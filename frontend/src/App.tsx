@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { ReactNode } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
@@ -8,7 +8,7 @@ import QARequests from './pages/QARequests'
 // Test Case Repository (Module 2) and Test Execution Management (Module 3) are
 // temporarily DISABLED per request -- pages are untouched and fully working,
 // just not routed to. Re-enable by uncommenting these two imports, the two
-// <Route> entries below, and the nav items in components/Layout.jsx.
+// <Route> entries below, and the nav items in components/Layout.tsx.
 // import TestCases from './pages/TestCases'
 // import TestRuns from './pages/TestRuns'
 import SAST from './pages/SAST'
@@ -19,7 +19,7 @@ import Approvals from './pages/Approvals'
 import Reports from './pages/Reports'
 import Admin from './pages/Admin'
 
-function Protected({ children }) {
+function Protected({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth()
   if (loading) return <div style={{ padding: 40 }}>Loading...</div>
   if (!user) return <Navigate to="/login" replace />

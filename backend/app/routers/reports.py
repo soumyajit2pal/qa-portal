@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..database import get_db
 from ..deps import get_current_user
+from ..constants import SUPPRESSION_TERMINAL_STATUSES
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -122,7 +123,8 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
                 "Department": s.department, "Application Owner": s.application_owner,
                 "Issue ID": item.issue_id if item else None, "Severity": item.severity if item else None,
                 "Status": s.status,
-                "App Owner Decision": s.app_owner_decision, "Dept Head Decision": s.dept_head_decision,
+                "SM Decision": s.sm_decision, "Dept Head Decision": s.dept_head_decision,
+                "Security Team Decision": s.security_decision,
             })
     return out
 
@@ -137,7 +139,7 @@ def monthly_kpi(db: Session = Depends(get_db), current_user: models.User = Depen
     return [{
         "Total QA Requests": total_requests, "Completed Requests": completed,
         "Open Suppressions": db.query(models.SuppressionRequest).filter(
-            models.SuppressionRequest.status.notin_(["Approved", "Rejected"])).count(),
+            models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES)).count(),
     }]
 
 

@@ -79,6 +79,18 @@ class UserRole(Base):
     user = relationship("User", back_populates="role_assignments")
 
 
+class Department(Base):
+    """DB-backed department list (Admin section) -- replaces the old hardcoded
+    constants.DEPARTMENTS list so an admin can add/deactivate departments at
+    runtime without a redeploy. See routers/departments.py. Seeded once from
+    constants.SEED_DEPARTMENTS by seed.py."""
+    __tablename__ = "qap_departments"
+    id = pk_column()
+    name = Column(String(150), unique=True, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=now)
+
+
 # ---------------------------------------------------------------------------
 # Module 1: QA Request Management
 # ---------------------------------------------------------------------------
@@ -395,14 +407,24 @@ class SuppressionRequest(Base):
     dast_request_id = Column(Integer, ForeignKey("qap_dast_requests.id"), nullable=True)
     risk_assessment = Column(Text)
 
-    status = Column(String(40), default="Pending Application Owner")
+    status = Column(String(40), default="Draft")
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    # Legacy -- Application Owner approval was removed from the flow (SM was
+    # inserted in its place, see sm_decision below); columns kept unused
+    # rather than dropped, to avoid an Oracle DROP COLUMN migration for old
+    # data. Nothing in the current flow reads or writes these anymore.
     app_owner_decision = Column(String(16))
     app_owner_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     app_owner_decided_at = Column(DateTime, nullable=True)
+    sm_decision = Column(String(16))
+    sm_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    sm_decided_at = Column(DateTime, nullable=True)
     dept_head_decision = Column(String(16))
     dept_head_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     dept_head_decided_at = Column(DateTime, nullable=True)
+    security_decision = Column(String(16))
+    security_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    security_decided_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)

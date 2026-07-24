@@ -1,18 +1,26 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { IconSearch } from './Icons'
 
+interface SearchableSelectProps {
+  value: string
+  onChange: (value: string) => void
+  options: string[]
+  placeholder?: string
+  disabled?: boolean
+}
+
 // Single-select dropdown with an inline search box for filtering long,
 // fixed option lists (e.g. Department). Reusable anywhere a plain
 // <select> would otherwise need dozens of <option>s.
-export default function SearchableSelect({ value, onChange, options, placeholder, disabled }) {
+export default function SearchableSelect({ value, onChange, options, placeholder, disabled }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const rootRef = useRef(null)
-  const inputRef = useRef(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    function onDocClick(e) {
-      if (rootRef.current && !rootRef.current.contains(e.target)) {
+    function onDocClick(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
         setOpen(false)
         setQuery('')
       }
@@ -27,7 +35,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
 
   const filtered = options.filter((o) => o.toLowerCase().includes(query.toLowerCase()))
 
-  function select(opt) {
+  function select(opt: string) {
     onChange(opt)
     setOpen(false)
     setQuery('')

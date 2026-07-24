@@ -1,26 +1,27 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { Card, Table, Badge, ErrorText, PageHeader } from '../components/Common'
+import { ApprovalActionOut, UserOut } from '../types'
 
 const ENTITY_TYPES = ['', 'QA_REQUEST', 'TEST_CASE', 'SAST_DAST', 'SUPPRESSION', 'SIGNOFF']
 
-function userName(users, id) {
+function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
 }
 
 export default function Approvals() {
-  const [rows, setRows] = useState([])
-  const [users, setUsers] = useState([])
+  const [rows, setRows] = useState<ApprovalActionOut[]>([])
+  const [users, setUsers] = useState<UserOut[]>([])
   const [entityType, setEntityType] = useState('')
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<unknown>(null)
 
   const load = useCallback(async () => {
     try {
       const qs = entityType ? `?entity_type=${entityType}` : ''
       const [approvals, us] = await Promise.all([
-        api.get(`/api/approvals${qs}`),
-        api.get('/api/auth/users'),
+        api.get<ApprovalActionOut[]>(`/api/approvals${qs}`),
+        api.get<UserOut[]>('/api/auth/users'),
       ])
       setRows(approvals)
       setUsers(us)

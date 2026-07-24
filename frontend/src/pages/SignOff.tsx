@@ -3,6 +3,7 @@ import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader } from '../components/Common'
 import { CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, hasRole } from '../constants'
+import { SignOffOut } from '../types'
 
 const EMPTY = {
   certificate_type: 'Full Clearance', testing_type: 'Functional', testing_request_id: '',
@@ -11,17 +12,18 @@ const EMPTY = {
   environment_tested: 'UAT', target_promotion_environment: 'Production',
   exit_criteria_notes: '', open_defect_summary: '', residual_risk_notes: '',
 }
+type SignOffForm = typeof EMPTY
 
-function NewSignOffModal({ onClose, onCreated }) {
-  const [form, setForm] = useState(EMPTY)
-  const [error, setError] = useState(null)
+function NewSignOffModal({ onClose, onCreated }: { onClose: () => void; onCreated: (s: SignOffOut) => void }) {
+  const [form, setForm] = useState<SignOffForm>(EMPTY)
+  const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  function set(k, v) { setForm((f) => ({ ...f, [k]: v })) }
+  function set<K extends keyof SignOffForm>(k: K, v: SignOffForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
-    try { onCreated(await api.post('/api/signoffs', form)) }
+    try { onCreated(await api.post<SignOffOut>('/api/signoffs', form)) }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
 
@@ -76,12 +78,12 @@ function NewSignOffModal({ onClose, onCreated }) {
   )
 }
 
-function SignOffDetail({ item, onClose, onChanged }) {
+function SignOffDetail({ item, onClose, onChanged }: { item: SignOffOut; onClose: () => void; onChanged: (s: SignOffOut) => void }) {
   const { user } = useAuth()
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<unknown>(null)
 
   async function issue() {
-    try { onChanged(await api.post(`/api/signoffs/${item.id}/issue`, {})) } catch (err) { setError(err) }
+    try { onChanged(await api.post<SignOffOut>(`/api/signoffs/${item.id}/issue`, {})) } catch (err) { setError(err) }
   }
 
   return (
@@ -106,13 +108,13 @@ function SignOffDetail({ item, onClose, onChanged }) {
 
 export default function SignOff() {
   const { user } = useAuth()
-  const [rows, setRows] = useState([])
+  const [rows, setRows] = useState<SignOffOut[]>([])
   const [showNew, setShowNew] = useState(false)
-  const [selected, setSelected] = useState(null)
-  const [error, setError] = useState(null)
+  const [selected, setSelected] = useState<SignOffOut | null>(null)
+  const [error, setError] = useState<unknown>(null)
 
   const load = useCallback(async () => {
-    try { setRows(await api.get('/api/signoffs')) } catch (err) { setError(err) }
+    try { setRows(await api.get<SignOffOut[]>('/api/signoffs')) } catch (err) { setError(err) }
   }, [])
   useEffect(() => { load() }, [load])
 

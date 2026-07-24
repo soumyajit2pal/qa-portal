@@ -1,9 +1,9 @@
-import React from 'react'
+import React, { ReactNode } from 'react'
 
 import { QA_STATUS_LABELS } from '../constants'
 import { IconFolder } from './Icons'
 
-export function Badge({ status }) {
+export function Badge({ status }: { status?: string | null }) {
   // Colour families are semantic, not decorative: gray = neutral/closed,
   // blue = submitted/informational, purple = actively being worked
   // (planning/execution/scanning), teal = verification/sign-off checkpoints,
@@ -11,7 +11,7 @@ export function Badge({ status }) {
   // red = rejected/blocked/defect. Spreading statuses across this wider
   // palette (rather than defaulting everything "in progress" to yellow)
   // makes list/table views easier to scan at a glance.
-  const map = {
+  const map: Record<string, string> = {
     // Legacy / other-module statuses
     Draft: 'badge-gray', Completed: 'badge-green', Returned: 'badge-red', Cancelled: 'badge-gray',
     Approved: 'badge-green', Rejected: 'badge-red', Passed: 'badge-green',
@@ -46,14 +46,22 @@ export function Badge({ status }) {
     CLOSED: 'badge-green',
     CANCELLED: 'badge-gray',
   }
-  const label = QA_STATUS_LABELS[status] || status
-  return <span className={`badge ${map[status] || 'badge-gray'}`}>{label}</span>
+  const label = (status && QA_STATUS_LABELS[status]) || status || ''
+  return <span className={`badge ${(status && map[status]) || 'badge-gray'}`}>{label}</span>
+}
+
+interface PageHeaderProps {
+  title: ReactNode
+  subtitle?: ReactNode
+  count?: number
+  actions?: ReactNode
+  children?: ReactNode
 }
 
 // Consistent "title + description + primary actions" header used at the top
 // of every page, replacing the old ad hoc <div className="toolbar"> + bare
 // <Card title="X (N)"> pairing that varied slightly page to page.
-export function PageHeader({ title, subtitle, count, actions, children }) {
+export function PageHeader({ title, subtitle, count, actions, children }: PageHeaderProps) {
   return (
     <div className="page-header">
       <div className="titles">
@@ -69,9 +77,17 @@ export function PageHeader({ title, subtitle, count, actions, children }) {
   )
 }
 
-export function Card({ title, subtitle, children, right }) {
+interface CardProps {
+  title?: ReactNode
+  subtitle?: ReactNode
+  children?: ReactNode
+  right?: ReactNode
+  style?: React.CSSProperties
+}
+
+export function Card({ title, subtitle, children, right, style }: CardProps) {
   return (
-    <div className="card">
+    <div className="card" style={style}>
       {(title || right) && (
         <div className="card-head">
           <div>
@@ -86,7 +102,7 @@ export function Card({ title, subtitle, children, right }) {
   )
 }
 
-export function MetricCard({ label, value }) {
+export function MetricCard({ label, value }: { label: ReactNode; value: ReactNode }) {
   return (
     <div className="metric-card">
       <div className="value">{value ?? 0}</div>
@@ -95,7 +111,7 @@ export function MetricCard({ label, value }) {
   )
 }
 
-export function BarChart({ data }) {
+export function BarChart({ data }: { data?: Record<string, number> | null }) {
   const entries = Object.entries(data || {}).filter(([k]) => k)
   const max = Math.max(1, ...entries.map(([, v]) => v))
   if (entries.length === 0) return <p className="muted small">No data yet.</p>
@@ -112,11 +128,18 @@ export function BarChart({ data }) {
   )
 }
 
+interface ModalProps {
+  title: ReactNode
+  onClose: () => void
+  children?: ReactNode
+  wide?: boolean
+}
+
 // Right-side slide-over drawer (rather than a centered dialog) -- gives
 // record detail views (QA Request, SAST/DAST, Suppression, Sign-off, Admin
 // forms, etc.) room to breathe and keeps the surrounding page visible/in
 // context, matching the panel pattern used by most modern SaaS dashboards.
-export function Modal({ title, onClose, children, wide }) {
+export function Modal({ title, onClose, children, wide }: ModalProps) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className={`drawer ${wide ? 'drawer-wide' : ''}`} onClick={(e) => e.stopPropagation()}>
@@ -130,7 +153,7 @@ export function Modal({ title, onClose, children, wide }) {
   )
 }
 
-export function Field({ label, children }) {
+export function Field({ label, children }: { label: ReactNode; children?: ReactNode }) {
   return (
     <div className="form-field">
       <label>{label}</label>
@@ -139,12 +162,26 @@ export function Field({ label, children }) {
   )
 }
 
-export function ErrorText({ error }) {
+export function ErrorText({ error }: { error?: unknown }) {
   if (!error) return null
-  return <p className="error-text">{String(error.message || error)}</p>
+  const message = error instanceof Error ? error.message : String(error)
+  return <p className="error-text">{message}</p>
 }
 
-export function Table({ columns, rows, rowKey, onRowClick }) {
+export interface TableColumn<T> {
+  key: string
+  header: ReactNode
+  render?: (row: T) => ReactNode
+}
+
+interface TableProps<T> {
+  columns: TableColumn<T>[]
+  rows: T[]
+  rowKey: keyof T
+  onRowClick?: (row: T) => void
+}
+
+export function Table<T extends Record<string, any>>({ columns, rows, rowKey, onRowClick }: TableProps<T>) {
   return (
     <div className="table-wrap">
       <table>
@@ -163,9 +200,9 @@ export function Table({ columns, rows, rowKey, onRowClick }) {
             </tr>
           )}
           {rows.map((row) => (
-            <tr key={row[rowKey]} onClick={onRowClick ? () => onRowClick(row) : undefined}
+            <tr key={String(row[rowKey])} onClick={onRowClick ? () => onRowClick(row) : undefined}
                 className={onRowClick ? 'row-clickable' : undefined}>
-              {columns.map((c) => <td key={c.key}>{c.render ? c.render(row) : row[c.key]}</td>)}
+              {columns.map((c) => <td key={c.key}>{c.render ? c.render(row) : (row as any)[c.key]}</td>)}
             </tr>
           ))}
         </tbody>

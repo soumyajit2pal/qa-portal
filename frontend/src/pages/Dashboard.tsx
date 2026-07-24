@@ -2,14 +2,18 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
-import { Card, MetricCard, BarChart, Table, Badge, ErrorText, PageHeader } from '../components/Common'
+import { Card, MetricCard, BarChart, Table, Badge, ErrorText, PageHeader, TableColumn } from '../components/Common'
 import {
   IconGrid, IconWarning, IconApprove, IconArrowRight, IconWorkflow, IconCheckCircle,
 } from '../components/Icons'
+import {
+  QARequestOut, ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut,
+  SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard, QAWiseOut,
+} from '../types'
 
-const DONUT_COLORS = ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed']
+const DONUT_COLORS = ['#4f46e5', '#16a34a', '#d97706', '#dc2626', '#7c3aed']
 
-function timeAgo(dateStr) {
+function timeAgo(dateStr: string): string {
   const diffMs = Date.now() - new Date(dateStr).getTime()
   const mins = Math.max(1, Math.round(diffMs / 60000))
   if (mins < 60) return `${mins} min ago`
@@ -19,7 +23,7 @@ function timeAgo(dateStr) {
   return `${days} day${days > 1 ? 's' : ''} ago`
 }
 
-function downloadCsv(filename, rows, columns) {
+function downloadCsv<T extends Record<string, any>>(filename: string, rows: T[], columns: { key: string; header: string }[]) {
   const header = columns.map((c) => c.header).join(',')
   const lines = rows.map((r) => columns.map((c) => `"${String(r[c.key] ?? '').replace(/"/g, '""')}"`).join(','))
   const blob = new Blob([[header, ...lines].join('\n')], { type: 'text/csv' })
@@ -30,7 +34,7 @@ function downloadCsv(filename, rows, columns) {
   URL.revokeObjectURL(url)
 }
 
-function Sparkline({ values }) {
+function Sparkline({ values }: { values?: Record<string, number> | null }) {
   const entries = Object.entries(values || {})
   if (entries.length === 0) return null
   const max = Math.max(1, ...entries.map(([, v]) => v))
@@ -43,7 +47,13 @@ function Sparkline({ values }) {
   )
 }
 
-function SegmentBar({ segments }) {
+interface Segment {
+  label: string
+  value: number
+  color: string
+}
+
+function SegmentBar({ segments }: { segments: Segment[] }) {
   const total = segments.reduce((s, x) => s + x.value, 0) || 1
   return (
     <div className="segment-bar">
@@ -55,7 +65,18 @@ function SegmentBar({ segments }) {
   )
 }
 
-function StatCard({ icon: Icon, iconClass, tag, value, label, footline, spark, segments }) {
+interface StatCardProps {
+  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>
+  iconClass: string
+  tag?: string
+  value: React.ReactNode
+  label: React.ReactNode
+  footline?: React.ReactNode
+  spark?: Record<string, number>
+  segments?: Segment[]
+}
+
+function StatCard({ icon: Icon, iconClass, tag, value, label, footline, spark, segments }: StatCardProps) {
   return (
     <div className="stat-card">
       <div className="top-row">
@@ -71,7 +92,7 @@ function StatCard({ icon: Icon, iconClass, tag, value, label, footline, spark, s
   )
 }
 
-function Donut({ data, size = 128 }) {
+function Donut({ data, size = 128 }: { data?: Record<string, number> | null; size?: number }) {
   const entries = Object.entries(data || {}).filter(([, v]) => v > 0)
   const total = entries.reduce((s, [, v]) => s + v, 0)
   let acc = 0
@@ -114,7 +135,7 @@ const LIFECYCLE_STAGES = [
   { key: 'signoff', label: 'Sign-off' },
 ]
 
-const STATUS_STAGE_INDEX = {
+const STATUS_STAGE_INDEX: Record<string, number> = {
   DRAFT: 0, SUBMITTED: 0,
   DEPARTMENT_HEAD_APPROVAL_PENDING: 1, RETURNED_BY_DEPARTMENT_HEAD: 1, DEPARTMENT_HEAD_REJECTED: 1,
   QA_LEAD_ASSIGNED: 2, READINESS_VERIFICATION: 2, RETURNED_BY_QA_LEAD: 2,
@@ -123,7 +144,7 @@ const STATUS_STAGE_INDEX = {
   QA_SIGNOFF_PENDING: 4, QA_SIGNED_OFF: 4, REQUESTER_VERIFICATION: 4, CLOSED: 4,
 }
 
-function lifecycleFunnel(requests) {
+function lifecycleFunnel(requests: QARequestOut[]) {
   const eligible = requests.filter((r) => r.status !== 'CANCELLED')
   return LIFECYCLE_STAGES.map((stage, i) => {
     const count = eligible.filter((r) => (STATUS_STAGE_INDEX[r.status] ?? 0) >= i).length
@@ -131,7 +152,7 @@ function lifecycleFunnel(requests) {
   })
 }
 
-function LifecycleStepper({ requests }) {
+function LifecycleStepper({ requests }: { requests: QARequestOut[] }) {
   const funnel = lifecycleFunnel(requests)
   const maxCount = Math.max(1, ...funnel.map((f) => f.count))
   return (
@@ -150,13 +171,13 @@ function LifecycleStepper({ requests }) {
   )
 }
 
-function ACTIVITY_ICON(decision) {
+function ACTIVITY_ICON(decision?: string | null) {
   if (decision === 'Approved' || decision === 'Completed' || decision === 'Started') return { cls: 'green', Icon: IconCheckCircle }
   if (decision === 'Rejected' || decision === 'Returned') return { cls: 'amber', Icon: IconWarning }
   return { cls: 'blue', Icon: IconApprove }
 }
 
-function RecentActivity({ items }) {
+function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
   if (items.length === 0) return <p className="muted small">No activity recorded yet.</p>
   return (
     <div>
@@ -178,27 +199,27 @@ function RecentActivity({ items }) {
 
 function CommandCentre() {
   const navigate = useNavigate()
-  const [proj, setProj] = useState(null)
-  const [threeW, setThreeW] = useState(null)
-  const [requests, setRequests] = useState([])
-  const [activity, setActivity] = useState([])
-  const [error, setError] = useState(null)
+  const [proj, setProj] = useState<ProjectWiseOut | null>(null)
+  const [threeW, setThreeW] = useState<ThreeWOut | null>(null)
+  const [requests, setRequests] = useState<QARequestOut[]>([])
+  const [activity, setActivity] = useState<ApprovalActionOut[]>([])
+  const [error, setError] = useState<unknown>(null)
   const [govTab, setGovTab] = useState('Overview')
   const [teamFilter, setTeamFilter] = useState('')
 
   useEffect(() => {
     Promise.all([
-      api.get('/api/dashboard/project-wise'),
-      api.get('/api/dashboard/3w'),
-      api.get('/api/qa-requests'),
-      api.get('/api/approvals'),
+      api.get<ProjectWiseOut>('/api/dashboard/project-wise'),
+      api.get<ThreeWOut>('/api/dashboard/3w'),
+      api.get<QARequestOut[]>('/api/qa-requests'),
+      api.get<ApprovalActionOut[]>('/api/approvals'),
     ]).then(([p, w, r, a]) => {
       setProj(p); setThreeW(w); setRequests(r); setActivity(a.slice(0, 6))
     }).catch(setError)
   }, [])
 
   const teams = useMemo(() => threeW ? Object.keys(threeW.team_wise_distribution) : [], [threeW])
-  const visibleItems = useMemo(() => {
+  const visibleItems = useMemo<ThreeWItem[]>(() => {
     if (!threeW) return []
     const items = teamFilter ? threeW.items.filter((i) => i.responsible_team === teamFilter) : threeW.items
     return items
@@ -213,7 +234,7 @@ function CommandCentre() {
   const slaBreached = threeW.items.filter((i) => i.ageing_days > 15).length
   const nearingRelease = requests.filter((r) => {
     if (!r.target_release_date) return false
-    const days = (new Date(r.target_release_date) - new Date()) / 86400000
+    const days = (new Date(r.target_release_date).getTime() - Date.now()) / 86400000
     return days >= 0 && days <= 14
   }).length
   const criticalPending = requests.filter((r) => (
@@ -223,6 +244,16 @@ function CommandCentre() {
   )).length
 
   const tableRows = visibleItems.slice(0, 8)
+
+  const attentionColumns: TableColumn<ThreeWItem>[] = [
+    { key: 'project_id', header: 'Project' },
+    { key: 'pending_stage', header: 'Pending At' },
+    { key: 'responsible_team', header: 'Pending With' },
+    { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
+    { key: 'ageing_days', header: 'Since', render: (r) => `${r.ageing_days} day${r.ageing_days !== 1 ? 's' : ''} ago` },
+    { key: 'ageing_bucket', header: 'Ageing' },
+    { key: 'priority', header: 'Priority' },
+  ]
 
   return (
     <div>
@@ -301,15 +332,7 @@ function CommandCentre() {
                   { key: 'owner', header: 'Owner' }, { key: 'ageing_days', header: 'Ageing (days)' }, { key: 'priority', header: 'Priority' },
                 ])}>Download</button>
               </div>
-              <Table rowKey="project_id" columns={[
-                { key: 'project_id', header: 'Project' },
-                { key: 'pending_stage', header: 'Pending At' },
-                { key: 'responsible_team', header: 'Pending With' },
-                { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
-                { key: 'ageing_days', header: 'Since', render: (r) => `${r.ageing_days} day${r.ageing_days !== 1 ? 's' : ''} ago` },
-                { key: 'ageing_bucket', header: 'Ageing' },
-                { key: 'priority', header: 'Priority' },
-              ]} rows={tableRows} />
+              <Table rowKey="project_id" columns={attentionColumns} rows={tableRows} />
               {visibleItems.length > tableRows.length && (
                 <p style={{ textAlign: 'center', marginTop: 10 }}>
                   <a style={{ cursor: 'pointer', color: 'var(--navy)', fontSize: 12.5, fontWeight: 600 }} onClick={() => setGovTab('Projects')}>
@@ -365,10 +388,13 @@ function CommandCentre() {
   )
 }
 
-function QAWiseTab({ userId }) {
-  const [data, setData] = useState(null)
-  const [error, setError] = useState(null)
-  useEffect(() => { api.get(`/api/dashboard/qa-wise/${userId}`).then(setData).catch(setError) }, [userId])
+// DISABLED along with the "QA-wise (My Metrics)" tab below (see Dashboard()) --
+// kept here, typed, so re-enabling later is just uncommenting the tab entry
+// and render branch, not rewriting this component from scratch.
+function QAWiseTab({ userId }: { userId: number }) {
+  const [data, setData] = useState<QAWiseOut | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  useEffect(() => { api.get<QAWiseOut>(`/api/dashboard/qa-wise/${userId}`).then(setData).catch(setError) }, [userId])
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading...</p>
   const m = data.metrics
@@ -389,11 +415,11 @@ function QAWiseTab({ userId }) {
 }
 
 function SecurityTab() {
-  const [sast, setSast] = useState(null)
-  const [dast, setDast] = useState(null)
-  const [error, setError] = useState(null)
+  const [sast, setSast] = useState<SecuritySastDashboard | null>(null)
+  const [dast, setDast] = useState<SecurityDastDashboard | null>(null)
+  const [error, setError] = useState<unknown>(null)
   useEffect(() => {
-    Promise.all([api.get('/api/dashboard/security/sast'), api.get('/api/dashboard/security/dast')])
+    Promise.all([api.get<SecuritySastDashboard>('/api/dashboard/security/sast'), api.get<SecurityDastDashboard>('/api/dashboard/security/dast')])
       .then(([s, d]) => { setSast(s); setDast(d) }).catch(setError)
   }, [])
   if (error) return <ErrorText error={error} />
@@ -414,9 +440,9 @@ function SecurityTab() {
 }
 
 function SuppressionTab() {
-  const [data, setData] = useState(null)
-  const [error, setError] = useState(null)
-  useEffect(() => { api.get('/api/dashboard/suppression').then(setData).catch(setError) }, [])
+  const [data, setData] = useState<SuppressionDashboard | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  useEffect(() => { api.get<SuppressionDashboard>('/api/dashboard/suppression').then(setData).catch(setError) }, [])
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading...</p>
   return (
@@ -431,14 +457,14 @@ function SuppressionTab() {
 }
 
 function ThreeWTab() {
-  const [data, setData] = useState(null)
-  const [error, setError] = useState(null)
-  const [detail, setDetail] = useState(null)
+  const [data, setData] = useState<ThreeWOut | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  const [detail, setDetail] = useState<ThreeWDetailOut | null>(null)
 
-  useEffect(() => { api.get('/api/dashboard/3w').then(setData).catch(setError) }, [])
+  useEffect(() => { api.get<ThreeWOut>('/api/dashboard/3w').then(setData).catch(setError) }, [])
 
-  async function openProject(projectId) {
-    try { setDetail(await api.get(`/api/dashboard/3w/${projectId}`)) } catch (err) { setError(err) }
+  async function openProject(projectId: string) {
+    try { setDetail(await api.get<ThreeWDetailOut>(`/api/dashboard/3w/${projectId}`)) } catch (err) { setError(err) }
   }
 
   if (error) return <ErrorText error={error} />
@@ -531,7 +557,7 @@ export default function Dashboard() {
         ))}
       </div>
       {tab === 'command' && <CommandCentre />}
-      {/* {tab === 'qa' && <QAWiseTab userId={user.id || 0} />} */}
+      {/* {tab === 'qa' && <QAWiseTab userId={user?.id || 0} />} */}
       {tab === 'security' && <SecurityTab />}
       {tab === 'suppression' && <SuppressionTab />}
       {tab === '3w' && <ThreeWTab />}

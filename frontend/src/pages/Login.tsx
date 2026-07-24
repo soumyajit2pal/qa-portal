@@ -4,10 +4,11 @@ import { useAuth } from '../context/AuthContext'
 import { IconGrid, IconShield, IconApprove, IconCertificate } from '../components/Icons'
 
 // Mirrors backend app/seed.py DEMO_USERS -- one demo account per role.
-const DEMO_ACCOUNTS = [
+const DEMO_ACCOUNTS: [string, string][] = [
   ['requester1', 'Requester (Developer) / Others'], ['ba1', 'Business Analyst'], ['qa1', 'QA Engineer (QA)'],
   ['qalead1', 'QA Lead'], ['exec1', 'Executive COE (AGM-QA)'], ['security1', 'Security Analyst (QA)'],
-  ['appowner1', 'Application Owner'], ['depthead1', 'Department Head - CM/AGM'], ['admin', 'Administrator'],
+  ['appowner1', 'Application Owner'], ['depthead1', 'Department Head - CM/AGM'],
+  ['sm1', 'SM'], ['admin', 'Administrator'],
 ]
 
 const HIGHLIGHTS = [
@@ -20,19 +21,19 @@ const HIGHLIGHTS = [
 export default function Login() {
   const [username, setUsername] = useState('requester1')
   const [password, setPassword] = useState('Password@123')
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const { login } = useAuth()
   const navigate = useNavigate()
 
-  async function onSubmit(e) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
       await login(username, password)
       navigate('/')
-    } catch (err) {
+    } catch (err: any) {
       setError(err.message || 'Login failed')
     } finally {
       setBusy(false)

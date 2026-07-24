@@ -1,8 +1,8 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
-import App from './App.jsx'
-import { AuthProvider } from './context/AuthContext.jsx'
+import App from './App'
+import { AuthProvider } from './context/AuthContext'
 import './index.css'
 
 // NOTE: React.StrictMode intentionally double-invokes effects in development
@@ -12,7 +12,10 @@ import './index.css'
 // behavior (removed in production builds) and doesn't indicate a real bug,
 // but it was making the Network tab noisy/confusing during testing, so it's
 // been removed here.
-ReactDOM.createRoot(document.getElementById('root')).render(
+const rootEl = document.getElementById('root')
+if (!rootEl) throw new Error('Root element #root not found')
+
+ReactDOM.createRoot(rootEl).render(
   <BrowserRouter>
     <AuthProvider>
       <App />

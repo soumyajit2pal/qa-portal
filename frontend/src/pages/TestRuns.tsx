@@ -3,23 +3,24 @@ import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, MetricCard } from '../components/Common'
 import { RUN_TYPES, EXECUTION_STATUSES, hasRole } from '../constants'
+import { TestCaseOut, TestRunOut, TestRunCaseOut, TestRunMetricsOut } from '../types'
 
-function NewRunModal({ onClose, onCreated }) {
+function NewRunModal({ onClose, onCreated }: { onClose: () => void; onCreated: (r: TestRunOut) => void }) {
   const [form, setForm] = useState({ project: '', application: '', release: '', run_type: 'Release-wise', start_date: '', end_date: '' })
-  const [caseIds, setCaseIds] = useState([])
-  const [allCases, setAllCases] = useState([])
-  const [error, setError] = useState(null)
+  const [caseIds, setCaseIds] = useState<string[]>([])
+  const [allCases, setAllCases] = useState<TestCaseOut[]>([])
+  const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
-  useEffect(() => { api.get('/api/test-cases').then(setAllCases).catch(setError) }, [])
-  function set(k, v) { setForm((f) => ({ ...f, [k]: v })) }
+  useEffect(() => { api.get<TestCaseOut[]>('/api/test-cases').then(setAllCases).catch(setError) }, [])
+  function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
-      const created = await api.post('/api/test-runs', { ...form, test_case_ids: caseIds.map(Number) })
+      const created = await api.post<TestRunOut>('/api/test-runs', { ...form, test_case_ids: caseIds.map(Number) })
       onCreated(created)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -54,22 +55,22 @@ function NewRunModal({ onClose, onCreated }) {
   )
 }
 
-function RunDetail({ run, onClose, onChanged }) {
-  const [metrics, setMetrics] = useState(null)
-  const [error, setError] = useState(null)
+function RunDetail({ run, onClose, onChanged }: { run: TestRunOut; onClose: () => void; onChanged: (r: TestRunOut) => void }) {
+  const [metrics, setMetrics] = useState<TestRunMetricsOut | null>(null)
+  const [error, setError] = useState<unknown>(null)
 
   const loadMetrics = useCallback(() => {
-    api.get(`/api/test-runs/${run.id}/metrics`).then(setMetrics).catch(setError)
+    api.get<TestRunMetricsOut>(`/api/test-runs/${run.id}/metrics`).then(setMetrics).catch(setError)
   }, [run.id])
 
   useEffect(() => { loadMetrics() }, [loadMetrics])
 
-  async function updateCase(rc, execution_status) {
+  async function updateCase(rc: TestRunCaseOut, execution_status: string) {
     try {
       await api.put(`/api/test-runs/${run.id}/cases/${rc.id}`, {
         execution_status, actual_result: rc.actual_result || '', defect_id: rc.defect_id || '',
       })
-      const fresh = await api.get(`/api/test-runs/${run.id}`)
+      const fresh = await api.get<TestRunOut>(`/api/test-runs/${run.id}`)
       onChanged(fresh)
       loadMetrics()
     } catch (err) { setError(err) }
@@ -108,13 +109,13 @@ function RunDetail({ run, onClose, onChanged }) {
 
 export default function TestRuns() {
   const { user } = useAuth()
-  const [rows, setRows] = useState([])
+  const [rows, setRows] = useState<TestRunOut[]>([])
   const [showNew, setShowNew] = useState(false)
-  const [selected, setSelected] = useState(null)
-  const [error, setError] = useState(null)
+  const [selected, setSelected] = useState<TestRunOut | null>(null)
+  const [error, setError] = useState<unknown>(null)
 
   const load = useCallback(async () => {
-    try { setRows(await api.get('/api/test-runs')) } catch (err) { setError(err) }
+    try { setRows(await api.get<TestRunOut[]>('/api/test-runs')) } catch (err) { setError(err) }
   }, [])
 
   useEffect(() => { load() }, [load])

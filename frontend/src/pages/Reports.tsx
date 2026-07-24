@@ -6,10 +6,10 @@ import { REPORTS } from '../constants'
 const GROUPS = ['Operational', 'Security', 'Management']
 
 export default function Reports() {
-  const [error, setError] = useState(null)
-  const [busyKey, setBusyKey] = useState(null)
+  const [error, setError] = useState<unknown>(null)
+  const [busyKey, setBusyKey] = useState<string | null>(null)
 
-  async function download(key, format) {
+  async function download(key: string, format: string) {
     setBusyKey(`${key}-${format}`)
     setError(null)
     try {

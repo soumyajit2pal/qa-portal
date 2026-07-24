@@ -1,14 +1,21 @@
 :root {
-  --navy: #2563eb;
-  --navy-light: #1d4ed8;
+  /* Design refresh: primary accent moved from flat blue to an indigo/violet
+     duotone -- ties the whole app together with the purple/teal tones
+     already used for "in progress"/"verification" badges and stat-card
+     chips, instead of everything defaulting to the same blue. Variable
+     names kept as --navy* so every existing usage site picks this up
+     automatically without a find/replace across every file. */
+  --navy: #4f46e5;
+  --navy-light: #4338ca;
   --navy-dark: #0f172a;
-  --navy-50: #eff6ff;
-  --sidebar-bg: #0b1324;
-  --sidebar-bg-light: #141e33;
-  --gold: #2563eb;
-  --bg: #f4f6fb;
+  --navy-50: #eef2ff;
+  --accent-2: #7c3aed;
+  --sidebar-bg: #0b1024;
+  --sidebar-bg-light: #161233;
+  --gold: #4f46e5;
+  --bg: #f5f5fb;
   --card: #ffffff;
-  --border: #e5e7eb;
+  --border: #e6e5f0;
   --text: #111827;
   --muted: #6b7280;
   --danger: #dc2626;
@@ -44,15 +51,15 @@ a { color: inherit; }
 .app-shell { display: flex; min-height: 100vh; }
 
 .sidebar {
-  width: 250px; background: linear-gradient(180deg, var(--sidebar-bg) 0%, #0e1830 100%);
+  width: 250px; background: linear-gradient(180deg, var(--sidebar-bg) 0%, #150f2e 55%, #1a1338 100%);
   color: #fff; flex-shrink: 0; display: flex; flex-direction: column;
-  box-shadow: 2px 0 16px rgba(0, 0, 0, 0.18); position: relative; z-index: 5;
+  box-shadow: 2px 0 16px rgba(0, 0, 0, 0.22); position: relative; z-index: 5;
 }
 .sidebar .brand { padding: 18px 18px 16px; display: flex; align-items: center; gap: 10px; }
 .sidebar .brand .logo-mark {
   width: 34px; height: 34px; border-radius: 9px;
-  background: linear-gradient(135deg, #3b82f6, var(--navy-light));
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.45);
+  background: linear-gradient(135deg, #818cf8, var(--accent-2));
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.5);
   display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px; flex-shrink: 0;
 }
 .sidebar .brand h1 { font-size: 14.5px; margin: 0; line-height: 1.3; }
@@ -95,9 +102,9 @@ a { color: inherit; }
 
 .user-chip { display: flex; align-items: center; gap: 9px; padding: 8px 4px; border-top: 1px solid rgba(255,255,255,0.08); }
 .user-chip .avatar {
-  width: 30px; height: 30px; border-radius: 50%; background: linear-gradient(135deg, #3b82f6, var(--navy-light)); color: #fff;
+  width: 30px; height: 30px; border-radius: 50%; background: linear-gradient(135deg, #818cf8, var(--navy-light)); color: #fff;
   display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0;
-  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.4);
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.4);
 }
 .user-chip .who { flex: 1; min-width: 0; }
 .user-chip .name { font-size: 12.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -150,7 +157,7 @@ a { color: inherit; }
   .topbar .search-box kbd { display: none; }
 }
 .topbar h2 { margin: 0; font-size: 18px; }
-.content { padding: 24px; flex: 1; }
+.content { padding: 24px; flex: 1; animation: fade-in .18s var(--ease); }
 
 /* Consistent page header -- title + optional record count + description,
    with primary actions right-aligned. Used at the top of every page instead
@@ -192,7 +199,7 @@ a { color: inherit; }
    a card (e.g. .searchable-select-panel). */
 .card::before {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
-  border-radius: 12px 12px 0 0; background: linear-gradient(90deg, #3b82f6, #8b5cf6, #06b6d4); opacity: 0.7;
+  border-radius: 12px 12px 0 0; background: linear-gradient(90deg, var(--navy), var(--accent-2), #06b6d4); opacity: 0.75;
 }
 .card h3 { margin-top: 0; font-size: 15px; }
 .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
@@ -265,8 +272,8 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 }
 .btn:hover { background: #f2f4f7; box-shadow: var(--shadow-xs); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
-.btn-primary { background: linear-gradient(180deg, #3b82f6, var(--navy)); color: #fff; border-color: var(--navy); box-shadow: 0 2px 8px rgba(37, 99, 235, 0.28); }
-.btn-primary:hover { background: linear-gradient(180deg, #4f8bf7, var(--navy-light)); box-shadow: 0 3px 10px rgba(37, 99, 235, 0.38); }
+.btn-primary { background: linear-gradient(180deg, #818cf8, var(--navy)); color: #fff; border-color: var(--navy); box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3); }
+.btn-primary:hover { background: linear-gradient(180deg, #9195f9, var(--navy-light)); box-shadow: 0 3px 10px rgba(79, 70, 229, 0.4); }
 .btn-danger { color: var(--danger); border-color: var(--danger); background: #fff; }
 .btn-danger:hover { background: #fef2f2; }
 .btn-success { color: var(--success); border-color: var(--success); background: #fff; }
@@ -396,24 +403,24 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 
 .login-page {
   min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px;
-  background: radial-gradient(circle at 20% 20%, #16223e 0%, var(--sidebar-bg) 55%, #060a16 100%);
+  background: radial-gradient(circle at 20% 20%, #241c46 0%, var(--sidebar-bg) 55%, #06040f 100%);
 }
 .login-shell { display: flex; width: 100%; max-width: 920px; border-radius: 18px; overflow: hidden; box-shadow: var(--shadow-lg); }
 .login-brand {
   flex: 1; min-width: 320px; padding: 44px 40px; color: #fff;
-  background: linear-gradient(160deg, #16233f 0%, var(--sidebar-bg) 60%, #060a16 100%);
+  background: linear-gradient(160deg, #231b45 0%, var(--sidebar-bg) 60%, #06040f 100%);
   display: flex; flex-direction: column; justify-content: center;
 }
 .login-brand .logo-mark {
-  width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #3b82f6, var(--navy-light));
+  width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #818cf8, var(--accent-2));
   display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 20px;
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.45); margin-bottom: 18px;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.5); margin-bottom: 18px;
 }
 .login-brand h1 { font-size: 22px; margin: 0 0 8px; letter-spacing: -0.01em; }
 .login-brand .tagline { font-size: 13px; color: #9aa5bd; line-height: 1.5; margin: 0 0 28px; max-width: 360px; }
 .login-brand .highlights { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
 .login-brand .highlights li { display: flex; align-items: flex-start; gap: 10px; font-size: 12.5px; color: #c3cbdd; line-height: 1.5; }
-.login-brand .highlights svg { color: #7fa8ff; flex-shrink: 0; margin-top: 1px; }
+.login-brand .highlights svg { color: #a5b4fc; flex-shrink: 0; margin-top: 1px; }
 .login-card { background: #fff; padding: 40px; width: 380px; flex-shrink: 0; }
 .login-card h1 { font-size: 19px; margin: 0 0 4px; }
 .login-card p.sub { font-size: 12.5px; color: var(--muted); margin: 0 0 22px; }
@@ -459,7 +466,7 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
   display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: var(--text);
   transition: background .2s var(--ease), border-color .2s var(--ease), box-shadow .2s var(--ease);
 }
-.stepper .step.filled .circle { background: var(--navy-50); border-color: var(--navy); color: var(--navy); box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.08); }
+.stepper .step.filled .circle { background: var(--navy-50); border-color: var(--navy); color: var(--navy); box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.1); }
 .stepper .step .step-label { font-size: 11.5px; color: var(--muted); }
 .stepper .connector { flex: 1; height: 2px; background: var(--border); margin: 0 2px 26px; transition: background .2s var(--ease); }
 .stepper .connector.filled { background: var(--navy); }

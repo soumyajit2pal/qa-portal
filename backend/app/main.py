@@ -12,7 +12,7 @@ from . import models  # noqa: F401  (ensures models are registered before create
 from .routers import (
     auth, qa_requests,  # test_cases, test_runs,
     sast_dast, suppression,
-    approvals, signoff, dashboard, reports, export,
+    approvals, signoff, dashboard, reports, export, departments,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -43,6 +43,7 @@ app.include_router(signoff.router)
 app.include_router(dashboard.router)
 app.include_router(reports.router)
 app.include_router(export.router)
+app.include_router(departments.router)
 
 
 @app.get("/api/health")

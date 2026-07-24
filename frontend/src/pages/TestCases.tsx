@@ -3,25 +3,27 @@ import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText } from '../components/Common'
 import { TEST_TYPES, PRIORITIES, hasRole } from '../constants'
+import { TestCaseOut, TestCaseVersionOut } from '../types'
 
 const EMPTY = {
   epic_id: '', feature_id: '', user_story_id: '', test_type: 'Functional', module_name: '',
   project_name: '', test_scenario: '', precondition: '', description: '', steps: '',
   expected_result: '', priority: 'Medium',
 }
+type TestCaseForm = typeof EMPTY
 
-function NewTestCaseModal({ onClose, onCreated }) {
-  const [form, setForm] = useState(EMPTY)
-  const [error, setError] = useState(null)
+function NewTestCaseModal({ onClose, onCreated }: { onClose: () => void; onCreated: (tc: TestCaseOut) => void }) {
+  const [form, setForm] = useState<TestCaseForm>(EMPTY)
+  const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  function set(k, v) { setForm((f) => ({ ...f, [k]: v })) }
+  function set<K extends keyof TestCaseForm>(k: K, v: TestCaseForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
-      const created = await api.post('/api/test-cases', form)
+      const created = await api.post<TestCaseOut>('/api/test-cases', form)
       onCreated(created)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -61,25 +63,25 @@ function NewTestCaseModal({ onClose, onCreated }) {
   )
 }
 
-function TestCaseDetail({ tc, onClose, onChanged }) {
+function TestCaseDetail({ tc, onClose, onChanged }: { tc: TestCaseOut; onClose: () => void; onChanged: (tc: TestCaseOut) => void }) {
   const { user } = useAuth()
-  const [error, setError] = useState(null)
-  const [versions, setVersions] = useState([])
+  const [error, setError] = useState<unknown>(null)
+  const [versions, setVersions] = useState<TestCaseVersionOut[]>([])
 
   useEffect(() => {
-    api.get(`/api/test-cases/${tc.id}/versions`).then(setVersions).catch(setError)
+    api.get<TestCaseVersionOut[]>(`/api/test-cases/${tc.id}/versions`).then(setVersions).catch(setError)
   }, [tc.id])
 
-  async function review(decision) {
+  async function review(decision: string) {
     try {
-      const updated = await api.post(`/api/test-cases/${tc.id}/review`, { decision })
+      const updated = await api.post<TestCaseOut>(`/api/test-cases/${tc.id}/review`, { decision })
       onChanged(updated)
     } catch (err) { setError(err) }
   }
 
   async function archive() {
     try {
-      const updated = await api.post(`/api/test-cases/${tc.id}/archive`, {})
+      const updated = await api.post<TestCaseOut>(`/api/test-cases/${tc.id}/archive`, {})
       onChanged(updated)
     } catch (err) { setError(err) }
   }
@@ -117,17 +119,17 @@ function TestCaseDetail({ tc, onClose, onChanged }) {
 
 export default function TestCases() {
   const { user } = useAuth()
-  const [rows, setRows] = useState([])
+  const [rows, setRows] = useState<TestCaseOut[]>([])
   const [project, setProject] = useState('')
   const [showNew, setShowNew] = useState(false)
-  const [selected, setSelected] = useState(null)
-  const [error, setError] = useState(null)
+  const [selected, setSelected] = useState<TestCaseOut | null>(null)
+  const [error, setError] = useState<unknown>(null)
 
   const load = useCallback(async () => {
     try {
       const qs = new URLSearchParams()
       if (project) qs.set('project_name', project)
-      setRows(await api.get(`/api/test-cases?${qs.toString()}`))
+      setRows(await api.get<TestCaseOut[]>(`/api/test-cases?${qs.toString()}`))
     } catch (err) { setError(err) }
   }, [project])
 

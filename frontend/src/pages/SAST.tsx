@@ -2,7 +2,8 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader } from '../components/Common'
-import { SEVERITIES, hasRole } from '../constants'
+import { SEVERITIES, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_STATUS_LABELS, hasRole } from '../constants'
+import { SASTOut } from '../types'
 
 // Standalone SAST request creation is DISABLED per request -- a SAST request
 // can now only come into being by including "SAST" in a QA Request's request
@@ -12,7 +13,7 @@ import { SEVERITIES, hasRole } from '../constants'
 // the mandatory details (repository URL, branch, commit ID, tech stack,
 // build number) on that auto-created request before the security team picks
 // it up -- see canEditDetails in SASTDetail below.
-function SASTFormModal({ onClose, onSaved, editing }) {
+function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onSaved: (s: SASTOut) => void; editing: SASTOut }) {
   const [form, setForm] = useState({
     application_name: editing.application_name || '', project_name: editing.project_name || '',
     cr_number: editing.cr_number || '', build_number: editing.build_number || '',
@@ -20,15 +21,15 @@ function SASTFormModal({ onClose, onSaved, editing }) {
     commit_id: editing.commit_id || '', technology_stack: editing.technology_stack || '',
     risk_category: editing.risk_category || 'Medium', hash_value: editing.hash_value || '',
   })
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  function set(k, v) { setForm((f) => ({ ...f, [k]: v })) }
+  function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     try {
-      const saved = await api.put(`/api/sast-requests/${editing.id}`, form)
+      const saved = await api.put<SASTOut>(`/api/sast-requests/${editing.id}`, form)
       onSaved(saved)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -60,7 +61,7 @@ function SASTFormModal({ onClose, onSaved, editing }) {
         </div>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
-          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : (editing ? 'Save Changes' : 'Submit Request')}</button>
+          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Changes'}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -68,38 +69,62 @@ function SASTFormModal({ onClose, onSaved, editing }) {
   )
 }
 
-function SASTDetail({ req, onClose, onChanged }) {
+function SASTDetail({ req, onClose, onChanged }: { req: SASTOut; onClose: () => void; onChanged: (s: SASTOut) => void }) {
   const { user } = useAuth()
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<unknown>(null)
   const [finding, setFinding] = useState({ issue_id: '', severity: 'Medium', description: '' })
   const [editing, setEditing] = useState(false)
+  const [comments, setComments] = useState('')
+  const [busy, setBusy] = useState(false)
 
-  async function decide(decision) {
-    try { onChanged(await api.post(`/api/sast-requests/${req.id}/decision`, { decision })) }
-    catch (err) { setError(err) }
+  async function act(action: string, extra?: Record<string, unknown>) {
+    setError(null)
+    setBusy(true)
+    try { onChanged(await api.post<SASTOut>(`/api/sast-requests/${req.id}/${action}`, extra || {})) }
+    catch (err) { setError(err) } finally { setBusy(false) }
   }
-  async function addFinding(e) {
+  async function addFinding(e: React.FormEvent) {
     e.preventDefault()
     try {
       await api.post(`/api/sast-requests/${req.id}/findings`, finding)
-      const fresh = await api.get('/api/sast-requests')
-      onChanged(fresh.find((r) => r.id === req.id))
+      const fresh = await api.get<SASTOut[]>('/api/sast-requests')
+      const updated = fresh.find((r) => r.id === req.id)
+      if (updated) onChanged(updated)
       setFinding({ issue_id: '', severity: 'Medium', description: '' })
     } catch (err) { setError(err) }
   }
-  async function close() {
-    try { onChanged(await api.post(`/api/sast-requests/${req.id}/close`, {})) } catch (err) { setError(err) }
+  async function resolveFinding(findingId: number) {
+    try {
+      await api.post(`/api/sast-requests/${req.id}/findings/${findingId}/resolve`, {})
+      const fresh = await api.get<SASTOut[]>('/api/sast-requests')
+      const updated = fresh.find((r) => r.id === req.id)
+      if (updated) onChanged(updated)
+    } catch (err) { setError(err) }
   }
 
-  const canDecide = hasRole(user, 'SECURITY_ANALYST', 'APPLICATION_OWNER')
-  const canEditDetails = (req.requester_id === user.id || hasRole(user, 'SECURITY_ANALYST'))
-    && req.status === 'Requested'
+  const isRequester = req.requester_id === user?.id || hasRole(user, 'ADMIN')
+  const status = req.status
+
+  const canEditDetails = (isRequester || hasRole(user, 'SECURITY_ANALYST')) && SAST_DAST_EDITABLE_STATUSES.includes(status)
+  const canSubmit = isRequester && status === 'Requested'
+  const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_QA_LEAD'].includes(status)
+  // Department-scoped, same as QA Request's SM/Dept Head steps -- see the
+  // comment in QARequests.tsx. Doesn't apply to the QA-side steps below.
+  const sameDept = !!user?.department && user.department === req.department
+  const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN'))
+  const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN'))
+  const canReadinessDecide = hasRole(user, 'QA_LEAD', 'SECURITY_ANALYST') && status === 'READINESS_CHECK'
+  const canStartScan = hasRole(user, 'SECURITY_ANALYST') && status === 'Allocated'
+  const canMarkFixed = (isRequester || hasRole(user, 'SECURITY_ANALYST')) && status === 'WAITING_FOR_FIX'
+  const canAddFinding = hasRole(user, 'SECURITY_ANALYST') && status === 'Scanning'
+  const canMarkSecurityComplete = hasRole(user, 'SECURITY_ANALYST') && status === 'Scanning'
+  const canMarkReportReady = hasRole(user, 'SECURITY_ANALYST') && status === 'SECURITY_COMPLETE'
 
   return (
     <Modal title={`${req.request_id} — ${req.application_name}`} onClose={onClose} wide>
       <ErrorText error={error} />
       <div className="grid grid-2">
-        <div><strong>Status:</strong> <Badge status={req.status} /></div>
+        <div><strong>Status:</strong> <Badge status={status} /> <span className="muted small">{SAST_DAST_STATUS_LABELS[status] || status}</span></div>
         <div><strong>Risk:</strong> {req.risk_category}</div>
         <div><strong>Build:</strong> {req.build_number || '—'}</div>
         <div><strong>Branch/Commit:</strong> {req.git_branch || '—'} / {req.commit_id || '—'}</div>
@@ -107,15 +132,42 @@ function SASTDetail({ req, onClose, onChanged }) {
       {req.qa_request && (
         <p className="muted small">Linked from QA Request {req.qa_request.request_id}.</p>
       )}
+
+      <div className="section-title">Workflow Actions</div>
+      <Field label="Comments (used by the next action below)">
+        <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Optional comments..." />
+      </Field>
       <div style={{ display: 'flex', gap: 8, margin: '10px 0', flexWrap: 'wrap' }}>
-        {canEditDetails && <button className="btn btn-sm" onClick={() => setEditing(true)}>Edit Details</button>}
-        {canDecide && !['Report Ready', 'Closed'].includes(req.status) && (
+        {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
+        {canSubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
+        {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('resubmit')}>Re-submit</button>}
+
+        {canSMDecide && (
           <>
-            <button className="btn btn-success btn-sm" onClick={() => decide('Approved')}>Approve / Progress</button>
-            <button className="btn btn-danger btn-sm" onClick={() => decide('Rejected')}>Reject</button>
+            <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('sm-decision', { decision: 'Approved', comments })}>Approve</button>
+            <button className="btn btn-sm" disabled={busy} onClick={() => act('sm-decision', { decision: 'Returned', comments })}>Return to Requester</button>
+            <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('sm-decision', { decision: 'Rejected', comments })}>Reject</button>
           </>
         )}
+        {canDeptHeadDecide && (
+          <>
+            <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('department-head-decision', { decision: 'Approved', comments })}>Approve</button>
+            <button className="btn btn-sm" disabled={busy} onClick={() => act('department-head-decision', { decision: 'Returned', comments })}>Return to Requester</button>
+            <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('department-head-decision', { decision: 'Rejected', comments })}>Reject</button>
+          </>
+        )}
+        {canReadinessDecide && (
+          <>
+            <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('readiness-decision', { decision: 'Passed', comments })}>Readiness Passed</button>
+            <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('readiness-decision', { decision: 'Failed', comments })}>Readiness Failed</button>
+          </>
+        )}
+        {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-scan')}>Start Scan</button>}
+        {canMarkFixed && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('mark-fixed')}>Mark Fixed (Rescan)</button>}
+        {canMarkSecurityComplete && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('mark-security-complete')}>Mark Security Complete</button>}
+        {canMarkReportReady && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('mark-report-ready')}>Mark Report Ready</button>}
       </div>
+
       {editing && (
         <SASTFormModal
           editing={req}
@@ -129,16 +181,20 @@ function SASTDetail({ req, onClose, onChanged }) {
         { key: 'severity', header: 'Severity' },
         { key: 'description', header: 'Description' },
         { key: 'status', header: 'Status' },
+        { key: 'actions', header: '', render: (f) => (
+          f.status === 'Open' && hasRole(user, 'SECURITY_ANALYST') ? (
+            <button className="btn btn-sm" onClick={() => resolveFinding(f.id)}>Mark Fixed</button>
+          ) : null
+        ) },
       ]} rows={req.findings} />
-      {hasRole(user, 'SECURITY_ANALYST') && (
+      {canAddFinding && (
         <form onSubmit={addFinding} style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
           <input placeholder="Issue ID" value={finding.issue_id} onChange={(e) => setFinding((f) => ({ ...f, issue_id: e.target.value }))} />
           <select value={finding.severity} onChange={(e) => setFinding((f) => ({ ...f, severity: e.target.value }))}>
             {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
           <input placeholder="Description" value={finding.description} onChange={(e) => setFinding((f) => ({ ...f, description: e.target.value }))} />
-          <button className="btn btn-sm">Add Finding</button>
-          {req.status !== 'Report Ready' && <button type="button" className="btn btn-sm" onClick={close}>Mark Report Ready</button>}
+          <button className="btn btn-sm">Log Finding (marks Waiting For Fix)</button>
         </form>
       )}
     </Modal>
@@ -146,12 +202,12 @@ function SASTDetail({ req, onClose, onChanged }) {
 }
 
 export default function SAST() {
-  const [rows, setRows] = useState([])
-  const [selected, setSelected] = useState(null)
-  const [error, setError] = useState(null)
+  const [rows, setRows] = useState<SASTOut[]>([])
+  const [selected, setSelected] = useState<SASTOut | null>(null)
+  const [error, setError] = useState<unknown>(null)
 
   const load = useCallback(async () => {
-    try { setRows(await api.get('/api/sast-requests')) } catch (err) { setError(err) }
+    try { setRows(await api.get<SASTOut[]>('/api/sast-requests')) } catch (err) { setError(err) }
   }, [])
   useEffect(() => { load() }, [load])
 

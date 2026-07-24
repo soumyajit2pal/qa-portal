@@ -483,8 +483,10 @@ class SuppressionOut(ORMModel):
     risk_assessment: Optional[str] = None
     items: List[SuppressionItemOut] = []
     status: str
-    app_owner_decision: Optional[str] = None
+    created_by_id: Optional[int] = None
+    sm_decision: Optional[str] = None
     dept_head_decision: Optional[str] = None
+    security_decision: Optional[str] = None
     created_at: datetime.datetime
 
 
@@ -547,3 +549,19 @@ class SignOffOut(ORMModel):
     target_promotion_environment: Optional[str] = None
     status: str
     created_at: datetime.datetime
+
+
+# ---------------- Module 9: Departments (Admin) ----------------
+class DepartmentOut(ORMModel):
+    id: int
+    name: str
+    is_active: bool
+
+
+class DepartmentCreate(BaseModel):
+    name: str
+
+
+class DepartmentUpdate(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None

@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles
+from ..deps import get_current_user, require_roles, require_same_department
 from ..constants import (
     Role, DEFAULT_CHECKLIST_ITEMS, CONDITIONAL_CHECKLIST_ITEMS, checklist_item_is_mandatory,
     QAStatus, QA_REQUEST_EDITABLE_STATUSES, QA_REQUEST_TERMINAL_STATUSES, QA_REQUEST_CANCELLABLE_STATUSES,
+    SAST_DAST_TERMINAL_STATUSES,
 )
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
@@ -201,7 +202,7 @@ def cancel_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     return obj
 
 
-# ---- Requester: Draft -> Submitted -> Department Head Approval Pending ----
+# ---- Requester: Draft -> Submitted -> SM Approval Pending ----
 @router.post("/{req_id}/submit", response_model=schemas.QARequestOut)
 def submit_request(req_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
@@ -213,8 +214,8 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     _require(obj, QAStatus.DRAFT, "Submit")
     obj.status = QAStatus.SUBMITTED
     _log(db, obj.id, "Requester", current_user, "Submitted", None)
-    obj.status = QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING
-    _log(db, obj.id, "Department Head Approval", current_user, "Pending", "Awaiting Department Head decision")
+    obj.status = QAStatus.SM_APPROVAL_PENDING
+    _log(db, obj.id, "SM Approval", current_user, "Pending", "Awaiting SM decision")
     db.commit()
     db.refresh(obj)
     return obj
@@ -223,19 +224,49 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
 @router.post("/{req_id}/resubmit", response_model=schemas.QARequestOut)
 def resubmit_request(req_id: int, db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
-    """Re-submits a request returned by the Department Head or by the QA Lead."""
+    """Re-submits a request returned by SM, by the Department Head, or by the QA Lead."""
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
-    _require(obj, [QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD], "Resubmit")
-    if obj.status == QAStatus.RETURNED_BY_DEPARTMENT_HEAD:
+    _require(obj, [QAStatus.RETURNED_BY_SM, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD],
+             "Resubmit")
+    if obj.status == QAStatus.RETURNED_BY_SM:
+        obj.status = QAStatus.SM_APPROVAL_PENDING
+        _log(db, obj.id, "SM Approval", current_user, "Resubmitted", "Returned request re-submitted")
+    elif obj.status == QAStatus.RETURNED_BY_DEPARTMENT_HEAD:
         obj.status = QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING
         _log(db, obj.id, "Department Head Approval", current_user, "Resubmitted", "Returned request re-submitted")
     else:
         obj.status = QAStatus.READINESS_VERIFICATION
         _log(db, obj.id, "Readiness Verification", current_user, "Resubmitted", "Returned request re-submitted")
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+# ---- SM Approval: Approve (-> Department Head) / Return / Reject ----
+@router.post("/{req_id}/sm-decision", response_model=schemas.QARequestOut)
+def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
+                current_user: models.User = Depends(require_roles(Role.SM))):
+    """New checkpoint between the requester's submission and Department Head
+    approval. A Return goes back to the requester for correction; a Reject
+    closes the request out (SM_REJECTED, terminal)."""
+    obj = db.query(models.QARequest).get(req_id)
+    if not obj:
+        raise HTTPException(404, "QA Request not found")
+    require_same_department(current_user, obj.department)
+    _require(obj, QAStatus.SM_APPROVAL_PENDING, "SM decision")
+    if payload.decision == "Approved":
+        obj.status = QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING
+    elif payload.decision == "Returned":
+        obj.status = QAStatus.RETURNED_BY_SM
+    elif payload.decision == "Rejected":
+        obj.status = QAStatus.SM_REJECTED
+    else:
+        raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
+    _log(db, obj.id, "SM Approval", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)
     return obj
@@ -251,6 +282,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    require_same_department(current_user, obj.department)
     _require(obj, QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, "Department Head decision")
     obj.department_head_id = current_user.id
 
@@ -436,11 +468,28 @@ def start_regression(req_id: int, payload: schemas.CommentIn, db: Session = Depe
 def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     """Marks QA activity complete -- reachable directly from execution (no issues found)
-    or after the defect/retest/regression cycle."""
+    or after the defect/retest/regression cycle.
+
+    Blocked while any linked SAST/DAST request (see _sync_linked_security_requests)
+    hasn't itself reached a terminal state (Report Ready or Closed) -- a QA
+    Request can't be signed off as complete while its own security testing is
+    still open."""
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
     _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING, QAStatus.REGRESSION_TESTING], "Complete QA")
+
+    open_security = [
+        s.request_id for s in list(obj.linked_sast_requests) + list(obj.linked_dast_requests)
+        if s.status not in SAST_DAST_TERMINAL_STATUSES
+    ]
+    if open_security:
+        raise HTTPException(
+            400,
+            "QA cannot be marked complete while linked SAST/DAST request(s) are still open: "
+            + ", ".join(open_security) + ". They must reach Report Ready or Closed first.",
+        )
+
     obj.status = QAStatus.QA_COMPLETED
     _log(db, obj.id, "Execution", current_user, "QA Completed", payload.comments)
     db.commit()

@@ -6,14 +6,17 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..database import get_db
 from ..deps import get_current_user
-from ..constants import QAStatus, QA_REQUEST_TERMINAL_STATUSES
+from ..constants import (
+    QAStatus, QA_REQUEST_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
+)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
 
 # Statuses that represent "work still in flight" for a QA Request (i.e. not a
 # terminal state and not sitting untouched in Draft).
 ACTIVE_QA_STATUSES = {
-    QAStatus.SUBMITTED, QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.RETURNED_BY_DEPARTMENT_HEAD,
+    QAStatus.SUBMITTED, QAStatus.SM_APPROVAL_PENDING, QAStatus.RETURNED_BY_SM,
+    QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.RETURNED_BY_DEPARTMENT_HEAD,
     QAStatus.QA_LEAD_ASSIGNED, QAStatus.READINESS_VERIFICATION, QAStatus.RETURNED_BY_QA_LEAD,
     QAStatus.QA_ACTIVITY_INITIATED, QAStatus.PLANNING, QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN,
     QAStatus.EXECUTION_IN_PROGRESS, QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX,
@@ -24,8 +27,16 @@ ACTIVE_QA_STATUSES = {
 # Statuses awaiting a decision/action from someone other than the requester --
 # used for the "pending approvals" metric.
 PENDING_APPROVAL_STATUSES = {
-    QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING,
+    QAStatus.SM_APPROVAL_PENDING, QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING,
     QAStatus.READINESS_VERIFICATION, QAStatus.QA_SIGNOFF_PENDING, QAStatus.REQUESTER_VERIFICATION,
+}
+
+# SAST/DAST statuses that represent an open approval checkpoint (i.e. sitting
+# with someone other than the requester) -- used for the same "pending
+# approvals" metric below. "Requested" is excluded deliberately: it's the
+# equivalent of a Draft (not yet submitted), so it isn't "pending" on anyone.
+SAST_DAST_PENDING_APPROVAL_STATUSES = {
+    "SM_APPROVAL_PENDING", "DEPARTMENT_HEAD_APPROVAL_PENDING", "READINESS_CHECK",
 }
 
 
@@ -87,10 +98,12 @@ def project_wise(db: Session = Depends(get_db), current_user: models.User = Depe
     # plus SAST/DAST requests still "Requested", plus open Suppressions.
     pending_approvals = (
         len([r for r in requests if r.status in PENDING_APPROVAL_STATUSES])
-        + db.query(models.SASTRequest).filter(models.SASTRequest.status == "Requested").count()
-        + db.query(models.DASTRequest).filter(models.DASTRequest.status == "Requested").count()
+        + db.query(models.SASTRequest).filter(
+            models.SASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)).count()
+        + db.query(models.DASTRequest).filter(
+            models.DASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)).count()
         + db.query(models.SuppressionRequest).filter(
-            models.SuppressionRequest.status.notin_(["Approved", "Rejected"])).count()
+            models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES)).count()
     )
 
     risk_counts = Counter(r.risk_rating for r in requests if r.risk_rating)
@@ -170,7 +183,7 @@ def security_dast(db: Session = Depends(get_db), current_user: models.User = Dep
 @router.get("/suppression")
 def suppression_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     sups = db.query(models.SuppressionRequest).all()
-    open_sups = [s for s in sups if s.status not in ("Approved", "Rejected")]
+    open_sups = [s for s in sups if s.status not in SUPPRESSION_TERMINAL_STATUSES]
     # A suppression request can cover several findings (models.SuppressionItem)
     # -- count it as critical/high risk if ANY of its findings are.
     critical_high = [s for s in open_sups if any(i.severity in ("Critical", "High") for i in s.items)]
@@ -183,7 +196,9 @@ def suppression_dashboard(db: Session = Depends(get_db), current_user: models.Us
 
 # ---------------- 4.9.8 3W Project Dashboard (What / Where / Since When) ----------------
 STAGE_LABELS = {
-    QAStatus.SUBMITTED: "Department Head Approval Pending",
+    QAStatus.SUBMITTED: "SM Approval Pending",
+    QAStatus.SM_APPROVAL_PENDING: "SM Approval Pending",
+    QAStatus.RETURNED_BY_SM: "Rework by Requester Pending",
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING: "Department Head Approval Pending",
     QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Rework by Requester Pending",
     QAStatus.QA_LEAD_ASSIGNED: "Readiness Verification Pending",
@@ -204,7 +219,9 @@ STAGE_LABELS = {
     QAStatus.REQUESTER_VERIFICATION: "Requester Verification Pending",
 }
 STAGE_TEAM = {
-    QAStatus.SUBMITTED: "Department Head",
+    QAStatus.SUBMITTED: "SM",
+    QAStatus.SM_APPROVAL_PENDING: "SM",
+    QAStatus.RETURNED_BY_SM: "Business / BA",
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING: "Department Head",
     QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Business / BA",
     QAStatus.QA_LEAD_ASSIGNED: "QA Lead",
@@ -248,7 +265,8 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
             "priority": r.priority, "status": r.status, "source": "QA Request",
         })
 
-    for r in db.query(models.SASTRequest).filter(models.SASTRequest.status != "Closed").all():
+    for r in db.query(models.SASTRequest).filter(
+            models.SASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "project_name": r.project_name or r.application_name,
@@ -258,7 +276,8 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
             "priority": r.risk_category, "status": r.status, "source": "SAST Request",
         })
 
-    for r in db.query(models.DASTRequest).filter(models.DASTRequest.status != "Closed").all():
+    for r in db.query(models.DASTRequest).filter(
+            models.DASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "project_name": r.application_url,
@@ -268,10 +287,17 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
             "priority": r.risk_category, "status": r.status, "source": "DAST Request",
         })
 
+    _SUPPRESSION_STAGE_TEAM = {
+        "SM_APPROVAL_PENDING": "SM",
+        "RETURNED_BY_SM": "Requester",
+        "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
+        "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
+        "SECURITY_TEAM_VERIFICATION": "Security Team",
+    }
     for s in db.query(models.SuppressionRequest).filter(
-            models.SuppressionRequest.status.notin_(["Approved", "Rejected"])).all():
+            models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES)).all():
         age = _age_days(s.updated_at)
-        team = "Application Owner" if s.status == "Pending Application Owner" else "Department Head"
+        team = _SUPPRESSION_STAGE_TEAM.get(s.status, "Requester")
         items.append({
             "project_id": s.suppression_id, "project_name": s.application_name,
             "application_name": s.application_name, "pending_stage": s.status,

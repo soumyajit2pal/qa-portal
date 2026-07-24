@@ -6,30 +6,74 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader } from '../comp
 import {
   REQUEST_TYPES, PRIORITIES, RISK_RATINGS, ENVIRONMENTS,
   DEFAULT_CHECKLIST_ITEMS, CONDITIONAL_CHECKLIST_ITEMS,
-  QA_STATUSES, QA_STATUS_LABELS, QA_EDITABLE_STATUSES, QA_CANCELLABLE_STATUSES, hasRole,
+  QA_STATUSES, QA_STATUS_LABELS, QA_EDITABLE_STATUSES, QA_CANCELLABLE_STATUSES, SAST_DAST_STATUS_LABELS, hasRole,
 } from '../constants'
 import { IconCheckCircle } from '../components/Icons'
+import { QARequestOut, UserOut, ChecklistItemOut, WalkthroughOut, QARequestDocumentOut, ApprovalActionOut } from '../types'
 
 const EMPTY_FORM = {
   department: '', application_name: '', application_owner: '', cr_number: '',
-  project_name: '', release_version: '', environment: 'SIT', request_types: [],
+  project_name: '', release_version: '', environment: 'SIT', request_types: [] as string[],
   request_type_other: '', priority: 'Medium', risk_rating: 'Medium',
-  target_release_date: '', remarks: '', checked_items: [],
+  target_release_date: '', remarks: '', checked_items: [] as string[],
 }
+type QARequestForm = typeof EMPTY_FORM
 
 // Item is relevant to show in the requester's tick-list unless it's gated
 // behind a request type (SAST/DAST readiness) that hasn't been selected.
-function isItemRelevant(item, requestTypes) {
+function isItemRelevant(item: string, requestTypes: string[]): boolean {
   const requiredType = CONDITIONAL_CHECKLIST_ITEMS[item]
   return !requiredType || requestTypes.includes(requiredType)
 }
 
-function NewRequestModal({ onClose, onCreated, editing, checklist }) {
+// Compact "what happens after I submit" preview shown at the top of the
+// form -- mirrors the real lifecycle order (see backend app/constants.py
+// QAStatus docstring): Draft -> SM -> Department Head -> QA -> Sign-off.
+const LIFECYCLE_STAGES = ['Draft', 'SM Approval', 'Dept. Head Approval', 'QA Activity', 'Sign-off', 'Closed']
+
+function LifecyclePreview({ activeIndex }: { activeIndex: number }) {
+  return (
+    <div className="stepper" style={{ margin: '4px 0 18px' }}>
+      {LIFECYCLE_STAGES.map((label, i) => (
+        <React.Fragment key={label}>
+          <div className={`step ${i <= activeIndex ? 'filled' : ''}`}>
+            <div className="circle">{i + 1}</div>
+            <div className="step-label">{label}</div>
+          </div>
+          {i < LIFECYCLE_STAGES.length - 1 && <div className={`connector ${i < activeIndex ? 'filled' : ''}`} />}
+        </React.Fragment>
+      ))}
+    </div>
+  )
+}
+
+// Maps a live status onto one of the LIFECYCLE_STAGES indices above, for
+// highlighting where an in-progress request currently sits.
+function lifecycleStageIndex(status?: string): number {
+  if (!status || status === 'DRAFT') return 0
+  if (['SUBMITTED', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM'].includes(status)) return 1
+  if (['DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD'].includes(status)) return 2
+  if (['QA_LEAD_ASSIGNED', 'READINESS_VERIFICATION', 'RETURNED_BY_QA_LEAD', 'QA_ACTIVITY_INITIATED',
+       'PLANNING', 'TESTER_ASSIGNED', 'TEST_DESIGN', 'EXECUTION_IN_PROGRESS', 'DEFECT_RAISED',
+       'WAITING_FOR_FIX', 'RETESTING', 'REGRESSION_TESTING', 'QA_COMPLETED'].includes(status)) return 3
+  if (['QA_SIGNOFF_PENDING', 'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION'].includes(status)) return 4
+  if (['CLOSED', 'CANCELLED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED'].includes(status)) return 5
+  return 0
+}
+
+interface NewRequestModalProps {
+  onClose: () => void
+  onCreated: (req: QARequestOut) => void
+  editing?: QARequestOut
+  checklist?: ChecklistItemOut[]
+}
+
+function NewRequestModal({ onClose, onCreated, editing, checklist }: NewRequestModalProps) {
   const { user } = useAuth()
   // Department is always the requester's own profile department -- it is
   // set/enforced server-side regardless of what's submitted here, so this
   // field is pre-filled and locked (not user-editable per request).
-  const [form, setForm] = useState(editing ? {
+  const [form, setForm] = useState<QARequestForm>(editing ? {
     department: editing.department || user?.department || '',
     application_name: editing.application_name || '',
     application_owner: editing.application_owner || '',
@@ -46,33 +90,33 @@ function NewRequestModal({ onClose, onCreated, editing, checklist }) {
     // Pre-fill from the requester's previously-saved self-declaration ticks.
     checked_items: (checklist || []).filter((c) => c.requester_checked).map((c) => c.item),
   } : { ...EMPTY_FORM, department: user?.department || '' })
-  const [files, setFiles] = useState([])
-  const [error, setError] = useState(null)
+  const [files, setFiles] = useState<File[]>([])
+  const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
-  function set(k, v) { setForm((f) => ({ ...f, [k]: v })) }
-  function toggleType(t) {
+  function set<K extends keyof QARequestForm>(k: K, v: QARequestForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
+  function toggleType(t: string) {
     setForm((f) => ({
       ...f,
       request_types: f.request_types.includes(t) ? f.request_types.filter((x) => x !== t) : [...f.request_types, t],
     }))
   }
-  function toggleChecked(item) {
+  function toggleChecked(item: string) {
     setForm((f) => ({
       ...f,
       checked_items: f.checked_items.includes(item) ? f.checked_items.filter((x) => x !== item) : [...f.checked_items, item],
     }))
   }
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
       const payload = { ...form, target_release_date: form.target_release_date || null }
       const saved = editing
-        ? await api.put(`/api/qa-requests/${editing.id}`, payload)
-        : await api.post('/api/qa-requests', payload)
+        ? await api.put<QARequestOut>(`/api/qa-requests/${editing.id}`, payload)
+        : await api.post<QARequestOut>('/api/qa-requests', payload)
       if (files.length > 0) {
         // Uploaded after creation so files can be stored under the request's
         // own request_id folder (backend/app/uploads/<request_id>/...).
@@ -90,6 +134,7 @@ function NewRequestModal({ onClose, onCreated, editing, checklist }) {
 
   return (
     <Modal title={editing ? `Edit ${editing.request_id}` : 'Raise QA Request'} onClose={onClose} wide>
+      <LifecyclePreview activeIndex={editing ? lifecycleStageIndex(editing.status) : 0} />
       <form onSubmit={submit}>
         <div className="form-section">
           <div className="form-section-title">Application &amp; Change Details</div>
@@ -157,7 +202,10 @@ function NewRequestModal({ onClose, onCreated, editing, checklist }) {
               Since {form.request_types.includes('SAST') && form.request_types.includes('DAST') ? 'SAST and DAST are'
                 : form.request_types.includes('SAST') ? 'SAST is' : 'DAST is'} selected, a linked SAST/DAST
               request with its own unique ID will be created automatically, and the corresponding readiness
-              checklist item(s) will be mandatory before testing can begin.
+              checklist item(s) will be mandatory before testing can begin. That linked request runs its own
+              independent Draft &rarr; SM &rarr; Department Head &rarr; Readiness &rarr; Scanning lifecycle, and
+              this QA Request cannot be marked <strong>QA Completed</strong> until it (and any suppression
+              request raised against it) reaches Report Ready / Closed / Done.
             </p>
           )}
         </div>
@@ -185,7 +233,7 @@ function NewRequestModal({ onClose, onCreated, editing, checklist }) {
             <input
               type="file"
               multiple
-              onChange={(e) => setFiles(Array.from(e.target.files))}
+              onChange={(e) => setFiles(Array.from(e.target.files || []))}
             />
             {files.length > 0 && (
               <p className="muted small" style={{ marginTop: 4 }}>
@@ -218,32 +266,39 @@ function NewRequestModal({ onClose, onCreated, editing, checklist }) {
   )
 }
 
-function userName(users, id) {
+function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
 }
 
-function RequestDetail({ req, onClose, onChanged, users }) {
+interface RequestDetailProps {
+  req: QARequestOut
+  onClose: () => void
+  onChanged: (req: QARequestOut) => void
+  users: UserOut[]
+}
+
+function RequestDetail({ req, onClose, onChanged, users }: RequestDetailProps) {
   const { user } = useAuth()
   const [tab, setTab] = useState('overview')
-  const [checklist, setChecklist] = useState([])
-  const [walkthroughs, setWalkthroughs] = useState([])
-  const [documents, setDocuments] = useState([])
-  const [history, setHistory] = useState([])
-  const [error, setError] = useState(null)
+  const [checklist, setChecklist] = useState<ChecklistItemOut[]>([])
+  const [walkthroughs, setWalkthroughs] = useState<WalkthroughOut[]>([])
+  const [documents, setDocuments] = useState<QARequestDocumentOut[]>([])
+  const [history, setHistory] = useState<ApprovalActionOut[]>([])
+  const [error, setError] = useState<unknown>(null)
   const [comments, setComments] = useState('')
   const [selectedQALead, setSelectedQALead] = useState('')
-  const [selectedTesters, setSelectedTesters] = useState([])
-  const [busyAction, setBusyAction] = useState(null)
+  const [selectedTesters, setSelectedTesters] = useState<string[]>([])
+  const [busyAction, setBusyAction] = useState<string | null>(null)
   const [editingReq, setEditingReq] = useState(false)
 
   const load = useCallback(async () => {
     try {
       const [cl, wt, docs, hist] = await Promise.all([
-        api.get(`/api/qa-requests/${req.id}/checklist`),
-        api.get(`/api/qa-requests/${req.id}/walkthroughs`),
-        api.get(`/api/qa-requests/${req.id}/documents`),
-        api.get(`/api/qa-requests/${req.id}/history`),
+        api.get<ChecklistItemOut[]>(`/api/qa-requests/${req.id}/checklist`),
+        api.get<WalkthroughOut[]>(`/api/qa-requests/${req.id}/walkthroughs`),
+        api.get<QARequestDocumentOut[]>(`/api/qa-requests/${req.id}/documents`),
+        api.get<ApprovalActionOut[]>(`/api/qa-requests/${req.id}/history`),
       ])
       setChecklist(cl); setWalkthroughs(wt); setDocuments(docs); setHistory(hist)
     } catch (err) { setError(err) }
@@ -251,17 +306,17 @@ function RequestDetail({ req, onClose, onChanged, users }) {
 
   useEffect(() => { load() }, [load])
 
-  async function act(action, extra) {
+  async function act(action: string, extra?: Record<string, unknown>) {
     setError(null)
     setBusyAction(action)
     try {
-      const updated = await api.post(`/api/qa-requests/${req.id}/${action}`, extra || {})
+      const updated = await api.post<QARequestOut>(`/api/qa-requests/${req.id}/${action}`, extra || {})
       onChanged(updated)
       load()
     } catch (err) { setError(err) } finally { setBusyAction(null) }
   }
 
-  async function toggleChecklistItem(item) {
+  async function toggleChecklistItem(item: ChecklistItemOut) {
     setError(null)
     try {
       await api.put(`/api/qa-requests/${req.id}/checklist/${item.id}`, { is_complete: !item.is_complete })
@@ -273,8 +328,8 @@ function RequestDetail({ req, onClose, onChanged, users }) {
   const testers = users.filter((u) => (u.roles || []).includes('QA_ENGINEER'))
 
   const isAdmin = hasRole(user, 'ADMIN')
-  const isRequester = (req.requester_id === user.id) || isAdmin
-  const isAssignedQALead = (req.qa_lead_id === user.id) || isAdmin
+  const isRequester = (req.requester_id === user?.id) || isAdmin
+  const isAssignedQALead = (req.qa_lead_id === user?.id) || isAdmin
   const isRequesterVerifier = isRequester || hasRole(user, 'APPLICATION_OWNER')
 
   const status = req.status
@@ -288,8 +343,15 @@ function RequestDetail({ req, onClose, onChanged, users }) {
     && status === 'READINESS_VERIFICATION'
 
   const canSubmit = isRequester && status === 'DRAFT'
-  const canResubmit = isRequester && ['RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_QA_LEAD'].includes(status)
-  const canDepartmentHeadDecide = hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING'
+  const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_QA_LEAD'].includes(status)
+  // SM/Department Head approvals are department-scoped -- a stakeholder can
+  // only act on requests raised from their own department (enforced
+  // server-side too; this just keeps the buttons from appearing for a
+  // mismatch instead of surfacing a 403 after clicking). Doesn't apply to
+  // the QA-side steps below, since QA is the team receiving the request.
+  const sameDept = !!user?.department && user.department === req.department
+  const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || isAdmin)
+  const canDepartmentHeadDecide = hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || isAdmin)
   const canStartReadiness = hasRole(user, 'QA_LEAD') && isAssignedQALead && status === 'QA_LEAD_ASSIGNED'
   const canReadinessDecide = hasRole(user, 'QA_LEAD') && status === 'READINESS_VERIFICATION'
   const canBeginPlanning = hasRole(user, 'QA_LEAD') && status === 'QA_ACTIVITY_INITIATED'
@@ -327,6 +389,7 @@ function RequestDetail({ req, onClose, onChanged, users }) {
 
       {tab === 'overview' && (
         <div>
+          <LifecyclePreview activeIndex={lifecycleStageIndex(req.status)} />
           <div className="grid grid-2">
             <div><strong>Status:</strong> <Badge status={req.status} /></div>
             <div><strong>Priority / Risk:</strong> {req.priority} / {req.risk_rating}</div>
@@ -351,12 +414,12 @@ function RequestDetail({ req, onClose, onChanged, users }) {
               <strong>Linked Security Requests:</strong>{' '}
               {req.linked_sast_requests.map((s) => (
                 <span key={`sast-${s.id}`} className="badge badge-blue" style={{ marginRight: 6 }}>
-                  SAST {s.request_id} — {s.status}
+                  SAST {s.request_id} — {SAST_DAST_STATUS_LABELS[s.status] || s.status}
                 </span>
               ))}
               {req.linked_dast_requests.map((d) => (
                 <span key={`dast-${d.id}`} className="badge badge-blue" style={{ marginRight: 6 }}>
-                  DAST {d.request_id} — {d.status}
+                  DAST {d.request_id} — {SAST_DAST_STATUS_LABELS[d.status] || d.status}
                 </span>
               ))}
             </p>
@@ -366,13 +429,24 @@ function RequestDetail({ req, onClose, onChanged, users }) {
           <div className="section-title">Workflow Actions</div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {canEditRequest && (
-              <button className="btn btn-sm" disabled={busyAction} onClick={() => setEditingReq(true)}>Edit Request</button>
+              <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setEditingReq(true)}>Edit Request</button>
             )}
             {canSubmit && (
-              <button className="btn btn-primary btn-sm" disabled={busyAction} onClick={() => act('submit')}>Submit for Department Head Approval</button>
+              <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('submit')}>Submit for SM Approval</button>
             )}
             {canResubmit && (
-              <button className="btn btn-primary btn-sm" disabled={busyAction} onClick={() => act('resubmit')}>Re-submit</button>
+              <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('resubmit')}>Re-submit</button>
+            )}
+
+            {canSMDecide && (
+              <>
+                <button className="btn btn-success btn-sm" disabled={!!busyAction}
+                        onClick={() => act('sm-decision', { decision: 'Approved', comments })}>Approve</button>
+                <button className="btn btn-sm" disabled={!!busyAction}
+                        onClick={() => act('sm-decision', { decision: 'Returned', comments })}>Return to Requester</button>
+                <button className="btn btn-danger btn-sm" disabled={!!busyAction}
+                        onClick={() => act('sm-decision', { decision: 'Rejected', comments })}>Reject</button>
+              </>
             )}
 
             {canDepartmentHeadDecide && (
@@ -381,84 +455,84 @@ function RequestDetail({ req, onClose, onChanged, users }) {
                   <option value="">Assign QA Lead...</option>
                   {qaLeads.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
                 </select>
-                <button className="btn btn-success btn-sm" disabled={!selectedQALead || busyAction}
+                <button className="btn btn-success btn-sm" disabled={!selectedQALead || !!busyAction}
                         onClick={() => act('department-head-decision', { decision: 'Approved', qa_lead_id: Number(selectedQALead), comments })}>
                   Approve
                 </button>
-                <button className="btn btn-sm" disabled={busyAction}
+                <button className="btn btn-sm" disabled={!!busyAction}
                         onClick={() => act('department-head-decision', { decision: 'Returned', comments })}>Return to Requester</button>
-                <button className="btn btn-danger btn-sm" disabled={busyAction}
+                <button className="btn btn-danger btn-sm" disabled={!!busyAction}
                         onClick={() => act('department-head-decision', { decision: 'Rejected', comments })}>Reject</button>
               </>
             )}
 
             {canStartReadiness && (
-              <button className="btn btn-primary btn-sm" disabled={busyAction} onClick={() => act('start-readiness-verification')}>
+              <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('start-readiness-verification')}>
                 Start Readiness Verification
               </button>
             )}
             {canReadinessDecide && (
               <>
-                <button className="btn btn-success btn-sm" disabled={busyAction}
+                <button className="btn btn-success btn-sm" disabled={!!busyAction}
                         onClick={() => act('readiness-decision', { decision: 'Passed', comments })}>Readiness Passed</button>
-                <button className="btn btn-danger btn-sm" disabled={busyAction}
+                <button className="btn btn-danger btn-sm" disabled={!!busyAction}
                         onClick={() => act('readiness-decision', { decision: 'Failed', comments })}>Readiness Failed</button>
               </>
             )}
 
             {canBeginPlanning && (
-              <button className="btn btn-primary btn-sm" disabled={busyAction} onClick={() => act('begin-planning')}>Begin Planning</button>
+              <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('begin-planning')}>Begin Planning</button>
             )}
             {canAssignTester && (
               <>
                 <select multiple value={selectedTesters} onChange={(e) => setSelectedTesters(Array.from(e.target.selectedOptions, (o) => o.value))} style={{ minWidth: 180 }}>
                   {testers.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
                 </select>
-                <button className="btn btn-primary btn-sm" disabled={selectedTesters.length === 0 || busyAction}
+                <button className="btn btn-primary btn-sm" disabled={selectedTesters.length === 0 || !!busyAction}
                         onClick={() => act('assign-tester', { tester_ids: selectedTesters.map(Number) })}>Assign Tester(s)</button>
               </>
             )}
             {canStartTestDesign && (
-              <button className="btn btn-primary btn-sm" disabled={busyAction} onClick={() => act('start-test-design')}>Start Test Design</button>
+              <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('start-test-design')}>Start Test Design</button>
             )}
             {canStartExecution && (
-              <button className="btn btn-primary btn-sm" disabled={busyAction} onClick={() => act('start-execution')}>Start Execution</button>
+              <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('start-execution')}>Start Execution</button>
             )}
 
             {canRaiseDefect && (
-              <button className="btn btn-danger btn-sm" disabled={busyAction} onClick={() => act('raise-defect', { comments })}>Raise Defect</button>
+              <button className="btn btn-danger btn-sm" disabled={!!busyAction} onClick={() => act('raise-defect', { comments })}>Raise Defect</button>
             )}
             {canMarkWaitingForFix && (
-              <button className="btn btn-sm" disabled={busyAction} onClick={() => act('mark-waiting-for-fix', { comments })}>Mark Waiting For Fix</button>
+              <button className="btn btn-sm" disabled={!!busyAction} onClick={() => act('mark-waiting-for-fix', { comments })}>Mark Waiting For Fix</button>
             )}
             {canStartRetest && (
-              <button className="btn btn-primary btn-sm" disabled={busyAction} onClick={() => act('start-retesting', { comments })}>Start Retesting</button>
+              <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('start-retesting', { comments })}>Start Retesting</button>
             )}
             {canStartRegression && (
-              <button className="btn btn-sm" disabled={busyAction} onClick={() => act('start-regression', { comments })}>Start Regression Testing</button>
+              <button className="btn btn-sm" disabled={!!busyAction} onClick={() => act('start-regression', { comments })}>Start Regression Testing</button>
             )}
             {canCompleteQA && (
-              <button className="btn btn-success btn-sm" disabled={busyAction} onClick={() => act('complete-qa', { comments })}>Mark QA Completed</button>
+              <button className="btn btn-success btn-sm" disabled={!!busyAction} onClick={() => act('complete-qa', { comments })}>Mark QA Completed</button>
             )}
 
             {canRequestSignoff && (
-              <button className="btn btn-primary btn-sm" disabled={busyAction} onClick={() => act('request-signoff')}>Request Sign-off</button>
+              <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('request-signoff')}>Request Sign-off</button>
             )}
             {canConfirmSignoff && (
-              <button className="btn btn-success btn-sm" disabled={busyAction} onClick={() => act('confirm-signoff', { comments })}>Confirm Sign-off</button>
+              <button className="btn btn-success btn-sm" disabled={!!busyAction} onClick={() => act('confirm-signoff', { comments })}>Confirm Sign-off</button>
             )}
 
             {canRequesterDecide && (
               <>
-                <button className="btn btn-success btn-sm" disabled={busyAction}
+                <button className="btn btn-success btn-sm" disabled={!!busyAction}
                         onClick={() => act('requester-decision', { decision: 'Accepted', comments })}>Accept &amp; Close</button>
-                <button className="btn btn-danger btn-sm" disabled={busyAction}
+                <button className="btn btn-danger btn-sm" disabled={!!busyAction}
                         onClick={() => act('requester-decision', { decision: 'ChangesRequired', comments })}>Changes Required</button>
               </>
             )}
 
             {canCancel && (
-              <button className="btn btn-danger btn-sm" disabled={busyAction} onClick={() => act('cancel')}>Cancel Request</button>
+              <button className="btn btn-danger btn-sm" disabled={!!busyAction} onClick={() => act('cancel')}>Cancel Request</button>
             )}
             {!canEditRequest && !canSubmit && !canResubmit && !canDepartmentHeadDecide && !canStartReadiness
               && !canReadinessDecide
@@ -584,12 +658,12 @@ function RequestDetail({ req, onClose, onChanged, users }) {
   )
 }
 
-function AddDocuments({ reqId, onAdded }) {
-  const [files, setFiles] = useState([])
+function AddDocuments({ reqId, onAdded }: { reqId: number; onAdded: () => void }) {
+  const [files, setFiles] = useState<File[]>([])
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<unknown>(null)
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (files.length === 0) return
     setBusy(true)
@@ -603,7 +677,7 @@ function AddDocuments({ reqId, onAdded }) {
 
   return (
     <form onSubmit={submit} style={{ marginTop: 14, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-      <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files))} />
+      <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
       <button className="btn btn-sm" disabled={busy || files.length === 0}>
         {busy ? 'Uploading...' : 'Upload'}
       </button>
@@ -612,13 +686,13 @@ function AddDocuments({ reqId, onAdded }) {
   )
 }
 
-function AddWalkthrough({ reqId, onAdded }) {
+function AddWalkthrough({ reqId, onAdded }: { reqId: number; onAdded: () => void }) {
   const [conducted_by, setConductedBy] = useState('')
   const [participants, setParticipants] = useState('')
   const [notes, setNotes] = useState('')
   const [busy, setBusy] = useState(false)
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     try {
@@ -643,13 +717,13 @@ export default function QARequests() {
   const location = useLocation()
   const navigate = useNavigate()
   const searchParams = new URLSearchParams(location.search)
-  const [requests, setRequests] = useState([])
-  const [users, setUsers] = useState([])
+  const [requests, setRequests] = useState<QARequestOut[]>([])
+  const [users, setUsers] = useState<UserOut[]>([])
   const [statusFilter, setStatusFilter] = useState('')
   const [search, setSearch] = useState(searchParams.get('search') || searchParams.get('application_name') || '')
   const [showNew, setShowNew] = useState(false)
-  const [selected, setSelected] = useState(null)
-  const [error, setError] = useState(null)
+  const [selected, setSelected] = useState<QARequestOut | null>(null)
+  const [error, setError] = useState<unknown>(null)
 
   useEffect(() => {
     // Reacts to location.state on every navigation to this route -- not just
@@ -657,7 +731,8 @@ export default function QARequests() {
     // navigates here with { state: { openNew: true } }) also works when the
     // user is already sitting on the QA Requests page (no remount happens
     // in that case, so a useState initializer alone would miss it).
-    if (location.state?.openNew) {
+    const state = location.state as { openNew?: boolean } | null
+    if (state?.openNew) {
       setShowNew(true)
       // Clear the nav state so refreshing/back/clicking the button again doesn't get stuck.
       navigate(location.pathname, { replace: true, state: {} })
@@ -670,8 +745,8 @@ export default function QARequests() {
       if (statusFilter) qs.set('status_filter', statusFilter)
       if (search) qs.set('search', search)
       const [reqs, us] = await Promise.all([
-        api.get(`/api/qa-requests?${qs.toString()}`),
-        api.get('/api/auth/users'),
+        api.get<QARequestOut[]>(`/api/qa-requests?${qs.toString()}`),
+        api.get<UserOut[]>('/api/auth/users'),
       ])
       setRequests(reqs)
       setUsers(us)

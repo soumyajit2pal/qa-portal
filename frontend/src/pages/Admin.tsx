@@ -2,17 +2,28 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../components/Common'
-import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, DEPARTMENTS, hasRole } from '../constants'
+import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../constants'
 import { IconPlus, IconLock, IconWarning, IconCheckCircle } from '../components/Icons'
 import SearchableSelect from '../components/SearchableSelect'
+import { UserOut, DepartmentOut } from '../types'
+
+// Shared by every page that needs a department picker -- departments are
+// DB-backed now (see backend app/models.py Department / routers/departments.py)
+// instead of a hardcoded constants list, so this fetches the active set at
+// call time. Exported so QARequests.tsx (and anywhere else) can reuse it
+// instead of duplicating the fetch.
+export async function loadActiveDepartments(): Promise<DepartmentOut[]> {
+  return api.get<DepartmentOut[]>('/api/departments')
+}
 
 const EMPTY_FORM = {
   username: '', full_name: '', email: '', department: '',
-  roles: ['REQUESTER'], login_type: 'STANDARD', password: '',
+  roles: ['REQUESTER'] as string[], login_type: 'STANDARD', password: '',
 }
+type CreateUserForm = typeof EMPTY_FORM
 
-function RoleChipSelect({ value, onChange, disabled }) {
-  function toggle(role) {
+function RoleChipSelect({ value, onChange, disabled }: { value: string[]; onChange: (roles: string[]) => void; disabled?: boolean }) {
+  function toggle(role: string) {
     if (disabled) return
     const has = value.includes(role)
     onChange(has ? value.filter((r) => r !== role) : [...value, role])
@@ -33,14 +44,16 @@ function RoleChipSelect({ value, onChange, disabled }) {
   )
 }
 
-function CreateUserModal({ onClose, onCreated }) {
-  const [form, setForm] = useState(EMPTY_FORM)
-  const [error, setError] = useState(null)
+function CreateUserModal({ onClose, onCreated, departmentOptions }: {
+  onClose: () => void; onCreated: (u: UserOut) => void; departmentOptions: string[]
+}) {
+  const [form, setForm] = useState<CreateUserForm>(EMPTY_FORM)
+  const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
-  function set(k, v) { setForm((f) => ({ ...f, [k]: v })) }
+  function set<K extends keyof CreateUserForm>(k: K, v: CreateUserForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (form.roles.length === 0) {
       setError(new Error('Select at least one role'))
@@ -49,9 +62,9 @@ function CreateUserModal({ onClose, onCreated }) {
     setBusy(true)
     setError(null)
     try {
-      const payload = { ...form }
+      const payload: Partial<CreateUserForm> = { ...form }
       if (payload.login_type === 'LDAP') delete payload.password
-      const created = await api.post('/api/auth/users', payload)
+      const created = await api.post<UserOut>('/api/auth/users', payload)
       onCreated(created)
     } catch (err) {
       setError(err)
@@ -71,7 +84,7 @@ function CreateUserModal({ onClose, onCreated }) {
             <SearchableSelect
               value={form.department}
               onChange={(v) => set('department', v)}
-              options={DEPARTMENTS}
+              options={departmentOptions}
               placeholder="Select department..."
             />
           </Field>
@@ -106,12 +119,12 @@ function CreateUserModal({ onClose, onCreated }) {
   )
 }
 
-function ResetPasswordModal({ userRow, onClose, onDone }) {
+function ResetPasswordModal({ userRow, onClose, onDone }: { userRow: UserOut; onClose: () => void; onDone: () => void }) {
   const [newPassword, setNewPassword] = useState('')
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
-  async function submit(e) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
@@ -141,27 +154,116 @@ function ResetPasswordModal({ userRow, onClose, onDone }) {
   )
 }
 
+// Admin section: "provision to add department" -- lists every department
+// (active and deactivated), lets an admin add a new one, rename one, or
+// toggle it active/inactive. Deactivating (rather than deleting) keeps
+// existing users/requests that already reference the name intact.
+function DepartmentManagerCard({ departments, onChanged }: { departments: DepartmentOut[]; onChanged: () => void }) {
+  const [newName, setNewName] = useState('')
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+  const [savingId, setSavingId] = useState<number | null>(null)
+
+  async function addDepartment(e: React.FormEvent) {
+    e.preventDefault()
+    const name = newName.trim()
+    if (!name) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post('/api/departments', { name })
+      setNewName('')
+      onChanged()
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function toggleActive(d: DepartmentOut) {
+    setSavingId(d.id)
+    setError(null)
+    try {
+      await api.patch(`/api/departments/${d.id}`, { is_active: !d.is_active })
+      onChanged()
+    } catch (err) {
+      setError(err)
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  return (
+    <Card title="Departments">
+      <p className="muted small" style={{ marginTop: -4, marginBottom: 12 }}>
+        Departments picked throughout the portal (user mapping, QA Request form, etc.) come from this
+        list — deactivating one keeps existing records intact but hides it from new pickers.
+      </p>
+      <form onSubmit={addDepartment} style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <input
+          style={{ flex: 1 }}
+          placeholder="New department name..."
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+        />
+        <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !newName.trim()}>
+          <IconPlus width={13} height={13} /> Add
+        </button>
+      </form>
+      <ErrorText error={error} />
+      <Table
+        rowKey="id"
+        columns={[
+          { key: 'name', header: 'Name' },
+          { key: 'is_active', header: 'Status', render: (d) => (
+            <button
+              className={`btn btn-sm ${d.is_active ? '' : 'btn-danger'}`}
+              disabled={savingId === d.id}
+              onClick={() => toggleActive(d)}
+            >
+              {d.is_active ? 'Active' : 'Inactive'}
+            </button>
+          ) },
+        ]}
+        rows={departments}
+      />
+    </Card>
+  )
+}
+
 export default function Admin() {
   const { user } = useAuth()
-  const [users, setUsers] = useState([])
-  const [error, setError] = useState(null)
+  const [users, setUsers] = useState<UserOut[]>([])
+  const [departments, setDepartments] = useState<DepartmentOut[]>([])
+  const [error, setError] = useState<unknown>(null)
   const [showCreate, setShowCreate] = useState(false)
-  const [resetTarget, setResetTarget] = useState(null)
-  const [savingId, setSavingId] = useState(null)
+  const [resetTarget, setResetTarget] = useState<UserOut | null>(null)
+  const [savingId, setSavingId] = useState<number | null>(null)
 
   const load = useCallback(async () => {
     try {
-      const rows = await api.get('/api/auth/users/all')
+      const rows = await api.get<UserOut[]>('/api/auth/users/all')
       // Surface accounts awaiting review first -- these are typically brand-new
       // LDAP logins that were auto-provisioned with the default low-privilege role.
-      rows.sort((a, b) => (b.needs_role_review === true) - (a.needs_role_review === true))
+      rows.sort((a, b) => Number(b.needs_role_review === true) - Number(a.needs_role_review === true))
       setUsers(rows)
     } catch (err) { setError(err) }
   }, [])
 
-  const reviewCount = users.filter((u) => u.needs_role_review).length
+  const loadDepartments = useCallback(async () => {
+    try {
+      // /all (not the plain active-only /api/departments) so the manager
+      // section below can show and re-activate deactivated rows too.
+      const rows = await api.get<DepartmentOut[]>('/api/departments/all')
+      setDepartments(rows)
+    } catch (err) { setError(err) }
+  }, [])
 
-  useEffect(() => { load() }, [load])
+  const reviewCount = users.filter((u) => u.needs_role_review).length
+  const departmentOptions = departments.filter((d) => d.is_active).map((d) => d.name)
+
+  useEffect(() => { load(); loadDepartments() }, [load, loadDepartments])
 
   if (!hasRole(user, 'ADMIN')) {
     return (
@@ -171,11 +273,11 @@ export default function Admin() {
     )
   }
 
-  async function patchUser(id, changes) {
+  async function patchUser(id: number, changes: Partial<UserOut>) {
     setError(null)
     setSavingId(id)
     try {
-      const updated = await api.patch(`/api/auth/users/${id}`, changes)
+      const updated = await api.patch<UserOut>(`/api/auth/users/${id}`, changes)
       setUsers((rows) => rows.map((r) => (r.id === id ? updated : r)))
     } catch (err) {
       setError(err)
@@ -228,7 +330,7 @@ export default function Admin() {
                   value={u.department || ''}
                   disabled={savingId === u.id}
                   onChange={(v) => patchUser(u.id, { department: v })}
-                  options={DEPARTMENTS}
+                  options={departmentOptions}
                   placeholder="Not set"
                 />
               </div>
@@ -250,8 +352,8 @@ export default function Admin() {
             { key: 'is_active', header: 'Status', render: (u) => (
               <button
                 className={`btn btn-sm ${u.is_active ? '' : 'btn-danger'}`}
-                disabled={savingId === u.id || u.id === user.id}
-                title={u.id === user.id ? "You can't deactivate your own account" : ''}
+                disabled={savingId === u.id || u.id === user?.id}
+                title={u.id === user?.id ? "You can't deactivate your own account" : ''}
                 onClick={() => patchUser(u.id, { is_active: !u.is_active })}
               >
                 {u.is_active ? 'Active' : 'Disabled'}
@@ -269,10 +371,15 @@ export default function Admin() {
         />
       </Card>
 
+      <div style={{ marginTop: 24 }}>
+        <DepartmentManagerCard departments={departments} onChanged={loadDepartments} />
+      </div>
+
       {showCreate && (
         <CreateUserModal
           onClose={() => setShowCreate(false)}
           onCreated={() => { setShowCreate(false); load() }}
+          departmentOptions={departmentOptions}
         />
       )}
       {resetTarget && (

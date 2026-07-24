@@ -9,7 +9,7 @@ from ..auth import (
     verify_password, create_access_token, ldap_authenticate, ldap_authenticate_with_profile, LDAPAuthError,
 )
 from ..deps import get_current_user, require_roles
-from ..constants import Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES, DEFAULT_LDAP_PROVISION_ROLE, DEPARTMENTS
+from ..constants import Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES, DEFAULT_LDAP_PROVISION_ROLE
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -107,8 +107,16 @@ def _dedupe_roles(roles: list) -> list:
     return list(dict.fromkeys(roles))
 
 
-def _validate_department(department):
-    if department and department not in DEPARTMENTS:
+def _validate_department(db: Session, department):
+    """Departments are now DB-backed (models.Department, managed via
+    /api/departments) instead of a hardcoded list -- validate against active
+    rows there."""
+    if not department:
+        return
+    exists = db.query(models.Department).filter(
+        models.Department.name == department, models.Department.is_active == True  # noqa: E712
+    ).first()
+    if not exists:
         raise HTTPException(status_code=400, detail=f"Invalid department '{department}'")
 
 
@@ -123,7 +131,7 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail="Username already exists")
     _validate_roles(payload.roles)
     roles = _dedupe_roles(payload.roles)
-    _validate_department(payload.department)
+    _validate_department(db, payload.department)
     login_type = payload.login_type or LoginType.STANDARD
     if login_type not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{login_type}'")
@@ -156,7 +164,7 @@ def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends
         _validate_roles(new_roles)
         new_roles = _dedupe_roles(new_roles)
     if "department" in data:
-        _validate_department(data["department"])
+        _validate_department(db, data["department"])
     if "login_type" in data and data["login_type"] not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{data['login_type']}'")
     # Note: switching an LDAP account to Standard leaves it with no usable

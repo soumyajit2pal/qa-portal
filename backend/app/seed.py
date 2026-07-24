@@ -7,7 +7,7 @@ DAST requests, or other dummy records. Run with:
 from .database import SessionLocal, Base, engine
 from . import models
 from .auth import hash_password
-from .constants import Role, LoginType
+from .constants import Role, LoginType, SEED_DEPARTMENTS
 
 Base.metadata.create_all(bind=engine)
 
@@ -24,15 +24,32 @@ DEMO_USERS = [
     ("security1", "Neha Kale", Role.SECURITY_ANALYST, "Information Security"),
     ("appowner1", "Manoj Bhosale", Role.APPLICATION_OWNER, "Core Banking Systems (CBS)"),
     ("depthead1", "Suresh Rane", Role.DEPARTMENT_HEAD, "Information Technology Department"),
+    # New SM checkpoint role (sits between Requester and Department Head on
+    # QA Request / SAST-DAST / Suppression workflows).
+    ("sm1", "Alok Mehta", Role.SM, "Information Technology Department"),
     ("admin", "QA Portal Administrator", Role.ADMIN, "QA Team"),
 ]
+
+
+def _seed_departments(db):
+    if db.query(models.Department).count() > 0:
+        return
+    for name in SEED_DEPARTMENTS:
+        db.add(models.Department(name=name, is_active=True))
+    db.commit()
+    print(f"Seeded {len(SEED_DEPARTMENTS)} departments.")
 
 
 def run():
     db = SessionLocal()
     try:
+        # Departments are seeded independently of the users check below so
+        # that re-running against a DB that already has users (but predates
+        # the Department table) still backfills the department list.
+        _seed_departments(db)
+
         if db.query(models.User).count() > 0:
-            print("Database already seeded — skipping. Delete qa_portal.db to reseed.")
+            print("Users already seeded — skipping. Delete qa_portal.db to reseed.")
             return
 
         for username, full_name, role, dept in DEMO_USERS:

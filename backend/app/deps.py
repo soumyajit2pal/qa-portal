@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from .database import get_db
 from . import models
 from .auth import decode_access_token
+from .constants import Role
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -44,3 +45,33 @@ def require_roles(*roles):
             )
         return current_user
     return checker
+
+
+def require_same_department(current_user: models.User, entity_department) -> None:
+    """Business-side approval checkpoints (SM, Department Head) may only be
+    actioned by someone in the SAME department as the request they're
+    approving -- e.g. a requester from DBD can only be approved by an SM/
+    Department Head who is also mapped to DBD. This does NOT apply to the QA
+    side of the workflow (QA Lead / QA Engineer / Security Analyst readiness,
+    scanning, security-complete, report-ready, etc.) since QA is the team
+    *receiving* the request, not a same-department stakeholder -- callers
+    should only invoke this from the SM/Department Head decision endpoints.
+    ADMIN always bypasses this check.
+
+    entity_department may be None (e.g. a requester with no department set on
+    their profile, or a standalone security request with nothing to match
+    against) -- in that case the check is skipped rather than blocking
+    everyone, since there's nothing meaningful to compare against.
+    """
+    if current_user.has_role(Role.ADMIN):
+        return
+    if not entity_department:
+        return
+    if (current_user.department or None) != entity_department:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"You can only act on requests from your own department. This request belongs to "
+                f"'{entity_department}', but your profile is mapped to '{current_user.department or 'no department'}'."
+            ),
+        )

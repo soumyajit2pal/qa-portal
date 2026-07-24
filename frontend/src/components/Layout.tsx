@@ -1,27 +1,46 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { ROLE_LABELS, QA_ACTIVE_STATUSES, hasRole } from '../constants'
 import { api } from '../api'
+import { QARequestOut, SASTOut, DASTOut, UserOut } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconPlay, IconShield, IconTarget, IconEyeOff,
   IconCertificate, IconApprove, IconChart, IconSearch,
   IconPlus, IconCheckCircle, IconLogout, IconUsers,
 } from './Icons'
 
+interface NavCounts {
+  qaRequests: number
+  security: number
+  pendingReview: number
+}
+
+interface NavItem {
+  to: string
+  label: string
+  icon: React.ComponentType<React.SVGProps<SVGSVGElement>>
+  count?: number
+}
+
+interface NavGroup {
+  label: string
+  items: NavItem[]
+}
+
 // Nav items are grouped into short, labeled sections (Workspace / Security /
 // Governance / Administration) rather than one long flat list -- with 8+
 // destinations a flat list stops reading as a hierarchy, so grouping gives
 // the sidebar a clearer information architecture.
-function navGroups(counts, user) {
-  const groups = [
+function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
+  const groups: NavGroup[] = [
     {
       label: 'Workspace',
       items: [
         { to: '/', label: 'Command Centre', icon: IconGrid },
         { to: '/qa-requests', label: 'QA Requests', icon: IconEdit, count: counts.qaRequests },
         // Test Case Repository (Module 2) and Test Execution Management (Module 3)
-        // are temporarily DISABLED per request -- see App.jsx for the matching
+        // are temporarily DISABLED per request -- see App.tsx for the matching
         // commented-out routes. Re-enable by uncommenting these two nav items too.
         // { to: '/test-cases', label: 'Test Case Repository', icon: IconFolder },
         // { to: '/test-runs', label: 'Test Execution', icon: IconPlay },
@@ -55,25 +74,25 @@ function navGroups(counts, user) {
 
 const OPEN_SECURITY_STATUSES = ['Requested', 'Lead Approved', 'Allocated', 'Scanning']
 
-function initials(name) {
+function initials(name?: string | null): string {
   if (!name) return '?'
   const parts = name.trim().split(/\s+/)
   return ((parts[0]?.[0] || '') + (parts[1]?.[0] || '')).toUpperCase()
 }
 
-export default function Layout({ children }) {
+export default function Layout({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
-  const [counts, setCounts] = useState({ qaRequests: 0, security: 0, pendingReview: 0 })
+  const [counts, setCounts] = useState<NavCounts>({ qaRequests: 0, security: 0, pendingReview: 0 })
   const [search, setSearch] = useState('')
 
   const loadCounts = useCallback(async () => {
     try {
       const [reqs, sast, dast] = await Promise.all([
-        api.get('/api/qa-requests'),
-        api.get('/api/sast-requests'),
-        api.get('/api/dast-requests'),
+        api.get<QARequestOut[]>('/api/qa-requests'),
+        api.get<SASTOut[]>('/api/sast-requests'),
+        api.get<DASTOut[]>('/api/dast-requests'),
       ])
       const qaRequests = reqs.filter((r) => QA_ACTIVE_STATUSES.includes(r.status)).length
       const security = sast.filter((r) => OPEN_SECURITY_STATUSES.includes(r.status)).length
@@ -82,7 +101,7 @@ export default function Layout({ children }) {
       let pendingReview = 0
       if (hasRole(user, 'ADMIN')) {
         try {
-          const allUsers = await api.get('/api/auth/users/all')
+          const allUsers = await api.get<UserOut[]>('/api/auth/users/all')
           pendingReview = allUsers.filter((u) => u.needs_role_review).length
         } catch (e) { /* ignore */ }
       }
@@ -92,7 +111,7 @@ export default function Layout({ children }) {
 
   useEffect(() => { loadCounts() }, [loadCounts, location.pathname])
 
-  function submitSearch(e) {
+  function submitSearch(e: React.FormEvent) {
     e.preventDefault()
     // Broad search -- matches Request ID, Application Name, or Project Name
     // (see the `search` query param on GET /api/qa-requests).

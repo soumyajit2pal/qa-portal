@@ -11,11 +11,17 @@ class Role:
     APPLICATION_OWNER = "APPLICATION_OWNER"     # Approval Authority
     DEPARTMENT_HEAD = "DEPARTMENT_HEAD"         # QA Request + Suppression Approval (business dept head)
     ADMIN = "ADMIN"                             # Configuration & Access
+    # New checkpoint role sitting between the requester and Department Head on
+    # every workflow (QA Request, SAST/DAST, Suppression) -- added per request.
+    # Label is deliberately left as the literal "SM" (not expanded to a guessed
+    # full name like "Senior Manager"/"Section Manager") since that's what was
+    # specified; rename ROLE_LABELS[Role.SM] below if you want a fuller label.
+    SM = "SM"
 
 ALL_ROLES = [
     Role.REQUESTER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD,
     Role.DEPARTMENT_HEAD_COE, Role.SECURITY_ANALYST, Role.APPLICATION_OWNER,
-    Role.DEPARTMENT_HEAD, Role.ADMIN,
+    Role.DEPARTMENT_HEAD, Role.SM, Role.ADMIN,
 ]
 
 # ---- Login / authentication type (Admin section: Module 9 - Configuration & Access) ----
@@ -46,13 +52,16 @@ ROLE_LABELS = {
     Role.SECURITY_ANALYST: "Security Analyst (QA)",
     Role.APPLICATION_OWNER: "Application Owner",
     Role.DEPARTMENT_HEAD: "Department Head - CM/AGM",
+    Role.SM: "SM",
     Role.ADMIN: "Administrator",
 }
 
 # ---- Departments (Admin section: user mapping = department + role(s)) ----
-# Fixed list in code (searchable dropdown on the frontend). Add/remove entries
-# here and redeploy if the bank's department list changes.
-DEPARTMENTS = [
+# NOTE: departments are now DB-backed (see models.Department / routers/departments.py)
+# instead of this hardcoded list, so an admin can add/deactivate departments at
+# runtime without a redeploy. This constant is kept ONLY as the one-time seed
+# list consumed by seed.py on first run -- nothing else should import it.
+SEED_DEPARTMENTS = [
     "Information Technology Department",
     "Digital Banking Department (DBD)",
     "Software",
@@ -75,13 +84,23 @@ REQUEST_TYPES = [
 ]
 
 class QAStatus:
-    """The QA Request lifecycle: Requester -> Department Head approval (also
-    assigns the QA Lead) -> QA Lead readiness verification -> QA activity
-    (planning/tester assignment/test design/execution, with a
-    defect-fix-retest-regression cycle) -> QA sign-off -> Requester
-    verification -> Closed."""
+    """The QA Request lifecycle: Requester -> Draft -> Submit to SM -> SM
+    approval -> Department Head approval (also assigns the QA Lead) -> QA
+    Lead readiness verification -> QA activity (planning/tester assignment/
+    test design/execution, with a defect-fix-retest-regression cycle) -> QA
+    sign-off -> Requester verification -> Closed.
+
+    A QA Request can only be marked QA_COMPLETED once every SAST/DAST request
+    it's linked to (see QARequest.linked_sast_requests/linked_dast_requests)
+    is itself in a terminal state (Report Ready or Closed) -- see
+    SAST_DAST_TERMINAL_STATUSES and routers/qa_requests.py::complete_qa.
+    """
     DRAFT = "DRAFT"
     SUBMITTED = "SUBMITTED"
+    # New: sits between Submitted and Department Head Approval.
+    SM_APPROVAL_PENDING = "SM_APPROVAL_PENDING"
+    RETURNED_BY_SM = "RETURNED_BY_SM"
+    SM_REJECTED = "SM_REJECTED"
     DEPARTMENT_HEAD_APPROVAL_PENDING = "DEPARTMENT_HEAD_APPROVAL_PENDING"
     RETURNED_BY_DEPARTMENT_HEAD = "RETURNED_BY_DEPARTMENT_HEAD"
     DEPARTMENT_HEAD_REJECTED = "DEPARTMENT_HEAD_REJECTED"
@@ -107,6 +126,7 @@ class QAStatus:
 
 QA_REQUEST_STATUSES = [
     QAStatus.DRAFT, QAStatus.SUBMITTED,
+    QAStatus.SM_APPROVAL_PENDING, QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.DEPARTMENT_HEAD_REJECTED,
     QAStatus.QA_LEAD_ASSIGNED,
     QAStatus.READINESS_VERIFICATION, QAStatus.RETURNED_BY_QA_LEAD, QAStatus.QA_ACTIVITY_INITIATED,
@@ -118,12 +138,12 @@ QA_REQUEST_STATUSES = [
 
 # Statuses from which the request can still be edited by the requester.
 QA_REQUEST_EDITABLE_STATUSES = [
-    QAStatus.DRAFT, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD,
+    QAStatus.DRAFT, QAStatus.RETURNED_BY_SM, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD,
 ]
 
 # Terminal statuses -- no further transitions possible.
 QA_REQUEST_TERMINAL_STATUSES = [
-    QAStatus.CLOSED, QAStatus.CANCELLED, QAStatus.DEPARTMENT_HEAD_REJECTED,
+    QAStatus.CLOSED, QAStatus.CANCELLED, QAStatus.SM_REJECTED, QAStatus.DEPARTMENT_HEAD_REJECTED,
 ]
 
 # Statuses from which the requester (or admin) may still cancel the request --
@@ -132,6 +152,7 @@ QA_REQUEST_TERMINAL_STATUSES = [
 # already committed to QA and cancellation is no longer offered.
 QA_REQUEST_CANCELLABLE_STATUSES = [
     QAStatus.DRAFT, QAStatus.SUBMITTED,
+    QAStatus.SM_APPROVAL_PENDING, QAStatus.RETURNED_BY_SM,
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.RETURNED_BY_DEPARTMENT_HEAD,
 ]
 
@@ -139,6 +160,9 @@ QA_REQUEST_CANCELLABLE_STATUSES = [
 QA_REQUEST_STATUS_LABELS = {
     QAStatus.DRAFT: "Draft",
     QAStatus.SUBMITTED: "Submitted",
+    QAStatus.SM_APPROVAL_PENDING: "SM Approval Pending",
+    QAStatus.RETURNED_BY_SM: "Returned by SM",
+    QAStatus.SM_REJECTED: "Rejected by SM",
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING: "Department Head Approval Pending",
     QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Returned by Department Head",
     QAStatus.DEPARTMENT_HEAD_REJECTED: "Department Head Rejected",
@@ -216,26 +240,96 @@ RUN_TYPES = ["Release-wise", "Sprint-wise", "Regression"]
 EXECUTION_STATUSES = ["Not Started", "In Progress", "Passed", "Failed", "Blocked", "Retest Passed", "NA"]
 
 # ---- Module 4/5: SAST / DAST ----
-SAST_DAST_STATUSES = ["Requested", "Lead Approved", "Allocated", "Scanning", "Report Ready", "Closed"]
+# Independent lifecycle (identical for SAST and DAST) -- mirrors the early
+# part of the QA Request lifecycle (Requested acts as its "Draft") up through
+# Department Head approval, then diverges into its own readiness/scanning/
+# remediation cycle:
+#
+#   Requested (requester fills mandatory details, e.g. repo URL/branch for
+#   SAST or target URL for DAST) -> Submit to SM -> SM approval -> Department
+#   Head approval -> Readiness Check (QA Lead or Security Analyst) -> Allocated
+#   (assigned to security team) -> Scanning -> [vulnerability found ->
+#   Waiting For Fix (owner: the requester) -> fix submitted -> Scanning again]
+#   -> Security Complete (no open findings) -> Report Ready.
+#
+# The final Security Complete -> Report Ready step additionally checks whether
+# any Suppression request was raised against this SAST/DAST id -- if so, ALL
+# such suppression requests must be "Done" before Report Ready is allowed (see
+# routers/sast_dast.py::_mark_report_ready and SUPPRESSION_STATUSES below).
+SAST_DAST_STATUSES = [
+    "Requested",
+    "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD",
+    "READINESS_CHECK", "RETURNED_BY_QA_LEAD",
+    "Allocated", "Scanning", "WAITING_FOR_FIX",
+    "SECURITY_COMPLETE", "Report Ready", "Closed",
+]
+# Terminal states -- a linked SAST/DAST request must be in one of these before
+# its parent QA Request can be marked QA_COMPLETED (see QAStatus docstring
+# above and routers/qa_requests.py::complete_qa).
+SAST_DAST_TERMINAL_STATUSES = ["Report Ready", "Closed"]
+# Statuses from which the requester may still edit mandatory details (repo
+# URL/branch/commit/tech stack for SAST; target URL/env/credentials for DAST).
+SAST_DAST_EDITABLE_STATUSES = ["Requested", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_QA_LEAD"]
+
+SAST_DAST_STATUS_LABELS = {
+    "Requested": "Requested",
+    "SM_APPROVAL_PENDING": "SM Approval Pending",
+    "RETURNED_BY_SM": "Returned by SM",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head Approval Pending",
+    "RETURNED_BY_DEPARTMENT_HEAD": "Returned by Department Head",
+    "READINESS_CHECK": "Readiness Check",
+    "RETURNED_BY_QA_LEAD": "Returned for Readiness Fix",
+    "Allocated": "Allocated to Security Team",
+    "Scanning": "Scanning",
+    "WAITING_FOR_FIX": "Waiting For Fix (Requester)",
+    "SECURITY_COMPLETE": "Security Complete",
+    "Report Ready": "Report Ready",
+    "Closed": "Closed",
+}
 
 # ---- Module 6: Suppression ----
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
+# Requester raises (Draft) -> Submit to SM -> SM approves & assigns to
+# Department Head -> Department Head approves -> Security Team verifies
+# (Accept -> Done / Reject -> Rejected). A SAST/DAST request can only be
+# marked "Report Ready" once every Suppression request raised against it is
+# "Done" (see SAST_DAST_STATUSES docstring above).
 SUPPRESSION_STATUSES = [
-    "Pending Application Owner", "Pending Department Head", "Approved", "Rejected",
+    "Draft",
+    "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD",
+    "SECURITY_TEAM_VERIFICATION",
+    "Done", "Rejected",
 ]
+SUPPRESSION_STATUS_LABELS = {
+    "Draft": "Draft",
+    "SM_APPROVAL_PENDING": "SM Approval Pending",
+    "RETURNED_BY_SM": "Returned by SM",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head Approval Pending",
+    "RETURNED_BY_DEPARTMENT_HEAD": "Returned by Department Head",
+    "SECURITY_TEAM_VERIFICATION": "Security Team Verification",
+    "Done": "Done",
+    "Rejected": "Rejected",
+}
+# Terminal states for a suppression request.
+SUPPRESSION_TERMINAL_STATUSES = ["Done", "Rejected"]
 
 # ---- Module 7: Approval workflow engine ----
 APPROVAL_DECISIONS = ["Approved", "Rejected", "Returned"]
 
 WORKFLOW_STEPS = {
     "QA_REQUEST": [
-        "Requester", "Department Head Approval", "QA Lead Assignment", "Readiness Verification",
+        "Requester", "SM Approval", "Department Head Approval", "QA Lead Assignment", "Readiness Verification",
         "QA Activity (Planning/Tester Assignment/Design/Execution)", "Defect-Retest-Regression Cycle",
         "QA Sign-off", "Requester Verification",
     ],
     "TEST_CASE": ["Author", "Reviewer", "QA Lead"],
-    "SAST_DAST": ["Requester", "Security Team", "Approver"],
-    "SUPPRESSION": ["Application Owner", "Business Head", "Security Approver"],
+    "SAST_DAST": [
+        "Requester", "SM Approval", "Department Head Approval", "Readiness Check",
+        "Security Team (Allocation/Scanning)", "Remediation (Requester)", "Security Complete", "Report Ready",
+    ],
+    "SUPPRESSION": ["Requester", "SM Approval", "Department Head Approval", "Security Team Verification"],
 }
 
 # ---- Module 8: QA Sign-off ----
