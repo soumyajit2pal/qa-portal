@@ -22,8 +22,8 @@
 
     "baseUrl": ".",
     "paths": {
-      "@qa-portal/shared": ["../shared/src"],
-      "@qa-portal/shared/*": ["../shared/src/*"]
+      "@qa-portal/shared": ["src/shared"],
+      "@qa-portal/shared/*": ["src/shared/*"]
     }
   },
   "include": ["src"],

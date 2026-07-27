@@ -1,32 +1,14 @@
 # Full-stack orchestration for the Centralized QA Portal.
 #
-# Architecture: the frontend is 5 INDEPENDENT images (shell + 4 module
-# remotes: functional, security, specialised-testing, governance), each
-# built from its own Dockerfile under frontend/packages/<name>/. They are
-# not one deployable unit -- each can be rebuilt/redeployed/rolled back on
-# its own without touching the others. This compose file is a convenience
-# for running the whole stack together (e.g. local staging); it is not a
-# requirement that they all ship together.
-#
-# IMPORTANT -- remote URLs are baked in at the shell's BUILD time, not
-# read at runtime (a known limitation of @originjs/vite-plugin-federation's
-# basic `remotes` config -- see frontend/packages/shell/vite.config.ts).
-# The browser (not the shell container) fetches each module's
-# remoteEntry.js directly, so the *_REMOTE_URL build args below must be
-# URLs the END USER'S BROWSER can reach -- localhost:500x works for this
-# docker-compose-on-one-machine setup, but for a real multi-host deploy
-# these must be the public URLs of each module (see README "Deployment").
+# Architecture: one backend image + one frontend image (a single React +
+# Vite app -- previously split into a Module Federation shell + 4
+# independently-deployed module remotes; that split was collapsed back into
+# one app/build/deploy since it shipped as one unit in practice anyway).
 #
 # Usage:
 #   docker compose up --build
-#   Shell:  http://localhost:8080
-#   API:    http://localhost:8000
-#
-# This file was written by hand and has NOT been executed in the sandbox
-# used to build this project (no Docker daemon was available there) --
-# please do a `docker compose up --build` smoke test on your own machine
-# before relying on it. See README.md "Verification status" for the full
-# list of what has and hasn't been tested.
+#   Frontend: http://localhost:8080
+#   API:      http://localhost:8000
 
 services:
   backend:
@@ -47,60 +29,14 @@ services:
       - qa_portal_uploads:/app/app/uploads
     restart: unless-stopped
 
-  functional:
+  frontend:
     build:
       context: ./frontend
-      dockerfile: packages/functional/Dockerfile
-    ports:
-      - "5001:80"
-    restart: unless-stopped
-
-  security:
-    build:
-      context: ./frontend
-      dockerfile: packages/security/Dockerfile
-    ports:
-      - "5002:80"
-    restart: unless-stopped
-
-  specialised-testing:
-    build:
-      context: ./frontend
-      dockerfile: packages/specialised-testing/Dockerfile
-    ports:
-      - "5003:80"
-    restart: unless-stopped
-
-  governance:
-    build:
-      context: ./frontend
-      dockerfile: packages/governance/Dockerfile
-    ports:
-      - "5004:80"
-    restart: unless-stopped
-
-  shell:
-    build:
-      context: ./frontend
-      dockerfile: packages/shell/Dockerfile
-      args:
-        # localhost:500x here relies on the *browser* (not this container)
-        # resolving these after the page loads -- fine for docker-compose
-        # on one machine, wrong for multi-host (see the note at the top of
-        # this file).
-        VITE_FUNCTIONAL_REMOTE_URL: ${VITE_FUNCTIONAL_REMOTE_URL:-http://localhost:5001/assets/remoteEntry.js}
-        VITE_SECURITY_REMOTE_URL: ${VITE_SECURITY_REMOTE_URL:-http://localhost:5002/assets/remoteEntry.js}
-        VITE_SPECIALISED_TESTING_REMOTE_URL: ${VITE_SPECIALISED_TESTING_REMOTE_URL:-http://localhost:5003/assets/remoteEntry.js}
-        VITE_GOVERNANCE_REMOTE_URL: ${VITE_GOVERNANCE_REMOTE_URL:-http://localhost:5004/assets/remoteEntry.js}
-        VITE_BACKEND_URL: ${VITE_BACKEND_URL:-http://localhost:8000}
+      dockerfile: Dockerfile
     ports:
       - "8080:80"
     depends_on:
       - backend
-      - functional
-      - security
-      - specialised-testing
-      - governance
     restart: unless-stopped
 
 volumes:

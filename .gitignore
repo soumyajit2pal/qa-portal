@@ -10,7 +10,6 @@ backend/app/uploads/*
 # Frontend
 frontend/node_modules/
 frontend/dist/
-frontend/packages/*/dist/
 frontend/.env
 
 .DS_Store
