@@ -1,12 +1,16 @@
 import datetime
+import os
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department
 from ..constants import Role
+from ..pdf_export import build_request_detail_pdf
+from .. import documents as doc_store
 
 router = APIRouter(prefix="/api/suppressions", tags=["suppression"])
 
@@ -37,6 +41,16 @@ def _require(obj, expected, action: str):
         raise HTTPException(400, f"'{action}' requires status in {expected} (currently '{obj.status}')")
 
 
+def _require_linked_request(data: dict):
+    """Every field on the New/Edit Suppression form is now mandatory --
+    including the SAST/DAST Request ID link itself (previously optional,
+    allowing a "standalone" finding with no linked scan). Enforced here
+    rather than in schemas.py to match this router's existing validation
+    style (see the decision-endpoint checks above/below)."""
+    if bool(data.get("sast_request_id")) == bool(data.get("dast_request_id")):
+        raise HTTPException(400, "Exactly one of SAST or DAST Request ID must be selected")
+
+
 @router.get("", response_model=List[schemas.SuppressionOut])
 def list_suppressions(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return db.query(models.SuppressionRequest).order_by(models.SuppressionRequest.created_at.desc()).all()
@@ -54,6 +68,7 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
     items_data = data.pop("items")
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
+    _require_linked_request(data)
     obj = models.SuppressionRequest(**data, created_by_id=current_user.id, status="Draft")
     obj.items = [models.SuppressionItem(**item) for item in items_data]
     db.add(obj)
@@ -84,6 +99,7 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
     data = payload.model_dump()
     items_data = data.pop("items", None)
+    _require_linked_request(data)
     for k, v in data.items():
         setattr(obj, k, v)
     if items_data is not None:
@@ -118,13 +134,16 @@ def resubmit_suppression(sup_id: int, db: Session = Depends(get_db), current_use
         raise HTTPException(404, "Suppression request not found")
     if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
-    _require(obj, ["RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD"], "Resubmit")
+    _require(obj, ["RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_TEAM"], "Resubmit")
     if obj.status == "RETURNED_BY_SM":
         obj.status = "SM_APPROVAL_PENDING"
         _log(db, obj.id, "SM Approval", current_user, "Resubmitted", "Returned request re-submitted")
-    else:
+    elif obj.status == "RETURNED_BY_DEPARTMENT_HEAD":
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
         _log(db, obj.id, "Department Head Approval", current_user, "Resubmitted", "Returned request re-submitted")
+    else:
+        obj.status = "SECURITY_TEAM_VERIFICATION"
+        _log(db, obj.id, "Security Team Verification", current_user, "Resubmitted", "Returned request re-submitted")
     db.commit()
     db.refresh(obj)
     return obj
@@ -186,19 +205,27 @@ def dept_head_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Sessi
 def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     """Security Team verifies the suppression is legitimate and accepts (Done
-    -- unblocks the linked SAST/DAST request's mark-report-ready) or rejects
-    it."""
+    -- unblocks the linked SAST/DAST request's mark-report-ready), rejects it
+    outright (terminal), or returns it to the requester if something needs
+    fixing first -- e.g. missing justification or evidence -- choosing (via
+    require_dept_head_reapproval) whether the fix needs a fresh Department
+    Head approval or can come straight back to Security Team Verification."""
     obj = db.query(models.SuppressionRequest).get(sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require(obj, "SECURITY_TEAM_VERIFICATION", "Security team decision")
     decision = payload.decision
-    if decision not in ("Accepted", "Approved", "Rejected"):
-        raise HTTPException(400, "decision must be one of: Accepted, Rejected")
+    if decision not in ("Accepted", "Approved", "Rejected", "Returned"):
+        raise HTTPException(400, "decision must be one of: Accepted, Rejected, Returned")
     obj.security_decision = decision
     obj.security_id = current_user.id
     obj.security_decided_at = datetime.datetime.utcnow()
-    obj.status = "Done" if decision in ("Accepted", "Approved") else "Rejected"
+    if decision in ("Accepted", "Approved"):
+        obj.status = "Done"
+    elif decision == "Rejected":
+        obj.status = "Rejected"
+    else:
+        obj.status = "RETURNED_BY_DEPARTMENT_HEAD" if payload.require_dept_head_reapproval else "RETURNED_BY_SECURITY_TEAM"
     _log(db, obj.id, "Security Team Verification", current_user, decision, payload.comments)
     db.commit()
     db.refresh(obj)
@@ -210,3 +237,134 @@ def suppression_history(sup_id: int, db: Session = Depends(get_db), current_user
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="SUPPRESSION", entity_id=sup_id)
             .order_by(models.ApprovalAction.created_at).all())
+
+
+@router.get("/{sup_id}/export")
+def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Every field on this Suppression / False Positive request, every
+    finding it covers, and its full approval/workflow history -- who
+    submitted, decided (SM/Department Head/Security Team), etc., and when --
+    as one downloadable PDF."""
+    obj = db.query(models.SuppressionRequest).get(sup_id)
+    if not obj:
+        raise HTTPException(404, "Suppression request not found")
+
+    def uname(uid):
+        if not uid:
+            return None
+        u = db.query(models.User).get(uid)
+        return u.full_name if u else None
+
+    sections = [
+        ("Status", [
+            ("Status", obj.status),
+            ("Scan Type", obj.scan_type),
+            ("Linked Request", (obj.sast_request.request_id if obj.sast_request else None)
+                                or (obj.dast_request.request_id if obj.dast_request else None)),
+        ]),
+        ("Application", [
+            ("Application Name", obj.application_name),
+            ("Department", obj.department),
+            ("Application Owner", obj.application_owner),
+        ]),
+        ("Decisions", [
+            ("SM Decision", f"{obj.sm_decision or 'Pending'} — {uname(obj.sm_id) or '—'}"),
+            ("Department Head Decision", f"{obj.dept_head_decision or 'Pending'} — {uname(obj.dept_head_id) or '—'}"),
+            ("Security Team Decision", f"{obj.security_decision or 'Pending'} — {uname(obj.security_id) or '—'}"),
+        ]),
+        ("Risk Assessment", [
+            ("Risk Assessment", obj.risk_assessment),
+        ]),
+        ("Findings Covered", [
+            (i.issue_id or f"Finding {i.id}", f"{i.severity} | {i.description or ''} | Justification: {i.justification or ''}")
+            for i in obj.items
+        ]),
+        ("Requester", [
+            ("Requester", uname(obj.created_by_id)),
+        ]),
+    ]
+
+    history_rows = (db.query(models.ApprovalAction)
+                     .filter_by(entity_type="SUPPRESSION", entity_id=sup_id)
+                     .order_by(models.ApprovalAction.created_at).all())
+    history = []
+    for h in history_rows:
+        history.append((h.step_name or "—", h.decision or "—", uname(h.actor_id) or "—",
+                         h.actor_role or "—", h.comments or "—",
+                         h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
+
+    buf = build_request_detail_pdf(
+        title=f"{obj.suppression_id} — {obj.application_name}",
+        subtitle="Suppression / False Positive Request — Full Detail Export",
+        sections=sections, history=history,
+        generated_by=current_user.full_name,
+        generated_at=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+    )
+    return StreamingResponse(
+        buf, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{obj.suppression_id}.pdf"'},
+    )
+
+
+# ---- Supporting documents (multiple files, uploaded any time after the
+# request has been raised) -- see documents.py for the shared implementation. ----
+@router.get("/{sup_id}/documents", response_model=List[schemas.RequestDocumentOut])
+def list_suppression_documents(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    return doc_store.list_documents(db, "SUPPRESSION", sup_id)
+
+
+@router.post("/{sup_id}/documents", response_model=List[schemas.RequestDocumentOut])
+def upload_suppression_documents(sup_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
+                                  current_user: models.User = Depends(get_current_user)):
+    obj = db.query(models.SuppressionRequest).get(sup_id)
+    if not obj:
+        raise HTTPException(404, "Suppression request not found")
+    return doc_store.save_documents(db, "SUPPRESSION", sup_id, obj.suppression_id, files, current_user.id)
+
+
+@router.get("/{sup_id}/documents/{doc_id}/download")
+def download_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(get_db),
+                                   current_user: models.User = Depends(get_current_user)):
+    doc = doc_store.get_document_or_404(db, "SUPPRESSION", sup_id, doc_id)
+    full_path = doc_store.full_path(doc)
+    if not os.path.exists(full_path):
+        raise HTTPException(404, "File is missing on disk")
+    return FileResponse(full_path, filename=doc.file_name, media_type=doc.content_type or "application/octet-stream")
+
+
+# ---- Walkthrough sessions ----
+# Own dedicated table (SuppressionWalkthrough), mirroring Functional's
+# WalkthroughSession -- see routers/functional.py for the same pattern.
+# Suppression has no readiness-checklist concept, so it only gets
+# Walkthroughs + History tabs on its detail page, not a Checklist tab.
+@router.get("/{sup_id}/walkthroughs", response_model=List[schemas.WalkthroughOut])
+def list_walkthroughs(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    return db.query(models.SuppressionWalkthrough).filter_by(suppression_request_id=sup_id).all()
+
+
+@router.post("/{sup_id}/walkthroughs", response_model=schemas.WalkthroughOut)
+def add_walkthrough(sup_id: int, payload: schemas.WalkthroughCreate, db: Session = Depends(get_db),
+                     current_user: models.User = Depends(require_roles(
+                         Role.BUSINESS_ANALYST, Role.REQUESTER, Role.QA_ENGINEER, Role.QA_LEAD,
+                         Role.SECURITY_ANALYST))):
+    if not db.query(models.SuppressionRequest).get(sup_id):
+        raise HTTPException(404, "Suppression request not found")
+    obj = models.SuppressionWalkthrough(suppression_request_id=sup_id, **payload.model_dump())
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.post("/{sup_id}/walkthroughs/{wt_id}/acknowledge", response_model=schemas.WalkthroughOut)
+def acknowledge_walkthrough(sup_id: int, wt_id: int, db: Session = Depends(get_db),
+                             current_user: models.User = Depends(require_roles(
+                                 Role.SECURITY_ANALYST, Role.QA_LEAD))):
+    obj = db.query(models.SuppressionWalkthrough).filter_by(id=wt_id, suppression_request_id=sup_id).first()
+    if not obj:
+        raise HTTPException(404, "Walkthrough session not found")
+    obj.qa_acknowledged_by_id = current_user.id
+    obj.qa_acknowledged_at = datetime.datetime.utcnow()
+    db.commit()
+    db.refresh(obj)
+    return obj

@@ -1,4 +1,5 @@
 import datetime
+import json
 import uuid
 from typing import List
 from sqlalchemy import (
@@ -6,7 +7,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from .database import Base
-from .constants import QAStatus, LoginType
+from .constants import QAStatus, LoginType, GatewayStatus
 
 # Unlike SQLite/PostgreSQL/MySQL, SQLAlchemy does NOT automatically make a
 # bare `Column(Integer, primary_key=True)` self-generating on Oracle -- Oracle
@@ -92,9 +93,21 @@ class Department(Base):
 
 
 # ---------------------------------------------------------------------------
-# Module 1: QA Request Management
+# Module 1: QA Request Management -- pure intake/gateway record
 # ---------------------------------------------------------------------------
 class QARequest(Base):
+    """The QA Request is a lightweight intake/gateway record only -- it has no
+    approval workflow of its own (see constants.GatewayStatus: Draft ->
+    Submitted -> Raised, or Cancelled while still Draft). Raising it
+    immediately spins off whichever independent child request(s) apply, each
+    with its own unique ID and its own full workflow (see
+    routers/qa_requests.py::_sync_linked_child_requests):
+      - Functional/Sanity/Regression Testing or UAT Support -> one combined
+        FunctionalRequest (see FunctionalRequest below).
+      - SAST / DAST -> SASTRequest / DASTRequest.
+      - Automation Testing -> AutomationRequest.
+      - Performance Testing -> PerformanceRequest.
+    """
     __tablename__ = "qap_requests"
     id = pk_column()
     request_id = Column(String(40), unique=True, default=lambda: gen_id("TQA-REQ"))
@@ -104,41 +117,103 @@ class QARequest(Base):
     application_owner = Column(String(150))
     cr_number = Column(String(64))
     project_name = Column(String(150))
+    change_type = Column(String(32))              # New / Enhancement / Bug Fix -- see constants.CHANGE_TYPES
+    vendor_si_partner = Column(String(150))
+    technology_stack = Column(String(150))
     release_version = Column(String(64))
-    environment = Column(String(32))
+    build_number = Column(String(64))
+    environment = Column(String(32))              # "Deployment Environment" -- SIT/UAT/Pre-Production/Production
+    target_promotion_environment = Column(String(32))
     request_types = Column(String(255))          # comma-separated from REQUEST_TYPES
     request_type_other = Column(String(150))
-    priority = Column(String(16))
-    risk_rating = Column(String(16))
+    # Priority/Risk used to be a single shared "Classification" pair here,
+    # collected once regardless of which request type(s) were selected. Moved
+    # to be per-request-type instead (e.g. FunctionalRequest.priority,
+    # SASTRequest.priority, PerformanceRequest.risk_category, ...) since the
+    # same change can reasonably need Automation Testing done at low priority
+    # while Performance Testing on the same change is high priority -- no
+    # longer meaningful as a single gateway-level value. The underlying Oracle
+    # columns (qap_requests.priority/risk_rating) are left in place (harmless,
+    # simply unmapped/unused going forward) rather than dropped -- see the
+    # Oracle migration notes for this round.
     target_release_date = Column(Date)
     supporting_doc_path = Column(String(255))
     remarks = Column(Text)
 
-    status = Column(String(32), default=QAStatus.DRAFT, index=True)
+    # Staging area, JSON-encoded, for the SAST/DAST/Performance detail fields
+    # (and the requester's readiness-checklist self-declaration ticks)
+    # collected on the wizard's own steps while this gateway is still a Draft.
+    # Linked child requests (Functional/SAST/DAST/Automation/Performance) are
+    # NOT created at Draft save time -- only "Submit / Raise" (see
+    # routers/qa_requests.py::submit_request) actually creates them, reading
+    # this column to seed their details before clearing it. This is what
+    # keeps "Linked Requests" empty (and correctly so) on a still-Draft
+    # request -- nothing should get its own trackable ID until the requester
+    # has actually raised it.
+    draft_child_details = Column(Text, nullable=True)
+
+    status = Column(String(32), default=GatewayStatus.DRAFT, index=True)
     requester_id = Column(Integer, ForeignKey("qap_users.id"))
-    department_head_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # who performed Department Head Approval
-    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # QA Lead assigned by the Department Head
-    assigned_tester_ids = Column(String(255))     # comma-separated QA Engineer user ids (Tester Assigned step)
-    signoff_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)    # linked QA Sign-off certificate
 
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
     requester = relationship("User", back_populates="qa_requests", foreign_keys=[requester_id])
-    checklist_items = relationship("ReadinessChecklistItem", back_populates="qa_request", cascade="all,delete-orphan")
-    walkthroughs = relationship("WalkthroughSession", back_populates="qa_request", cascade="all,delete-orphan")
-    # Test Case Repository (Module 2) is temporarily DISABLED (see main.py) --
-    # this relationship and the TestCase model below are left in place so
-    # existing/seeded data and this mapping keep working, but there's no live
-    # API surface to create/browse test cases while the module is disabled.
-    test_cases = relationship("TestCase", back_populates="qa_request")
     documents = relationship("QARequestDocument", back_populates="qa_request", cascade="all,delete-orphan")
-    # Auto-created when this request's request_types include SAST/DAST (see
-    # routers/qa_requests.py::_sync_linked_security_requests) so security
-    # testing gets its own trackable unique ID while staying linked back to
-    # the originating (typically Functional Testing) QA Request.
+    # Auto-created when this request's request_types include the matching
+    # type (see routers/qa_requests.py::_sync_linked_child_requests) so each
+    # gets its own trackable unique ID while staying linked back to the
+    # originating gateway QA Request.
+    linked_functional_requests = relationship("FunctionalRequest", back_populates="qa_request")
     linked_sast_requests = relationship("SASTRequest", back_populates="qa_request")
     linked_dast_requests = relationship("DASTRequest", back_populates="qa_request")
+    linked_automation_requests = relationship("AutomationRequest", back_populates="qa_request")
+    linked_performance_requests = relationship("PerformanceRequest", back_populates="qa_request")
+
+    def _draft_details(self) -> dict:
+        """Parses draft_child_details (see the column comment above) --
+        returns an empty shell once it's None, e.g. after Submit/Raise
+        consumes and clears it (see routers/qa_requests.py::submit_request)."""
+        if not self.draft_child_details:
+            return {
+                "checked_items": [], "sast_components": [], "dast_components": [],
+                "performance": {}, "automation_checked_items": [], "performance_checked_items": [],
+                "classification": {},
+            }
+        return json.loads(self.draft_child_details)
+
+    # Exposed read-only via QARequestOut so the "Edit Request" wizard can
+    # pre-fill the SAST/DAST/Performance/checklist steps it collected on an
+    # earlier Draft save, instead of showing them blank again (they aren't
+    # columns on this gateway record -- they only exist in this staging
+    # column until Submit/Raise turns them into a real child request).
+    @property
+    def draft_checked_items(self):
+        return self._draft_details().get("checked_items") or []
+
+    @property
+    def draft_sast_components(self):
+        return self._draft_details().get("sast_components") or []
+
+    @property
+    def draft_dast_components(self):
+        return self._draft_details().get("dast_components") or []
+
+    @property
+    def draft_performance(self):
+        return self._draft_details().get("performance") or {}
+
+    @property
+    def draft_automation_checked_items(self):
+        return self._draft_details().get("automation_checked_items") or []
+
+    @property
+    def draft_performance_checked_items(self):
+        return self._draft_details().get("performance_checked_items") or []
+
+    @property
+    def draft_classification(self):
+        return self._draft_details().get("classification") or {}
 
 
 class QARequestDocument(Base):
@@ -159,18 +234,149 @@ class QARequestDocument(Base):
     qa_request = relationship("QARequest", back_populates="documents")
 
 
+# ---------------------------------------------------------------------------
+# Module 1b: Functional Testing Request (Functional/Sanity/Regression/UAT Support)
+# ---------------------------------------------------------------------------
+class FunctionalRequest(Base):
+    """Auto-created from a QA Request when any of Functional Testing/Sanity
+    Testing/Regression Testing/UAT Support is one of its request types (see
+    routers/qa_requests.py::_sync_linked_child_requests) -- same auto-link
+    pattern as SASTRequest/DASTRequest/AutomationRequest/PerformanceRequest,
+    just for the "common" bucket. Carries the full QAStatus lifecycle that
+    used to live directly on QARequest (see constants.QAStatus). Most
+    descriptive fields (application name, project, department, etc.) are NOT
+    duplicated here -- they're delegated (read-only) from the linked
+    qa_request below, since a Functional Testing Request always describes the
+    exact same application/change as its parent gateway. Priority/risk_rating
+    are the exception -- real, independently-editable columns (see below),
+    since those can legitimately differ per request type even on the same
+    underlying change."""
+    __tablename__ = "qap_functional_requests"
+    id = pk_column()
+    request_id = Column(String(40), unique=True, default=lambda: gen_id("TQA-FUNC"))
+    status = Column(String(32), default=QAStatus.DRAFT, index=True)
+    # Set (independently of `status`) when the QA Lead fails Readiness
+    # Verification with "require re-approval" ticked. `status` is always set
+    # to RETURNED_BY_QA_LEAD in that case -- who actually returned it -- never
+    # RETURNED_BY_DEPARTMENT_HEAD (that status value is reserved for a genuine
+    # direct return during Department Head Approval); this flag is what
+    # `resubmit` checks to decide whether to route back through Department
+    # Head Approval or straight back to Readiness Verification, and what the
+    # frontend uses to show a "Department Head re-approval required after
+    # changes" note alongside the accurate status.
+    needs_dept_head_reapproval = Column(Boolean, default=False)
+    # Real, independently-editable columns -- NOT delegated from the parent
+    # QA Request (unlike application_name/project_name/department/
+    # application_owner below, which really are always identical to the
+    # gateway's). Priority/Risk moved to be per-request-type: this bucket
+    # (Functional/Sanity/Regression/UAT Support) can reasonably need a
+    # different priority than, say, a linked Automation Testing request on
+    # the same QA Request. Collected on the wizard's own "Functional Testing
+    # Classification" step and editable afterwards via
+    # PUT /api/functional-requests/{id}.
+    priority = Column(String(16))
+    risk_rating = Column(String(16))
+    requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    department_head_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # who performed Department Head Approval
+    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # QA Lead assigned by the Department Head
+    assigned_tester_ids = Column(String(255))     # comma-separated QA Engineer user ids (Tester Assigned step)
+    signoff_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)    # linked QA Sign-off certificate
+    # Set when auto-created from a QA Request gateway (always, for new rows --
+    # standalone creation is disabled, see routers/functional.py); nullable
+    # only for symmetry with the other linked-request models.
+    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
+
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    requester = relationship("User", foreign_keys=[requester_id])
+    qa_request = relationship("QARequest", back_populates="linked_functional_requests")
+    checklist_items = relationship("ReadinessChecklistItem", back_populates="functional_request", cascade="all,delete-orphan")
+    walkthroughs = relationship("WalkthroughSession", back_populates="functional_request", cascade="all,delete-orphan")
+
+    # Delegated (read-only) lookups from the parent gateway QA Request --
+    # see the class docstring above for why these aren't duplicated columns.
+    @property
+    def application_name(self):
+        return self.qa_request.application_name if self.qa_request else None
+
+    @property
+    def project_name(self):
+        return self.qa_request.project_name if self.qa_request else None
+
+    @property
+    def department(self):
+        return self.qa_request.department if self.qa_request else None
+
+    @property
+    def application_owner(self):
+        return self.qa_request.application_owner if self.qa_request else None
+
+    @property
+    def request_types(self):
+        return self.qa_request.request_types if self.qa_request else None
+
+    @property
+    def target_release_date(self):
+        return self.qa_request.target_release_date if self.qa_request else None
+
+    # Rest of "Application & Change Details"/"Release & Environment" --
+    # delegated (read-only) the same way as application_name/project_name/
+    # department/application_owner above. Previously omitted entirely (this
+    # request type showed fewer Overview fields than SAST/DAST/Automation/
+    # Performance); added so the Functional Testing Overview can show the
+    # full picture, and made writable (by writing through to qa_request, see
+    # routers/functional.py::update_functional) since once the QA Request
+    # gateway itself is RAISED it can no longer be edited there directly
+    # (see constants.GATEWAY_EDITABLE_STATUSES) -- this is the only place
+    # left to fix a typo in these fields after that point.
+    @property
+    def cr_number(self):
+        return self.qa_request.cr_number if self.qa_request else None
+
+    @property
+    def change_type(self):
+        return self.qa_request.change_type if self.qa_request else None
+
+    @property
+    def environment(self):
+        return self.qa_request.environment if self.qa_request else None
+
+    @property
+    def target_promotion_environment(self):
+        return self.qa_request.target_promotion_environment if self.qa_request else None
+
+    @property
+    def release_version(self):
+        return self.qa_request.release_version if self.qa_request else None
+
+    @property
+    def build_number(self):
+        return self.qa_request.build_number if self.qa_request else None
+
+    # Always None here -- Functional Testing uses risk_rating (above), not
+    # risk_category. Exists purely so schemas.LinkedRequestRef (the generic
+    # cross-reference shape shared by all 5 linked-request types) can safely
+    # read `.risk_category` off any of them without an AttributeError.
+    @property
+    def risk_category(self):
+        return None
+
+
 class ReadinessChecklistItem(Base):
-    """'Ready for Testing' gate — configurable checklist (Module 1)."""
+    """'Ready for Testing' gate — configurable checklist (Module 1b, lives on
+    the Functional Testing Request since that's where the QA activity/
+    readiness verification actually happens)."""
     __tablename__ = "qap_readiness_checklist_items"
     id = pk_column()
-    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"))
+    functional_request_id = Column(Integer, ForeignKey("qap_functional_requests.id"))
     item = Column(String(255), nullable=False)
     owner = Column(String(150))
     is_mandatory = Column(Boolean, default=True)
     # Requester's own self-declaration, ticked when raising (or editing, pre-
     # submission) the QA Request -- purely informational for the QA Lead, who
     # must still independently verify every item via is_complete below (see
-    # readiness_decision in routers/qa_requests.py -- nothing is auto-approved
+    # readiness_decision in routers/functional.py -- nothing is auto-approved
     # just because the requester ticked it).
     requester_checked = Column(Boolean, default=False)
     # QA Lead's independent verification -- this is the flag the readiness
@@ -179,13 +385,13 @@ class ReadinessChecklistItem(Base):
     approved_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     approved_at = Column(DateTime, nullable=True)
 
-    qa_request = relationship("QARequest", back_populates="checklist_items")
+    functional_request = relationship("FunctionalRequest", back_populates="checklist_items")
 
 
 class WalkthroughSession(Base):
     __tablename__ = "qap_walkthrough_sessions"
     id = pk_column()
-    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"))
+    functional_request_id = Column(Integer, ForeignKey("qap_functional_requests.id"))
     session_date = Column(DateTime, default=now)
     conducted_by = Column(String(150))
     participants = Column(Text)
@@ -195,87 +401,7 @@ class WalkthroughSession(Base):
     qa_acknowledged_at = Column(DateTime, nullable=True)
     notes = Column(Text)
 
-    qa_request = relationship("QARequest", back_populates="walkthroughs")
-
-
-# ---------------------------------------------------------------------------
-# Module 2: Test Case Repository
-# ---------------------------------------------------------------------------
-class TestCase(Base):
-    __tablename__ = "qap_test_cases"
-    id = pk_column()
-    test_case_id = Column(String(40), unique=True, default=lambda: gen_id("TC"))
-    epic_id = Column(String(64))
-    feature_id = Column(String(64))
-    user_story_id = Column(String(64))
-    test_type = Column(String(32))
-    module_name = Column(String(150))
-    project_name = Column(String(150))
-    test_scenario = Column(String(255))
-    precondition = Column(Text)
-    description = Column(Text)
-    steps = Column(Text)
-    expected_result = Column(Text)
-    priority = Column(String(16))
-    actual_result = Column(Text)
-    status = Column(String(32), default="Draft")
-    review_status = Column(String(32), default="Draft")
-    test_run_artifacts_path = Column(String(255))
-    defect_id = Column(String(64))
-    version = Column(Integer, default=1)
-    is_archived = Column(Boolean, default=False)
-
-    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
-    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    created_at = Column(DateTime, default=now)
-    updated_at = Column(DateTime, default=now, onupdate=now)
-
-    qa_request = relationship("QARequest", back_populates="test_cases")
-
-
-class TestCaseVersion(Base):
-    """Archived snapshot every time a test case is edited (version control)."""
-    __tablename__ = "qap_test_case_versions"
-    id = pk_column()
-    test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"))
-    version = Column(Integer)
-    snapshot_json = Column(Text)
-    archived_at = Column(DateTime, default=now)
-
-
-# ---------------------------------------------------------------------------
-# Module 3: Test Execution Management
-# ---------------------------------------------------------------------------
-class TestRun(Base):
-    __tablename__ = "qap_test_runs"
-    id = pk_column()
-    test_run_id = Column(String(40), unique=True, default=lambda: gen_id("TR"))
-    project = Column(String(150))
-    application = Column(String(150))
-    release = Column(String(64))
-    run_type = Column(String(32))
-    qa_owner_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    start_date = Column(Date)
-    end_date = Column(Date)
-    status = Column(String(32), default="Not Started")
-    created_at = Column(DateTime, default=now)
-
-    cases = relationship("TestRunCase", back_populates="test_run", cascade="all,delete-orphan")
-
-
-class TestRunCase(Base):
-    __tablename__ = "qap_test_run_cases"
-    id = pk_column()
-    test_run_id = Column(Integer, ForeignKey("qap_test_runs.id"))
-    test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"))
-    execution_status = Column(String(32), default="Not Started")
-    actual_result = Column(Text)
-    defect_id = Column(String(64))
-    executed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    executed_at = Column(DateTime, nullable=True)
-
-    test_run = relationship("TestRun", back_populates="cases")
-    test_case = relationship("TestCase")
+    functional_request = relationship("FunctionalRequest", back_populates="walkthroughs")
 
 
 # ---------------------------------------------------------------------------
@@ -288,21 +414,29 @@ class SASTRequest(Base):
     application_name = Column(String(150), nullable=False)
     project_name = Column(String(150))
     cr_number = Column(String(64))
-    build_number = Column(String(64))
-    repository_url = Column(String(255))
-    git_branch = Column(String(150))
-    commit_id = Column(String(150))
-    technology_stack = Column(String(150))
     risk_category = Column(String(16))
+    # Priority is per-request-type now (see FunctionalRequest's comment on
+    # priority/risk_rating for the full reasoning) -- collected on the QA
+    # Request wizard's own SAST step and editable afterwards via this
+    # request's own Edit Details modal, same as risk_category above already was.
+    priority = Column(String(16))
     source_code_path = Column(String(255))
     hash_value = Column(String(255))
 
-    status = Column(String(32), default="Requested")
+    status = Column(String(32), default="DRAFT")
+    # See FunctionalRequest.needs_dept_head_reapproval for the full
+    # explanation -- same reasoning, set when the Security Lead fails
+    # Security Readiness with "require re-approval" ticked (status is always
+    # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
+    needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    # Assigned during the "Security Lead Assigned" step (Department Head
+    # approval), mirroring how a QA Lead is assigned on the QA Request itself.
+    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     report_path = Column(String(255))
     # Set when this SAST request was auto-created because a QA Request's
     # request_types included "SAST" (see routers/qa_requests.py
-    # ::_sync_linked_security_requests); null for standalone SAST requests
+    # ::_sync_linked_child_requests); null for standalone SAST requests
     # raised directly through this module -- those still get their own
     # unique request_id via the default above, just with no QA Request link.
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
@@ -310,7 +444,18 @@ class SASTRequest(Base):
     updated_at = Column(DateTime, default=now, onupdate=now)
 
     findings = relationship("SASTFinding", back_populates="sast_request", cascade="all,delete-orphan")
+    walkthroughs = relationship("SASTWalkthrough", back_populates="sast_request", cascade="all,delete-orphan")
     qa_request = relationship("QARequest", back_populates="linked_sast_requests")
+    # One row per repository -- a project can span more than one, each with
+    # its own branch/commit/tech stack/build number. Used to be packed as the
+    # Nth comma-separated value across 5 parallel columns directly on this
+    # row (repository_url, git_branch, commit_id, technology_stack,
+    # build_number) -- fragile to parse/reconstruct and awkward to query.
+    # Replaced with a proper child table; see SASTComponent below.
+    components = relationship(
+        "SASTComponent", back_populates="sast_request", cascade="all,delete-orphan",
+        order_by="SASTComponent.id",
+    )
 
     # Convenience read-only lookups so the Suppression "Request ID" autosuggest
     # can auto-populate Department/Owner without a separate round trip -- these
@@ -323,6 +468,51 @@ class SASTRequest(Base):
     @property
     def application_owner(self):
         return self.qa_request.application_owner if self.qa_request else None
+
+    # Deployment/target promotion environment aren't columns on SASTRequest
+    # itself -- collected once, on the QA Request gateway, same delegation
+    # pattern as department/application_owner above.
+    @property
+    def environment(self):
+        return self.qa_request.environment if self.qa_request else None
+
+    @property
+    def target_promotion_environment(self):
+        return self.qa_request.target_promotion_environment if self.qa_request else None
+
+    # Convenience passthrough for callers that just want "a" build number for
+    # this request (e.g. the Reports export) without reaching into
+    # .components themselves -- first repository's, since that's overwhelmingly
+    # the common case of one repository per SAST request.
+    @property
+    def build_number(self):
+        return self.components[0].build_number if self.components else None
+
+    # Always None here -- SAST uses risk_category (above), not risk_rating.
+    # Exists purely so schemas.LinkedRequestRef can safely read
+    # `.risk_rating` off any of the 5 linked-request types without an
+    # AttributeError -- see FunctionalRequest.risk_category for the mirror.
+    @property
+    def risk_rating(self):
+        return None
+
+
+class SASTComponent(Base):
+    """One repository entry for a SAST request -- its own branch/commit/tech
+    stack/build number. A project can span more than one repository, each
+    needing its own full set of these 5 fields (see RepeatableGroupInput on
+    the SAST form, one row added per "+" click). Ordered by `id` (insertion
+    order == the order the requester added them in)."""
+    __tablename__ = "qap_sast_components"
+    id = pk_column()
+    sast_request_id = Column(Integer, ForeignKey("qap_sast_requests.id"), nullable=False)
+    repository_url = Column(String(1000))
+    git_branch = Column(String(500))
+    commit_id = Column(String(500))
+    technology_stack = Column(String(500))
+    build_number = Column(String(300))
+
+    sast_request = relationship("SASTRequest", back_populates="components")
 
 
 class SASTFinding(Base):
@@ -337,6 +527,25 @@ class SASTFinding(Base):
     sast_request = relationship("SASTRequest", back_populates="findings")
 
 
+class SASTWalkthrough(Base):
+    """Same shape as WalkthroughSession (Functional Testing's walkthrough
+    table) -- SAST previously had no walkthrough concept at all, unlike
+    every other module."""
+    __tablename__ = "qap_sast_walkthroughs"
+    id = pk_column()
+    sast_request_id = Column(Integer, ForeignKey("qap_sast_requests.id"))
+    session_date = Column(DateTime, default=now)
+    conducted_by = Column(String(150))
+    participants = Column(Text)
+    recording_path = Column(String(255))
+    document_path = Column(String(255))
+    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    qa_acknowledged_at = Column(DateTime, nullable=True)
+    notes = Column(Text)
+
+    sast_request = relationship("SASTRequest", back_populates="walkthroughs")
+
+
 # ---------------------------------------------------------------------------
 # Module 5: DAST Request Management
 # ---------------------------------------------------------------------------
@@ -344,16 +553,19 @@ class DASTRequest(Base):
     __tablename__ = "qap_dast_requests"
     id = pk_column()
     request_id = Column(String(40), unique=True, default=lambda: gen_id("DAST"))
-    application_url = Column(String(255), nullable=False)
-    environment = Column(String(32))
-    authentication_required = Column(Boolean, default=False)
-    test_credentials = Column(String(255))
-    target_release = Column(String(64))
     risk_category = Column(String(16))
+    # See SASTRequest.priority for the full reasoning.
+    priority = Column(String(16))
     supporting_docs_path = Column(String(255))
 
-    status = Column(String(32), default="Requested")
+    status = Column(String(32), default="DRAFT")
+    # See FunctionalRequest.needs_dept_head_reapproval for the full
+    # explanation -- same reasoning, set when the Security Lead fails
+    # Security Readiness with "require re-approval" ticked (status is always
+    # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
+    needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     report_path = Column(String(255))
     # Set when this DAST request was auto-created because a QA Request's
     # request_types included "DAST"; null for standalone DAST requests
@@ -363,7 +575,32 @@ class DASTRequest(Base):
     updated_at = Column(DateTime, default=now, onupdate=now)
 
     findings = relationship("DASTFinding", back_populates="dast_request", cascade="all,delete-orphan")
+    walkthroughs = relationship("DASTWalkthrough", back_populates="dast_request", cascade="all,delete-orphan")
     qa_request = relationship("QARequest", back_populates="linked_dast_requests")
+    # One row per scan target -- a project can span more than one target URL,
+    # each with its own environment/auth requirement/credentials. Used to be
+    # packed as the Nth newline-separated value across 4 parallel columns
+    # directly on this row (application_url, environment,
+    # authentication_required, test_credentials) -- fragile to parse/
+    # reconstruct and made per-row credential masking awkward. Replaced with
+    # a proper child table; see DASTTarget below.
+    targets = relationship(
+        "DASTTarget", back_populates="dast_request", cascade="all,delete-orphan",
+        order_by="DASTTarget.id",
+    )
+
+    # Convenience passthroughs so existing callers that used to read the flat
+    # application_url/environment/authentication_required columns still have
+    # a simple way to get "the first target's" value without reaching into
+    # .targets themselves (e.g. list views showing one summary URL, the
+    # Reports export).
+    @property
+    def application_url(self):
+        return self.targets[0].application_url if self.targets else None
+
+    @property
+    def environment(self):
+        return self.targets[0].environment if self.targets else None
 
     # See SASTRequest.department/application_owner above -- same idea, for DAST.
     @property
@@ -373,6 +610,66 @@ class DASTRequest(Base):
     @property
     def application_owner(self):
         return self.qa_request.application_owner if self.qa_request else None
+
+    # Target Release Date is already collected once, at QA Request creation
+    # time -- no separate "target_release" column on DAST anymore (was a
+    # free-text duplicate of the same thing); this delegates to the one
+    # source of truth, same pattern as FunctionalRequest.target_release_date.
+    @property
+    def target_release_date(self):
+        return self.qa_request.target_release_date if self.qa_request else None
+
+    # DAST has no application_name/project_name/cr_number columns of its own
+    # (it tests a URL, not "an application" directly) -- delegated from the
+    # gateway so the security team can see the full business context before
+    # starting a scan, same reasoning as SASTRequest's equivalents.
+    @property
+    def application_name(self):
+        return self.qa_request.application_name if self.qa_request else None
+
+    @property
+    def project_name(self):
+        return self.qa_request.project_name if self.qa_request else None
+
+    @property
+    def cr_number(self):
+        return self.qa_request.cr_number if self.qa_request else None
+
+    # Named "deployment_environment" (not "environment") to avoid clashing
+    # with the `environment` property above, which surfaces the first
+    # target's own scan environment instead -- this is the gateway's own
+    # Deployment Environment, shown as an additional reference.
+    @property
+    def deployment_environment(self):
+        return self.qa_request.environment if self.qa_request else None
+
+    @property
+    def target_promotion_environment(self):
+        return self.qa_request.target_promotion_environment if self.qa_request else None
+
+    # See SASTRequest.risk_rating above for the full reasoning.
+    @property
+    def risk_rating(self):
+        return None
+
+
+class DASTTarget(Base):
+    """One scan target for a DAST request -- its own environment/
+    authentication requirement/credentials. A project can span more than one
+    target URL, each needing its own answers for these (see RepeatableRows on
+    the DAST form, one row added per "+" click). Test Credentials is
+    sensitive -- see _can_view_dast_credentials in routers/sast_dast.py,
+    which now masks it per-row instead of on the whole newline-joined string
+    at once. Ordered by `id` (insertion order == the order added in)."""
+    __tablename__ = "qap_dast_targets"
+    id = pk_column()
+    dast_request_id = Column(Integer, ForeignKey("qap_dast_requests.id"), nullable=False)
+    application_url = Column(String(2000), nullable=False)
+    environment = Column(String(500))
+    authentication_required = Column(String(16), default="No")   # "Yes"/"No"
+    test_credentials = Column(String(2000))
+
+    dast_request = relationship("DASTRequest", back_populates="targets")
 
 
 class DASTFinding(Base):
@@ -385,6 +682,243 @@ class DASTFinding(Base):
     status = Column(String(32), default="Open")
 
     dast_request = relationship("DASTRequest", back_populates="findings")
+
+
+class DASTWalkthrough(Base):
+    """Same shape as WalkthroughSession/SASTWalkthrough -- see SASTWalkthrough
+    for why this exists (DAST previously had no walkthrough concept either)."""
+    __tablename__ = "qap_dast_walkthroughs"
+    id = pk_column()
+    dast_request_id = Column(Integer, ForeignKey("qap_dast_requests.id"))
+    session_date = Column(DateTime, default=now)
+    conducted_by = Column(String(150))
+    participants = Column(Text)
+    recording_path = Column(String(255))
+    document_path = Column(String(255))
+    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    qa_acknowledged_at = Column(DateTime, nullable=True)
+    notes = Column(Text)
+
+    dast_request = relationship("DASTRequest", back_populates="walkthroughs")
+
+
+# ---------------------------------------------------------------------------
+# Module 4b: Automation Testing Request Management
+# ---------------------------------------------------------------------------
+class AutomationRequest(Base):
+    """Auto-created from a QA Request when 'Automation Testing' is one of its
+    request types (see routers/qa_requests.py::_sync_linked_child_requests) --
+    same pattern as SASTRequest/DASTRequest. Runs its own independent
+    lifecycle after the common Draft/SM/Department Head prefix -- see
+    constants.AUTOMATION_STATUSES."""
+    __tablename__ = "qap_automation_requests"
+    id = pk_column()
+    request_id = Column(String(40), unique=True, default=lambda: gen_id("AUTO"))
+    application_name = Column(String(150), nullable=False)
+    project_name = Column(String(150))
+    cr_number = Column(String(64))
+    framework = Column(String(150))            # e.g. Selenium, Playwright, TOSCA
+    repository_url = Column(String(255))
+    ci_cd_pipeline_url = Column(String(255))
+    risk_category = Column(String(16))
+    # See SASTRequest.priority for the full reasoning.
+    priority = Column(String(16))
+
+    status = Column(String(32), default="DRAFT")
+    # See FunctionalRequest.needs_dept_head_reapproval for the full
+    # explanation -- same reasoning, set when Feasibility Assessment is
+    # Failed with "require re-approval" ticked (status is always
+    # RETURNED_BY_QA_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
+    needs_dept_head_reapproval = Column(Boolean, default=False)
+    requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    engineer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Engineer Assignment step
+    report_path = Column(String(255))
+    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    qa_request = relationship("QARequest", back_populates="linked_automation_requests")
+    checklist_items = relationship("AutomationChecklistItem", back_populates="automation_request",
+                                    cascade="all,delete-orphan")
+    walkthroughs = relationship("AutomationWalkthrough", back_populates="automation_request",
+                                 cascade="all,delete-orphan")
+
+    @property
+    def department(self):
+        return self.qa_request.department if self.qa_request else None
+
+    @property
+    def application_owner(self):
+        return self.qa_request.application_owner if self.qa_request else None
+
+    # See SASTRequest.risk_rating above for the full reasoning.
+    @property
+    def risk_rating(self):
+        return None
+
+
+class AutomationChecklistItem(Base):
+    """Automation Testing's own 'Ready for Automation' readiness checklist --
+    distinct from ReadinessChecklistItem (Functional Testing's) and
+    PerformanceChecklistItem (Performance Testing's). Seeded onto every
+    auto-created AutomationRequest (see constants.
+    DEFAULT_AUTOMATION_CHECKLIST_ITEMS and
+    routers/qa_requests.py::_sync_linked_child_requests) -- all mandatory
+    except "Manual testing completed...". Every mandatory item must be
+    ticked complete before Feasibility Assessment can Pass (see
+    routers/automation.py::feasibility_decision)."""
+    __tablename__ = "qap_automation_checklist_items"
+    id = pk_column()
+    automation_request_id = Column(Integer, ForeignKey("qap_automation_requests.id"))
+    item = Column(String(255), nullable=False)
+    owner = Column(String(150))
+    is_mandatory = Column(Boolean, default=True)
+    # Requester's own self-declaration, ticked on the QA Request wizard's
+    # "Automation Readiness Checklist" step (shown only while "Automation
+    # Testing" is selected) -- purely informational for the QA Lead, who must
+    # still independently verify every item via is_complete below.
+    requester_checked = Column(Boolean, default=False)
+    is_complete = Column(Boolean, default=False)
+    approved_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+
+    automation_request = relationship("AutomationRequest", back_populates="checklist_items")
+
+
+class AutomationWalkthrough(Base):
+    """Walkthrough session log for an Automation Testing Request -- own
+    dedicated table, mirroring WalkthroughSession (Functional Testing's)
+    rather than reusing it, since every other per-module concept in this app
+    (checklist items, findings, etc.) already gets its own table rather than
+    a single shared one keyed by entity type."""
+    __tablename__ = "qap_automation_walkthroughs"
+    id = pk_column()
+    automation_request_id = Column(Integer, ForeignKey("qap_automation_requests.id"))
+    session_date = Column(DateTime, default=now)
+    conducted_by = Column(String(150))
+    participants = Column(Text)
+    recording_path = Column(String(255))
+    document_path = Column(String(255))
+    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    qa_acknowledged_at = Column(DateTime, nullable=True)
+    notes = Column(Text)
+
+    automation_request = relationship("AutomationRequest", back_populates="walkthroughs")
+
+
+# ---------------------------------------------------------------------------
+# Module 4c: Performance Testing Request Management
+# ---------------------------------------------------------------------------
+class PerformanceRequest(Base):
+    """Auto-created from a QA Request when 'Performance Testing' is one of its
+    request types -- same pattern as AutomationRequest/SASTRequest/DASTRequest.
+    See constants.PERFORMANCE_STATUSES for the independent lifecycle.
+
+    Fields below mirror Annexure VIII ("QA Request Form & Checklist --
+    Performance Testing") -- see constants.PERFORMANCE_REQUEST_TYPES/
+    CHANGE_TYPES and PerformanceChecklistItem for the accompanying 19-item
+    pre-testing readiness checklist."""
+    __tablename__ = "qap_performance_requests"
+    id = pk_column()
+    request_id = Column(String(40), unique=True, default=lambda: gen_id("PERF"))
+    application_name = Column(String(150), nullable=False)
+    project_name = Column(String(150))
+    cr_number = Column(String(64))
+    tool_used = Column(String(150))            # e.g. JMeter, LoadRunner
+    target_load = Column(String(150))          # e.g. "500 concurrent users / 200 TPS"
+    environment = Column(String(32))
+    risk_category = Column(String(16))
+    # See SASTRequest.priority for the full reasoning.
+    priority = Column(String(16))
+
+    # Annexure VIII fields not already covered above.
+    request_type = Column(String(120))          # comma-separated: Load/Stress/Spike Testing
+    change_type = Column(String(32))            # New / Enhancement / Bug Fix
+    vendor_si_partner = Column(String(150))
+    technology_stack = Column(String(150))
+    release_version = Column(String(64))
+    build_number = Column(String(64))
+    hash_value = Column(String(255))
+    target_promotion_environment = Column(String(32))  # UAT / Pre-Production / Production
+
+    status = Column(String(32), default="DRAFT")
+    # See FunctionalRequest.needs_dept_head_reapproval for the full
+    # explanation -- same reasoning, set when Readiness is Failed with
+    # "require re-approval" ticked (status is always RETURNED_BY_ENGINEER in
+    # that case, never RETURNED_BY_DEPARTMENT_HEAD).
+    needs_dept_head_reapproval = Column(Boolean, default=False)
+    requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    # Assigned by the Department Head at approval time (see
+    # constants.PERFORMANCE_STATUSES's "ENGINEER_ASSIGNED" stage and
+    # routers/performance.py::department_head_decision) -- mirrors how SAST/
+    # DAST assign a Security Lead and Automation assigns an Engineer.
+    engineer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    report_path = Column(String(255))
+    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    qa_request = relationship("QARequest", back_populates="linked_performance_requests")
+    checklist_items = relationship("PerformanceChecklistItem", back_populates="performance_request",
+                                    cascade="all,delete-orphan")
+    walkthroughs = relationship("PerformanceWalkthrough", back_populates="performance_request",
+                                 cascade="all,delete-orphan")
+
+    @property
+    def department(self):
+        return self.qa_request.department if self.qa_request else None
+
+    @property
+    def application_owner(self):
+        return self.qa_request.application_owner if self.qa_request else None
+
+    # See SASTRequest.risk_rating above for the full reasoning.
+    @property
+    def risk_rating(self):
+        return None
+
+
+class PerformanceChecklistItem(Base):
+    """'L1: Pre-Testing Readiness Checklist' from Annexure VIII -- 19 fixed
+    items (see constants.DEFAULT_PERFORMANCE_CHECKLIST_ITEMS), seeded onto
+    every auto-created PerformanceRequest. All are mandatory; every item must
+    be ticked complete before Readiness -> Feasibility (see
+    routers/performance.py::readiness_decision)."""
+    __tablename__ = "qap_performance_checklist_items"
+    id = pk_column()
+    performance_request_id = Column(Integer, ForeignKey("qap_performance_requests.id"))
+    item = Column(String(255), nullable=False)
+    data_required = Column(String(255))   # "Data Required from Department" column in the annexure
+    is_mandatory = Column(Boolean, default=True)
+    # Requester's own self-declaration, ticked on the QA Request wizard's
+    # Performance Testing step -- purely informational, same pattern as
+    # Functional's/Automation's requester_checked. Does NOT set is_complete;
+    # QA still independently verifies every item (see
+    # routers/performance.py::update_checklist_item).
+    requester_checked = Column(Boolean, default=False)
+    is_complete = Column(Boolean, default=False)
+    approved_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+
+    performance_request = relationship("PerformanceRequest", back_populates="checklist_items")
+
+
+class PerformanceWalkthrough(Base):
+    """Walkthrough session log for a Performance Testing Request -- own
+    dedicated table, mirroring WalkthroughSession (Functional Testing's)."""
+    __tablename__ = "qap_performance_walkthroughs"
+    id = pk_column()
+    performance_request_id = Column(Integer, ForeignKey("qap_performance_requests.id"))
+    session_date = Column(DateTime, default=now)
+    conducted_by = Column(String(150))
+    participants = Column(Text)
+    recording_path = Column(String(255))
+    document_path = Column(String(255))
+    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    qa_acknowledged_at = Column(DateTime, nullable=True)
+    notes = Column(Text)
+
+    performance_request = relationship("PerformanceRequest", back_populates="walkthroughs")
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +968,8 @@ class SuppressionRequest(Base):
     # finding (each finding still gets its own issue id/severity/description/
     # justification, just grouped under a single approval workflow).
     items = relationship("SuppressionItem", back_populates="suppression_request", cascade="all,delete-orphan")
+    walkthroughs = relationship("SuppressionWalkthrough", back_populates="suppression_request",
+                                 cascade="all,delete-orphan")
     sast_request = relationship("SASTRequest")
     dast_request = relationship("DASTRequest")
 
@@ -450,6 +986,27 @@ class SuppressionItem(Base):
     justification = Column(Text)
 
     suppression_request = relationship("SuppressionRequest", back_populates="items")
+
+
+class SuppressionWalkthrough(Base):
+    """Walkthrough session log for a Suppression / False Positive request --
+    own dedicated table, mirroring WalkthroughSession (Functional Testing's).
+    Suppression has no readiness-checklist concept (it's an approval flow,
+    not a testing-readiness flow), so it only gets Walkthroughs + History,
+    not a Checklist tab."""
+    __tablename__ = "qap_suppression_walkthroughs"
+    id = pk_column()
+    suppression_request_id = Column(Integer, ForeignKey("qap_suppression_requests.id"))
+    session_date = Column(DateTime, default=now)
+    conducted_by = Column(String(150))
+    participants = Column(Text)
+    recording_path = Column(String(255))
+    document_path = Column(String(255))
+    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    qa_acknowledged_at = Column(DateTime, nullable=True)
+    notes = Column(Text)
+
+    suppression_request = relationship("SuppressionRequest", back_populates="walkthroughs")
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +1034,34 @@ class ApprovalAction(Base):
     decision = Column(String(64))
     comments = Column(Text)
     created_at = Column(DateTime, default=now)
+
+
+class RequestDocument(Base):
+    """Supporting documents uploaded after a request has been raised, for
+    every request type EXCEPT the Gateway QA Request (which has its own
+    dedicated QARequestDocument table/endpoints predating this one -- see
+    Module 1, field 4.1.2). Generic/polymorphic (keyed by module+request_id)
+    rather than one dedicated table per module, to avoid 7x near-identical
+    tables.
+
+    Unlike ApprovalAction.entity_type (where SAST and DAST unsafely share
+    the string "SAST_DAST" despite each table having its own independent id
+    sequence -- see the collision note on _sast_dast_history() in
+    routers/sast_dast.py), every module here is assigned its own distinct
+    `module` string (FUNCTIONAL / SAST / DAST / AUTOMATION / PERFORMANCE /
+    SUPPRESSION / SIGNOFF), so (module, request_id) is always unambiguous.
+    Files are stored on disk under backend/app/uploads/<module>/<request's
+    own request_id string>/<filename> -- see UPLOAD_ROOT in documents.py."""
+    __tablename__ = "qap_module_documents"
+    id = pk_column()
+    module = Column(String(20), nullable=False, index=True)
+    request_id = Column(Integer, nullable=False, index=True)
+    file_name = Column(String(255), nullable=False)
+    stored_path = Column(String(500), nullable=False)   # relative to UPLOAD_ROOT
+    content_type = Column(String(150))
+    file_size = Column(Integer)
+    uploaded_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    uploaded_at = Column(DateTime, default=now)
 
 
 # ---------------------------------------------------------------------------

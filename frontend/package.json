@@ -1,25 +1,17 @@
 {
   "name": "qa-portal-frontend",
   "private": true,
-  "version": "1.0.0",
-  "type": "module",
+  "version": "2.0.0",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.2"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.1",
-    "vite": "^5.4.6",
-    "typescript": "^5.5.4",
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.0",
-    "@types/node": "^20.14.9"
+    "dev:shell": "npm run dev --workspace=@qa-portal/shell",
+    "dev:functional": "npm run dev --workspace=@qa-portal/module-functional",
+    "dev:security": "npm run dev --workspace=@qa-portal/module-security",
+    "dev:specialised-testing": "npm run dev --workspace=@qa-portal/module-specialised-testing",
+    "dev:governance": "npm run dev --workspace=@qa-portal/module-governance",
+    "build:all": "npm run build --workspace=@qa-portal/module-functional && npm run build --workspace=@qa-portal/module-security && npm run build --workspace=@qa-portal/module-specialised-testing && npm run build --workspace=@qa-portal/module-governance && npm run build --workspace=@qa-portal/shell",
+    "typecheck:all": "npm run typecheck --workspaces --if-present"
   }
 }

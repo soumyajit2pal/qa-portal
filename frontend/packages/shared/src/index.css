@@ -1,0 +1,707 @@
+:root {
+  /* Design refresh: primary accent moved from flat blue to an indigo/violet
+     duotone -- ties the whole app together with the purple/teal tones
+     already used for "in progress"/"verification" badges and stat-card
+     chips, instead of everything defaulting to the same blue. Variable
+     names kept as --navy* so every existing usage site picks this up
+     automatically without a find/replace across every file. */
+  --navy: #4f46e5;
+  --navy-light: #4338ca;
+  --navy-dark: #0f172a;
+  --navy-50: #eef2ff;
+  --accent-2: #7c3aed;
+  --sidebar-bg: #0b1024;
+  --sidebar-bg-light: #161233;
+  --gold: #4f46e5;
+  --bg: #f5f5fb;
+  --card: #ffffff;
+  --border: #e6e5f0;
+  --text: #111827;
+  --muted: #6b7280;
+  --danger: #dc2626;
+  --success: #16a34a;
+  --warning: #d97706;
+
+  /* Elevation + motion tokens -- used throughout for a consistent, subtle
+     "lift" language instead of flat borders everywhere. */
+  --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 4px 14px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.05);
+  --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.06);
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); }
+a { color: inherit; }
+
+/* Slim, unobtrusive scrollbars -- keeps long lists/tables/sidebars from
+   looking like a stock OS chrome next to an otherwise designed UI. */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(15, 23, 42, 0.16); border-radius: 100px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(15, 23, 42, 0.28); background-clip: padding-box; }
+
+:focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; border-radius: 4px; }
+
+.app-shell { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 250px; background: linear-gradient(180deg, var(--sidebar-bg) 0%, #150f2e 55%, #1a1338 100%);
+  color: #fff; flex-shrink: 0; display: flex; flex-direction: column;
+  box-shadow: 2px 0 16px rgba(0, 0, 0, 0.22); position: relative; z-index: 5;
+}
+.sidebar .brand { padding: 18px 18px 16px; display: flex; align-items: center; gap: 10px; }
+.sidebar .brand .logo-mark {
+  width: 34px; height: 34px; border-radius: 9px;
+  background: linear-gradient(135deg, #818cf8, var(--accent-2));
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.5);
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15.5px; flex-shrink: 0;
+}
+.sidebar .brand h1 { font-size: 14px; margin: 0; line-height: 1.3; }
+.sidebar .brand p { font-size: 11px; color: #8b98b3; margin: 1px 0 0; }
+
+.sidebar-section-label {
+  padding: 6px 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.07em;
+  text-transform: uppercase; color: #5c6884;
+}
+.sidebar nav { padding: 4px 10px 12px; overflow-y: auto; }
+.nav-group + .nav-group { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06); }
+.sidebar nav a {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin: 2px 0; border-radius: 8px;
+  font-size: 13.5px; text-decoration: none; color: #c3cbdd; border-left: 3px solid transparent;
+  transition: background .15s var(--ease), color .15s var(--ease), transform .15s var(--ease);
+}
+.sidebar nav a svg { flex-shrink: 0; opacity: 0.85; transition: opacity .15s var(--ease); }
+.sidebar nav a .nav-label { flex: 1; }
+.sidebar nav a .nav-count {
+  font-size: 11.5px; font-weight: 600; color: #aeb8cc; background: rgba(255,255,255,0.08);
+  padding: 1px 7px; border-radius: 100px; min-width: 18px; text-align: center;
+}
+.sidebar nav a:hover { background: rgba(255,255,255,0.07); color: #fff; transform: translateX(1px); }
+.sidebar nav a.active {
+  background: linear-gradient(90deg, rgba(37,99,235,0.28), rgba(37,99,235,0.1));
+  color: #fff; font-weight: 600; border-left-color: #5b9dff;
+}
+.sidebar nav a.active .nav-count { background: var(--navy); color: #fff; }
+.sidebar nav a.active svg { opacity: 1; color: #7fa8ff; }
+
+.sidebar-bottom { margin-top: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.audit-card {
+  background: var(--sidebar-bg-light); border-radius: 10px; padding: 12px; font-size: 12px;
+  display: flex; gap: 8px; align-items: flex-start; border: 1px solid rgba(255,255,255,0.06);
+}
+.audit-card svg { color: #4ade80; flex-shrink: 0; margin-top: 1px; }
+.audit-card .title { font-weight: 600; color: #fff; margin-bottom: 2px; }
+.audit-card .desc { color: #9aa5bd; line-height: 1.4; }
+.audit-card .since { color: #6b7690; margin-top: 4px; font-size: 11px; }
+
+.user-chip { display: flex; align-items: center; gap: 9px; padding: 8px 4px; border-top: 1px solid rgba(255,255,255,0.08); }
+.user-chip .avatar {
+  width: 30px; height: 30px; border-radius: 50%; background: linear-gradient(135deg, #818cf8, var(--navy-light)); color: #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 12.5px; font-weight: 700; flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.4);
+}
+.user-chip .who { flex: 1; min-width: 0; }
+.user-chip .name { font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-chip .role { font-size: 11px; color: #8b98b3; }
+.user-chip button {
+  background: none; border: none; color: #8b98b3; cursor: pointer; padding: 4px; border-radius: 6px; display: flex;
+  transition: background .15s var(--ease), color .15s var(--ease);
+}
+.user-chip button:hover { background: rgba(255,255,255,0.08); color: #fff; }
+
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar {
+  background: #fff; border-bottom: 1px solid var(--border); padding: 12px 24px;
+  display: flex; align-items: center; gap: 16px; box-shadow: var(--shadow-xs); position: relative; z-index: 4;
+}
+.topbar .search-box {
+  /* flex-shrink is intentionally allowed (unlike .right-group below) so this
+     box gives up space first on narrow windows, instead of the action icons
+     (Favorites/Help/Notifications/Apps) getting squeezed off-screen -- see
+     .right-group's flex-shrink: 0 for the other half of that fix. */
+  flex: 1 1 160px; min-width: 0; max-width: 420px; display: flex; align-items: center; gap: 8px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; color: var(--muted);
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease), background .15s var(--ease);
+}
+.topbar .search-box:focus-within { border-color: var(--navy); background: #fff; box-shadow: 0 0 0 3px var(--navy-50); }
+.topbar .search-box svg { flex-shrink: 0; }
+.topbar .search-box input { border: none; background: none; outline: none; font-size: 13px; flex: 1; min-width: 0; color: var(--text); }
+.topbar .search-box kbd {
+  font-size: 11px; color: var(--muted); background: #fff; border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 6px;
+}
+.topbar .status-pill { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.topbar .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15); }
+.topbar .icon-btn {
+  width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: #fff;
+  display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: pointer; position: relative; flex-shrink: 0;
+  transition: background .15s var(--ease), color .15s var(--ease), transform .1s var(--ease), box-shadow .15s var(--ease);
+}
+.topbar .icon-btn:hover { background: var(--bg); color: var(--text); box-shadow: var(--shadow-xs); }
+.topbar .icon-btn:active { transform: scale(0.94); }
+.topbar .icon-btn .dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 2px #fff; }
+/* flex-shrink: 0 keeps Favorites/Help/Notifications/Apps/+New always fully
+   visible -- without it, this group shrank along with the search box on
+   narrower windows and its buttons got squeezed out past the visible edge. */
+.topbar .right-group { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+@media (max-width: 900px) {
+  .topbar .status-pill { display: none; }
+}
+@media (max-width: 760px) {
+  .topbar .search-box kbd { display: none; }
+}
+.topbar h2 { margin: 0; font-size: 17.5px; }
+.content { padding: 24px; flex: 1; animation: fade-in .18s var(--ease); }
+
+/* Consistent page header -- title + optional record count + description,
+   with primary actions right-aligned. Used at the top of every page instead
+   of the old mix of bare toolbars and Card titles. */
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.page-header .titles h2 { margin: 0; font-size: 19px; letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; }
+.page-header .titles p { margin: 5px 0 0; font-size: 13px; color: var(--muted); max-width: 640px; }
+.page-header .actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.count-pill {
+  font-size: 12.5px; font-weight: 600; color: var(--navy); background: var(--navy-50);
+  border-radius: 100px; padding: 2px 10px; line-height: 1.5;
+}
+
+.alert-banner {
+  display: flex; align-items: center; gap: 12px; background: linear-gradient(90deg, #fffaeb, #fff7e0);
+  border: 1px solid #fde68a; border-radius: 10px; padding: 12px 16px; margin-bottom: 18px; box-shadow: var(--shadow-xs);
+}
+.alert-banner .icon-wrap {
+  width: 32px; height: 32px; border-radius: 50%; background: #fef3c7; color: var(--warning);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.alert-banner .body { flex: 1; }
+.alert-banner .title { font-size: 13.5px; font-weight: 600; color: #92400e; }
+.alert-banner .sub { font-size: 12.5px; color: #a16207; margin-top: 1px; }
+.alert-banner .action {
+  font-size: 13px; font-weight: 600; color: #92400e; white-space: nowrap; text-decoration: none;
+  display: flex; align-items: center; gap: 4px; transition: gap .15s var(--ease);
+}
+.alert-banner .action:hover { gap: 7px; }
+
+.card {
+  position: relative; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 18px;
+  box-shadow: var(--shadow-sm); transition: box-shadow .2s var(--ease);
+}
+/* Thin gradient accent bar -- a small recurring touch of colour on every
+   card so the whole app doesn't read as flat gray/white. Sized to the
+   card's own top corners (rather than relying on overflow:hidden on .card)
+   so it never clips absolutely-positioned dropdowns/panels rendered inside
+   a card (e.g. .searchable-select-panel). */
+.card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  border-radius: 12px 12px 0 0; background: linear-gradient(90deg, var(--navy), var(--accent-2), #06b6d4); opacity: 0.75;
+}
+.card h3 { margin-top: 0; font-size: 14.5px; }
+.card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.card-head h3 { margin-bottom: 0; }
+
+.grid { display: grid; gap: 14px; }
+.grid-4 { grid-template-columns: repeat(4, 1fr); }
+.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-2 { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 900px) { .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr 1fr; } }
+
+.metric-card {
+  background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+  box-shadow: var(--shadow-xs); transition: box-shadow .2s var(--ease), transform .2s var(--ease);
+}
+.metric-card:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.metric-card .value { font-size: 23px; font-weight: 700; color: var(--navy); }
+.metric-card .label { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+
+.stat-card {
+  background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+  box-shadow: var(--shadow-sm); transition: box-shadow .2s var(--ease), transform .2s var(--ease);
+}
+.stat-card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+.stat-card .top-row { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; }
+.stat-card .icon-chip {
+  width: 34px; height: 34px; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.stat-card .icon-chip.blue { background: linear-gradient(135deg, #dbeafe, #bfdbfe); color: var(--navy); }
+.stat-card .icon-chip.purple { background: linear-gradient(135deg, #ede9fe, #ddd6fe); color: #7c3aed; }
+.stat-card .icon-chip.red { background: linear-gradient(135deg, #fee2e2, #fecaca); color: var(--danger); }
+.stat-card .icon-chip.amber { background: linear-gradient(135deg, #fef3c7, #fde68a); color: var(--warning); }
+.stat-card .chip-tag { font-size: 11px; font-weight: 600; color: var(--muted); background: var(--bg); border-radius: 100px; padding: 2px 9px; }
+.stat-card .value { font-size: 25px; font-weight: 700; line-height: 1; letter-spacing: -0.02em; }
+.stat-card .label { font-size: 13px; color: var(--muted); margin-top: 5px; }
+.stat-card .footline { font-size: 11.5px; color: var(--muted); margin-top: 12px; }
+.stat-card .sparkline { display: flex; align-items: flex-end; gap: 3px; height: 22px; margin-top: 12px; }
+.stat-card .sparkline .bar { flex: 1; background: #dbeafe; border-radius: 2px 2px 0 0; transition: background .15s var(--ease); }
+.stat-card .sparkline .bar.filled { background: var(--navy); }
+.stat-card .segment-bar { display: flex; height: 6px; border-radius: 100px; overflow: hidden; margin-top: 12px; }
+
+/* Table wrapper -- frames the table in its own rounded, bordered card so it
+   reads as a distinct colourful surface rather than bare rows floating in
+   the page card. overflow-x:auto/overflow-y:hidden (rather than plain
+   hidden) keeps the rounded corners crisp while still letting wide tables
+   scroll horizontally. */
+.table-wrap { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+thead tr { background: linear-gradient(180deg, #eef3ff, #eceffb); }
+th {
+  font-weight: 700; color: var(--navy-dark); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em;
+  border-bottom: 2px solid #d9e3fb; white-space: nowrap; position: relative;
+}
+tbody tr:nth-child(even) td { background: #f9fafc; }
+tbody tr:last-child td { border-bottom: none; }
+tr { transition: background .12s var(--ease); }
+tr:hover td { background: linear-gradient(90deg, var(--navy-50), #f5f2ff) !important; }
+tr.row-clickable { cursor: pointer; }
+tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
+
+/* Per-column filter icon beside each header -- every Table gets one
+   automatically (see components/Common.tsx::Table), so list pages don't
+   each need their own bespoke filter UI. Clicking the icon reveals a small
+   popover with the actual search box, rather than a filter row that's
+   always on screen taking up space. */
+.th-cell { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.th-filter-btn {
+  display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  border: none; background: none; border-radius: 5px; color: #9aa3bd; cursor: pointer; flex-shrink: 0;
+  transition: background .12s var(--ease), color .12s var(--ease);
+}
+.th-filter-btn:hover { background: rgba(79, 70, 229, 0.1); color: var(--navy); }
+.th-filter-btn.active { color: var(--navy); background: rgba(79, 70, 229, 0.14); }
+/* position:fixed (coordinates set inline from the filter icon's own
+   getBoundingClientRect, see Table's toggleFilter) rather than
+   position:absolute nested under the header cell -- escapes .table-wrap's
+   overflow-x:auto/overflow-y:hidden scroll box entirely and always paints
+   above every row via the very high z-index, instead of visually
+   overlapping/blending into the first row's cell directly underneath it. */
+.th-filter-popover {
+  position: fixed; z-index: 500; min-width: 200px;
+  background: #fff; border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-lg);
+  padding: 8px; display: flex; gap: 6px; align-items: center;
+  text-transform: none; letter-spacing: normal; font-weight: 400;
+}
+.table-filter-input {
+  width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+  font-size: 11.5px; font-weight: 400; text-transform: none; letter-spacing: normal;
+  color: var(--text); font-family: inherit; background: var(--bg);
+}
+.table-filter-input:focus { outline: none; border-color: var(--navy); background: #fff; }
+.table-filter-input::placeholder { color: var(--muted); }
+.th-filter-popover-clear {
+  background: none; border: none; color: var(--navy); font-weight: 700; cursor: pointer; padding: 0;
+  font-size: 11px; white-space: nowrap; flex-shrink: 0;
+}
+.th-filter-popover-clear:hover { text-decoration: underline; }
+.table-filter-summary {
+  display: flex; justify-content: space-between; align-items: center; padding: 8px 14px;
+  font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--border); background: #f9fafc;
+}
+.table-filter-summary button {
+  background: none; border: none; color: var(--navy); font-weight: 700; cursor: pointer; padding: 0; font-size: 11.5px;
+}
+.table-filter-summary button:hover { text-decoration: underline; }
+.empty-state .btn { margin-top: 4px; }
+
+/* Caps a table cell's rendered width so one long value (e.g. a per-type
+   Priority/Risk breakdown listing several request types at once) can't blow
+   out a whole column and push other columns off-screen -- the full value is
+   still available on hover via the native title tooltip. */
+.truncate-cell {
+  display: inline-block; max-width: 260px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; vertical-align: middle;
+}
+
+/* Generic boxed sub-panel -- same shaded/bordered treatment as
+   .actions-panel, under a name that isn't action-button-specific, for
+   grouping related chart/table content within an already-existing .card
+   (e.g. Command Centre's paired charts) without stacking card-on-card
+   elevation. */
+.subpanel {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px;
+}
+.subpanel .subpanel-title {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); margin: 0 0 12px;
+}
+
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 44px 20px; color: var(--muted); }
+.empty-state svg { opacity: 0.3; }
+.empty-state .msg { font-size: 13px; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid #d6d3f5;
+  background: linear-gradient(180deg, #f5f4ff, #ece9ff); color: var(--navy-light); font-weight: 600;
+  padding: 7px 14px; border-radius: 7px; font-size: 13px; cursor: pointer;
+  transition: background .15s var(--ease), border-color .15s var(--ease), box-shadow .15s var(--ease), transform .08s var(--ease);
+}
+.btn:hover { background: linear-gradient(180deg, #ece9ff, #ddd9fc); box-shadow: var(--shadow-xs); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn-primary { background: linear-gradient(180deg, #818cf8, var(--navy)); color: #fff; border-color: var(--navy); box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3); }
+.btn-primary:hover { background: linear-gradient(180deg, #9195f9, var(--navy-light)); box-shadow: 0 3px 10px rgba(79, 70, 229, 0.4); }
+.btn-danger { background: linear-gradient(180deg, #f87171, var(--danger)); color: #fff; border-color: var(--danger); box-shadow: 0 2px 8px rgba(220, 38, 38, 0.3); }
+.btn-danger:hover { background: linear-gradient(180deg, #fb8a8a, #b91c1c); box-shadow: 0 3px 10px rgba(220, 38, 38, 0.4); }
+.btn-success { background: linear-gradient(180deg, #4ade80, var(--success)); color: #fff; border-color: var(--success); box-shadow: 0 2px 8px rgba(22, 163, 74, 0.3); }
+.btn-success:hover { background: linear-gradient(180deg, #5eeb92, #15803d); box-shadow: 0 3px 10px rgba(22, 163, 74, 0.4); }
+.btn-sm { padding: 4px 9px; font-size: 12.5px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+
+.badge {
+  display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 100px; font-size: 11.5px; font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
+}
+.badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: 0.8; margin-right: 5px; flex-shrink: 0; }
+.badge-gray { background: #eef0f3; color: #4b5563; }
+.badge-blue { background: #dbeafe; color: #1d4ed8; }
+.badge-green { background: #dcfce7; color: #15803d; }
+.badge-red { background: #fee2e2; color: #b91c1c; }
+.badge-yellow { background: #fef3c7; color: #b45309; }
+.badge-purple { background: #ede9fe; color: #6d28d9; }
+.badge-teal { background: #ccfbf1; color: #0f766e; }
+.badge-pink { background: #fce7f3; color: #be185d; }
+
+.form-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 12px; }
+.form-field label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
+.form-field input, .form-field select, .form-field textarea {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 13px; font-family: inherit;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.form-field input:focus, .form-field select:focus, .form-field textarea:focus {
+  outline: none; border-color: var(--navy); box-shadow: 0 0 0 3px var(--navy-50);
+}
+.form-field textarea { resize: vertical; min-height: 60px; }
+.checkbox-list label { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 4px; font-weight: 400; }
+
+/* Chip-style multi-select (e.g. QA Request "Request Type") -- avoids the
+   uneven baseline/wrap alignment native checkboxes get in a fixed-column
+   grid when label text lengths vary. */
+.chip-select { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip-toggle {
+  position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px 7px 12px;
+  border: 1px solid var(--border); border-radius: 100px; font-size: 13px; cursor: pointer;
+  background: #fff; color: var(--text); user-select: none; transition: background .12s var(--ease), border-color .12s var(--ease), color .12s var(--ease), box-shadow .12s var(--ease);
+}
+.chip-toggle input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+.chip-toggle:hover { border-color: var(--navy); box-shadow: var(--shadow-xs); }
+.chip-toggle .chip-dot {
+  width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--border); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; transition: background .12s var(--ease), border-color .12s var(--ease);
+}
+.chip-toggle.active { background: var(--navy-50); border-color: var(--navy); color: var(--navy-light); font-weight: 600; }
+.chip-toggle.active .chip-dot { background: var(--navy); border-color: var(--navy); }
+.chip-toggle.active .chip-dot svg { color: #fff; }
+.chip-toggle.disabled { opacity: .55; cursor: not-allowed; }
+
+/* Searchable single-select dropdown (e.g. Department) */
+.searchable-select { position: relative; }
+.searchable-select-trigger {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 13px;
+  background: #fff; color: var(--text); cursor: pointer; font-family: inherit; transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.searchable-select-trigger:hover { border-color: #cbd5e1; }
+.searchable-select-trigger:disabled { opacity: .6; cursor: not-allowed; }
+.searchable-select-trigger .muted { color: var(--muted); }
+.searchable-select-trigger .caret { font-size: 10.5px; color: var(--muted); }
+.searchable-select-panel {
+  position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0;
+  background: #fff; border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.searchable-select-search {
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+.searchable-select-search input {
+  border: none; outline: none; font-size: 13px; font-family: inherit; flex: 1; padding: 0;
+}
+.searchable-select-list { max-height: 220px; overflow-y: auto; }
+.searchable-select-option { padding: 8px 12px; font-size: 13px; cursor: pointer; transition: background .1s var(--ease); }
+.searchable-select-option:hover { background: #f1f5f9; }
+.searchable-select-option.active { background: var(--navy-50); color: var(--navy-light); font-weight: 600; }
+.searchable-select-empty { padding: 10px 12px; font-size: 13px; color: var(--muted); }
+
+.form-section { margin-bottom: 20px; }
+.form-section-title {
+  font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+
+/* Read-only detail grouping (request detail Overview tabs) -- same visual
+   language as .form-section above (used for editable forms), but as its own
+   class so a plain read-only field group never picks up form-specific
+   spacing tweaks some pages apply to .form-section. Splits what used to be
+   one long flat `.grid.grid-2` of 10-15 fields into labeled clusters
+   (Application & Change, Classification, Environment & Release, People)
+   so a detail screen reads as several small groups instead of one wall of
+   facts. */
+.detail-section { margin-bottom: 18px; }
+.detail-section-title {
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.detail-section .grid { row-gap: 10px; }
+.detail-field .label { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.detail-field .value { font-size: 13.5px; color: var(--text); word-break: break-word; }
+
+/* Visually separates the workflow action buttons (Submit/Approve/Return/
+   Assign/etc.) from the read-only detail sections above them -- previously
+   both sat directly on the plain page background with only a heading
+   between them, so a status badge, a dozen read-only fields, and a wrapping
+   row of buttons all blurred into one continuous page. This gives the
+   "what can I actually do right now" area its own shaded, bordered surface,
+   the same way .card already does for page-level containers. */
+.actions-panel {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px; margin-top: 4px;
+}
+.actions-panel .section-title { margin-top: 0; }
+
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.tabs button {
+  padding: 9px 14px; border: none; background: none; font-size: 13px; cursor: pointer;
+  color: var(--muted); border-bottom: 2px solid transparent; transition: color .15s var(--ease), border-color .15s var(--ease);
+}
+.tabs button:hover { color: var(--text); }
+.tabs button.active { color: var(--navy); border-bottom-color: var(--navy); font-weight: 600; }
+
+.pill-tabs { display: inline-flex; background: var(--bg); border-radius: 8px; padding: 3px; gap: 2px; }
+.pill-tabs button {
+  border: none; background: none; padding: 6px 13px; border-radius: 6px; font-size: 13px; cursor: pointer; color: var(--muted);
+  transition: background .15s var(--ease), color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.pill-tabs button.active { background: #fff; color: var(--text); font-weight: 600; box-shadow: var(--shadow-xs); }
+
+/* Multi-step form wizard (e.g. the QA Request creation modal, split into a
+   page per selected request type). Deliberately its own component rather
+   than reusing `.tabs` -- `.tabs` relies on a single shared border-bottom
+   line under the whole row, which breaks/misaligns as soon as long step
+   labels wrap onto a second line. Each pill here is self-contained so
+   wrapping never looks broken, and a numbered circle makes current/done/
+   upcoming state legible at a glance instead of relying on color alone. */
+.wizard-steps { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.wizard-step-btn {
+  display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); background: #fff;
+  padding: 5px 14px 5px 5px; border-radius: 100px; font-size: 13px; color: var(--muted); cursor: pointer;
+  transition: background .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.wizard-step-btn:hover { border-color: var(--navy); box-shadow: var(--shadow-xs); }
+.wizard-step-btn .step-num {
+  width: 22px; height: 22px; border-radius: 50%; background: var(--bg); border: 1px solid var(--border); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; font-size: 11.5px; font-weight: 700; color: var(--muted);
+  transition: background .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease);
+}
+.wizard-step-btn.done { color: var(--text); }
+.wizard-step-btn.done .step-num { background: var(--navy-50); border-color: var(--navy); color: var(--navy); }
+.wizard-step-btn.active { border-color: var(--navy); background: var(--navy-50); color: var(--navy-light); font-weight: 600; }
+.wizard-step-btn.active .step-num { background: var(--navy); border-color: var(--navy); color: #fff; }
+
+/* Right-side slide-over drawer (record detail / forms) -- keeps the list
+   page visible/in context behind a dimmed backdrop instead of a centered
+   dialog floating over everything, matching the panel pattern most modern
+   SaaS dashboards (Linear, Notion, Stripe) use for record details. */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(10, 16, 32, 0.5); backdrop-filter: blur(2px); display: flex;
+  align-items: stretch; justify-content: flex-end; z-index: 50;
+  animation: fade-in .15s var(--ease);
+}
+.drawer {
+  background: #fff; width: 520px; max-width: 92vw; height: 100%;
+  box-shadow: var(--shadow-lg); display: flex; flex-direction: column;
+  animation: drawer-in .2s var(--ease);
+}
+.drawer-wide { width: 860px; }
+.drawer-header {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 20px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.drawer-header h3 { margin: 0; font-size: 15.5px; letter-spacing: -0.01em; }
+.drawer-body { padding: 22px 24px; overflow-y: auto; flex: 1; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drawer-in { from { transform: translateX(28px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* Centered dialog variant of Modal (opt-in via variant="dialog") -- used for
+   longer, multi-step forms like the QA Request wizard, where a narrow
+   side-anchored drawer cramps a step's worth of fields/checklist content.
+   Reuses .drawer-header/.drawer-body for the chrome so header/body styling
+   stays identical to every other modal in the app; only the positioning and
+   entrance animation differ. */
+.modal-overlay-center { align-items: center; justify-content: center; padding: 24px; }
+.dialog {
+  background: #fff; width: 640px; max-width: 100%; max-height: min(88vh, 900px);
+  border-radius: 14px; box-shadow: var(--shadow-lg); display: flex; flex-direction: column;
+  animation: dialog-in .18s var(--ease);
+}
+.dialog-wide { width: 960px; }
+@keyframes dialog-in { from { transform: scale(.97) translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* `variant="dialog"` is only ever used by the QA Request wizard (confirmed --
+   no other page passes it to <Modal>), so these are safe to restyle directly
+   without any risk of affecting the drawer variant everyone else uses. Extra
+   breathing room to match the more spacious "card wizard" redesign below. */
+.dialog .drawer-header { padding: 22px 30px; }
+.dialog .drawer-header h3 { font-size: 16.5px; }
+.dialog .drawer-body { padding: 26px 30px; }
+
+/* QA Request wizard redesign: "modern card-style wizard" -- each step reads as
+   a spacious, bordered card instead of a flat unbroken form, with a moderate
+   font-size bump (labels ~13.5-14px, inputs/body ~14-14.5px) and a polished
+   progress bar above the step pills. Everything here is scoped under
+   `.qa-wizard` (a wrapper div placed just inside the dialog in QARequests.tsx)
+   specifically because `.form-section`, `.form-field`, `.chip-toggle`,
+   `.checklist-row`, and `.wizard-steps`/`.wizard-step-btn` are shared classes
+   reused by Performance/Suppression/Automation/DAST/SAST/SignOff/Login/Admin
+   -- editing their base rules directly would have redesigned every other
+   page's forms too. */
+.qa-wizard { font-size: 14px; }
+.qa-wizard-stepcount { margin: 0 0 8px; }
+.qa-wizard-progress {
+  height: 6px; border-radius: 100px; background: var(--border); overflow: hidden; margin: 0 0 18px;
+}
+.qa-wizard-progress-fill {
+  height: 100%; border-radius: 100px; background: linear-gradient(90deg, #818cf8, var(--navy));
+  transition: width .25s var(--ease);
+}
+.qa-wizard .wizard-steps { gap: 10px; margin-bottom: 24px; padding-bottom: 18px; }
+.qa-wizard .wizard-step-btn { padding: 7px 16px 7px 7px; font-size: 13.5px; }
+.qa-wizard .wizard-step-btn .step-num { width: 24px; height: 24px; font-size: 12.5px; }
+.qa-wizard .form-section {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px 22px; margin-bottom: 18px; box-shadow: var(--shadow-xs);
+}
+.qa-wizard .form-section-title { font-size: 13px; letter-spacing: 0.03em; margin-bottom: 16px; padding-bottom: 10px; }
+.qa-wizard .form-field label { font-size: 13.5px; margin-bottom: 6px; }
+.qa-wizard .form-field input,
+.qa-wizard .form-field select,
+.qa-wizard .form-field textarea { padding: 10px 12px; font-size: 14px; border-radius: 8px; }
+.qa-wizard .form-field textarea { min-height: 76px; }
+.qa-wizard .checkbox-list label { font-size: 13.5px; gap: 8px; margin-bottom: 8px; }
+.qa-wizard .chip-toggle { padding: 8px 16px 8px 13px; font-size: 13.5px; gap: 7px; }
+.qa-wizard .chip-toggle .chip-dot { width: 16px; height: 16px; }
+.qa-wizard .checklist-row { padding: 9px 0; }
+.qa-wizard .checklist-row-header { font-size: 13px; padding-bottom: 10px; }
+.qa-wizard .btn { font-size: 13.5px; padding: 9px 18px; border-radius: 8px; }
+
+/* Suppression / False Positive request form redesign -- same "modern card"
+   language and moderate font bump as `.qa-wizard` above (spacious bordered
+   sections, larger labels/inputs, bigger touch targets), scoped under
+   `.suppression-form` for the same reason: `.form-section`/`.form-field`/
+   `.card` are shared classes reused elsewhere, so this must not be a global
+   rule change. This form has no multi-step wizard, so there's no progress
+   bar/step-pill styling to duplicate here. */
+.suppression-form { font-size: 14px; }
+.suppression-form .form-section {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px 22px; margin-bottom: 18px; box-shadow: var(--shadow-xs);
+}
+.suppression-form .form-section-title { font-size: 13px; letter-spacing: 0.03em; margin-bottom: 16px; padding-bottom: 10px; }
+.suppression-form .form-field label { font-size: 13.5px; margin-bottom: 6px; }
+.suppression-form .form-field input,
+.suppression-form .form-field select,
+.suppression-form .form-field textarea { padding: 10px 12px; font-size: 14px; border-radius: 8px; }
+.suppression-form .form-field textarea { min-height: 76px; }
+.suppression-form .form-field input:disabled,
+.suppression-form .form-field select:disabled { background: var(--bg); color: var(--muted); cursor: not-allowed; }
+.suppression-form .card { border-radius: 10px; border: 1px solid var(--border); background: var(--bg); box-shadow: none; }
+.suppression-form .btn { font-size: 13.5px; padding: 9px 18px; border-radius: 8px; }
+
+.login-page {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px;
+  background: radial-gradient(circle at 20% 20%, #241c46 0%, var(--sidebar-bg) 55%, #06040f 100%);
+}
+.login-shell { display: flex; width: 100%; max-width: 920px; border-radius: 18px; overflow: hidden; box-shadow: var(--shadow-lg); }
+.login-brand {
+  flex: 1; min-width: 320px; padding: 44px 40px; color: #fff;
+  background: linear-gradient(160deg, #231b45 0%, var(--sidebar-bg) 60%, #06040f 100%);
+  display: flex; flex-direction: column; justify-content: center;
+}
+.login-brand .logo-mark {
+  width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #818cf8, var(--accent-2));
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 19px;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.5); margin-bottom: 18px;
+}
+.login-brand h1 { font-size: 21px; margin: 0 0 8px; letter-spacing: -0.01em; }
+.login-brand .tagline { font-size: 13px; color: #9aa5bd; line-height: 1.5; margin: 0 0 28px; max-width: 360px; }
+.login-brand .highlights { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.login-brand .highlights li { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: #c3cbdd; line-height: 1.5; }
+.login-brand .highlights svg { color: #a5b4fc; flex-shrink: 0; margin-top: 1px; }
+.login-card { background: #fff; padding: 40px; width: 380px; flex-shrink: 0; }
+.login-card h1 { font-size: 18.5px; margin: 0 0 4px; }
+.login-card p.sub { font-size: 13px; color: var(--muted); margin: 0 0 22px; }
+.error-text { color: var(--danger); font-size: 13px; margin-top: 8px; }
+.hint-box { background: #f4f6f9; border-radius: 8px; padding: 12px; font-size: 12px; color: var(--muted); margin-top: 18px; line-height: 1.5; }
+.demo-accounts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.demo-chip {
+  border: 1px solid var(--border); background: #fff; border-radius: 100px; padding: 4px 10px; font-size: 11.5px;
+  cursor: pointer; color: var(--text); transition: border-color .15s var(--ease), background .15s var(--ease);
+}
+.demo-chip:hover { border-color: var(--navy); background: var(--navy-50); }
+@media (max-width: 760px) {
+  .login-brand { display: none; }
+  .login-shell { max-width: 400px; }
+}
+
+.toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.toolbar input, .toolbar select {
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 13px;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.toolbar input:focus, .toolbar select:focus { outline: none; border-color: var(--navy); box-shadow: 0 0 0 3px var(--navy-50); }
+.spacer { flex: 1; }
+
+.bar-chart { display: flex; flex-direction: column; gap: 10px; }
+.bar-row { display: grid; grid-template-columns: 110px 1fr 30px; align-items: center; gap: 10px; font-size: 13px; }
+.bar-track { background: #eef0f3; border-radius: 100px; height: 8px; overflow: hidden; }
+.bar-fill { background: linear-gradient(90deg, #60a5fa, var(--navy)); height: 100%; border-radius: 100px; transition: width .3s var(--ease); }
+
+.donut-wrap { display: flex; align-items: center; gap: 20px; }
+.donut { width: 128px; height: 128px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; position: relative; filter: drop-shadow(0 2px 6px rgba(15, 23, 42, 0.12)); }
+.donut .donut-center { width: 78px; height: 78px; border-radius: 50%; background: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.donut .donut-center .num { font-size: 19px; font-weight: 700; }
+.donut .donut-center .lbl { font-size: 10.5px; color: var(--muted); }
+.donut-legend { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.donut-legend .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 7px; }
+.donut-legend .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+
+/* Checklist rows (readiness checklists, Annexure VIII pre-testing checklist
+   previews, etc.) -- a shared grid so the checkbox column, item text, and
+   "data required" column always line up between the header row and every
+   data row (a plain flex layout let the checkbox's intrinsic width drift out
+   of alignment with its header spacer). */
+.checklist-row { display: grid; grid-template-columns: 28px 1.1fr 1fr; gap: 8px; align-items: center; padding: 7px 0; }
+.checklist-row + .checklist-row { border-top: 1px solid var(--border); }
+.checklist-row-header { font-weight: 600; font-size: 12.5px; color: var(--muted); padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.checklist-row .checklist-check { display: flex; align-items: center; justify-content: center; }
+
+.stepper { display: flex; align-items: center; }
+.stepper .step { display: flex; flex-direction: column; align-items: center; gap: 8px; flex-shrink: 0; }
+.stepper .step .circle {
+  width: 44px; height: 44px; border-radius: 50%; background: var(--bg); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center; font-size: 13.5px; font-weight: 700; color: var(--text);
+  transition: background .2s var(--ease), border-color .2s var(--ease), box-shadow .2s var(--ease);
+}
+.stepper .step.filled .circle { background: var(--navy-50); border-color: var(--navy); color: var(--navy); box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.1); }
+.stepper .step .step-label { font-size: 12px; color: var(--muted); }
+.stepper .connector { flex: 1; height: 2px; background: var(--border); margin: 0 2px 26px; transition: background .2s var(--ease); }
+.stepper .connector.filled { background: var(--navy); }
+
+.activity-item { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.activity-item:last-child { border-bottom: none; }
+.activity-item .icon-wrap {
+  width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px;
+}
+.activity-item .icon-wrap.green { background: #dcfce7; color: var(--success); }
+.activity-item .icon-wrap.amber { background: #fef3c7; color: var(--warning); }
+.activity-item .icon-wrap.blue { background: #e0ecff; color: var(--navy); }
+.activity-item .title { font-size: 13px; font-weight: 600; }
+.activity-item .sub { font-size: 12px; color: var(--muted); margin-top: 1px; }
+
+.muted { color: var(--muted); }
+.small { font-size: 12.5px; }
+.section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); margin: 18px 0 10px; }

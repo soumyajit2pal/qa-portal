@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..database import get_db
 from ..deps import get_current_user
-from ..constants import SUPPRESSION_TERMINAL_STATUSES
+from ..constants import SUPPRESSION_TERMINAL_STATUSES, QAStatus
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -12,69 +12,38 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 # ---------------- 4.10.1 Operational Reports ----------------
 @router.get("/qa-request-summary")
 def qa_request_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """One row per QA Request (the intake gateway -- see constants.GatewayStatus
+    for its own Draft/Submitted/Raised/Cancelled status). "QA Testing Status"
+    additionally surfaces the linked Functional Testing Request's own Draft ->
+    ... -> Closed status, if one was raised alongside it."""
     rows = db.query(models.QARequest).all()
-    return [{
-        "Request ID": r.request_id, "Request Date": r.request_date, "Department": r.department,
-        "Application Name": r.application_name, "Project Name": r.project_name,
-        "Request Type(s)": r.request_types, "Priority": r.priority, "Risk Rating": r.risk_rating,
-        "Status": r.status,
-    } for r in rows]
-
-
-# Test Case Repository / Test Execution Management (Modules 2 & 3) are
-# temporarily DISABLED -- the portal is currently focused on the QA Request
-# module only, so the reports below (which all read TestCase/TestRun/
-# TestRunCase directly) have been taken out of REPORT_REGISTRY and the
-# Reports & Export Centre listing (see constants.js REPORTS). The functions
-# are left in place, commented out, so they can be re-enabled together with
-# those modules later.
-#
-# @router.get("/project-testing-status")
-# def project_testing_status(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-#     rows = db.query(models.TestRun).all()
-#     out = []
-#     for r in rows:
-#         cases = r.cases
-#         executed = len([c for c in cases if c.execution_status != "Not Started"])
-#         passed = len([c for c in cases if c.execution_status in ("Passed", "Retest Passed")])
-#         out.append({
-#             "Test Run ID": r.test_run_id, "Project": r.project, "Application": r.application,
-#             "Release": r.release, "Status": r.status, "Total Cases": len(cases),
-#             "Executed": executed, "Pass %": round(passed / executed * 100, 2) if executed else 0,
-#         })
-#     return out
-#
-#
-# @router.get("/test-case-execution")
-# def test_case_execution(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-#     rows = db.query(models.TestRunCase).all()
-#     return [{
-#         "Test Run ID": rc.test_run.test_run_id if rc.test_run else None,
-#         "Test Case ID": rc.test_case.test_case_id if rc.test_case else None,
-#         "Scenario": rc.test_case.test_scenario if rc.test_case else None,
-#         "Execution Status": rc.execution_status, "Actual Result": rc.actual_result,
-#         "Defect ID": rc.defect_id, "Executed At": rc.executed_at,
-#     } for rc in rows]
-#
-#
-# @router.get("/requirement-traceability-matrix")
-# def rtm(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-#     rows = db.query(models.TestCase).filter(models.TestCase.is_archived == False).all()  # noqa: E712
-#     return [{
-#         "Epic ID": tc.epic_id, "Feature ID": tc.feature_id, "User Story ID": tc.user_story_id,
-#         "Test Case ID": tc.test_case_id, "Test Scenario": tc.test_scenario, "Status": tc.status,
-#         "Defect ID": tc.defect_id,
-#     } for tc in rows]
-#
-#
-# @router.get("/defect-summary")
-# def defect_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-#     rows = db.query(models.TestRunCase).filter(models.TestRunCase.defect_id.isnot(None)).all()
-#     return [{
-#         "Defect ID": rc.defect_id, "Test Case ID": rc.test_case.test_case_id if rc.test_case else None,
-#         "Test Run ID": rc.test_run.test_run_id if rc.test_run else None,
-#         "Status": rc.execution_status, "Logged At": rc.executed_at,
-#     } for rc in rows]
+    out = []
+    for r in rows:
+        functional = next(iter(r.linked_functional_requests), None)
+        sast = next(iter(r.linked_sast_requests), None)
+        dast = next(iter(r.linked_dast_requests), None)
+        automation = next(iter(r.linked_automation_requests), None)
+        performance = next(iter(r.linked_performance_requests), None)
+        # Priority/Risk are per-request-type now (see models.FunctionalRequest
+        # for the full reasoning), not a single shared gateway value -- so
+        # this report lists "Type: Priority/Risk" for every type actually
+        # linked to this QA Request instead of one flat column.
+        classification = "; ".join(
+            f"{label}: {req.priority or '—'}/{(getattr(req, 'risk_rating', None) or getattr(req, 'risk_category', None)) or '—'}"
+            for label, req in (
+                ("Functional", functional), ("SAST", sast), ("DAST", dast),
+                ("Automation", automation), ("Performance", performance),
+            ) if req is not None
+        )
+        out.append({
+            "Request ID": r.request_id, "Request Date": r.request_date, "Department": r.department,
+            "Application Name": r.application_name, "Project Name": r.project_name,
+            "Request Type(s)": r.request_types, "Priority / Risk (per type)": classification or None,
+            "Status": r.status,
+            "QA Testing Request ID": functional.request_id if functional else None,
+            "QA Testing Status": functional.status if functional else None,
+        })
+    return out
 
 
 # ---------------- 4.10.2 Security Reports ----------------
@@ -133,9 +102,10 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
 @router.get("/monthly-qa-kpi")
 def monthly_kpi(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     total_requests = db.query(models.QARequest).count()
-    completed = db.query(models.QARequest).filter(models.QARequest.status == "Completed").count()
-    # "Test Cases Executed" / "Pass %" (TestRunCase-based) removed along with
-    # Modules 2 & 3 -- portal is currently focused on the QA Request module only.
+    # "Completed" is measured on the linked Functional Testing Request (the
+    # QA Request gateway's own status is just Draft/Submitted/Raised/Cancelled
+    # -- see constants.GatewayStatus).
+    completed = db.query(models.FunctionalRequest).filter(models.FunctionalRequest.status == QAStatus.CLOSED).count()
     return [{
         "Total QA Requests": total_requests, "Completed Requests": completed,
         "Open Suppressions": db.query(models.SuppressionRequest).filter(
@@ -149,29 +119,18 @@ def quality_scorecard(db: Session = Depends(get_db), current_user: models.User =
     out = []
     for app in apps:
         reqs = db.query(models.QARequest).filter(models.QARequest.application_name == app).all()
+        completed = 0
+        for r in reqs:
+            functional = next(iter(r.linked_functional_requests), None)
+            if functional and functional.status == QAStatus.CLOSED:
+                completed += 1
         sast = db.query(models.SASTRequest).filter(models.SASTRequest.application_name == app).count()
-        dast_count = db.query(models.DASTRequest).count()
         out.append({
             "Application": app, "QA Requests": len(reqs),
-            "Completed": len([r for r in reqs if r.status == "Completed"]),
+            "Completed": completed,
             "SAST Requests": sast,
         })
     return out
-
-
-# Resource Utilization Report is TestRunCase-based (Module 3, disabled) --
-# see note above test-case-execution/etc. Commented out for the same reason.
-#
-# @router.get("/resource-utilization")
-# def resource_utilization(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-#     from collections import Counter
-#     run_cases = db.query(models.TestRunCase).filter(models.TestRunCase.executed_by_id.isnot(None)).all()
-#     counts = Counter(c.executed_by_id for c in run_cases)
-#     out = []
-#     for uid, cnt in counts.items():
-#         u = db.query(models.User).get(uid)
-#         out.append({"QA Engineer": u.full_name if u else uid, "Cases Executed": cnt})
-#     return out
 
 
 @router.get("/audit-evidence")
@@ -190,10 +149,6 @@ def audit_evidence(db: Session = Depends(get_db), current_user: models.User = De
 
 REPORT_REGISTRY = {
     "qa-request-summary": qa_request_summary,
-    # "project-testing-status", "test-case-execution", "requirement-traceability-matrix",
-    # "defect-summary" and "resource-utilization" are disabled along with Test Case
-    # Repository / Test Execution Management (Modules 2 & 3) -- see the commented-out
-    # functions above. Re-add here when those modules are re-enabled.
     "sast-scan": sast_scan_report,
     "dast-scan": dast_scan_report,
     "vulnerability-trend": vulnerability_trend,

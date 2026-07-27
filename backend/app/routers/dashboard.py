@@ -36,7 +36,7 @@ PENDING_APPROVAL_STATUSES = {
 # approvals" metric below. "Requested" is excluded deliberately: it's the
 # equivalent of a Draft (not yet submitted), so it isn't "pending" on anyone.
 SAST_DAST_PENDING_APPROVAL_STATUSES = {
-    "SM_APPROVAL_PENDING", "DEPARTMENT_HEAD_APPROVAL_PENDING", "READINESS_CHECK",
+    "SM_APPROVAL_PENDING", "DEPARTMENT_HEAD_APPROVAL_PENDING", "SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS",
 }
 
 
@@ -77,15 +77,12 @@ def _ageing_bucket(days: int) -> str:
 # ---------------- 4.9.1 / 4.9.2 Project-wise Dashboard ----------------
 @router.get("/project-wise")
 def project_wise(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    requests = db.query(models.QARequest).all()
+    # The QA Request is now just an intake gateway (see constants.GatewayStatus)
+    # -- the actual QAStatus workflow being measured here lives on the linked
+    # Functional Testing Request (see models.FunctionalRequest).
+    requests = db.query(models.FunctionalRequest).all()
     active_projects = len({r.project_name for r in requests if r.status in ACTIVE_QA_STATUSES and r.project_name})
 
-    # Test Case Repository / Test Execution Management (Modules 2 & 3) are
-    # temporarily DISABLED -- the "Test cases tracked" and "Open defects"
-    # Command Centre metrics (which read TestCase/TestRunCase directly) have
-    # been removed along with them per request; the portal is currently
-    # focused on the QA Request module only. Re-enable by restoring the
-    # total_test_cases/open_defects computation here alongside the modules.
     sast_findings = db.query(models.SASTFinding).count()
     dast_findings = db.query(models.DASTFinding).count()
 
@@ -121,47 +118,13 @@ def project_wise(db: Session = Depends(get_db), current_user: models.User = Depe
     }
 
 
-# ---------------- 4.9.3 / 4.9.4 QA-wise Dashboard ----------------
-@router.get("/qa-wise/{user_id}")
-def qa_wise(user_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    requests = db.query(models.QARequest).filter(
-        models.QARequest.assigned_tester_ids.like(f"%{user_id}%")
-    ).all()
-    assigned_projects = len({r.project_name for r in requests if r.project_name})
-
-    # See note in project_wise() above -- Test Case Repository / Test Execution
-    # are disabled for direct use, but these metrics still read the tables.
-    run_cases = db.query(models.TestRunCase).filter(models.TestRunCase.executed_by_id == user_id).all()
-    executed = len(run_cases)
-    passed = len([c for c in run_cases if c.execution_status in ("Passed", "Retest Passed")])
-    defects_logged = len([c for c in run_cases if c.defect_id])
-
-    assigned_cases = db.query(models.TestCase).filter(models.TestCase.created_by_id == user_id).count()
-
-    return {
-        "metrics": {
-            "assigned_projects": assigned_projects,
-            "assigned_test_cases": assigned_cases,
-            "executed_cases": executed,
-            "pass_rate": round(passed / executed * 100, 2) if executed else 0,
-            "defects_logged": defects_logged,
-            "defects_closed": 0,
-        },
-        "charts": {
-            "qa_performance_overview": {"executed": executed, "passed": passed},
-            "work_allocation": {"projects": assigned_projects, "test_cases": assigned_cases},
-            "test_execution_trend": Counter(c.execution_status for c in run_cases),
-        },
-    }
-
-
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------
 @router.get("/security/sast")
 def security_sast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     reqs = db.query(models.SASTRequest).all()
     findings = db.query(models.SASTFinding).all()
     return {
-        "applications_scanned": len({r.application_name for r in reqs if r.status in ("Report Ready", "Closed")}),
+        "applications_scanned": len({r.application_name for r in reqs if r.status in ("REPORT_READY", "CLOSED")}),
         "open_vulnerabilities": len([f for f in findings if f.status == "Open"]),
         "severity_distribution": Counter(f.severity for f in findings),
         "remediation_status": Counter(f.status for f in findings),
@@ -255,14 +218,14 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
     """
     items = []
 
-    for r in db.query(models.QARequest).filter(models.QARequest.status.in_(list(STAGE_LABELS.keys()))).all():
+    for r in db.query(models.FunctionalRequest).filter(models.FunctionalRequest.status.in_(list(STAGE_LABELS.keys()))).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "project_name": r.project_name or r.application_name,
             "application_name": r.application_name, "pending_stage": STAGE_LABELS.get(r.status, r.status),
             "responsible_team": STAGE_TEAM.get(r.status, "QA"), "owner": r.application_owner,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
-            "priority": r.priority, "status": r.status, "source": "QA Request",
+            "priority": r.priority, "status": r.status, "source": "Functional Testing Request",
         })
 
     for r in db.query(models.SASTRequest).filter(
@@ -325,13 +288,13 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
 def three_w_project_detail(project_id: str, db: Session = Depends(get_db),
                             current_user: models.User = Depends(get_current_user)):
     """Drill-down: selecting a Project ID shows its full lifecycle + audit trail."""
-    req = db.query(models.QARequest).filter(models.QARequest.request_id == project_id).first()
+    req = db.query(models.FunctionalRequest).filter(models.FunctionalRequest.request_id == project_id).first()
     if not req:
         return {"detail": "Project not found"}
     history = (db.query(models.ApprovalAction)
-               .filter_by(entity_type="QA_REQUEST", entity_id=req.id)
+               .filter_by(entity_type="FUNCTIONAL_REQUEST", entity_id=req.id)
                .order_by(models.ApprovalAction.created_at).all())
-    checklist = db.query(models.ReadinessChecklistItem).filter_by(qa_request_id=req.id).all()
+    checklist = db.query(models.ReadinessChecklistItem).filter_by(functional_request_id=req.id).all()
     return {
         "project_id": req.request_id,
         "application_name": req.application_name,

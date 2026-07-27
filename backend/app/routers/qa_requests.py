@@ -1,20 +1,23 @@
+import datetime
+import json
 import os
 import shutil
 import uuid
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department
+from ..deps import get_current_user, require_roles
 from ..constants import (
-    Role, DEFAULT_CHECKLIST_ITEMS, CONDITIONAL_CHECKLIST_ITEMS, checklist_item_is_mandatory,
-    QAStatus, QA_REQUEST_EDITABLE_STATUSES, QA_REQUEST_TERMINAL_STATUSES, QA_REQUEST_CANCELLABLE_STATUSES,
-    SAST_DAST_TERMINAL_STATUSES,
+    Role, DEFAULT_CHECKLIST_ITEMS, checklist_item_is_mandatory, DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
+    DEFAULT_AUTOMATION_CHECKLIST_ITEMS,
+    FUNCTIONAL_BUCKET_TYPES, GatewayStatus, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
 )
+from ..pdf_export import build_request_detail_pdf
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
 
@@ -29,6 +32,52 @@ def _log(db: Session, entity_id: int, step: str, user: models.User, decision: st
         entity_type="QA_REQUEST", entity_id=entity_id, step_name=step,
         actor_id=user.id, actor_role=user.roles_csv, decision=decision, comments=comments,
     ))
+
+
+def _stash_draft_details(checked_items: Optional[set], sast_components: list, dast_components: list,
+                          performance_details: dict, automation_checked_items: Optional[set] = None,
+                          performance_checked_items: Optional[set] = None,
+                          classification_details: Optional[dict] = None) -> str:
+    """Serializes everything a Draft's wizard steps collected for its
+    not-yet-created child request(s) -- see QARequest.draft_child_details.
+    Only meaningful while the gateway is still DRAFT; consumed (and read
+    back via _unstash_draft_details) once by submit_request. sast_components/
+    dast_components are each a list of dicts (one per repository/target row --
+    see schemas.SASTComponentIn/DASTTargetIn), not joined strings -- same
+    structure that ends up in models.SASTComponent/DASTTarget rows once the
+    child request is actually created. automation_checked_items/
+    performance_checked_items both mirror checked_items (Functional's
+    readiness checklist self-declaration) but for Automation's/Performance's
+    own DEFAULT_AUTOMATION_CHECKLIST_ITEMS/DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.
+    classification_details is a single merged dict carrying every
+    per-request-type Priority/Risk field (functional_priority,
+    sast_risk_category, etc. -- see schemas.QARequestCreate) -- one dict
+    rather than yet more discrete tuple members, since none of the keys
+    collide across modules."""
+    return json.dumps({
+        "checked_items": sorted(checked_items) if checked_items else [],
+        "sast_components": sast_components or [],
+        "dast_components": dast_components or [],
+        "performance": performance_details or {},
+        "automation_checked_items": sorted(automation_checked_items) if automation_checked_items else [],
+        "performance_checked_items": sorted(performance_checked_items) if performance_checked_items else [],
+        "classification": classification_details or {},
+    })
+
+
+def _unstash_draft_details(raw: Optional[str]):
+    if not raw:
+        return set(), [], [], {}, set(), set(), {}
+    data = json.loads(raw)
+    return (
+        set(data.get("checked_items") or []),
+        data.get("sast_components") or [],
+        data.get("dast_components") or [],
+        data.get("performance") or {},
+        set(data.get("automation_checked_items") or []),
+        set(data.get("performance_checked_items") or []),
+        data.get("classification") or {},
+    )
 
 
 @router.get("", response_model=List[schemas.QARequestOut])
@@ -63,75 +112,246 @@ def get_request(req_id: int, db: Session = Depends(get_db), current_user: models
     return obj
 
 
-def _require(obj, expected_statuses, action: str):
-    if isinstance(expected_statuses, str):
-        expected_statuses = [expected_statuses]
-    if obj.status not in expected_statuses:
-        raise HTTPException(
-            400, f"'{action}' requires status in {expected_statuses} (currently '{obj.status}')"
-        )
+def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", request_types: list,
+                                 checked_items: Optional[set] = None,
+                                 sast_components: Optional[list] = None, dast_components: Optional[list] = None,
+                                 performance_details: Optional[dict] = None,
+                                 automation_checked_items: Optional[set] = None,
+                                 performance_checked_items: Optional[set] = None,
+                                 classification: Optional[dict] = None):
+    """Auto-creates a linked Functional/SAST/DAST/Automation/Performance
+    request when the QA Request's request_types include the matching
+    type(s), so each still gets its own trackable unique ID (via the normal
+    TQA-FUNC-.../SAST-.../DAST-.../AUTO-.../PERF-... generator) while staying
+    linked back to the originating gateway QA Request. Only creates what's
+    missing -- calling this again after request_types changes won't
+    duplicate an existing link. Standalone requests raised directly via their
+    own modules are untouched by this and simply keep qa_request_id = None.
 
-
-def _sync_linked_security_requests(db: Session, qa_request: "models.QARequest", request_types: list):
-    """Auto-creates a linked SAST and/or DAST Request when the QA Request's
-    request_types include SAST/DAST, so security testing still gets its own
-    trackable unique ID (via the normal SAST-.../DAST-... generator) while
-    staying linked back to the originating QA Request (typically raised
-    alongside Functional Testing). Only creates what's missing -- calling
-    this again after request_types changes won't duplicate an existing link.
-    Standalone SAST/DAST requests raised directly via their own modules are
-    untouched by this and simply keep qa_request_id = None."""
+    The QA Request itself is a pure intake/gateway record with no workflow of
+    its own ("QA request form will be the gateway only" per request) --
+    Functional Testing/Sanity Testing/Regression Testing/UAT Support (any of
+    these) are combined into a single FunctionalRequest carrying the full
+    Draft -> SM -> Department Head -> ... -> Closed lifecycle that used to
+    live directly on QARequest; see models.FunctionalRequest and
+    routers/functional.py."""
+    classification = classification or {}
     existing_types = set()
+    if any(True for _ in qa_request.linked_functional_requests):
+        existing_types.add("FUNCTIONAL")
     if any(True for _ in qa_request.linked_sast_requests):
         existing_types.add("SAST")
     if any(True for _ in qa_request.linked_dast_requests):
         existing_types.add("DAST")
+    if any(True for _ in qa_request.linked_automation_requests):
+        existing_types.add("Automation Testing")
+    if any(True for _ in qa_request.linked_performance_requests):
+        existing_types.add("Performance Testing")
+
+    wants_functional = any(t in request_types for t in FUNCTIONAL_BUCKET_TYPES)
+    if wants_functional and "FUNCTIONAL" not in existing_types:
+        functional = models.FunctionalRequest(
+            requester_id=qa_request.requester_id,
+            qa_request_id=qa_request.id,
+            priority=classification.get("functional_priority"),
+            risk_rating=classification.get("functional_risk_rating"),
+        )
+        db.add(functional)
+        db.flush()  # need functional.id before the checklist items below can reference it
+        checked_set = checked_items or set()
+        for item, owner in DEFAULT_CHECKLIST_ITEMS:
+            # `requester_checked` is the requester's own self-declaration made
+            # at raise-time -- it is reference/pre-fill only. It does NOT set
+            # `is_complete`; the QA Lead must still independently verify every
+            # item during Readiness Verification.
+            db.add(models.ReadinessChecklistItem(
+                functional_request_id=functional.id, item=item, owner=owner,
+                is_mandatory=checklist_item_is_mandatory(item, request_types),
+                requester_checked=item in checked_set,
+            ))
 
     if "SAST" in request_types and "SAST" not in existing_types:
-        db.add(models.SASTRequest(
+        sast = models.SASTRequest(
             application_name=qa_request.application_name,
             project_name=qa_request.project_name,
             cr_number=qa_request.cr_number,
-            risk_category=qa_request.risk_rating,
+            risk_category=classification.get("sast_risk_category"),
+            priority=classification.get("sast_priority"),
             requester_id=qa_request.requester_id,
             qa_request_id=qa_request.id,
-        ))
+        )
+        db.add(sast)
+        db.flush()  # need sast.id before the component rows below can reference it
+        # Filled in directly on the QA Request form (shown only while "SAST"
+        # is ticked) instead of being left as placeholders for the requester
+        # to fill in later on the SAST module page -- one row per repository
+        # (see models.SASTComponent).
+        for c in (sast_components or []):
+            db.add(models.SASTComponent(
+                sast_request_id=sast.id,
+                repository_url=c.get("repository_url"),
+                git_branch=c.get("git_branch"),
+                commit_id=c.get("commit_id"),
+                technology_stack=c.get("technology_stack"),
+                build_number=c.get("build_number"),
+            ))
     if "DAST" in request_types and "DAST" not in existing_types:
-        db.add(models.DASTRequest(
-            application_url=f"To be confirmed — linked from {qa_request.request_id}",
-            environment=qa_request.environment,
-            target_release=qa_request.release_version,
-            risk_category=qa_request.risk_rating,
+        dast = models.DASTRequest(
+            risk_category=classification.get("dast_risk_category"),
+            priority=classification.get("dast_priority"),
             requester_id=qa_request.requester_id,
             qa_request_id=qa_request.id,
-        ))
+        )
+        db.add(dast)
+        db.flush()  # need dast.id before the target rows below can reference it
+        # Filled in directly on the QA Request form (shown only while "DAST"
+        # is ticked) -- one row per target URL (see models.DASTTarget). Falls
+        # back to a single placeholder target only if none were added at all,
+        # so this request always has at least one row to edit. No
+        # target_release here -- Target Release Date is already collected
+        # once, on the QA Request itself (see DASTRequest.target_release_date).
+        targets = dast_components or [{}]
+        for t in targets:
+            db.add(models.DASTTarget(
+                dast_request_id=dast.id,
+                application_url=t.get("application_url") or f"To be confirmed — linked from {qa_request.request_id}",
+                environment=t.get("environment") or qa_request.environment,
+                authentication_required=t.get("authentication_required") or "No",
+                test_credentials=t.get("test_credentials"),
+            ))
+    if "Automation Testing" in request_types and "Automation Testing" not in existing_types:
+        automation = models.AutomationRequest(
+            application_name=qa_request.application_name,
+            project_name=qa_request.project_name,
+            cr_number=qa_request.cr_number,
+            risk_category=classification.get("automation_risk_category"),
+            priority=classification.get("automation_priority"),
+            requester_id=qa_request.requester_id,
+            qa_request_id=qa_request.id,
+        )
+        db.add(automation)
+        db.flush()  # need automation.id before the checklist items below can reference it
+        # "Ready for Automation" readiness checklist (see
+        # constants.DEFAULT_AUTOMATION_CHECKLIST_ITEMS) -- same
+        # requester-self-declaration pattern as Functional's checklist above.
+        automation_checked_set = automation_checked_items or set()
+        for item, owner, is_mandatory in DEFAULT_AUTOMATION_CHECKLIST_ITEMS:
+            db.add(models.AutomationChecklistItem(
+                automation_request_id=automation.id, item=item, owner=owner,
+                is_mandatory=is_mandatory,
+                requester_checked=item in automation_checked_set,
+            ))
+    if "Performance Testing" in request_types and "Performance Testing" not in existing_types:
+        pd = performance_details or {}
+        performance = models.PerformanceRequest(
+            application_name=qa_request.application_name,
+            project_name=qa_request.project_name,
+            cr_number=qa_request.cr_number,
+            environment=qa_request.environment,
+            # performance_risk_category/performance_priority land in `pd`
+            # naturally via the "performance_" prefix sweep in create_request/
+            # edit_request (same sweep that already catches
+            # performance_request_type below) -- no separate classification
+            # dict needed here, unlike Functional/SAST/DAST/Automation.
+            risk_category=pd.get("performance_risk_category"),
+            priority=pd.get("performance_priority"),
+            requester_id=qa_request.requester_id,
+            qa_request_id=qa_request.id,
+            # request_type (Load/Stress/Spike Testing) is Performance-specific
+            # and has no gateway equivalent, so it's still collected on the QA
+            # Request wizard's Performance step. change_type/vendor_si_partner/
+            # technology_stack/release_version/build_number/
+            # target_promotion_environment are NOT re-collected there anymore
+            # -- they're delegated straight from the gateway's own
+            # "Application & Change Details" fields (same values the requester
+            # already typed once), matching how application_name/project_name/
+            # environment above are delegated too (risk_category/priority are
+            # NOT delegated -- collected on this request type's own step, see
+            # above). hash_value has no gateway equivalent either, so it's
+            # simply left blank at intake and can be filled in later on this
+            # request's own page (same "fill in later" pattern as Automation's
+            # framework/
+            # repository_url/ci_cd_pipeline_url).
+            request_type=pd.get("performance_request_type"),
+            change_type=qa_request.change_type,
+            vendor_si_partner=qa_request.vendor_si_partner,
+            technology_stack=qa_request.technology_stack,
+            release_version=qa_request.release_version,
+            build_number=qa_request.build_number,
+            hash_value=None,
+            target_promotion_environment=qa_request.target_promotion_environment,
+        )
+        db.add(performance)
+        db.flush()  # need performance.id before the checklist items below can reference it
+        # "L1: Pre-Testing Readiness Checklist" (Annexure VIII) -- 19 fixed
+        # items, all mandatory (see constants.DEFAULT_PERFORMANCE_CHECKLIST_ITEMS).
+        # requester_checked is the requester's own self-declaration made at
+        # raise-time (see the QA Request wizard's Performance step) -- same
+        # pattern as Functional's/Automation's checklists; it does NOT set
+        # is_complete, which QA still independently verifies (see
+        # routers/performance.py::update_checklist_item).
+        performance_checked_set = performance_checked_items or set()
+        for item, data_required in DEFAULT_PERFORMANCE_CHECKLIST_ITEMS:
+            db.add(models.PerformanceChecklistItem(
+                performance_request_id=performance.id, item=item, data_required=data_required,
+                is_mandatory=True,
+                requester_checked=item in performance_checked_set,
+            ))
 
 
 @router.post("", response_model=schemas.QARequestOut)
 def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
-    """Creates the request in DRAFT. Call POST /{id}/submit to send it for Executive Approval."""
+    """Creates the gateway request in Draft ONLY -- no linked child request
+    (Functional/SAST/DAST/Automation/Performance) is created yet, even if
+    SAST/DAST/etc. detail fields were filled in on the wizard. Those details
+    are stashed on draft_child_details instead, and only turned into real,
+    ID-bearing child requests once POST /{id}/submit actually raises this
+    gateway record -- see _sync_linked_child_requests / submit_request."""
     data = payload.model_dump()
     # Department is always sourced from the requester's own user profile, not
     # from client input -- ignore whatever the payload sent.
     data["department"] = current_user.department
     request_types = data.pop("request_types", [])
     checked_items = set(data.pop("checked_items", []) or [])
-    obj = models.QARequest(**data, request_types=",".join(request_types), requester_id=current_user.id,
-                            status=QAStatus.DRAFT)
+    # SAST/DAST/Performance detail fields aren't columns on QARequest itself
+    # -- they're stashed (see draft_child_details) until submit time, when
+    # they seed whichever child request actually gets created. sast_components/
+    # dast_components are each a list of per-row dicts (repository/target),
+    # not joined strings -- see schemas.SASTComponentIn/DASTTargetIn.
+    sast_components = data.pop("sast_components", []) or []
+    dast_components = data.pop("dast_components", []) or []
+    # Popped explicitly before the generic "performance_" prefix sweep below,
+    # since its own name also starts with "performance_" and would otherwise
+    # get swept into performance_details instead of being kept as its own
+    # self-declaration set (same pattern as automation_checked_items).
+    performance_checked_items = set(data.pop("performance_checked_items", []) or [])
+    performance_details = {k: data.pop(k) for k in list(data) if k.startswith("performance_")}
+    automation_checked_items = set(data.pop("automation_checked_items", []) or [])
+    # Per-request-type Priority/Risk fields (see schemas.QARequestCreate) --
+    # merged into one dict since none of the keys collide across modules.
+    # sast_components/dast_components and automation_checked_items are
+    # already popped above, so these sweeps only catch each module's own
+    # priority/risk_category fields, not those. performance_priority/
+    # performance_risk_category were already swept into performance_details
+    # above (its "performance_" sweep runs before this) -- read back out of
+    # `pd` in _sync_linked_child_requests instead of duplicated here.
+    classification_details = {
+        **{k: data.pop(k) for k in list(data) if k.startswith("functional_")},
+        **{k: data.pop(k) for k in list(data) if k.startswith("sast_")},
+        **{k: data.pop(k) for k in list(data) if k.startswith("dast_")},
+        **{k: data.pop(k) for k in list(data) if k.startswith("automation_")},
+    }
+    obj = models.QARequest(
+        **data, request_types=",".join(request_types), requester_id=current_user.id,
+        status=GatewayStatus.DRAFT,
+        draft_child_details=_stash_draft_details(
+            checked_items, sast_components, dast_components, performance_details, automation_checked_items,
+            performance_checked_items, classification_details,
+        ),
+    )
     db.add(obj)
     db.flush()
-    for item, owner in DEFAULT_CHECKLIST_ITEMS:
-        # `requester_checked` is the requester's own self-declaration made at
-        # raise-time -- it is reference/pre-fill only. It does NOT set
-        # `is_complete`; the QA Lead must still independently verify every
-        # item during Readiness Verification.
-        db.add(models.ReadinessChecklistItem(
-            qa_request_id=obj.id, item=item, owner=owner,
-            is_mandatory=checklist_item_is_mandatory(item, request_types),
-            requester_checked=item in checked_items,
-        ))
-    _sync_linked_security_requests(db, obj, request_types)
     _log(db, obj.id, "Requester", current_user, "Drafted", "QA Request created as draft")
     db.commit()
     db.refresh(obj)
@@ -146,32 +366,61 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
         raise HTTPException(404, "QA Request not found")
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can edit this request")
-    if obj.status not in QA_REQUEST_EDITABLE_STATUSES:
+    if obj.status not in GATEWAY_EDITABLE_STATUSES:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
+    # GATEWAY_EDITABLE_STATUSES is Draft-only, so no linked child request
+    # exists yet at this point (see submit_request) -- editing here just
+    # means updating the still-Draft gateway fields and its stashed
+    # draft_child_details, never touching/creating any child request.
     data = payload.model_dump(exclude_unset=True)
     # Department tracks the requester's own profile, not something edited per-request.
     data.pop("department", None)
     request_types = data.pop("request_types", None)
     checked_items = data.pop("checked_items", None)
+    # SAST/DAST/Performance detail fields aren't columns on QARequest itself
+    # -- merge them into the stashed draft_child_details below instead of
+    # seeding any child request directly (there isn't one yet). sast_components/
+    # dast_components, when sent at all, replace the previously-stashed list
+    # wholesale (same "+"-driven repeatable-list semantics as SASTUpdate/
+    # DASTUpdate once the real child request exists) rather than being
+    # merged field-by-field.
+    sast_components = data.pop("sast_components", None)
+    dast_components = data.pop("dast_components", None)
+    # Popped explicitly before the generic "performance_" prefix sweep below --
+    # see the matching comment in create_request.
+    performance_checked_items = data.pop("performance_checked_items", None)
+    performance_details = {k: data.pop(k) for k in list(data) if k.startswith("performance_")}
+    automation_checked_items = data.pop("automation_checked_items", None)
+    # Same merged classification dict as create_request -- popped before the
+    # setattr loop below since none of these are columns on QARequest itself.
+    classification_details = {
+        **{k: data.pop(k) for k in list(data) if k.startswith("functional_")},
+        **{k: data.pop(k) for k in list(data) if k.startswith("sast_")},
+        **{k: data.pop(k) for k in list(data) if k.startswith("dast_")},
+        **{k: data.pop(k) for k in list(data) if k.startswith("automation_")},
+    }
     for k, v in data.items():
         setattr(obj, k, v)
+
     if request_types is not None:
         obj.request_types = ",".join(request_types)
-        # Re-evaluate which readiness-checklist items are mandatory now that
-        # the request types may have changed (e.g. SAST/DAST added, or the
-        # request became/stopped being security-only), and auto-create any
-        # newly-needed linked SAST/DAST request. Every item is recomputed
-        # (not just the conditional SAST/DAST ones) since the security-only
-        # exception affects the unconditional items too.
-        for item in obj.checklist_items:
-            item.is_mandatory = checklist_item_is_mandatory(item.item, request_types)
-        _sync_linked_security_requests(db, obj, request_types)
-    if checked_items is not None:
-        # Requester updating their self-declared readiness ticks -- still
-        # reference-only, does not touch is_complete (QA Lead's call).
-        checked_set = set(checked_items)
-        for item in obj.checklist_items:
-            item.requester_checked = item.item in checked_set
+
+    # Merge whatever changed on top of what was already stashed, rather than
+    # overwriting wholesale -- e.g. re-saving the SAST step alone shouldn't
+    # blank out Performance details already captured on an earlier save.
+    prev_checked, prev_sast, prev_dast, prev_perf, prev_automation_checked, prev_performance_checked, prev_classification = _unstash_draft_details(obj.draft_child_details)
+    merged_checked = set(checked_items) if checked_items is not None else prev_checked
+    merged_sast = sast_components if sast_components is not None else prev_sast
+    merged_dast = dast_components if dast_components is not None else prev_dast
+    merged_perf = {**prev_perf, **performance_details} if performance_details else prev_perf
+    merged_automation_checked = set(automation_checked_items) if automation_checked_items is not None else prev_automation_checked
+    merged_performance_checked = set(performance_checked_items) if performance_checked_items is not None else prev_performance_checked
+    merged_classification = {**prev_classification, **classification_details} if classification_details else prev_classification
+    obj.draft_child_details = _stash_draft_details(
+        merged_checked, merged_sast, merged_dast, merged_perf, merged_automation_checked,
+        merged_performance_checked, merged_classification,
+    )
+
     db.commit()
     db.refresh(obj)
     return obj
@@ -184,443 +433,57 @@ def cancel_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         raise HTTPException(404, "QA Request not found")
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can cancel this request")
-    if obj.status in QA_REQUEST_TERMINAL_STATUSES:
-        raise HTTPException(400, f"Request is already '{obj.status}' and cannot be cancelled")
-    # Once the Department Head has approved and a QA Lead is assigned, the
-    # request is committed to QA and cancellation is no longer offered --
-    # only Draft/Submitted/Department Head Approval Pending/Returned by
-    # Department Head may still be cancelled.
-    if obj.status not in QA_REQUEST_CANCELLABLE_STATUSES:
+    # The gateway can only be cancelled while still in Draft (i.e. before it's
+    # ever been raised) -- once raised, its linked child request(s) have their
+    # own independent workflows and are each cancelled/rejected on their own.
+    if obj.status not in GATEWAY_CANCELLABLE_STATUSES:
         raise HTTPException(
             400,
-            f"Request is already past Department Head approval ('{obj.status}') and can no longer be cancelled",
+            f"Request is already '{obj.status}' and can no longer be cancelled -- only a still-Draft "
+            "(not yet raised) request can be cancelled here.",
         )
-    obj.status = QAStatus.CANCELLED
+    obj.status = GatewayStatus.CANCELLED
     _log(db, obj.id, "Requester", current_user, "Cancelled", None)
     db.commit()
     db.refresh(obj)
     return obj
 
 
-# ---- Requester: Draft -> Submitted -> SM Approval Pending ----
 @router.post("/{req_id}/submit", response_model=schemas.QARequestOut)
 def submit_request(req_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
+    """Raises the request: creates whichever linked child request(s) the
+    selected request_types call for -- this is the only place they're ever
+    created (see create_request/edit_request, which merely stash their
+    detail fields on draft_child_details while still Draft) -- then moves
+    the gateway straight to Raised -- there is no approval step on the
+    gateway itself. Every linked child then runs its own independent
+    Draft -> SM -> Department Head -> ... workflow from here."""
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this request")
-    _require(obj, QAStatus.DRAFT, "Submit")
-    obj.status = QAStatus.SUBMITTED
+    if obj.status != GatewayStatus.DRAFT:
+        raise HTTPException(400, f"'Submit' requires status 'DRAFT' (currently '{obj.status}')")
+    request_types = obj.request_types.split(",") if obj.request_types else []
+    # This is the one and only point where linked child request(s) actually
+    # get created -- everything collected on the wizard's SAST/DAST/
+    # Performance steps (and the readiness-checklist self-declaration ticks)
+    # was just sitting in draft_child_details until now (see create_request/
+    # edit_request). "Linked Requests" is correctly empty right up until
+    # this call.
+    checked_items, sast_components, dast_components, performance_details, automation_checked_items, performance_checked_items, classification_details = _unstash_draft_details(obj.draft_child_details)
+    _sync_linked_child_requests(db, obj, request_types, checked_items, sast_components, dast_components, performance_details,
+                                 automation_checked_items=automation_checked_items,
+                                 performance_checked_items=performance_checked_items,
+                                 classification=classification_details)
+    obj.draft_child_details = None  # consumed -- no longer needed once raised
+    obj.status = GatewayStatus.SUBMITTED
     _log(db, obj.id, "Requester", current_user, "Submitted", None)
-    obj.status = QAStatus.SM_APPROVAL_PENDING
-    _log(db, obj.id, "SM Approval", current_user, "Pending", "Awaiting SM decision")
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/resubmit", response_model=schemas.QARequestOut)
-def resubmit_request(req_id: int, db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
-    """Re-submits a request returned by SM, by the Department Head, or by the QA Lead."""
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        raise HTTPException(403, "Only the requester or an admin can resubmit this request")
-    _require(obj, [QAStatus.RETURNED_BY_SM, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD],
-             "Resubmit")
-    if obj.status == QAStatus.RETURNED_BY_SM:
-        obj.status = QAStatus.SM_APPROVAL_PENDING
-        _log(db, obj.id, "SM Approval", current_user, "Resubmitted", "Returned request re-submitted")
-    elif obj.status == QAStatus.RETURNED_BY_DEPARTMENT_HEAD:
-        obj.status = QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING
-        _log(db, obj.id, "Department Head Approval", current_user, "Resubmitted", "Returned request re-submitted")
-    else:
-        obj.status = QAStatus.READINESS_VERIFICATION
-        _log(db, obj.id, "Readiness Verification", current_user, "Resubmitted", "Returned request re-submitted")
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-# ---- SM Approval: Approve (-> Department Head) / Return / Reject ----
-@router.post("/{req_id}/sm-decision", response_model=schemas.QARequestOut)
-def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
-                current_user: models.User = Depends(require_roles(Role.SM))):
-    """New checkpoint between the requester's submission and Department Head
-    approval. A Return goes back to the requester for correction; a Reject
-    closes the request out (SM_REJECTED, terminal)."""
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    require_same_department(current_user, obj.department)
-    _require(obj, QAStatus.SM_APPROVAL_PENDING, "SM decision")
-    if payload.decision == "Approved":
-        obj.status = QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING
-    elif payload.decision == "Returned":
-        obj.status = QAStatus.RETURNED_BY_SM
-    elif payload.decision == "Rejected":
-        obj.status = QAStatus.SM_REJECTED
-    else:
-        raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
-    _log(db, obj.id, "SM Approval", current_user, payload.decision, payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-# ---- Department Head Approval: Approve (+ assign QA Lead) / Return / Reject ----
-@router.post("/{req_id}/department-head-decision", response_model=schemas.QARequestOut)
-def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisionIn, db: Session = Depends(get_db),
-                              current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD))):
-    """Department Head reviews the request raised by their own department and,
-    on approval, assigns the QA Lead who will own it going forward. A Return
-    goes back to the requester for correction; a Reject closes it out."""
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    require_same_department(current_user, obj.department)
-    _require(obj, QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, "Department Head decision")
-    obj.department_head_id = current_user.id
-
-    if payload.decision == "Approved":
-        if not payload.qa_lead_id:
-            raise HTTPException(400, "qa_lead_id is required when approving (a QA Lead must be assigned)")
-        qa_lead = db.query(models.User).get(payload.qa_lead_id)
-        if not qa_lead or not qa_lead.has_role(Role.QA_LEAD):
-            raise HTTPException(400, "qa_lead_id must reference an active QA Lead user")
-        obj.qa_lead_id = payload.qa_lead_id
-        obj.status = QAStatus.QA_LEAD_ASSIGNED
-    elif payload.decision == "Returned":
-        obj.status = QAStatus.RETURNED_BY_DEPARTMENT_HEAD
-    elif payload.decision == "Rejected":
-        obj.status = QAStatus.DEPARTMENT_HEAD_REJECTED
-    else:
-        raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
-
-    _log(db, obj.id, "Department Head Approval", current_user, payload.decision, payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-# ---- QA Lead: Readiness Verification ----
-@router.post("/{req_id}/start-readiness-verification", response_model=schemas.QARequestOut)
-def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    if obj.qa_lead_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        raise HTTPException(403, "Only the assigned QA Lead or an admin can start readiness verification")
-    _require(obj, QAStatus.QA_LEAD_ASSIGNED, "Start readiness verification")
-    obj.status = QAStatus.READINESS_VERIFICATION
-    _log(db, obj.id, "QA Lead Assignment", current_user, "Started", "Readiness verification started")
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/readiness-decision", response_model=schemas.QARequestOut)
-def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.READINESS_VERIFICATION, "Readiness decision")
-    if payload.decision == "Passed":
-        pending = [c.item for c in obj.checklist_items if c.is_mandatory and not c.is_complete]
-        if pending:
-            raise HTTPException(400, f"Readiness checklist incomplete: {', '.join(pending)}")
-        obj.status = QAStatus.QA_ACTIVITY_INITIATED
-    elif payload.decision == "Failed":
-        obj.status = QAStatus.RETURNED_BY_QA_LEAD
-    else:
-        raise HTTPException(400, "decision must be one of: Passed, Failed")
-    _log(db, obj.id, "Readiness Verification", current_user, payload.decision, payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-# ---- QA Activity: Planning -> Tester Assignment -> Test Design -> Execution ----
-@router.post("/{req_id}/begin-planning", response_model=schemas.QARequestOut)
-def begin_planning(req_id: int, db: Session = Depends(get_db),
-                    current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.QA_ACTIVITY_INITIATED, "Begin planning")
-    obj.status = QAStatus.PLANNING
-    _log(db, obj.id, "QA Activity Initiated", current_user, "Planning Started", None)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/assign-tester", response_model=schemas.QARequestOut)
-def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = Depends(get_db),
-                   current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.PLANNING, "Assign tester")
-    if not payload.tester_ids:
-        raise HTTPException(400, "At least one tester_id is required")
-    obj.assigned_tester_ids = ",".join(str(i) for i in payload.tester_ids)
-    obj.status = QAStatus.TESTER_ASSIGNED
-    _log(db, obj.id, "Planning", current_user, "Tester Assigned", f"Assigned tester user ids: {payload.tester_ids}")
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/start-test-design", response_model=schemas.QARequestOut)
-def start_test_design(req_id: int, db: Session = Depends(get_db),
-                       current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.TESTER_ASSIGNED, "Start test design")
-    obj.status = QAStatus.TEST_DESIGN
-    _log(db, obj.id, "Tester Assigned", current_user, "Test Design Started", None)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/start-execution", response_model=schemas.QARequestOut)
-def start_execution(req_id: int, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.TEST_DESIGN, "Start execution")
-    obj.status = QAStatus.EXECUTION_IN_PROGRESS
-    _log(db, obj.id, "Test Design", current_user, "Execution Started", None)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-# ---- Defect -> Fix -> Retest -> Regression cycle ----
-@router.post("/{req_id}/raise-defect", response_model=schemas.QARequestOut)
-def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.EXECUTION_IN_PROGRESS, "Raise defect")
-    obj.status = QAStatus.DEFECT_RAISED
-    _log(db, obj.id, "Execution In Progress", current_user, "Defect Raised", payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/mark-waiting-for-fix", response_model=schemas.QARequestOut)
-def mark_waiting_for_fix(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.DEFECT_RAISED, "Mark waiting for fix")
-    obj.status = QAStatus.WAITING_FOR_FIX
-    _log(db, obj.id, "Defect Raised", current_user, "Waiting For Fix", payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/start-retesting", response_model=schemas.QARequestOut)
-def start_retesting(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.WAITING_FOR_FIX, "Start retesting")
-    obj.status = QAStatus.RETESTING
-    _log(db, obj.id, "Waiting For Fix", current_user, "Retesting Started", payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/start-regression", response_model=schemas.QARequestOut)
-def start_regression(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    """Optional broader-impact regression pass after retesting, before QA completion."""
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.RETESTING, "Start regression testing")
-    obj.status = QAStatus.REGRESSION_TESTING
-    _log(db, obj.id, "Retesting", current_user, "Regression Testing Started", payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/complete-qa", response_model=schemas.QARequestOut)
-def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                 current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    """Marks QA activity complete -- reachable directly from execution (no issues found)
-    or after the defect/retest/regression cycle.
-
-    Blocked while any linked SAST/DAST request (see _sync_linked_security_requests)
-    hasn't itself reached a terminal state (Report Ready or Closed) -- a QA
-    Request can't be signed off as complete while its own security testing is
-    still open."""
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING, QAStatus.REGRESSION_TESTING], "Complete QA")
-
-    open_security = [
-        s.request_id for s in list(obj.linked_sast_requests) + list(obj.linked_dast_requests)
-        if s.status not in SAST_DAST_TERMINAL_STATUSES
-    ]
-    if open_security:
-        raise HTTPException(
-            400,
-            "QA cannot be marked complete while linked SAST/DAST request(s) are still open: "
-            + ", ".join(open_security) + ". They must reach Report Ready or Closed first.",
-        )
-
-    obj.status = QAStatus.QA_COMPLETED
-    _log(db, obj.id, "Execution", current_user, "QA Completed", payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-# ---- QA Sign-off -> Requester Verification -> Closed ----
-@router.post("/{req_id}/request-signoff", response_model=schemas.QARequestOut)
-def request_signoff(req_id: int, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.QA_COMPLETED, "Request sign-off")
-    obj.status = QAStatus.QA_SIGNOFF_PENDING
-    _log(db, obj.id, "QA Completed", current_user, "Sign-off Requested", None)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/confirm-signoff", response_model=schemas.QARequestOut)
-def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
-    """Confirms the QA Sign-off certificate (optionally linking a Module 8 QASignOff
-    record created via /api/signoffs) and hands the request to the requester for
-    final verification."""
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    _require(obj, QAStatus.QA_SIGNOFF_PENDING, "Confirm sign-off")
-    if payload.signoff_id is not None:
-        cert = db.query(models.QASignOff).get(payload.signoff_id)
-        if not cert:
-            raise HTTPException(400, "signoff_id does not reference an existing sign-off certificate")
-        obj.signoff_id = payload.signoff_id
-    obj.status = QAStatus.QA_SIGNED_OFF
-    _log(db, obj.id, "QA Sign-off", current_user, "Signed Off", payload.comments)
-    obj.status = QAStatus.REQUESTER_VERIFICATION
-    _log(db, obj.id, "Requester Verification", current_user, "Pending", "Sent for requester verification")
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/requester-decision", response_model=schemas.QARequestOut)
-def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(
-                            Role.REQUESTER, Role.BUSINESS_ANALYST, Role.APPLICATION_OWNER))):
-    obj = db.query(models.QARequest).get(req_id)
-    if not obj:
-        raise HTTPException(404, "QA Request not found")
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        raise HTTPException(403, "Only the requester or an admin can record this decision")
-    _require(obj, QAStatus.REQUESTER_VERIFICATION, "Requester decision")
-    if payload.decision == "Accepted":
-        obj.status = QAStatus.CLOSED
-    elif payload.decision == "ChangesRequired":
-        obj.status = QAStatus.QA_LEAD_ASSIGNED
-    else:
-        raise HTTPException(400, "decision must be one of: Accepted, ChangesRequired")
-    _log(db, obj.id, "Requester Verification", current_user, payload.decision, payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-# ---- Readiness checklist (Ready for Testing gate) ----
-@router.get("/{req_id}/checklist", response_model=List[schemas.ChecklistItemOut])
-def get_checklist(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.ReadinessChecklistItem).filter_by(qa_request_id=req_id).all()
-
-
-@router.put("/{req_id}/checklist/{item_id}", response_model=schemas.ChecklistItemOut)
-def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistItemUpdate,
-                           db: Session = Depends(get_db),
-                           current_user: models.User = Depends(require_roles(
-                               Role.QA_LEAD, Role.QA_ENGINEER, Role.BUSINESS_ANALYST))):
-    item = db.query(models.ReadinessChecklistItem).filter_by(id=item_id, qa_request_id=req_id).first()
-    if not item:
-        raise HTTPException(404, "Checklist item not found")
-    parent = db.query(models.QARequest).get(req_id)
-    if not parent or parent.status != QAStatus.READINESS_VERIFICATION:
-        raise HTTPException(
-            400,
-            "Readiness checklist items can only be verified while the request is in "
-            "Readiness Verification (i.e. by the QA Lead after Executive Approval) -- "
-            "not while still in Draft or any other stage.",
-        )
-    item.is_complete = payload.is_complete
-    if payload.is_complete:
-        item.approved_by_id = current_user.id
-        import datetime
-        item.approved_at = datetime.datetime.utcnow()
-    else:
-        item.approved_by_id = None
-        item.approved_at = None
-    db.commit()
-    db.refresh(item)
-    return item
-
-
-# ---- Walkthrough sessions ----
-@router.get("/{req_id}/walkthroughs", response_model=List[schemas.WalkthroughOut])
-def list_walkthroughs(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.WalkthroughSession).filter_by(qa_request_id=req_id).all()
-
-
-@router.post("/{req_id}/walkthroughs", response_model=schemas.WalkthroughOut)
-def add_walkthrough(req_id: int, payload: schemas.WalkthroughCreate, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(
-                         Role.BUSINESS_ANALYST, Role.REQUESTER, Role.QA_ENGINEER, Role.QA_LEAD))):
-    if not db.query(models.QARequest).get(req_id):
-        raise HTTPException(404, "QA Request not found")
-    obj = models.WalkthroughSession(qa_request_id=req_id, **payload.model_dump())
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/walkthroughs/{wt_id}/acknowledge", response_model=schemas.WalkthroughOut)
-def acknowledge_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(Role.QA_ENGINEER, Role.QA_LEAD))):
-    obj = db.query(models.WalkthroughSession).filter_by(id=wt_id, qa_request_id=req_id).first()
-    if not obj:
-        raise HTTPException(404, "Walkthrough session not found")
-    import datetime
-    obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow()
+    obj.status = GatewayStatus.RAISED
+    _log(db, obj.id, "Requester", current_user, "Raised",
+         "Linked request(s) raised with their own independent ID(s); workflow now handled on each separately")
     db.commit()
     db.refresh(obj)
     return obj
@@ -631,6 +494,80 @@ def request_history(req_id: int, db: Session = Depends(get_db), current_user: mo
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="QA_REQUEST", entity_id=req_id)
             .order_by(models.ApprovalAction.created_at).all())
+
+
+@router.get("/{req_id}/export")
+def export_request(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Every field on this gateway record, plus the full Gateway Actions
+    approval history (who submitted/raised/cancelled it and when), as one
+    downloadable PDF -- the offline/printable record of the intake request
+    itself. Each linked child request (Functional QA/SAST/DAST/Automation/
+    Performance) has its own, separate export covering its own full
+    workflow -- this one only covers the gateway's own short Draft ->
+    Submitted -> Raised lifecycle."""
+    obj = db.query(models.QARequest).get(req_id)
+    if not obj:
+        raise HTTPException(404, "QA Request not found")
+
+    linked = []
+    linked += [f"Functional QA {f.request_id}" for f in obj.linked_functional_requests]
+    linked += [f"SAST {s.request_id}" for s in obj.linked_sast_requests]
+    linked += [f"DAST {d.request_id}" for d in obj.linked_dast_requests]
+    linked += [f"Automation {a.request_id}" for a in obj.linked_automation_requests]
+    linked += [f"Performance {p.request_id}" for p in obj.linked_performance_requests]
+
+    sections = [
+        ("Status", [
+            ("Status", obj.status),
+            ("Requester", obj.requester.full_name if obj.requester else None),
+            ("Department", obj.department),
+            ("Linked Requests", ", ".join(linked) if linked else None),
+        ]),
+        ("Application & Change", [
+            ("Application Name", obj.application_name),
+            ("Application Owner", obj.application_owner),
+            ("Project Name", obj.project_name),
+            ("Change Request ID(s)", obj.cr_number),
+            ("Change Type", obj.change_type),
+            ("Vendor / SI Partner", obj.vendor_si_partner),
+            ("Technology Stack", obj.technology_stack),
+        ]),
+        ("Environment & Release", [
+            ("Deployment Environment", obj.environment),
+            ("Target Promotion Environment", obj.target_promotion_environment),
+            ("Release Version / Hash Value", obj.release_version),
+            ("Build Number / Hash Value", obj.build_number),
+            ("Target Release Date", obj.target_release_date),
+        ]),
+        ("Request Details", [
+            ("Request Type(s)", obj.request_types),
+            ("Other Request Type", obj.request_type_other),
+            ("Remarks", obj.remarks),
+            ("Raised On", obj.created_at),
+        ]),
+    ]
+
+    history_rows = (db.query(models.ApprovalAction)
+                     .filter_by(entity_type="QA_REQUEST", entity_id=req_id)
+                     .order_by(models.ApprovalAction.created_at).all())
+    history = []
+    for h in history_rows:
+        actor = db.query(models.User).get(h.actor_id) if h.actor_id else None
+        history.append((h.step_name or "—", h.decision or "—", actor.full_name if actor else "—",
+                         h.actor_role or "—", h.comments or "—",
+                         h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
+
+    buf = build_request_detail_pdf(
+        title=f"{obj.request_id} — {obj.application_name}",
+        subtitle="QA Request (Gateway) — Full Detail Export",
+        sections=sections, history=history,
+        generated_by=current_user.full_name,
+        generated_at=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+    )
+    return StreamingResponse(
+        buf, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{obj.request_id}.pdf"'},
+    )
 
 
 # ---- Supporting documents (Module 1, field 4.1.2 -- multiple files per request) ----

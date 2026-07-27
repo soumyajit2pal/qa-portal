@@ -17,6 +17,9 @@ def _resolve_request_ref(db: Session, entity_type: str, entity_id: int) -> Optio
     if entity_type == "QA_REQUEST":
         obj = db.query(models.QARequest).get(entity_id)
         return obj.request_id if obj else None
+    if entity_type == "FUNCTIONAL_REQUEST":
+        obj = db.query(models.FunctionalRequest).get(entity_id)
+        return obj.request_id if obj else None
     if entity_type == "SAST_DAST":
         # entity_id may belong to either table -- SAST and DAST decisions
         # both log under this one entity_type (see routers/sast_dast.py).
@@ -25,15 +28,18 @@ def _resolve_request_ref(db: Session, entity_type: str, entity_id: int) -> Optio
             return sast.request_id
         dast = db.query(models.DASTRequest).get(entity_id)
         return dast.request_id if dast else None
+    if entity_type == "AUTOMATION":
+        obj = db.query(models.AutomationRequest).get(entity_id)
+        return obj.request_id if obj else None
+    if entity_type == "PERFORMANCE":
+        obj = db.query(models.PerformanceRequest).get(entity_id)
+        return obj.request_id if obj else None
     if entity_type == "SUPPRESSION":
         obj = db.query(models.SuppressionRequest).get(entity_id)
         return obj.suppression_id if obj else None
     if entity_type == "SIGNOFF":
         obj = db.query(models.QASignOff).get(entity_id)
         return obj.certificate_id if obj else None
-    if entity_type == "TEST_CASE":
-        obj = db.query(models.TestCase).get(entity_id)
-        return obj.test_case_id if obj else None
     return None
 
 
