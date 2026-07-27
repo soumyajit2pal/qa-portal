@@ -11,6 +11,7 @@ import Layout from './components/Layout'
 import Login from './Login'
 import Dashboard from './Dashboard'
 import QARequests from './QARequests'
+import ModuleBoundary from './components/ModuleBoundary'
 
 // The 4 domain modules (Functional / Security / Specialised Testing /
 // Governance) are now true Module Federation remotes -- each is its own
@@ -65,23 +66,29 @@ export default function App() {
         <Route path="/" element={<Protected><Dashboard /></Protected>} />
         <Route path="/qa-requests" element={<Protected><QARequests /></Protected>} />
 
-        {/* Functional module -- remote "functional" */}
-        <Route path="/functional-requests" element={<Protected><Functional /></Protected>} />
+        {/* Functional module -- remote "functional". Each remote route is
+            wrapped in its own ModuleBoundary instance (not one boundary
+            around the whole <Routes>) so a failed remote shows a clear,
+            actionable error for just that module instead of silently
+            blanking the entire app, and so navigating away from a failed
+            module to a working one gets a fresh boundary instead of a
+            stuck error screen. */}
+        <Route path="/functional-requests" element={<Protected><ModuleBoundary moduleName="Functional" remoteKey="functional" serveScript="functional"><Functional /></ModuleBoundary></Protected>} />
 
         {/* Security module -- remote "security" */}
-        <Route path="/sast" element={<Protected><SAST /></Protected>} />
-        <Route path="/dast" element={<Protected><DAST /></Protected>} />
-        <Route path="/suppression" element={<Protected><Suppression /></Protected>} />
+        <Route path="/sast" element={<Protected><ModuleBoundary moduleName="Security" remoteKey="security" serveScript="security"><SAST /></ModuleBoundary></Protected>} />
+        <Route path="/dast" element={<Protected><ModuleBoundary moduleName="Security" remoteKey="security" serveScript="security"><DAST /></ModuleBoundary></Protected>} />
+        <Route path="/suppression" element={<Protected><ModuleBoundary moduleName="Security" remoteKey="security" serveScript="security"><Suppression /></ModuleBoundary></Protected>} />
 
         {/* Specialised Testing module -- remote "specialisedTesting" */}
-        <Route path="/automation" element={<Protected><Automation /></Protected>} />
-        <Route path="/performance" element={<Protected><Performance /></Protected>} />
+        <Route path="/automation" element={<Protected><ModuleBoundary moduleName="Specialised Testing" remoteKey="specialisedTesting" serveScript="specialised-testing"><Automation /></ModuleBoundary></Protected>} />
+        <Route path="/performance" element={<Protected><ModuleBoundary moduleName="Specialised Testing" remoteKey="specialisedTesting" serveScript="specialised-testing"><Performance /></ModuleBoundary></Protected>} />
 
         {/* Governance module -- remote "governance" */}
-        <Route path="/signoff" element={<Protected><SignOff /></Protected>} />
-        <Route path="/approvals" element={<Protected><Approvals /></Protected>} />
-        <Route path="/reports" element={<Protected><Reports /></Protected>} />
-        <Route path="/admin" element={<Protected><Admin /></Protected>} />
+        <Route path="/signoff" element={<Protected><ModuleBoundary moduleName="Governance" remoteKey="governance" serveScript="governance"><SignOff /></ModuleBoundary></Protected>} />
+        <Route path="/approvals" element={<Protected><ModuleBoundary moduleName="Governance" remoteKey="governance" serveScript="governance"><Approvals /></ModuleBoundary></Protected>} />
+        <Route path="/reports" element={<Protected><ModuleBoundary moduleName="Governance" remoteKey="governance" serveScript="governance"><Reports /></ModuleBoundary></Protected>} />
+        <Route path="/admin" element={<Protected><ModuleBoundary moduleName="Governance" remoteKey="governance" serveScript="governance"><Admin /></ModuleBoundary></Protected>} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

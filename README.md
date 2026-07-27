@@ -200,16 +200,53 @@ cd frontend
 npm install
 ```
 
-Then run the shell and however many modules you're actively working on, each as its own dev
-server:
+**Two different ways to run each module — pick based on what you're doing:**
+
+- **Editing a module's own UI in isolation** (not through the shell): `npm run dev:<module>`.
+  This runs Vite's normal dev server (fast HMR) and opens that module's page directly, wrapped
+  in its own standalone `<BrowserRouter><AuthProvider>` (see `packages/<module>/src/main.tsx`)
+  — useful for quick iteration, but it is **not** going through Module Federation at all.
+- **Viewing/testing a module through the shell** (the real integrated app): the module must be
+  **built and previewed**, not run via `vite dev`. `@originjs/vite-plugin-federation` only
+  generates and serves `remoteEntry.js` — the file the shell fetches to load a remote — as part
+  of a production build (`vite build` + `vite preview`, or a real static server like nginx). If
+  the shell tries to load a module that's running `vite dev`, the import fails and you'll see a
+  blank page (see [Troubleshooting](#troubleshooting-blank-module-screen) below). Use the
+  `serve:*` scripts for this instead of `dev:*`:
 
 ```bash
-npm run dev:shell                  # http://localhost:5173
-npm run dev:functional             # http://localhost:5001
-npm run dev:security                # http://localhost:5002
-npm run dev:specialised-testing      # http://localhost:5003
-npm run dev:governance                # http://localhost:5004
+npm run serve:functional             # builds, then http://localhost:5001
+npm run serve:security                # builds, then http://localhost:5002
+npm run serve:specialised-testing      # builds, then http://localhost:5003
+npm run serve:governance                # builds, then http://localhost:5004
+npm run dev:shell                        # http://localhost:5173 — the shell itself can stay in dev mode
 ```
+
+Run each `serve:*`/`dev:*` command in its own terminal (they're long-running dev/preview
+servers). You only need the shell plus whichever module(s) you're actually viewing running at
+once.
+
+### Troubleshooting: blank module screen
+
+If the shell loads but a module's page (Functional, Security, Specialised Testing, or
+Governance — anything routed through Module Federation) is a blank white screen, check, in
+order:
+
+1. **Is that module running via `npm run serve:<module>` (build + preview), not
+   `npm run dev:<module>`?** This is the most common cause — `vite dev` never serves
+   `remoteEntry.js` for this plugin, only a built/previewed output does. Stop the `dev:*`
+   process for that module and start `serve:*` instead.
+2. **Open the browser console.** As of this version, a failed remote load shows an in-app error
+   message naming the module and the likely cause (via `packages/shell/src/components/ModuleBoundary.tsx`)
+   instead of a silent blank page — if you're still seeing a truly blank page with no message at
+   all, you're likely on an older build; rebuild the shell.
+3. **Check the Network tab for a failed request to `.../assets/remoteEntry.js`.** A 404 means
+   that module isn't actually serving a build (see #1); a CORS error means that module's
+   `nginx.conf`/dev server isn't sending `Access-Control-Allow-Origin` for the shell's origin.
+4. **Check the shell was built/started with the right `VITE_*_REMOTE_URL`.** These are baked in
+   at the shell's build time (see the "Known limitation" note under
+   [Frontend architecture](#frontend-architecture)) — if a module moved to a new host/port since
+   the shell was last built, the shell is still pointing at the old address.
 
 Open `http://localhost:5173` — the shell loads each module from the ports above (see
 `packages/shell/vite.config.ts`, defaults already point at `localhost:5001`-`5004`) and proxies

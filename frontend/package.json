@@ -11,6 +11,15 @@
     "dev:security": "npm run dev --workspace=@qa-portal/module-security",
     "dev:specialised-testing": "npm run dev --workspace=@qa-portal/module-specialised-testing",
     "dev:governance": "npm run dev --workspace=@qa-portal/module-governance",
+    "serve:functional": "npm run build --workspace=@qa-portal/module-functional && npm run preview --workspace=@qa-portal/module-functional",
+    "serve:security": "npm run build --workspace=@qa-portal/module-security && npm run preview --workspace=@qa-portal/module-security",
+    "serve:specialised-testing": "npm run build --workspace=@qa-portal/module-specialised-testing && npm run preview --workspace=@qa-portal/module-specialised-testing",
+    "serve:governance": "npm run build --workspace=@qa-portal/module-governance && npm run preview --workspace=@qa-portal/module-governance",
+    "build:modules": "npm run build --workspace=@qa-portal/module-functional && npm run build --workspace=@qa-portal/module-security && npm run build --workspace=@qa-portal/module-specialised-testing && npm run build --workspace=@qa-portal/module-governance",
+    "preview:functional": "npm run preview --workspace=@qa-portal/module-functional",
+    "preview:security": "npm run preview --workspace=@qa-portal/module-security",
+    "preview:specialised-testing": "npm run preview --workspace=@qa-portal/module-specialised-testing",
+    "preview:governance": "npm run preview --workspace=@qa-portal/module-governance",
     "build:all": "npm run build --workspace=@qa-portal/module-functional && npm run build --workspace=@qa-portal/module-security && npm run build --workspace=@qa-portal/module-specialised-testing && npm run build --workspace=@qa-portal/module-governance && npm run build --workspace=@qa-portal/shell",
     "typecheck:all": "npm run typecheck --workspaces --if-present"
   }
