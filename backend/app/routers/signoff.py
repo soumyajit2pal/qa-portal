@@ -47,6 +47,21 @@ def _get_or_404(db: Session, signoff_id: int) -> "models.QASignOff":
     return obj
 
 
+def _requester_department(db: Session, obj: "models.QASignOff"):
+    """Confirmed: "Sign off form raised by QA team, so it should be approved
+    by QA team only" -- Department Head COE approval matches against the
+    certificate's own REQUESTER's department (the Tester/QA Lead who raised
+    it -- always someone on the QA team), not `obj.department` (the
+    delegated business department of the underlying Functional Testing
+    Request, e.g. "Digital Banking Department (DBD)" -- that field is what
+    the SM step matches against instead, since SM is the genuine business-
+    side reviewer). Using the requester's own department rather than
+    hardcoding the literal string "QA Team" keeps this correct even if the
+    QA team's department is ever renamed or split in Admin > Departments."""
+    requester = db.query(models.User).get(obj.requester_id) if obj.requester_id else None
+    return requester.department if requester else None
+
+
 @router.get("", response_model=List[schemas.SignOffOut])
 def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return db.query(models.QASignOff).order_by(models.QASignOff.created_at.desc()).all()
@@ -173,9 +188,22 @@ def sm_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session 
 def department_head_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
                                   current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_COE))):
     """Final approval -- Approved issues the certificate outright (no further
-    QA-Lead sign step; this replaces the old /issue endpoint)."""
+    QA-Lead sign step; this replaces the old /issue endpoint).
+
+    Department mapping IS required here, same as SM/Department Head --
+    confirmed explicitly: "Sign off form raised by QA team, so it should be
+    approved by QA team only." The certificate's own REQUESTER (the Tester/
+    QA Lead who raised it) is always someone on the QA team -- so this
+    matches against *their* department (see _requester_department above),
+    not `obj.department` (the delegated business department of the
+    underlying Functional Testing Request, e.g. "Digital Banking Department
+    (DBD)" -- that's what the SM step matches against instead, a couple of
+    lines up, since SM genuinely is the business-side reviewer). Matching
+    against `obj.department` here (an earlier revision's mistake, since
+    corrected) would have compared the Executive COE's own department
+    against the wrong side of the workflow entirely and could never pass."""
     obj = _get_or_404(db, signoff_id)
-    require_same_department(current_user, obj.department)
+    require_same_department(current_user, _requester_department(db, obj))
     _require(obj, "DEPT_HEAD_COE_APPROVAL_PENDING", "Department Head COE decision")
     if payload.decision == "Approved":
         obj.status = "ISSUED"
@@ -273,14 +301,17 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     )
 
 
-def _can_upload_documents(obj: "models.QASignOff", user: models.User) -> bool:
+def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.User) -> bool:
     """Reported bug: upload had no restriction at all -- any logged-in user
     could attach documents to any QA Sign-off certificate. Scoped to the
     original requester (Tester/QA Lead who raised it, always) plus whoever
     the certificate's *current* status is actually sitting with: SM during
-    SM_APPROVAL_PENDING or Department Head COE during
-    DEPT_HEAD_COE_APPROVAL_PENDING, both same-department-scoped, matching
-    those stages' own decision endpoints above. Admin always bypasses, same
+    SM_APPROVAL_PENDING (matches `obj.department`, the delegated business
+    department -- SM is a genuine business-side reviewer), or Department
+    Head COE during DEPT_HEAD_COE_APPROVAL_PENDING (matches the certificate's
+    own requester's department instead -- see _requester_department and the
+    matching comment on department_head_coe_decision -- "raised by QA team,
+    so should be approved by QA team only"). Admin always bypasses, same
     convention as every other permission check in this file."""
     if user.has_role(Role.ADMIN):
         return True
@@ -290,7 +321,7 @@ def _can_upload_documents(obj: "models.QASignOff", user: models.User) -> bool:
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPT_HEAD_COE_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_COE) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_COE) and user.department == _requester_department(db, obj)
     return False
 
 
@@ -305,7 +336,7 @@ def list_signoff_documents(signoff_id: int, db: Session = Depends(get_db), curre
 def upload_signoff_documents(signoff_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                               current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, signoff_id)
-    if not _can_upload_documents(obj, current_user):
+    if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the requester or this certificate's current stage owner (SM or Department Head COE currently reviewing it) can upload documents")
     return doc_store.save_documents(db, "SIGNOFF", signoff_id, obj.certificate_id, files, current_user.id)
 

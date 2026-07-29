@@ -3173,7 +3173,9 @@ already enforces, not merely "anyone holding that role":
   assignee either, since the Security Team reviews across departments), so this one stays role-only,
   matching that endpoint's own gate exactly.
 - **`signoff.py`:** the certificate's own requester, SM (same department) during `SM_APPROVAL_PENDING`, or
-  Department Head COE (same department) during `DEPT_HEAD_COE_APPROVAL_PENDING`.
+  Department Head COE during `DEPT_HEAD_COE_APPROVAL_PENDING` -- role-only, NOT department-scoped (see
+  section 74 below, which corrects this same file's department_head_coe_decision endpoint and this helper
+  together after the department scoping turned out to block real approvals).
 - **`qa_requests.py`** (the gateway QA Request itself): narrowed to just the request's own `requester_id`
   (or admin) -- the gateway has no approval workflow of its own to widen this to (pure intake record, see
   `models.QARequest`'s docstring), so there's no equivalent "current stage owner" concept here the way there
@@ -3188,3 +3190,107 @@ cross-checked every role/status constant referenced (`Role.SM`/`Role.DEPARTMENT_
 `Role.DEPARTMENT_HEAD_COE`/`Role.SECURITY_ANALYST`/`Role.ADMIN`, and every `QAStatus`/`SAST_DAST_STATUSES`/
 `PERFORMANCE_STATUSES` value used) directly against `constants.py`; Documents and outputs copies re-synced
 and confirmed identical via `diff -rq`.
+
+## 74. Bug fix: Executive COE (Department Head COE) could not approve QA Sign-off Certificates
+
+**SUPERSEDED by section 75 below** -- confirmed directly afterward that department mapping for Department
+Head COE is in fact required (an Executive COE from one department must not be able to complete a
+certificate belonging to another), so this section's removal of `require_same_department` was wrong and has
+been reverted. Left in place below for the record of what was tried and why; do not re-apply this section's
+fix.
+
+**Why:** reported directly -- an Executive COE (AGM-QA) user, holding `Role.DEPARTMENT_HEAD_COE`, could not
+approve, return, or reject a certificate sitting at `DEPT_HEAD_COE_APPROVAL_PENDING`, the final step of the
+QA Sign-off chain. Root cause: `routers/signoff.py::department_head_coe_decision` called
+`require_same_department(current_user, obj.department)` -- the same department-match check used by the SM
+and (business) Department Head decision endpoints. But `deps.py::require_same_department`'s own docstring is
+explicit that this check is for genuine business-side roles "mapped to a specific department" and does NOT
+apply to the QA side of the workflow (it names QA_LEAD/QA_ENGINEER/SECURITY_ANALYST as the existing
+exemptions). `Role.DEPARTMENT_HEAD_COE` is "Executive COE (CM/AGM-QA)" (see `constants.ROLE_LABELS`) -- a QA
+function executive who signs off certificates across the whole QA organization, not a business department
+head tied to the requester's own department. Confirmed via `seed.py`: the seeded Executive COE user (`exec1`,
+Vikram Joshi) is mapped to department `"QA Team"`, which will never equal a business department like "Digital
+Banking Department (DBD)" -- so `require_same_department` silently rejected every real approval this role
+was ever asked to make. The frontend had the identical bug: `SignOff.tsx`'s `canDeptHeadCoeDecide` also
+required `sameDept || isAdmin`, so the Approve/Return/Reject buttons themselves never rendered for a non-admin
+Executive COE either. The upload-permission fix from section 73 (same session, just before this one) had
+also carried the same same-department requirement into its own `_can_upload_documents` helper for this
+exact status, since it was modeled on the (correctly department-scoped) SM case right above it.
+
+**Fix:** removed the `require_same_department` call from `department_head_coe_decision` entirely -- the
+endpoint now only requires `Role.DEPARTMENT_HEAD_COE` (via `require_roles`, unchanged) and the certificate
+being in `DEPT_HEAD_COE_APPROVAL_PENDING`. Updated `_can_upload_documents`'s own `DEPT_HEAD_COE_APPROVAL_PENDING`
+branch to drop the `user.department == obj.department` comparison, keeping only the role check. Updated
+`SignOff.tsx::canDeptHeadCoeDecide` to `hasRole(user, 'DEPARTMENT_HEAD_COE') && status ===
+'DEPT_HEAD_COE_APPROVAL_PENDING'`, dropping `sameDept || isAdmin` (both still used elsewhere in the file for
+the genuinely department-scoped SM checks, so neither was removed). SM's own department scoping (`sm_decision`,
+`update_signoff`'s SM-editing window, `canSMDecide`) is untouched -- SM is a real business-side role and this
+restriction is correct there.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `signoff.py` (clean); `npx tsc --noEmit -p .`
+from `frontend/` (clean); confirmed via `seed.py` that the seeded Executive COE account's department
+("QA Team") could never have matched a real request's business department, explaining the reported symptom
+exactly; Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 75. Revert of section 74 -- Department Head COE department mapping is required after all
+
+**Why:** confirmed directly, immediately after section 74 shipped: department mapping for Department Head
+COE ("Executive COE (CM/AGM-QA)") is in fact a required business rule -- "other department can not complete
+sign off." Section 74's reasoning (that this role signs off across the whole QA function, org-wide, the same
+way QA_LEAD/QA_ENGINEER/SECURITY_ANALYST are exempted from `require_same_department`) was wrong: in the real
+deployment, each Executive COE user is mapped to a specific department, same as SM/Department Head, and one
+department's Executive COE must not be able to approve another department's certificate. The workflow order
+itself (SM Approval -> Department Head COE Approval, i.e. `SM_APPROVAL_PENDING` ->
+`DEPT_HEAD_COE_APPROVAL_PENDING`) was never in question and is unchanged.
+
+The original "Executive COE not able to approve" symptom that prompted section 74 was real, but its true
+cause was a data-mapping problem, not a code bug: the demo/seed account (`seed.py`'s `exec1`, Vikram Joshi) is
+mapped to department `"QA Team"`, which will never equal a real request's business department (e.g. "Digital
+Banking Department (DBD)") -- so it could never pass the same-department check regardless of which
+certificate it tried to approve. The fix for that is data, not code: every real Executive COE user must be
+mapped, via Admin > Users, to the SAME department as the certificates they're expected to approve.
+
+**Fix (reverting section 74's three changes):**
+- `routers/signoff.py::department_head_coe_decision` -- restored the `require_same_department(current_user,
+  obj.department)` call (removed docstring reasoning about org-wide scope; replaced with a note explaining
+  the mapping requirement and pointing at the real (data) cause of the original symptom).
+- `routers/signoff.py::_can_upload_documents` -- restored `user.department == obj.department` on the
+  `DEPT_HEAD_COE_APPROVAL_PENDING` branch.
+- `frontend/src/modules/governance/SignOff.tsx::canDeptHeadCoeDecide` -- restored `&& (sameDept || isAdmin)`.
+
+SM's own department scoping (`sm_decision`, `update_signoff`'s SM-editing window, `canSMDecide`) was never
+touched by either section 74 or this revert -- SM has always correctly required department mapping.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `signoff.py` (clean); `npx tsc --noEmit -p .`
+from `frontend/` (clean); Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 76. Fix: Department Head COE department match compared against the wrong side of the workflow
+
+**Why:** section 75's revert restored `require_same_department(current_user, obj.department)` on
+`department_head_coe_decision` -- correct in spirit (department mapping is required), but `obj.department` is
+the delegated *business* department of the underlying Functional Testing Request (e.g. "Digital Banking
+Department (DBD)"), the same field the SM step legitimately matches against a couple of lines up (SM is a
+genuine business-side reviewer). Confirmed directly: "Sign off form raised by QA team, so it should be
+approved by QA team only" -- the certificate is raised by a Tester/QA Lead, always someone on the QA team, so
+Department Head COE approval should match against *the requester's own department*, not the business
+department of the change being tested. Comparing against `obj.department` instead would have meant an
+Executive COE mapped to "QA Team" could never approve a certificate whose underlying request came from any
+business department (DBD, IT, etc.) -- i.e. never, since a certificate's `obj.department` is always a
+business department, not "QA Team" -- reproducing the exact original symptom section 74/75 were trying to
+fix, just for a different (correct, this time) reason.
+
+**Fix:** added `_requester_department(db, obj)` to `routers/signoff.py` -- looks up the certificate's own
+`requester_id` and returns *that user's* `department` (always the QA team's, since only QA_ENGINEER/QA_LEAD
+can raise a certificate -- see `create_signoff`'s own role gate). `department_head_coe_decision` and
+`_can_upload_documents`'s `DEPT_HEAD_COE_APPROVAL_PENDING` branch now call
+`require_same_department(current_user, _requester_department(db, obj))` / compare against it, instead of
+`obj.department`. Deliberately looks up the requester's actual department rather than hardcoding the literal
+string `"QA Team"`, so this stays correct even if that department is ever renamed or split in Admin >
+Departments. Mirrored on the frontend: `SignOff.tsx`'s `SignOffDetail` now computes `requesterDepartment`
+(via `users.find((u) => u.id === item.requester_id)?.department`) and a new `sameDeptAsRequester`, and
+`canDeptHeadCoeDecide` checks `sameDeptAsRequester || isAdmin` instead of `sameDept || isAdmin` (`sameDept`
+itself -- matched against `item.department`, the business department -- is untouched and still correctly used
+by `canSMDecide`/the SM-editing window in `canEditDetails`).
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `signoff.py` (clean); `npx tsc --noEmit -p .`
+from `frontend/` (clean); Documents and outputs copies re-synced and confirmed identical via `diff -rq`.

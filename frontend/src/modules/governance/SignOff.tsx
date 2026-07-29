@@ -360,12 +360,27 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   const isRequester = item.requester_id === user?.id || hasRole(user, 'ADMIN')
   const status = item.status
   const sameDept = !!user?.department && user.department === item.department
+  // Confirmed: "Sign off form raised by QA team, so it should be approved by
+  // QA team only" -- Department Head COE approval matches against the
+  // certificate's own REQUESTER's department (the Tester/QA Lead who raised
+  // it -- always someone on the QA team), not `item.department` (the
+  // delegated business department of the underlying Functional Testing
+  // Request, e.g. "Digital Banking Department (DBD)" -- that's what
+  // `sameDept` above is for instead, since SM genuinely is the business-side
+  // reviewer). Mirrors routers/signoff.py::_requester_department.
+  const requesterDepartment = users.find((u) => u.id === item.requester_id)?.department
+  const sameDeptAsRequester = !!user?.department && user.department === requesterDepartment
   const isAdmin = hasRole(user, 'ADMIN')
 
   const canSubmit = isRequester && status === 'DRAFT'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status)
   const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || isAdmin)
-  const canDeptHeadCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && (sameDept || isAdmin)
+  // Department mapping IS required for Department Head COE too, same as SM
+  // above -- confirmed explicitly, just matched against the requester's own
+  // department (see requesterDepartment/sameDeptAsRequester above) rather
+  // than item.department. Every real Executive COE user must be mapped, via
+  // Admin > Users, to the SAME department as this certificate's requester.
+  const canDeptHeadCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && (sameDeptAsRequester || isAdmin)
   // Tester's own editable statuses, or an SM directly editing while it's
   // sitting at their own SM_APPROVAL_PENDING review -- see
   // routers/signoff.py::update_signoff.
