@@ -1,0 +1,26 @@
+{
+  "name": "qa-portal-frontend",
+  "private": true,
+  "version": "3.0.0",
+  "type": "module",
+  "description": "Centralized QA Portal -- single React + Vite SPA. Domain areas (Functional, Security, Specialised Testing, Governance) live as plain folders under src/modules/ and are code-split via React.lazy(), but all ship in one build/deploy -- this project previously used a Module Federation micro-frontend split (separate images per module) and was consolidated back into one app; see README 'Frontend architecture'.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview --port 5173"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.6",
+    "typescript": "^5.5.4",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/node": "^20.14.9"
+  }
+}

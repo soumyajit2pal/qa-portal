@@ -1,0 +1,481 @@
+import React, { useEffect, useState, useCallback, useRef } from 'react'
+import { api } from '../../api'
+import { useAuth } from '../../context/AuthContext'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
+import {
+  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, hasRole,
+  SIGNOFF_EDITABLE_STATUSES,
+} from '../../constants'
+import { SignOffOut, UserOut, FunctionalOut, ApprovalActionOut } from '../../types'
+
+function userName(users: UserOut[], id?: number | null): string | null {
+  const u = users.find((x) => x.id === id)
+  return u ? u.full_name : null
+}
+
+// Only Functional Testing Requests that have actually finished QA activity
+// are eligible to be picked as the "Testing Request ID" for a new
+// certificate -- raising sign-off for a request still mid-execution
+// wouldn't make sense.
+const SIGNOFF_ELIGIBLE_STATUSES = ['QA_COMPLETED', 'QA_SIGNOFF_PENDING', 'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION', 'CLOSED']
+
+const EMPTY = {
+  certificate_type: 'Full Clearance', testing_type: 'Functional', testing_request_id: '',
+  change_request_ids: '', application_name: '', application_owner: '', department: '',
+  technology_stack: '', risk_tier: 'Tier 3 (Medium)', release_version: '', build_number: '',
+  environment_tested: 'UAT', target_promotion_environment: 'Production',
+  exit_criteria_notes: '', open_defect_summary: '', residual_risk_notes: '',
+}
+type SignOffForm = typeof EMPTY
+
+// Searchable "Testing Request ID" autosuggest over Functional Testing
+// Requests -- same pattern as Suppression.tsx's SAST/DAST RequestIdSearch.
+// Selecting a match hands the full FunctionalOut record back to the caller,
+// which derives every auto-populated certificate field from it (see
+// NewSignOffModal::applyRequest below).
+function TestingRequestIdSearch({ requests, selected, onSelect, onClear }: {
+  requests: FunctionalOut[]
+  selected: FunctionalOut | null
+  onSelect: (r: FunctionalOut) => void
+  onClear: () => void
+}) {
+  const [query, setQuery] = useState('')
+  const [open, setOpen] = useState(false)
+  const boxRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) { if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [])
+
+  if (selected) {
+    return (
+      <div className="searchable-select">
+        <div className="searchable-select-trigger" style={{ cursor: 'default' }}>
+          <span>{selected.request_id} — {selected.application_name || '—'}</span>
+          <button type="button" className="btn btn-sm" onClick={onClear}>Change</button>
+        </div>
+      </div>
+    )
+  }
+
+  const q = query.trim().toLowerCase()
+  const matches = (q
+    ? requests.filter((r) => r.request_id.toLowerCase().includes(q)
+        || (r.application_name || '').toLowerCase().includes(q))
+    : requests
+  ).slice(0, 8)
+
+  return (
+    <div className="searchable-select" ref={boxRef}>
+      <input
+        placeholder="Search Testing Request ID or application..."
+        value={query}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
+      />
+      {open && (
+        <div className="searchable-select-panel">
+          <div className="searchable-select-list">
+            {matches.length === 0 && <div className="searchable-select-empty">No eligible Functional Testing Requests found.</div>}
+            {matches.map((r) => (
+              <div key={r.id} className="searchable-select-option"
+                   onClick={() => { onSelect(r); setQuery(''); setOpen(false) }}>
+                <div>{r.request_id} — {r.application_name || '—'}</div>
+                {(r.department || r.application_owner) && (
+                  <div className="muted small">{r.application_owner || '—'} &middot; {r.department || '—'}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// `presetRequest`, when given (see functional/Functional.tsx's "Request
+// Sign-off" button), locks the Testing Request ID to that specific request
+// -- raising sign-off from a request's own page always means the
+// certificate is for THAT request, so there's nothing to search/change.
+// Without it (the standalone "+ New Sign-off Certificate" button on this
+// page), the QA Lead searches for and picks any eligible Functional Testing
+// Request via TestingRequestIdSearch above.
+//
+// Either way, once a Testing Request is selected, Application Name/Owner/
+// Department/Change Request ID(s) are derived from it and locked -- never
+// independently editable, so the certificate can't drift from the request
+// it's actually for.
+export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
+  onClose: () => void
+  onCreated: (s: SignOffOut) => void
+  presetRequest?: FunctionalOut
+}) {
+  const [form, setForm] = useState<SignOffForm>(EMPTY)
+  const [selectedRequest, setSelectedRequest] = useState<FunctionalOut | null>(null)
+  const [eligibleRequests, setEligibleRequests] = useState<FunctionalOut[]>([])
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+  function set<K extends keyof SignOffForm>(k: K, v: SignOffForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
+
+  const applyRequest = useCallback((r: FunctionalOut) => {
+    setSelectedRequest(r)
+    setForm((f) => ({
+      ...f,
+      testing_request_id: r.request_id,
+      application_name: r.application_name || '',
+      application_owner: r.application_owner || '',
+      department: r.department || '',
+      change_request_ids: r.cr_number || '',
+      technology_stack: r.technology_stack || '',
+      release_version: r.release_version || '',
+      build_number: r.build_number || '',
+      // SIGNOFF_TESTING_TYPES is ["Functional", "SAST", "DAST"] -- a
+      // certificate raised from a Functional Testing Request is always the
+      // "Functional" type.
+      testing_type: 'Functional',
+      environment_tested: r.environment || f.environment_tested,
+      target_promotion_environment: r.target_promotion_environment || f.target_promotion_environment,
+    }))
+  }, [])
+
+  useEffect(() => {
+    if (presetRequest) { applyRequest(presetRequest); return }
+    api.get<FunctionalOut[]>('/api/functional-requests')
+      .then((rows) => setEligibleRequests(rows.filter((r) => SIGNOFF_ELIGIBLE_STATUSES.includes(r.status))))
+      .catch(setError)
+  }, [presetRequest, applyRequest])
+
+  function clearSelection() {
+    setSelectedRequest(null)
+    setForm((f) => ({ ...f, testing_request_id: '', application_name: '', application_owner: '', department: '', change_request_ids: '' }))
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    // Disabled inputs are skipped by the browser's own `required` validation
+    // entirely, so the locked Application Name/Owner/Department/Change
+    // Request ID(s) fields need this explicit check instead -- they're only
+    // ever filled in via picking a Testing Request above.
+    if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name/Owner/Department/Change Request ID(s) are derived from it.'); return }
+    setBusy(true)
+    try { onCreated(await api.post<SignOffOut>('/api/signoffs', form)) }
+    catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title="New QA Sign-off Certificate" onClose={onClose} wide>
+      <form onSubmit={submit}>
+        <Field label="Testing Request ID *">
+          {presetRequest ? (
+            <div className="searchable-select">
+              <div className="searchable-select-trigger" style={{ cursor: 'default' }}>
+                <span>{presetRequest.request_id} — {presetRequest.application_name || '—'}</span>
+              </div>
+            </div>
+          ) : (
+            <TestingRequestIdSearch requests={eligibleRequests} selected={selectedRequest} onSelect={applyRequest} onClear={clearSelection} />
+          )}
+        </Field>
+        <div className="form-row">
+          <Field label="Application Name *"><input required disabled value={form.application_name} onChange={() => {}} /></Field>
+          <Field label="Application Owner *"><input required disabled value={form.application_owner} onChange={() => {}} /></Field>
+          <Field label="Department *"><input required disabled value={form.department} onChange={() => {}} /></Field>
+          <Field label="Change Request ID(s) *"><input required disabled value={form.change_request_ids} onChange={() => {}} /></Field>
+          <Field label="Technology Stack *"><input required value={form.technology_stack} onChange={(e) => set('technology_stack', e.target.value)} /></Field>
+          <Field label="Release Version *"><input required value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>
+          <Field label="Build Number *"><input required value={form.build_number} onChange={(e) => set('build_number', e.target.value)} /></Field>
+          <Field label="Certificate Type *">
+            <select required value={form.certificate_type} onChange={(e) => set('certificate_type', e.target.value)}>
+              {CERTIFICATE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Testing Type *">
+            <select required value={form.testing_type} onChange={(e) => set('testing_type', e.target.value)}>
+              {SIGNOFF_TESTING_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Risk Tier *">
+            <select required value={form.risk_tier} onChange={(e) => set('risk_tier', e.target.value)}>
+              {RISK_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Environment Tested *">
+            <select required value={form.environment_tested} onChange={(e) => set('environment_tested', e.target.value)}>
+              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Target Promotion Environment *">
+            <select required value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
+              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+        </div>
+        <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
+        <Field label="Open Defect Review Summary *"><textarea required value={form.open_defect_summary} onChange={(e) => set('open_defect_summary', e.target.value)} /></Field>
+        <Field label="Residual Risk Documentation *"><textarea required value={form.residual_risk_notes} onChange={(e) => set('residual_risk_notes', e.target.value)} /></Field>
+        <ErrorText error={error} />
+        <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Draft Certificate'}</button>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+// Edit Details for an already-raised certificate -- reachable by the Tester
+// (requester) while it's Draft or sitting back with them after an SM/
+// Department Head COE return, or by an SM directly while it's sitting at
+// their own SM_APPROVAL_PENDING review (see routers/signoff.py::
+// update_signoff for the exact permission windows -- "he will have option
+// to modify details" per the requested workflow). Testing Request ID/
+// Application Name/Owner/Department/Change Request ID(s) stay locked here
+// too, same as at creation -- they're derived from the linked Functional
+// Testing Request and shouldn't drift from it.
+function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClose: () => void; onSaved: (s: SignOffOut) => void }) {
+  const [form, setForm] = useState({
+    certificate_type: item.certificate_type, testing_type: item.testing_type,
+    vendor_si_partner: item.vendor_si_partner || '', technology_stack: item.technology_stack || '',
+    risk_tier: item.risk_tier || '', release_version: item.release_version || '', build_number: item.build_number || '',
+    environment_tested: item.environment_tested || '', target_promotion_environment: item.target_promotion_environment || '',
+    exit_criteria_notes: item.exit_criteria_notes || '', open_defect_summary: item.open_defect_summary || '',
+    residual_risk_notes: item.residual_risk_notes || '',
+  })
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+  function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) { setForm((f) => ({ ...f, [k]: v })) }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+    try { onSaved(await api.put<SignOffOut>(`/api/signoffs/${item.id}`, form)) }
+    catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={`Edit ${item.certificate_id}`} onClose={onClose} wide>
+      <form onSubmit={submit}>
+        <div className="form-row">
+          <Field label="Testing Request ID"><input disabled value={item.testing_request_id || ''} /></Field>
+          <Field label="Application Name"><input disabled value={item.application_name} /></Field>
+          <Field label="Application Owner"><input disabled value={item.application_owner || ''} /></Field>
+          <Field label="Department"><input disabled value={item.department || ''} /></Field>
+        </div>
+        <div className="form-row">
+          <Field label="Certificate Type *">
+            <select required value={form.certificate_type} onChange={(e) => set('certificate_type', e.target.value)}>
+              {CERTIFICATE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Testing Type *">
+            <select required value={form.testing_type} onChange={(e) => set('testing_type', e.target.value)}>
+              {SIGNOFF_TESTING_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Technology Stack"><input value={form.technology_stack} onChange={(e) => set('technology_stack', e.target.value)} /></Field>
+          <Field label="Release Version"><input value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>
+          <Field label="Build Number"><input value={form.build_number} onChange={(e) => set('build_number', e.target.value)} /></Field>
+          <Field label="Risk Tier *">
+            <select required value={form.risk_tier} onChange={(e) => set('risk_tier', e.target.value)}>
+              {RISK_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Environment Tested *">
+            <select required value={form.environment_tested} onChange={(e) => set('environment_tested', e.target.value)}>
+              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <Field label="Target Promotion Environment *">
+            <select required value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
+              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+        </div>
+        <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
+        <Field label="Open Defect Review Summary *"><textarea required value={form.open_defect_summary} onChange={(e) => set('open_defect_summary', e.target.value)} /></Field>
+        <Field label="Residual Risk Documentation *"><textarea required value={form.residual_risk_notes} onChange={(e) => set('residual_risk_notes', e.target.value)} /></Field>
+        <ErrorText error={error} />
+        <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Changes'}</button>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; onClose: () => void; onChanged: (s: SignOffOut) => void; users: UserOut[] }) {
+  const { user } = useAuth()
+  const [error, setError] = useState<unknown>(null)
+  const [busyAction, setBusyAction] = useState<string | null>(null)
+  const [comments, setComments] = useState('')
+  const [history, setHistory] = useState<ApprovalActionOut[]>([])
+  const [editing, setEditing] = useState(false)
+
+  const load = useCallback(async () => {
+    try { setHistory(await api.get<ApprovalActionOut[]>(`/api/signoffs/${item.id}/history`)) }
+    catch (err) { setError(err) }
+  }, [item.id])
+  useEffect(() => { load() }, [load])
+
+  async function act(action: string, extra?: Record<string, unknown>) {
+    setError(null)
+    setBusyAction(action)
+    try {
+      const updated = await api.post<SignOffOut>(`/api/signoffs/${item.id}/${action}`, extra || {})
+      onChanged(updated)
+      load()
+    } catch (err) { setError(err) } finally { setBusyAction(null) }
+  }
+
+  const isRequester = item.requester_id === user?.id || hasRole(user, 'ADMIN')
+  const status = item.status
+  const sameDept = !!user?.department && user.department === item.department
+  const isAdmin = hasRole(user, 'ADMIN')
+
+  const canSubmit = isRequester && status === 'DRAFT'
+  const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status)
+  const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || isAdmin)
+  const canDeptHeadCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && (sameDept || isAdmin)
+  // Tester's own editable statuses, or an SM directly editing while it's
+  // sitting at their own SM_APPROVAL_PENDING review -- see
+  // routers/signoff.py::update_signoff.
+  const canEditDetails = (isRequester && SIGNOFF_EDITABLE_STATUSES.includes(status))
+    || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || isAdmin))
+
+  return (
+    <Modal title={item.certificate_id} onClose={onClose} wide>
+      <ErrorText error={error} />
+      <div className="grid grid-2">
+        <div><strong>Application:</strong> {item.application_name}</div>
+        <div><strong>Status:</strong> <Badge status={item.status} /></div>
+        <div><strong>Requested By (Tester):</strong> {userName(users, item.requester_id) || '—'}</div>
+        <div><strong>Reviewed By (SM):</strong> {userName(users, item.reviewed_by_id) || '—'}</div>
+        <div><strong>Approved By (Department Head COE):</strong> {userName(users, item.approved_by_id) || '—'}</div>
+        <div><strong>Certificate Type:</strong> {item.certificate_type}</div>
+        <div><strong>Testing Type:</strong> {item.testing_type}</div>
+        <div><strong>Release / Build:</strong> {item.release_version || '—'} / {item.build_number || '—'}</div>
+        <div><strong>Environment Tested:</strong> {item.environment_tested || '—'}</div>
+        <div><strong>Target Promotion:</strong> {item.target_promotion_environment || '—'}</div>
+        <div><strong>Risk Tier:</strong> {item.risk_tier || '—'}</div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
+        <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/signoffs/${item.id}/export`, `${item.certificate_id}.pdf`)}>
+          Export PDF
+        </button>
+        {canEditDetails && <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setEditing(true)}>Edit Details</button>}
+        {canSubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('submit')}>Submit for SM Approval</button>}
+        {canResubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('resubmit')}>Re-submit</button>}
+      </div>
+
+      {(canSMDecide || canDeptHeadCoeDecide) && (
+        <div className="form-field" style={{ marginTop: 10 }}>
+          <label>Comments (optional)</label>
+          <textarea value={comments} onChange={(e) => setComments(e.target.value)} />
+        </div>
+      )}
+      {canSMDecide && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <ApprovalDecisionButtons
+            userName={user?.full_name}
+            comments={comments}
+            busy={!!busyAction}
+            onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
+            onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
+            onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+          />
+        </div>
+      )}
+      {canDeptHeadCoeDecide && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <ApprovalDecisionButtons
+            userName={user?.full_name}
+            comments={comments}
+            busy={!!busyAction}
+            approveLabel="Approve & Issue Certificate"
+            onApprove={(signed) => act('department-head-coe-decision', { decision: 'Approved', comments: signed })}
+            onReturn={() => act('department-head-coe-decision', { decision: 'Returned', comments })}
+            onReject={() => act('department-head-coe-decision', { decision: 'Rejected', comments })}
+          />
+        </div>
+      )}
+
+      <div className="section-title">Documents</div>
+      <RequestDocuments apiBase="/api/signoffs" reqId={item.id} />
+
+      <div className="section-title">History</div>
+      <Table
+        rowKey="id"
+        columns={[
+          { key: 'step_name', header: 'Step' },
+          { key: 'decision', header: 'Decision' },
+          { key: 'actor_id', header: 'Actor', render: (r) => userName(users, r.actor_id) || '—', filterValue: (r) => userName(users, r.actor_id) || '' },
+          { key: 'actor_role', header: 'Role' },
+          { key: 'comments', header: 'Comments' },
+          { key: 'created_at', header: 'When', render: (r) => new Date(r.created_at).toLocaleString() },
+        ]}
+        rows={history}
+      />
+
+      {editing && (
+        <EditSignOffModal
+          item={item}
+          onClose={() => setEditing(false)}
+          onSaved={(updated) => { setEditing(false); onChanged(updated) }}
+        />
+      )}
+    </Modal>
+  )
+}
+
+export default function SignOff() {
+  const { user } = useAuth()
+  const [rows, setRows] = useState<SignOffOut[]>([])
+  const [showNew, setShowNew] = useState(false)
+  const [selected, setSelected] = useState<SignOffOut | null>(null)
+  const [users, setUsers] = useState<UserOut[]>([])
+  const [error, setError] = useState<unknown>(null)
+
+  const load = useCallback(async () => {
+    try { setRows(await api.get<SignOffOut[]>('/api/signoffs')) } catch (err) { setError(err) }
+  }, [])
+  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names just stay empty */ })
+  }, [])
+
+  // Tester (QA Engineer) raises the certificate now, per the Tester -> SM ->
+  // Department Head COE approval chain -- QA Lead keeps create access too
+  // (unchanged from before), Department Head COE no longer creates (their
+  // role is now the final approval step, not authorship).
+  const canCreate = hasRole(user, 'QA_ENGINEER', 'QA_LEAD')
+
+  return (
+    <div>
+      <ErrorText error={error} />
+      <PageHeader
+        title="QA Sign-off Certificates" count={rows.length}
+        subtitle="Formal QA clearance certificates: raised by the Tester, reviewed by SM, and given final approval by Department Head COE ahead of release."
+        actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Sign-off Certificate</button>}
+      />
+      <Card>
+        <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
+          { key: 'certificate_id', header: 'Certificate ID' },
+          { key: 'application_name', header: 'Application' },
+          { key: 'requester_id', header: 'Requested By', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
+          { key: 'reviewed_by_id', header: 'Reviewed By', render: (r) => userName(users, r.reviewed_by_id) || '—', filterValue: (r) => userName(users, r.reviewed_by_id) || '' },
+          { key: 'approved_by_id', header: 'Approved By', render: (r) => userName(users, r.approved_by_id) || '—', filterValue: (r) => userName(users, r.approved_by_id) || '' },
+          { key: 'certificate_type', header: 'Type' },
+          { key: 'testing_type', header: 'Testing Type' },
+          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} /> },
+        ]} rows={rows} />
+      </Card>
+      {showNew && <NewSignOffModal onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load() }} />}
+      {selected && <SignOffDetail item={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }} users={users} />}
+    </div>
+  )
+}

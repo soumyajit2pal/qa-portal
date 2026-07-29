@@ -1,0 +1,24 @@
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
+import App from './App'
+import { AuthProvider } from './context/AuthContext'
+import './index.css'
+
+// NOTE: React.StrictMode intentionally double-invokes effects in development
+// (mount -> cleanup -> mount) to help surface side-effect bugs -- this is why
+// every `useEffect(() => { load() }, [load])` data-fetch across the app was
+// firing its API calls twice in the Network tab. It's a dev-only React
+// behavior (removed in production builds) and doesn't indicate a real bug,
+// but it was making the Network tab noisy/confusing during testing, so it's
+// been left out here.
+const rootEl = document.getElementById('root')
+if (!rootEl) throw new Error('Root element #root not found')
+
+ReactDOM.createRoot(rootEl).render(
+  <BrowserRouter>
+    <AuthProvider>
+      <App />
+    </AuthProvider>
+  </BrowserRouter>,
+)

@@ -1,0 +1,61 @@
+# Full-stack orchestration for the Centralized QA Portal.
+#
+# Two services: a FastAPI/Oracle backend and one frontend image (single
+# React + Vite SPA -- this project previously split the frontend into 5
+# separately-deployed Module Federation images and was consolidated back
+# into one app; see README "Frontend architecture" for why).
+#
+# The frontend's nginx serves the built app and reverse-proxies /api/* to
+# the backend service same-origin (see frontend/nginx.conf), so the browser
+# never needs to know the backend's address directly and there's no CORS
+# configuration anywhere in this stack.
+#
+# Usage:
+#   docker compose up --build
+#   App:  http://localhost:8080
+#   API:  http://localhost:8000 (also reachable directly, e.g. for /docs)
+#
+# This file was written by hand and has NOT been executed in the sandbox
+# used to build this project (no Docker daemon was available there) --
+# please do a `docker compose up --build` smoke test on your own machine
+# before relying on it. See README.md "Verification status" for the full
+# list of what has and hasn't been tested.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # Point this at your Oracle instance. This compose file does not run
+      # Oracle itself -- see README "Database setup" for the bank's Oracle
+      # instance (Option A) or a local gvenzl/oracle-free container
+      # (Option B) to run alongside this stack.
+      DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:qa_portal_pwd@host.docker.internal:1521/?service_name=FREEPDB1}
+      SECRET_KEY: ${SECRET_KEY:-change-this-to-a-long-random-string-in-production}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+    volumes:
+      - qa_portal_uploads:/app/app/uploads
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # No build args needed by default -- frontend/nginx.conf proxies
+      # /api/* to the "backend" service by container name over the compose
+      # network. Only set VITE_API_BASE_URL if you're pointing this image at
+      # a backend NOT reachable via that proxy (e.g. a separately deployed
+      # API outside this compose file).
+      # args:
+      #   VITE_API_BASE_URL: https://api.example.com
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  qa_portal_uploads:
