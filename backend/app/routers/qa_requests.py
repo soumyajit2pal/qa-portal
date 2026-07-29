@@ -16,6 +16,7 @@ from ..constants import (
     Role, DEFAULT_CHECKLIST_ITEMS, checklist_item_is_mandatory, DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
     DEFAULT_AUTOMATION_CHECKLIST_ITEMS,
     FUNCTIONAL_BUCKET_TYPES, GatewayStatus, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
+    QAStatus,
 )
 from ..pdf_export import build_request_detail_pdf
 
@@ -31,6 +32,34 @@ def _log(db: Session, entity_id: int, step: str, user: models.User, decision: st
     db.add(models.ApprovalAction(
         entity_type="QA_REQUEST", entity_id=entity_id, step_name=step,
         actor_id=user.id, actor_role=user.roles_csv, decision=decision, comments=comments,
+    ))
+
+
+def _auto_advance_to_sm_approval(db: Session, entity_type: str, obj, current_user: models.User,
+                                  include_submitted_log: bool = False):
+    """Takes a just-created child request straight to SM_APPROVAL_PENDING,
+    mirroring that module's own /submit endpoint transition (see e.g.
+    functional.py::submit_request, sast_dast.py::_submit) -- per request,
+    a child auto-created off the gateway's own submit/raise is considered
+    already submitted by the requester, so it goes directly to SM Approval
+    instead of sitting in Draft waiting for a separate manual submit on that
+    module's own page. `entity_type` must match the ApprovalAction
+    entity_type that module's own history endpoint filters on (see each
+    router's own `_log`) -- "FUNCTIONAL_REQUEST", "SAST_DAST", "AUTOMATION",
+    or "PERFORMANCE". `include_submitted_log` mirrors functional.py's submit,
+    which logs an extra "Requester"/"Submitted" step before "SM Approval" --
+    the other modules' own /submit only logs the latter."""
+    if include_submitted_log:
+        obj.status = QAStatus.SUBMITTED
+        db.add(models.ApprovalAction(
+            entity_type=entity_type, entity_id=obj.id, step_name="Requester",
+            actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Submitted", comments=None,
+        ))
+    obj.status = QAStatus.SM_APPROVAL_PENDING
+    db.add(models.ApprovalAction(
+        entity_type=entity_type, entity_id=obj.id, step_name="SM Approval",
+        actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Pending",
+        comments="Awaiting SM decision",
     ))
 
 
@@ -113,6 +142,7 @@ def get_request(req_id: int, db: Session = Depends(get_db), current_user: models
 
 
 def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", request_types: list,
+                                 current_user: models.User,
                                  checked_items: Optional[set] = None,
                                  sast_components: Optional[list] = None, dast_components: Optional[list] = None,
                                  performance_details: Optional[dict] = None,
@@ -169,6 +199,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
                 is_mandatory=checklist_item_is_mandatory(item, request_types),
                 requester_checked=item in checked_set,
             ))
+        _auto_advance_to_sm_approval(db, "FUNCTIONAL_REQUEST", functional, current_user, include_submitted_log=True)
 
     if "SAST" in request_types and "SAST" not in existing_types:
         sast = models.SASTRequest(
@@ -195,6 +226,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
                 technology_stack=c.get("technology_stack"),
                 build_number=c.get("build_number"),
             ))
+        _auto_advance_to_sm_approval(db, "SAST_DAST", sast, current_user)
     if "DAST" in request_types and "DAST" not in existing_types:
         dast = models.DASTRequest(
             risk_category=classification.get("dast_risk_category"),
@@ -219,6 +251,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
                 authentication_required=t.get("authentication_required") or "No",
                 test_credentials=t.get("test_credentials"),
             ))
+        _auto_advance_to_sm_approval(db, "SAST_DAST", dast, current_user)
     if "Automation Testing" in request_types and "Automation Testing" not in existing_types:
         automation = models.AutomationRequest(
             application_name=qa_request.application_name,
@@ -241,6 +274,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
                 is_mandatory=is_mandatory,
                 requester_checked=item in automation_checked_set,
             ))
+        _auto_advance_to_sm_approval(db, "AUTOMATION", automation, current_user)
     if "Performance Testing" in request_types and "Performance Testing" not in existing_types:
         pd = performance_details or {}
         performance = models.PerformanceRequest(
@@ -297,6 +331,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
                 is_mandatory=True,
                 requester_checked=item in performance_checked_set,
             ))
+        _auto_advance_to_sm_approval(db, "PERFORMANCE", performance, current_user)
 
 
 @router.post("", response_model=schemas.QARequestOut)
@@ -457,8 +492,12 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     created (see create_request/edit_request, which merely stash their
     detail fields on draft_child_details while still Draft) -- then moves
     the gateway straight to Raised -- there is no approval step on the
-    gateway itself. Every linked child then runs its own independent
-    Draft -> SM -> Department Head -> ... workflow from here."""
+    gateway itself. Every linked child is created already at SM_APPROVAL_PENDING
+    (see _auto_advance_to_sm_approval) rather than Draft -- raising the
+    gateway is itself the requester's submission, so there's no separate
+    manual "submit" step left to do on each child's own module page -- then
+    runs its own independent SM -> Department Head -> ... workflow from
+    there."""
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
@@ -474,7 +513,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # edit_request). "Linked Requests" is correctly empty right up until
     # this call.
     checked_items, sast_components, dast_components, performance_details, automation_checked_items, performance_checked_items, classification_details = _unstash_draft_details(obj.draft_child_details)
-    _sync_linked_child_requests(db, obj, request_types, checked_items, sast_components, dast_components, performance_details,
+    _sync_linked_child_requests(db, obj, request_types, current_user, checked_items, sast_components, dast_components, performance_details,
                                  automation_checked_items=automation_checked_items,
                                  performance_checked_items=performance_checked_items,
                                  classification=classification_details)
