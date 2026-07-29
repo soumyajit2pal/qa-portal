@@ -3049,3 +3049,36 @@ the frontend's new convention.
 **No schema change.** **Verification:** `python3 -m py_compile` across `functional.py`, `sast_dast.py`,
 `performance.py` (clean); `tsc --noEmit -p .` clean; grep confirmed zero remaining "Not mandatory"/"Optional"
 checklist badges; Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 70. Removed the "linked sibling requests must all be terminal" gate on Functional's complete-qa
+
+**Why:** explicitly requested -- every request type (Functional/SAST/DAST/Performance) raised off the same
+QA Request gateway runs its own fully independent Draft/Raised-onward workflow ("QA request form is the
+gateway only" -- see models.QARequest's own docstring); they were never meant to block on each other.
+`functional.py::complete_qa` was the one exception: it refused to mark a Functional Testing Request's QA
+activity complete while any sibling SAST/DAST/Performance request raised alongside it (via the same gateway)
+hadn't yet reached its own terminal status, e.g. `"QA cannot be marked complete while linked request(s) are
+still open: SAST-20260729-08D215. They must reach a terminal (closed) state first."` A repo-wide search
+confirmed this was the **only** such gate in the codebase -- `sast_dast.py`/`performance.py`/`qa_requests.py`
+have no equivalent check blocking on a *gateway* sibling's status (SAST/DAST's own `_mark_report_ready` gate
+is unrelated -- it blocks on a linked **Suppression** request, a different relationship entirely, and is
+unaffected by this change).
+
+**Fix:** `complete_qa` no longer inspects `gateway.linked_sast_requests`/`linked_dast_requests`/
+`linked_performance_requests` at all -- the `open_security`/`open_performance`/`open_all` computation and the
+`HTTPException(400, ...)` it fed are deleted outright. Completing QA now only requires the Functional request
+itself to be in `EXECUTION_IN_PROGRESS`/`RETESTING`/`REGRESSION_TESTING` (unchanged), with no dependency on
+any other request's status. The now-unused `SAST_DAST_TERMINAL_STATUSES`/`PERFORMANCE_TERMINAL_STATUSES`
+imports were removed from `functional.py` too (still used elsewhere, e.g. `constants.py`/`dashboard.py`/
+`Layout.tsx`, so nothing else was touched).
+
+**No frontend change needed** -- the "Mark QA Completed" button in `Functional.tsx` was never disabled based
+on sibling status client-side; it simply called the endpoint and would have surfaced the now-removed 400 via
+the generic error handler. That informational note ("see that request for supporting documents and any
+other linked SAST/DAST/Performance requests") is unaffected -- it was never a blocking check, just a pointer
+to the sibling requests' own pages.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `functional.py` (clean); repo-wide grep
+confirmed `SAST_DAST_TERMINAL_STATUSES`/`PERFORMANCE_TERMINAL_STATUSES` no longer appear in that file and no
+other router has an equivalent gateway-sibling completion gate; Documents and outputs copies re-synced and
+confirmed identical via `diff -rq`.

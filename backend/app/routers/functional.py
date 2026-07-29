@@ -8,10 +8,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import (
-    Role, QAStatus, FUNCTIONAL_EDITABLE_STATUSES,
-    SAST_DAST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
-)
+from ..constants import Role, QAStatus, FUNCTIONAL_EDITABLE_STATUSES
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -470,28 +467,14 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     """Marks QA activity complete -- reachable directly from execution (no issues found)
     or after the defect/retest/regression cycle.
 
-    Blocked while any SAST/DAST/Performance request linked to the
-    *same gateway QA Request* hasn't itself reached a terminal state -- this
-    Functional Testing Request can't be signed off as complete while any
-    sibling request raised alongside it is still open."""
+    Not gated on any SAST/DAST/Performance sibling raised alongside it on the
+    same gateway QA Request -- every request type runs its own fully
+    independent workflow end-to-end (see models.QARequest's own docstring:
+    "QA request form is the gateway only"), so Functional completing has
+    never depended on -- and now explicitly does not wait for -- a sibling
+    request's own status."""
     obj = _get_or_404(db, req_id)
     _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING, QAStatus.REGRESSION_TESTING], "Complete QA")
-
-    gateway = obj.qa_request
-    open_security = [
-        s.request_id for s in (list(gateway.linked_sast_requests) + list(gateway.linked_dast_requests) if gateway else [])
-        if s.status not in SAST_DAST_TERMINAL_STATUSES
-    ]
-    open_performance = [
-        p.request_id for p in (gateway.linked_performance_requests if gateway else []) if p.status not in PERFORMANCE_TERMINAL_STATUSES
-    ]
-    open_all = open_security + open_performance
-    if open_all:
-        raise HTTPException(
-            400,
-            "QA cannot be marked complete while linked request(s) are still open: "
-            + ", ".join(open_all) + ". They must reach a terminal (closed) state first.",
-        )
 
     obj.status = QAStatus.QA_COMPLETED
     _log(db, obj.id, "Execution", current_user, "QA Completed", payload.comments)
