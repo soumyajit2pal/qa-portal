@@ -3082,3 +3082,25 @@ to the sibling requests' own pages.
 confirmed `SAST_DAST_TERMINAL_STATUSES`/`PERFORMANCE_TERMINAL_STATUSES` no longer appear in that file and no
 other router has an equivalent gateway-sibling completion gate; Documents and outputs copies re-synced and
 confirmed identical via `diff -rq`.
+
+## 71. Bug fix: "Request Sign-off" button never rendered for QA_ENGINEER once QA Completed
+
+**Why:** reported directly -- a Functional Testing Request reached `QA_COMPLETED` and the detail page's
+Workflow Actions panel showed only "No actions available for your role at this stage," with no "Request
+Sign-off" button, when viewed by the QA_ENGINEER who had actually run QA through to completion (not the
+request's assigned QA Lead). The backend was never the problem: both `functional.py::request_signoff`
+(`POST /{id}/request-signoff`) and `signoff.py::create_signoff` (`POST /api/signoffs`, which the sign-off
+modal calls to create the certificate itself) already gate on
+`require_roles(Role.QA_LEAD, Role.QA_ENGINEER)`. Only the frontend's button-visibility check in
+`Functional.tsx` was narrower than the API it drives -- `canRequestSignoff` checked `hasRole(user,
+'QA_LEAD')` alone, so a QA_ENGINEER who could legally call both endpoints had no way to reach them through
+the UI.
+
+**Fix:** widened the gate in `frontend/src/modules/functional/Functional.tsx` to
+`hasRole(user, 'QA_LEAD', 'QA_ENGINEER') && status === 'QA_COMPLETED'`, matching `canCompleteQA`'s own role
+set (QA_LEAD/QA_ENGINEER) immediately above it and both backend endpoints' role gates. `canConfirmSignoff`
+(the later "Confirm Sign-off" step, still QA_LEAD-only) is unaffected -- that stage's own backend endpoint
+(`confirm_signoff`) is intentionally QA_LEAD-only and wasn't touched.
+
+**No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean);
+Documents and outputs copies re-synced and confirmed identical via `diff -rq`.

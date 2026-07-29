@@ -389,7 +389,7 @@ def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = De
 
 @router.post("/{req_id}/start-test-design", response_model=schemas.FunctionalOut)
 def start_test_design(req_id: int, db: Session = Depends(get_db),
-                       current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                       current_user: models.User = Depends(require_roles( Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.TESTER_ASSIGNED, "Start test design")
     obj.status = QAStatus.TEST_DESIGN
@@ -414,7 +414,7 @@ def start_execution(req_id: int, db: Session = Depends(get_db),
 # ---- Defect -> Fix -> Retest -> Regression cycle ----
 @router.post("/{req_id}/raise-defect", response_model=schemas.FunctionalOut)
 def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                  current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.EXECUTION_IN_PROGRESS, "Raise defect")
     obj.status = QAStatus.DEFECT_RAISED
@@ -426,7 +426,7 @@ def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(
 
 @router.post("/{req_id}/mark-waiting-for-fix", response_model=schemas.FunctionalOut)
 def mark_waiting_for_fix(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                          current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.DEFECT_RAISED, "Mark waiting for fix")
     obj.status = QAStatus.WAITING_FOR_FIX
@@ -450,7 +450,7 @@ def start_retesting(req_id: int, payload: schemas.CommentIn, db: Session = Depen
 
 @router.post("/{req_id}/start-regression", response_model=schemas.FunctionalOut)
 def start_regression(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                      current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     """Optional broader-impact regression pass after retesting, before QA completion."""
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.RETESTING, "Start regression testing")
@@ -463,7 +463,7 @@ def start_regression(req_id: int, payload: schemas.CommentIn, db: Session = Depe
 
 @router.post("/{req_id}/complete-qa", response_model=schemas.FunctionalOut)
 def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                 current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                 current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     """Marks QA activity complete -- reachable directly from execution (no issues found)
     or after the defect/retest/regression cycle.
 
@@ -487,7 +487,7 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
 @router.post("/{req_id}/request-signoff", response_model=schemas.FunctionalOut)
 def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.RequestSignoffIn(),
                      db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.QA_COMPLETED, "Request sign-off")
     # The frontend now creates the QA Sign-off Certificate (POST /api/signoffs)

@@ -319,7 +319,11 @@ function FunctionalDetail({ req, onClose, onChanged, users }: FunctionalDetailPr
   const canStartRegression = hasRole(user, 'QA_LEAD', 'QA_ENGINEER') && status === 'RETESTING'
   const canCompleteQA = hasRole(user, 'QA_LEAD', 'QA_ENGINEER')
     && ['EXECUTION_IN_PROGRESS', 'RETESTING', 'REGRESSION_TESTING'].includes(status)
-  const canRequestSignoff = hasRole(user, 'QA_LEAD') && status === 'QA_COMPLETED'
+  // Matches the backend's own role gate on POST /{id}/request-signoff and
+  // POST /api/signoffs (both require_roles(Role.QA_LEAD, Role.QA_ENGINEER))
+  // -- whichever of them actually ran QA through to completion should be
+  // able to raise the certificate, not just the QA Lead.
+  const canRequestSignoff = hasRole(user, 'QA_LEAD', 'QA_ENGINEER') && status === 'QA_COMPLETED'
   const canConfirmSignoff = hasRole(user, 'QA_LEAD') && status === 'QA_SIGNOFF_PENDING'
   const canRequesterDecide = isRequesterVerifier && status === 'REQUESTER_VERIFICATION'
   // Mirrors backend FUNCTIONAL_EDITABLE_STATUSES -- same requester-or-QA role
