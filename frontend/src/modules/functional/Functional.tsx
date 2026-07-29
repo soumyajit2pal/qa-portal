@@ -149,7 +149,7 @@ function FunctionalFormModal({ onClose, onSaved, editing }: {
                 <input type="checkbox" checked={checkedItems.includes(c.item)} onChange={() => toggleChecked(c.item)} />
                 <span>
                   {c.item} {c.owner && <span className="muted small">({c.owner})</span>}{' '}
-                  {!c.is_mandatory && <span className="badge badge-gray">Not mandatory</span>}
+                  {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
                 </span>
                 {c.is_complete && <span className="badge badge-green" style={{ marginLeft: 'auto' }}>QA verified</span>}
               </label>

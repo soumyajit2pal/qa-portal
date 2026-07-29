@@ -3009,3 +3009,43 @@ does elsewhere in the app.
 
 **Verification:** `python3 -m py_compile` across `functional.py`, `sast_dast.py`, `performance.py` (clean);
 Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 69. Readiness "Passed" gate narrowed to requester-declared items only; "Not mandatory"/"Optional" checklist labels removed everywhere
+
+**Why:** two follow-up fixes to section 68 above, both reported immediately after that change shipped. First,
+section 68's fix required **every** checklist item to be `is_complete` before Passed -- but if a requester
+never self-declared a given item ready (`requester_checked = False`) at intake, `update_checklist_item`
+already blocks QA/Security from ever verifying that specific item (a pre-existing, intentional gate -- QA
+can't confirm something the requester never claimed). Requiring *that* item to be complete too meant such a
+request could never reach Passed at all -- a real deadlock, not just a stricter check. Second, every
+checklist row across Functional/SAST/DAST/Performance showed a "Not mandatory" (Edit Details modal) or
+"Optional" (main checklist tab) badge on every non-mandatory item -- visual noise on every single row, since
+almost every item in this app is non-mandatory by design (see section on "Make readiness checklists
+non-mandatory").
+
+**Fix 1 -- narrow the Passed gate to requester-declared items:** `functional.py::readiness_decision`,
+`sast_dast.py::_readiness_decision`, and `performance.py::readiness_decision` all now compute
+`pending = [c.item for c in obj.checklist_items if c.requester_checked and not c.is_complete]` (previously
+`if not c.is_complete`, unconditionally). An item the requester never ticked ready simply doesn't count
+toward the gate at all -- Passed no longer waits on it, and it's not something QA/Security ever had a way to
+verify in the first place. Every item the requester *did* self-declare ready still must be independently
+QA/Security-verified before Passed -- the original bug (Passed reachable with zero items verified) stays
+fixed, just without the new deadlock section 68 introduced.
+
+**Fix 2 -- drop the non-mandatory label everywhere, keep the mandatory one:** every `{!c.is_mandatory &&
+<span className="badge badge-gray">Not mandatory</span>}` / `{!c.is_mandatory && <span className="badge
+badge-gray">Optional</span>}` conditional was inverted to `{c.is_mandatory && <span className="badge
+badge-gray">Mandatory</span>}` -- so a "Mandatory" badge still calls out the (rare, SAST/DAST-only in
+practice) items that block Submit/require self-declaration, but nothing is shown at all for the common,
+non-mandatory case. Touched: `Functional.tsx` (Edit Details modal), `SAST.tsx` (Edit Details modal + Security
+Readiness tab), `DAST.tsx` (Edit Details modal + Security Readiness tab), `Performance.tsx` (Edit Details
+modal + Readiness tab). The QA Request wizard's own SAST/DAST checklist steps
+(`QARequests/steps/SastStep.tsx`/`DastStep.tsx`) already only showed a "Mandatory" badge with no
+non-mandatory counterpart, so they needed no change. Also fixed the one backend equivalent:
+`functional.py::export_functional`'s PDF export appended a literal `" (optional)"` suffix to every
+non-mandatory checklist row; changed to append `" (Mandatory)"` only when `is_mandatory` is true, matching
+the frontend's new convention.
+
+**No schema change.** **Verification:** `python3 -m py_compile` across `functional.py`, `sast_dast.py`,
+`performance.py` (clean); `tsc --noEmit -p .` clean; grep confirmed zero remaining "Not mandatory"/"Optional"
+checklist badges; Documents and outputs copies re-synced and confirmed identical via `diff -rq`.

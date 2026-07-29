@@ -316,18 +316,19 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.READINESS_VERIFICATION, "Readiness decision")
     if payload.decision == "Passed":
-        # Every readiness checklist item must be QA-verified (is_complete)
-        # before Readiness Verification can Pass -- not just the mandatory
-        # ones. None of DEFAULT_CHECKLIST_ITEMS ship mandatory (see
-        # constants.py), so a mandatory-only gate here was a no-op in
-        # practice: the QA Lead could click "Passed" the moment Readiness
-        # Verification started, without ever ticking a single item. If the
-        # requester never self-declared an item ready (requester_checked),
-        # the QA Lead can't verify it either (see update_checklist_item's own
-        # gate below) -- so that request can only reach Passed once the
-        # requester goes back and self-declares it, forcing a Failed/Return
-        # in the meantime rather than a silent Pass.
-        pending = [c.item for c in obj.checklist_items if not c.is_complete]
+        # Every item the requester actually self-declared ready
+        # (requester_checked) must be QA-verified (is_complete) before
+        # Readiness Verification can Pass -- not just the mandatory ones
+        # (none of DEFAULT_CHECKLIST_ITEMS ship mandatory, see constants.py,
+        # so a mandatory-only gate here was a no-op: the QA Lead could click
+        # "Passed" the moment Readiness Verification started, without ever
+        # ticking a single item). Scoped to requester_checked rather than
+        # every item on the list -- an item the requester never declared
+        # ready in the first place can't be QA-verified anyway (see
+        # update_checklist_item's own gate below), so requiring it here too
+        # would permanently block Passed with no way forward; the requester
+        # simply never claimed it, so it isn't part of what QA is confirming.
+        pending = [c.item for c in obj.checklist_items if c.requester_checked and not c.is_complete]
         if pending:
             raise HTTPException(400, f"Readiness checklist incomplete: {', '.join(pending)}")
         obj.status = QAStatus.QA_ACTIVITY_INITIATED
@@ -695,7 +696,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         ]),
         ("Readiness Checklist", [
             (c.item, f"Requester declared: {'Yes' if c.requester_checked else 'No'} | QA verified: {'Yes' if c.is_complete else 'No'}"
-                      + ("" if c.is_mandatory else " (optional)"))
+                      + (" (Mandatory)" if c.is_mandatory else ""))
             for c in obj.checklist_items
         ]),
     ]

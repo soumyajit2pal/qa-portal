@@ -163,7 +163,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
                 <input type="checkbox" checked={checkedItems.includes(c.item)} onChange={() => toggleChecked(c.item)} />
                 <span>
                   {c.item} {c.data_required && <span className="muted small">({c.data_required})</span>}{' '}
-                  {!c.is_mandatory && <span className="badge badge-gray">Not mandatory</span>}
+                  {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
                 </span>
                 {c.is_complete && <span className="badge badge-green" style={{ marginLeft: 'auto' }}>QA verified</span>}
               </label>
@@ -458,7 +458,7 @@ function PerformanceDetail({ req, onClose, onChanged, users, engineers }: {
             <div key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
               <span style={{ flex: 1 }}>
                 {c.item} <span className="muted small">({c.data_required})</span>{' '}
-                {!c.is_mandatory && <span className="badge badge-gray">Optional</span>}
+                {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
               </span>
               <span style={{ width: 130, textAlign: 'center' }}>
                 {c.requester_checked

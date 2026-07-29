@@ -258,28 +258,32 @@ def _advance(db, obj, expected, next_status, step_label, current_user):
 @router.post("/{req_id}/readiness-decision", response_model=schemas.PerformanceOut)
 def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
-    """Passed requires "L1: Pre-Testing Readiness Checklist" (Annexure VIII)
-    to be fully QA-verified (every item ticked is_complete, not just the
-    mandatory ones -- see the long comment inline below) before advancing to
-    Feasibility. Failed is new: a discrepancy found during Readiness (beyond
-    just an incomplete checklist -- e.g. something the assigned engineer
-    notices is wrong with the request itself) returns it to the requester,
-    with the QA Lead choosing (via require_dept_head_reapproval) whether the
-    fix needs a fresh Department Head approval or can come straight back to
-    Readiness once addressed (the default -- same assigned engineer, no
-    re-approval needed)."""
+    """Passed requires every item the requester self-declared ready on
+    "L1: Pre-Testing Readiness Checklist" (Annexure VIII) to be QA-verified
+    (is_complete), not just the mandatory ones -- see the long comment
+    inline below -- before advancing to Feasibility. Failed is new: a
+    discrepancy found during Readiness (beyond just an incomplete checklist
+    -- e.g. something the assigned engineer notices is wrong with the
+    request itself) returns it to the requester, with the QA Lead choosing
+    (via require_dept_head_reapproval) whether the fix needs a fresh
+    Department Head approval or can come straight back to Readiness once
+    addressed (the default -- same assigned engineer, no re-approval
+    needed)."""
     obj = _get_or_404(db, req_id)
     _require(obj, "READINESS", "Readiness decision")
     if payload.decision == "Passed":
-        # Every item must be QA-verified (is_complete) before Passed -- not
-        # just the mandatory ones. None of DEFAULT_PERFORMANCE_CHECKLIST_ITEMS
-        # ship mandatory (see constants.py), so a mandatory-only gate here was
-        # a no-op in practice: QA could click "Passed" the moment Readiness
-        # started, without ever ticking a single item. If the requester never
-        # self-declared an item ready, QA can't verify it either (see
-        # update_checklist_item's own gate below) -- so a Failed/Return is the
-        # only option until they do.
-        pending = [c.item for c in obj.checklist_items if not c.is_complete]
+        # Every item the requester actually self-declared ready
+        # (requester_checked) must be QA-verified (is_complete) before
+        # Passed -- not just the mandatory ones (none of
+        # DEFAULT_PERFORMANCE_CHECKLIST_ITEMS ship mandatory, see
+        # constants.py, so a mandatory-only gate here was a no-op: QA could
+        # click "Passed" the moment Readiness started, without ever ticking
+        # a single item). Scoped to requester_checked rather than every item
+        # on the list -- an item the requester never declared ready can't be
+        # verified anyway (see update_checklist_item's own gate below), so
+        # requiring it here too would permanently block Passed with no way
+        # forward.
+        pending = [c.item for c in obj.checklist_items if c.requester_checked and not c.is_complete]
         if pending:
             raise HTTPException(400, f"Pre-testing readiness checklist incomplete: {', '.join(pending)}")
         obj.status = "FEASIBILITY"

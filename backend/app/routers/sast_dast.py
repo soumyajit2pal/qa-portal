@@ -290,15 +290,17 @@ def _start_readiness(db: Session, obj, current_user):
 def _readiness_decision(db: Session, obj, payload, current_user):
     _require(obj, "SECURITY_READINESS", "Readiness decision")
     if payload.decision == "Passed":
-        # Every Security Readiness checklist item must be QA/Security-verified
-        # (is_complete) before this can Pass -- not just the mandatory ones
-        # (mandatory items were already enforced at Submit time, before this
-        # request even existed -- see _require_checklist_ready -- so a
-        # mandatory-only gate here let the non-mandatory items through
-        # unverified). If the requester never self-declared an item ready,
-        # Security can't verify it either (see update_checklist_item's own
-        # gate) -- so a Failed/Return is the only option until they do.
-        pending = [c.item for c in obj.checklist_items if not c.is_complete]
+        # Every item the requester actually self-declared ready
+        # (requester_checked) must be QA/Security-verified (is_complete)
+        # before this can Pass -- not just the mandatory ones (mandatory
+        # items are already forced self-declared at Submit time, before this
+        # request even existed -- see _require_checklist_ready -- so this
+        # naturally covers them too). Scoped to requester_checked rather than
+        # every item on the list -- an item the requester never declared
+        # ready can't be verified anyway (see update_checklist_item's own
+        # gate), so requiring it here too would permanently block Passed with
+        # no way forward.
+        pending = [c.item for c in obj.checklist_items if c.requester_checked and not c.is_complete]
         if pending:
             raise HTTPException(400, f"Security Readiness checklist incomplete: {', '.join(pending)}")
         obj.status = "PLANNING"
