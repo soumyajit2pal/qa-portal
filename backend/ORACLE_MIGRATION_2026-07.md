@@ -3294,3 +3294,93 @@ by `canSMDecide`/the SM-editing window in `canEditDetails`).
 
 **No schema change.** **Verification:** `python3 -m py_compile` on `signoff.py` (clean); `npx tsc --noEmit -p .`
 from `frontend/` (clean); Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 77. Bug fix: Functional Testing Request stayed at "QA Sign-off Pending" after its certificate was Issued
+
+**Why:** reported directly -- a QA Sign-off Certificate reached `ISSUED` (Department Head COE's final
+approval), but the linked Functional Testing Request kept showing "QA Sign-off Pending" instead of moving on.
+Root cause: nothing ever connected the two. The only bridge was `routers/functional.py::confirm_signoff`, a
+separate action a QA Lead had to manually trigger themselves (via a "Confirm Sign-off" button on the
+Functional Testing Request's own page) -- and that endpoint didn't even check that the linked certificate was
+actually `ISSUED` before letting them confirm. Once the certificate's own Tester -> SM -> Department Head COE
+approval chain was introduced (see section 64), this manual step became redundant busywork that was easy to
+forget, leaving the Functional Testing Request stuck at "QA Sign-off Pending" indefinitely even though the
+certificate itself had already finished its own approval.
+
+**Fix:** `routers/signoff.py::department_head_coe_decision` now calls a new
+`_sync_linked_functional_request(db, obj, current_user)` immediately after setting the certificate to
+`ISSUED` -- it looks up every `FunctionalRequest` with `signoff_id == obj.id` still sitting at
+`QA_SIGNOFF_PENDING` and advances it straight to `REQUESTER_VERIFICATION` (via the same two-step
+`QA_SIGNED_OFF` -> `REQUESTER_VERIFICATION` transition `confirm_signoff` used to do manually, logging both
+steps to the History tab identically, actor now the Department Head COE who approved rather than the QA Lead
+who used to click confirm). The frontend's "Confirm Sign-off" button has been removed from
+`Functional.tsx` entirely -- `canConfirmSignoff` and its two usages (the button itself, and the two
+conditions that referenced it) were deleted, since there's nothing left to manually confirm. While a
+certificate is still working through its own chain, the linked request correctly just sits at "QA Sign-off
+Pending" showing no available action -- it's genuinely waiting on someone else's decision, not on QA.
+
+`routers/functional.py::confirm_signoff` itself was NOT deleted (per the standing "don't remove things
+without being asked" convention) -- its docstring now explains it's superseded for the normal case and kept
+only as a manual fallback (e.g. for a certificate that predates this fix, with no `signoff_id` link for the
+auto-sync to find). It naturally becomes unreachable for every certificate the auto-sync successfully
+handles, since `_require(obj, QAStatus.QA_SIGNOFF_PENDING, ...)` will already have moved past that status by
+the time anyone could try to call it.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `signoff.py`/`functional.py` (clean);
+`npx tsc --noEmit -p .` from `frontend/` (clean); grepped the frontend for any remaining
+`confirm-signoff`/`canConfirmSignoff` references (none); Documents and outputs copies re-synced and confirmed
+identical via `diff -rq`.
+
+## 78. Bug fix: Department dropdown (and other searchable pickers) got clipped inside table rows
+
+**Why:** reported directly, with a screenshot -- the Admin > Users page's Department column uses
+`components/SearchableSelect.tsx` inline in each row; opening it showed the option list cut off after only
+two or three entries ("Business Development", "Compliance...") instead of the full scrollable list. Root
+cause: the panel is a plain `position: absolute` element nested under its trigger (`.searchable-select-panel`
+in `index.css`), but that trigger sits inside `.table-wrap`, which is deliberately `overflow-y: hidden` (so
+the table's rounded corners stay crisp -- see that rule's own comment). Any absolutely-positioned panel that
+would visually extend past `.table-wrap`'s own bottom edge gets hard-clipped by it. This is the exact same
+class of bug `.th-filter-popover` (the per-column filter icon's own popover) already had, and was already
+fixed for, back in section 46 -- but that fix was never applied to `SearchableSelect.tsx`, since it's a
+separate component that happened to reuse the same panel-under-trigger approach.
+
+**Fix:** applied the identical technique used for `.th-filter-popover`: `SearchableSelect.tsx` now computes
+the trigger button's on-screen position via `getBoundingClientRect()` the moment it opens (new `toggleOpen()`,
+replacing the plain `setOpen((o) => !o)` on the trigger's `onClick`) and renders the panel with a new
+`searchable-select-panel-fixed` class (`position: fixed`, top/left/width all set inline from that rect) --
+this escapes `.table-wrap`'s overflow clipping entirely, regardless of which row it's opened from. Applied
+the same fix to `components/UserAssignSelect.tsx` too (the "Assign Security Lead/QA Lead/Engineer" picker,
+which explicitly reuses "the same `.searchable-select*` chrome" per its own comment, and so shares the exact
+same latent bug wherever it's used inside a scroll-clipped container). `index.css` gained the
+`.searchable-select-panel-fixed` rule alongside the existing `.searchable-select-panel` one (which stays
+unchanged, still used as-is by `SignOff.tsx`/`Suppression.tsx`'s own local searchable dropdowns that don't
+need this -- they're not used inside a table).
+
+**No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean);
+Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 79. Bug fix: dropdown panel froze in place on scroll (follow-up to section 78)
+
+**Why:** reported directly, with a screenshot, right after section 78 shipped -- "on scroll select position
+fixed to the position, so it is not working." Root cause: section 78's `position: fixed` panel had its
+coordinates computed exactly once, at the moment it opened (`toggleOpen()`'s single `getBoundingClientRect()`
+call). `position: fixed` elements don't move with page scroll on their own, so scrolling the page (or any
+scrollable ancestor, e.g. `.table-wrap`) after opening the dropdown left the panel stranded at its original
+on-screen coordinates while its trigger button -- and everything else -- scrolled out from under it, visually
+detaching the two. Also flagged by the user as showing up "everywhere," including the first-time LDAP-login
+department picker (`DepartmentPrompt.tsx`) -- confirmed that page renders the same shared `SearchableSelect`
+component, so a single fix in the shared component covers every usage site.
+
+**Fix:** added a second `useEffect` (keyed on `open`) to both `components/SearchableSelect.tsx` and
+`components/UserAssignSelect.tsx` that, only while the panel is open, attaches a `scroll` listener to
+`window` with `{ capture: true }` plus a `resize` listener, both calling a `reposition()` function that
+re-reads `triggerRef.current?.getBoundingClientRect()` and updates `panelPos` state -- keeping the panel glued
+to its trigger continuously instead of only at open-time. Both listeners are removed when the panel closes or
+the component unmounts. `{ capture: true }` on the scroll listener is required because native `scroll` events
+don't bubble to `window`, but they do fire during the capture phase, which is what's needed to catch scrolling
+on a nested scrollable ancestor like `.table-wrap` (not just `window` itself scrolling). `toggleOpen()`'s
+original open-time `getBoundingClientRect()` call is unchanged -- it still sets the initial position
+immediately, before the first scroll/resize event has any chance to fire.
+
+**No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean);
+Documents and outputs copies re-synced and confirmed identical via `diff -rq`.

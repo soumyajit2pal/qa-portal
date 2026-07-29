@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role, SIGNOFF_EDITABLE_STATUSES
+from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -45,6 +45,38 @@ def _get_or_404(db: Session, signoff_id: int) -> "models.QASignOff":
     if not obj:
         raise HTTPException(404, "Sign-off certificate not found")
     return obj
+
+
+def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", current_user: models.User):
+    """Reported bug: a certificate reaching ISSUED (Department Head COE's
+    final approval) never moved the linked Functional Testing Request off
+    "QA Sign-off Pending" -- that hop only ever happened via a separate,
+    manual "Confirm Sign-off" button (routers/functional.py::confirm_signoff)
+    that a QA Lead had to remember to click themselves, and which didn't even
+    check that the certificate was actually Issued before letting them.
+    Since the certificate's own Tester -> SM -> Department Head COE approval
+    chain already fully covers "is this sign-off actually approved", that
+    separate manual step is redundant and easy to forget -- so this now
+    syncs automatically the moment the certificate is Issued, and the
+    Functional Testing Request's own "Confirm Sign-off" button has been
+    removed from the frontend (see Functional.tsx). Mirrors confirm_signoff's
+    own two-step log (QA Sign-off "Signed Off", then Requester Verification
+    "Pending") so the History tab reads identically either way."""
+    linked = (db.query(models.FunctionalRequest)
+              .filter_by(signoff_id=obj.id, status=QAStatus.QA_SIGNOFF_PENDING).all())
+    for fr in linked:
+        fr.status = QAStatus.QA_SIGNED_OFF
+        db.add(models.ApprovalAction(
+            entity_type="FUNCTIONAL_REQUEST", entity_id=fr.id, step_name="QA Sign-off",
+            actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Signed Off",
+            comments=f"Certificate {obj.certificate_id} issued by Department Head COE",
+        ))
+        fr.status = QAStatus.REQUESTER_VERIFICATION
+        db.add(models.ApprovalAction(
+            entity_type="FUNCTIONAL_REQUEST", entity_id=fr.id, step_name="Requester Verification",
+            actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Pending",
+            comments="Sent for requester verification",
+        ))
 
 
 def _requester_department(db: Session, obj: "models.QASignOff"):
@@ -208,6 +240,7 @@ def department_head_coe_decision(signoff_id: int, payload: schemas.WorkflowDecis
     if payload.decision == "Approved":
         obj.status = "ISSUED"
         obj.approved_by_id = current_user.id
+        _sync_linked_functional_request(db, obj, current_user)
     elif payload.decision == "Returned":
         obj.status = "RETURNED_BY_DEPT_HEAD_COE"
     elif payload.decision == "Rejected":

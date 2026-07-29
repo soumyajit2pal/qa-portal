@@ -512,7 +512,17 @@ def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session 
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
     """Confirms the QA Sign-off certificate (optionally linking a Module 8 QASignOff
     record created via /api/signoffs) and hands the request to the requester for
-    final verification."""
+    final verification.
+
+    Superseded for the normal case: routers/signoff.py::department_head_coe_decision
+    now does this automatically the instant a certificate reaches ISSUED (see
+    _sync_linked_functional_request there) -- a QA Lead no longer needs to
+    remember a separate manual click, and the frontend's own "Confirm Sign-off"
+    button has been removed (see Functional.tsx). Left in place, not deleted, as
+    a manual fallback (e.g. a certificate issued before this change existed, with
+    no linked FunctionalRequest.signoff_id yet to auto-sync against) -- reachable
+    only while status is still QA_SIGNOFF_PENDING, which the auto-sync above
+    already moves past for every certificate it successfully links."""
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.QA_SIGNOFF_PENDING, "Confirm sign-off")
     if payload.signoff_id is not None:

@@ -428,6 +428,15 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
   background: #fff; border: 1px solid var(--border); border-radius: 8px;
   box-shadow: var(--shadow-lg); overflow: hidden;
 }
+/* Used by components/SearchableSelect.tsx -- its own top/left/width are set
+   inline (computed from the trigger's own getBoundingClientRect() at open
+   time, see that component). Same fix as .th-filter-popover above: escapes
+   any ancestor's overflow clipping (e.g. the Admin Users table's own
+   `.table-wrap`, `overflow-y: hidden`) that a plain nested `position:
+   absolute` panel would otherwise get cut off by. `right`/`top`/`left` here
+   just override the plain `.searchable-select-panel` rule above -- the real
+   values always come from the inline style. */
+.searchable-select-panel-fixed { position: fixed; right: auto; top: 0; left: 0; z-index: 500; }
 .searchable-select-search {
   display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border);
   color: var(--muted);

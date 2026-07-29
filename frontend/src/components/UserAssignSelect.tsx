@@ -25,7 +25,9 @@ interface UserAssignSelectProps {
 export default function UserAssignSelect({ value, onChange, users, placeholder, disabled, style }: UserAssignSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const [panelPos, setPanelPos] = useState({ top: 0, left: 0, width: 0 })
   const rootRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -43,6 +45,25 @@ export default function UserAssignSelect({ value, onChange, users, placeholder, 
     if (open) inputRef.current?.focus()
   }, [open])
 
+  // Same fix as components/SearchableSelect.tsx -- see that component's own
+  // comment for the full reasoning. Without this, the position:fixed panel
+  // (computed once in toggleOpen below) stays stranded at its original
+  // on-screen spot when the page or an ancestor scroll container scrolls
+  // while the panel is open, instead of following its trigger.
+  useEffect(() => {
+    if (!open) return
+    function reposition() {
+      const rect = triggerRef.current?.getBoundingClientRect()
+      if (rect) setPanelPos({ top: rect.bottom + 4, left: rect.left, width: rect.width })
+    }
+    window.addEventListener('scroll', reposition, true)
+    window.addEventListener('resize', reposition)
+    return () => {
+      window.removeEventListener('scroll', reposition, true)
+      window.removeEventListener('resize', reposition)
+    }
+  }, [open])
+
   const selectedUser = users.find((u) => String(u.id) === value)
   const q = query.trim().toLowerCase()
   const filtered = q
@@ -55,19 +76,36 @@ export default function UserAssignSelect({ value, onChange, users, placeholder, 
     setQuery('')
   }
 
+  // Same fix as components/SearchableSelect.tsx -- see that component's own
+  // comment for the full reasoning (a plain nested `position: absolute`
+  // panel can get visually cut off by any ancestor with clipped overflow,
+  // e.g. a table's own scroll wrapper or a tall modal body). Computes the
+  // trigger's on-screen position at open-time and renders the panel with
+  // `position: fixed` at those exact coordinates instead.
+  function toggleOpen() {
+    if (open) { setOpen(false); return }
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (rect) setPanelPos({ top: rect.bottom + 4, left: rect.left, width: rect.width })
+    setOpen(true)
+  }
+
   return (
     <div className="searchable-select" ref={rootRef} style={style}>
       <button
+        ref={triggerRef}
         type="button"
         className="searchable-select-trigger"
         disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggleOpen}
       >
         <span className={selectedUser ? '' : 'muted'}>{selectedUser ? selectedUser.full_name : placeholder}</span>
         <span className="caret">&#9662;</span>
       </button>
       {open && (
-        <div className="searchable-select-panel">
+        <div
+          className="searchable-select-panel searchable-select-panel-fixed"
+          style={{ top: panelPos.top, left: panelPos.left, width: panelPos.width }}
+        >
           <div className="searchable-select-search">
             <IconSearch width={13} height={13} />
             <input

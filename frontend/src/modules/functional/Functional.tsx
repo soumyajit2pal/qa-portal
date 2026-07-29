@@ -324,7 +324,14 @@ function FunctionalDetail({ req, onClose, onChanged, users }: FunctionalDetailPr
   // -- whichever of them actually ran QA through to completion should be
   // able to raise the certificate, not just the QA Lead.
   const canRequestSignoff = hasRole(user, 'QA_LEAD', 'QA_ENGINEER') && status === 'QA_COMPLETED'
-  const canConfirmSignoff = hasRole(user, 'QA_LEAD') && status === 'QA_SIGNOFF_PENDING'
+  // "Confirm Sign-off" (a manual QA Lead click) removed -- the linked
+  // certificate reaching ISSUED now auto-advances this request straight to
+  // Requester Verification (see routers/signoff.py::
+  // _sync_linked_functional_request), so there's nothing left to manually
+  // confirm here. While a certificate is still working through its own
+  // Tester -> SM -> Department Head COE chain, this request just sits at
+  // "QA Sign-off Pending" with no action available on this side -- correct,
+  // since it's genuinely waiting on someone else's decision, not on QA.
   const canRequesterDecide = isRequesterVerifier && status === 'REQUESTER_VERIFICATION'
   // Mirrors backend FUNCTIONAL_EDITABLE_STATUSES -- same requester-or-QA role
   // gate as SAST/DAST/Performance's own Edit Details.
@@ -525,9 +532,6 @@ function FunctionalDetail({ req, onClose, onChanged, users }: FunctionalDetailPr
             {canRequestSignoff && (
               <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => setShowSignoffModal(true)}>Request Sign-off</button>
             )}
-            {canConfirmSignoff && (
-              <button className="btn btn-success btn-sm" disabled={!!busyAction} onClick={() => act('confirm-signoff', { comments })}>Confirm Sign-off</button>
-            )}
 
             {canRequesterDecide && (
               <>
@@ -542,12 +546,12 @@ function FunctionalDetail({ req, onClose, onChanged, users }: FunctionalDetailPr
               && !canReadinessDecide
               && !canBeginPlanning && !canAssignTester && !canStartTestDesign && !canStartExecution
               && !canRaiseDefect && !canMarkWaitingForFix && !canStartRetest && !canStartRegression
-              && !canCompleteQA && !canRequestSignoff && !canConfirmSignoff && !canRequesterDecide && (
+              && !canCompleteQA && !canRequestSignoff && !canRequesterDecide && (
               <span className="muted small">No actions available for your role at this stage.</span>
             )}
           </div>
           {(canSMDecide || canDepartmentHeadDecide || canReadinessDecide || canRaiseDefect || canMarkWaitingForFix || canStartRetest
-            || canStartRegression || canCompleteQA || canConfirmSignoff || canRequesterDecide) && (
+            || canStartRegression || canCompleteQA || canRequesterDecide) && (
             <input placeholder="Comments (optional)" value={comments} onChange={(e) => setComments(e.target.value)}
                    style={{ marginTop: 8, width: '100%', padding: 8, border: '1px solid var(--border)', borderRadius: 6 }} />
           )}
