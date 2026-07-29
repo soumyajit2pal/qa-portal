@@ -709,6 +709,44 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
 
 # ---- Supporting documents (multiple files, uploaded any time after the
 # request has been raised) -- see documents.py for the shared implementation. ----
+def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) -> bool:
+    """Reported bug: upload had no restriction at all -- any logged-in user
+    could attach documents to any Functional Testing Request, regardless of
+    role or involvement. Scoped to exactly whoever currently "owns" this
+    request: the original requester (always, they may need to attach more
+    evidence at any point), plus whichever actor the request's *current*
+    status is actually sitting with -- the same requester/role/department
+    match already enforced by that stage's own decision endpoint above (SM
+    during SM_APPROVAL_PENDING, Department Head during
+    DEPARTMENT_HEAD_APPROVAL_PENDING), or the specifically assigned QA Lead/
+    tester for every QA-activity status from QA_LEAD_ASSIGNED through
+    QA_SIGNOFF_PENDING (obj.qa_lead_id/obj.assigned_tester_ids) -- not just
+    anyone holding the QA_LEAD/QA_ENGINEER role. Admin always bypasses, same
+    convention as every other permission check in this file."""
+    if user.has_role(Role.ADMIN):
+        return True
+    if obj.requester_id == user.id:
+        return True
+    status = obj.status
+    if status == QAStatus.SM_APPROVAL_PENDING:
+        return user.has_role(Role.SM) and user.department == obj.department
+    if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
+        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+    if status in (QAStatus.QA_LEAD_ASSIGNED, QAStatus.READINESS_VERIFICATION,
+                   QAStatus.QA_ACTIVITY_INITIATED, QAStatus.PLANNING):
+        return obj.qa_lead_id == user.id
+    if status in (QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN, QAStatus.EXECUTION_IN_PROGRESS,
+                   QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
+                   QAStatus.REGRESSION_TESTING, QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING):
+        if obj.qa_lead_id == user.id:
+            return True
+        assigned = {int(i) for i in (obj.assigned_tester_ids or "").split(",") if i}
+        return user.id in assigned
+    # DRAFT/SUBMITTED/RETURNED_BY_*/REQUESTER_VERIFICATION/terminal statuses --
+    # nothing pending on anyone but the requester (already covered above).
+    return False
+
+
 @router.get("/{req_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_functional_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return doc_store.list_documents(db, "FUNCTIONAL", req_id)
@@ -718,6 +756,8 @@ def list_functional_documents(req_id: int, db: Session = Depends(get_db), curren
 def upload_functional_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                                  current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
+    if not _can_upload_documents(obj, current_user):
+        raise HTTPException(403, "Only the requester or this request's current stage owner (assigned QA Lead/tester, or the SM/Department Head currently reviewing it) can upload documents")
     return doc_store.save_documents(db, "FUNCTIONAL", req_id, obj.request_id, files, current_user.id)
 
 

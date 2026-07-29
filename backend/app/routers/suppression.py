@@ -313,6 +313,33 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
     )
 
 
+def _can_upload_documents(obj: "models.SuppressionRequest", user: models.User) -> bool:
+    """Reported bug: upload had no restriction at all -- any logged-in user
+    could attach documents to any Suppression request. Scoped to the
+    original requester (always) plus whoever the request's *current* status
+    is actually sitting with: SM during SM_APPROVAL_PENDING, Department Head
+    during DEPARTMENT_HEAD_APPROVAL_PENDING (both same-department-scoped,
+    matching those stages' own decision endpoints above), or any Security
+    Analyst during SECURITY_TEAM_VERIFICATION -- matching security_team_
+    decision's own role gate, which (unlike SM/Department Head) isn't
+    department-scoped and has no per-request individual assignment to check
+    against, since the Security Team reviews across departments. Admin
+    always bypasses, same convention as every other permission check in this
+    file."""
+    if user.has_role(Role.ADMIN):
+        return True
+    if obj.created_by_id == user.id:
+        return True
+    status = obj.status
+    if status == "SM_APPROVAL_PENDING":
+        return user.has_role(Role.SM) and user.department == obj.department
+    if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
+        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+    if status == "SECURITY_TEAM_VERIFICATION":
+        return user.has_role(Role.SECURITY_ANALYST)
+    return False
+
+
 # ---- Supporting documents (multiple files, uploaded any time after the
 # request has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/{sup_id}/documents", response_model=List[schemas.RequestDocumentOut])
@@ -326,6 +353,8 @@ def upload_suppression_documents(sup_id: int, files: List[UploadFile] = File(...
     obj = db.query(models.SuppressionRequest).get(sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    if not _can_upload_documents(obj, current_user):
+        raise HTTPException(403, "Only the requester or this request's current stage owner (Security Team, or the SM/Department Head currently reviewing it) can upload documents")
     return doc_store.save_documents(db, "SUPPRESSION", sup_id, obj.suppression_id, files, current_user.id)
 
 

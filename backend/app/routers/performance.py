@@ -565,6 +565,38 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
     )
 
 
+# Post-Engineer-assignment statuses (own lifecycle -- see constants.PERFORMANCE_STATUSES).
+_ENGINEER_OWNED_STATUSES = (
+    "ENGINEER_ASSIGNED", "READINESS", "FEASIBILITY", "PLANNING", "ENVIRONMENT_SETUP",
+    "SCRIPT_DEVELOPMENT", "BASELINE", "LOAD_TEST_EXECUTION", "RESULT_ANALYSIS",
+    "DEFECT_FIX_RETEST", "REPORT", "SIGNOFF_PENDING",
+)
+
+
+def _can_upload_documents(obj: "models.PerformanceRequest", user: models.User) -> bool:
+    """Reported bug: upload had no restriction at all -- any logged-in user
+    could attach documents to any Performance Testing request. Scoped to the
+    original requester (always) plus whoever the request's *current* status
+    is actually sitting with: SM during SM_APPROVAL_PENDING, Department Head
+    during DEPARTMENT_HEAD_APPROVAL_PENDING (both same-department-scoped,
+    matching those stages' own decision endpoints above), or the specifically
+    assigned Engineer (obj.engineer_id) for every post-assignment status --
+    not just anyone holding the QA_LEAD/QA_ENGINEER role. Admin always
+    bypasses, same convention as every other permission check in this file."""
+    if user.has_role(Role.ADMIN):
+        return True
+    if obj.requester_id == user.id:
+        return True
+    status = obj.status
+    if status == "SM_APPROVAL_PENDING":
+        return user.has_role(Role.SM) and user.department == obj.department
+    if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
+        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+    if status in _ENGINEER_OWNED_STATUSES:
+        return obj.engineer_id == user.id
+    return False
+
+
 # ---- Supporting documents (multiple files, uploaded any time after the
 # request has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/{req_id}/documents", response_model=List[schemas.RequestDocumentOut])
@@ -576,6 +608,8 @@ def list_performance_documents(req_id: int, db: Session = Depends(get_db), curre
 def upload_performance_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
+    if not _can_upload_documents(obj, current_user):
+        raise HTTPException(403, "Only the requester or this request's current stage owner (assigned Engineer, or the SM/Department Head currently reviewing it) can upload documents")
     return doc_store.save_documents(db, "PERFORMANCE", req_id, obj.request_id, files, current_user.id)
 
 

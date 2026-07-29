@@ -142,6 +142,39 @@ def _get_or_404(db: Session, model_cls, req_id: int, label: str):
     return obj
 
 
+# Post-Security-Lead-assignment statuses (own lifecycle, same set of values
+# for both SASTRequest and DASTRequest -- see constants.SAST_DAST_STATUSES).
+_SECURITY_OWNED_STATUSES = (
+    "SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS", "PLANNING", "CONFIGURATION", "SCANNING",
+    "FINDING_VALIDATION", "REMEDIATION", "ASSIGNED_TO_REQUESTER", "WAITING_FOR_FIX",
+    "ASSIGNED_TO_LEAD", "RESCAN", "SECURITY_COMPLETE",
+)
+
+
+def _can_upload_documents(obj, user: models.User) -> bool:
+    """Reported bug: upload had no restriction at all -- any logged-in user
+    could attach documents to any SAST/DAST request. Scoped to the original
+    requester (always) plus whoever the request's *current* status is
+    actually sitting with: SM during SM_APPROVAL_PENDING, Department Head
+    during DEPARTMENT_HEAD_APPROVAL_PENDING (both same-department-scoped,
+    matching those stages' own decision endpoints above), or the specifically
+    assigned Security Lead (obj.security_lead_id) for every post-assignment
+    status -- not just anyone holding the SECURITY_ANALYST role. Admin always
+    bypasses, same convention as every other permission check in this file."""
+    if user.has_role(Role.ADMIN):
+        return True
+    if obj.requester_id == user.id:
+        return True
+    status = obj.status
+    if status == "SM_APPROVAL_PENDING":
+        return user.has_role(Role.SM) and user.department == obj.department
+    if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
+        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+    if status in _SECURITY_OWNED_STATUSES:
+        return obj.security_lead_id == user.id
+    return False
+
+
 def _require_checklist_ready(obj):
     """The Security Readiness checklist's mandatory items (see
     constants.DEFAULT_SAST_CHECKLIST_ITEMS/DEFAULT_DAST_CHECKLIST_ITEMS) must
@@ -677,6 +710,8 @@ def list_sast_documents(req_id: int, db: Session = Depends(get_db), current_user
 def upload_sast_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                            current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    if not _can_upload_documents(obj, current_user):
+        raise HTTPException(403, "Only the requester or this request's current stage owner (assigned Security Lead, or the SM/Department Head currently reviewing it) can upload documents")
     return doc_store.save_documents(db, "SAST", req_id, obj.request_id, files, current_user.id)
 
 
@@ -1018,6 +1053,8 @@ def list_dast_documents(req_id: int, db: Session = Depends(get_db), current_user
 def upload_dast_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                            current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    if not _can_upload_documents(obj, current_user):
+        raise HTTPException(403, "Only the requester or this request's current stage owner (assigned Security Lead, or the SM/Department Head currently reviewing it) can upload documents")
     return doc_store.save_documents(db, "DAST", req_id, obj.request_id, files, current_user.id)
 
 

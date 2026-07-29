@@ -3104,3 +3104,87 @@ set (QA_LEAD/QA_ENGINEER) immediately above it and both backend endpoints' role 
 
 **No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean);
 Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 72. Sign-off raise flow: no document upload provision; certificate detail view missing Exit Criteria/Defect/Residual Risk fields
+
+**Why:** two gaps reported together. First, `NewSignOffModal` (the "Request Sign-off" form, in
+`frontend/src/modules/governance/SignOff.tsx`) had no file picker at all -- the backend has supported
+supporting-document upload for Sign-off certificates all along (`documents.py`'s shared
+module+request_id-keyed `qap_module_documents` table already lists `SIGNOFF` alongside
+Functional/SAST/DAST/Performance/Suppression, and `routers/signoff.py` already exposes
+`GET/POST /api/signoffs/{id}/documents` and the download endpoint), but the only place that called them was
+`RequestDocuments` inside `SignOffDetail` -- reachable only *after* the certificate exists, by opening it back
+up from the Sign-off list. There was no way to attach a document at raise time itself. Second,
+`SignOffDetail`'s own summary grid -- what actually renders when you click a raised certificate -- never
+displayed `exit_criteria_notes`/`open_defect_summary`/`residual_risk_notes` (all three mandatory fields
+captured at raise/edit time, see `NewSignOffModal`/`EditSignOffModal`'s own required textareas), nor several
+other captured fields (Testing Request ID, Change Request ID(s), Application Owner, Department, Certificate
+Date, Vendor/SI Partner, Technology Stack, Validity).
+
+**Fix (both frontend-only, `frontend/src/modules/governance/SignOff.tsx`):**
+- `NewSignOffModal` gained a `files: File[]` state and a "Supporting Documents" file-picker field. Since
+  there's no certificate id to upload against until `POST /api/signoffs` returns one, `submit()` now creates
+  the certificate first, then -- if any files were picked -- immediately calls
+  `api.uploadFiles('/api/signoffs/{id}/documents', files)` before handing control back via `onCreated`. A
+  failed upload doesn't block certificate creation (the certificate's own Documents tab, via the existing
+  `RequestDocuments`/`SignOffDetail`, can always retry), but the error still surfaces via `ErrorText` so the
+  user knows to retry.
+- `SignOffDetail`'s summary grid gained the missing fields listed above, plus a new "Exit Criteria & Risk"
+  section rendering `exit_criteria_notes`/`open_defect_summary`/`residual_risk_notes` in full (these are
+  free-text and can run long, so they're broken out of the 2-column grid rather than crammed into it).
+
+**No schema change, no backend change** (the upload/list/download endpoints already existed for `SIGNOFF`).
+**Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean); Documents and outputs copies re-synced and
+confirmed identical via `diff -rq`.
+
+## 73. Bug fix: document upload had no restriction at all -- any logged-in user could upload to any request
+
+**Why:** reported directly -- every module's `POST .../documents` endpoint accepted a file from any
+authenticated user regardless of role, department, or involvement in that specific request.
+`qa_requests.py::upload_documents` only checked that the caller held *any* of Requester/Business Analyst/
+QA Engineer/QA Lead -- not that they were *this* request's own requester, so e.g. any Requester-role user
+could upload to someone else's QA Request. `functional.py`/`sast_dast.py`/`performance.py`/`suppression.py`/
+`signoff.py`'s own upload endpoints were worse still -- plain `Depends(get_current_user)` with no role or
+ownership check whatsoever, so literally anyone logged in (any role, any department, uninvolved in the
+request) could attach a document to any request in the system.
+
+**Fix:** each module gained a `_can_upload_documents(obj, user)` helper, called from that module's own
+`POST .../documents` endpoint (list/download endpoints are unaffected -- viewing wasn't the reported problem,
+only who can add new files). Every helper follows the same shape: Admin always passes; the request's own
+requester (`requester_id`/`created_by_id`) always passes (they may need to attach more evidence at any
+point); and beyond that, only whoever the request's *current* status is actually sitting with is allowed --
+matching the exact role/department/assignment gate that status's own decision endpoint in the same file
+already enforces, not merely "anyone holding that role":
+
+- **`functional.py`:** SM (same department) during `SM_APPROVAL_PENDING`; Department Head (same department)
+  during `DEPARTMENT_HEAD_APPROVAL_PENDING`; the specifically assigned QA Lead (`qa_lead_id`) for
+  `QA_LEAD_ASSIGNED`/`READINESS_VERIFICATION`/`QA_ACTIVITY_INITIATED`/`PLANNING`; the assigned QA Lead or an
+  assigned tester (`assigned_tester_ids`) for every status from `TESTER_ASSIGNED` through
+  `QA_SIGNOFF_PENDING` (`TEST_DESIGN`/`EXECUTION_IN_PROGRESS`/`DEFECT_RAISED`/`WAITING_FOR_FIX`/`RETESTING`/
+  `REGRESSION_TESTING`/`QA_COMPLETED`/`QA_SIGNOFF_PENDING`).
+- **`sast_dast.py`** (shared helper, both SAST and DAST): SM/Department Head the same way, plus the
+  specifically assigned Security Lead (`security_lead_id`) for every post-assignment status
+  (`SECURITY_LEAD_ASSIGNED` through `SECURITY_COMPLETE`).
+- **`performance.py`:** SM/Department Head the same way, plus the specifically assigned Engineer
+  (`engineer_id`) for every post-assignment status (`ENGINEER_ASSIGNED` through `SIGNOFF_PENDING`).
+- **`suppression.py`:** SM/Department Head the same way, plus any Security Analyst during
+  `SECURITY_TEAM_VERIFICATION` -- unlike the other modules' equivalent stage, there's no individual
+  assignment to narrow to here (`security_team_decision` itself has no department scoping or per-request
+  assignee either, since the Security Team reviews across departments), so this one stays role-only,
+  matching that endpoint's own gate exactly.
+- **`signoff.py`:** the certificate's own requester, SM (same department) during `SM_APPROVAL_PENDING`, or
+  Department Head COE (same department) during `DEPT_HEAD_COE_APPROVAL_PENDING`.
+- **`qa_requests.py`** (the gateway QA Request itself): narrowed to just the request's own `requester_id`
+  (or admin) -- the gateway has no approval workflow of its own to widen this to (pure intake record, see
+  `models.QARequest`'s docstring), so there's no equivalent "current stage owner" concept here the way there
+  is for its linked child requests.
+
+Every stage not explicitly listed above (Draft, Submitted, Returned-by-*, Requester Verification, and every
+terminal/rejected status) falls through to "nothing pending on anyone but the requester" -- already covered
+by the requester check, so no other actor is granted upload access at those points.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on all six changed routers (clean); manually
+cross-checked every role/status constant referenced (`Role.SM`/`Role.DEPARTMENT_HEAD`/
+`Role.DEPARTMENT_HEAD_COE`/`Role.SECURITY_ANALYST`/`Role.ADMIN`, and every `QAStatus`/`SAST_DAST_STATUSES`/
+`PERFORMANCE_STATUSES` value used) directly against `constants.py`; Documents and outputs copies re-synced
+and confirmed identical via `diff -rq`.

@@ -746,13 +746,25 @@ def list_documents(req_id: int, db: Session = Depends(get_db), current_user: mod
 
 @router.post("/{req_id}/documents", response_model=List[schemas.QARequestDocumentOut])
 def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(
-                          Role.REQUESTER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD))):
+                      current_user: models.User = Depends(get_current_user)):
     """Accepts one or more files (multipart/form-data, field name 'files') and
-    stores them under UPLOAD_ROOT/<request_id>/, named to avoid collisions."""
+    stores them under UPLOAD_ROOT/<request_id>/, named to avoid collisions.
+
+    Reported bug: this previously only checked that the caller held ANY of
+    Requester/Business Analyst/QA Engineer/QA Lead -- meaning any user with
+    one of those roles could upload to *any* QA Request, not just their own.
+    The gateway QA Request has no approval workflow of its own (see
+    models.QARequest's docstring -- it's a pure intake/gateway record, Draft/
+    Submitted/Raised/Cancelled only, with every actual decision happening on
+    its linked child requests instead), so there's no "current stage owner"
+    to widen this to the way the linked Functional/SAST/DAST/Performance
+    requests' own upload endpoints do -- just the request's own requester
+    (or an admin)."""
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
+    if req.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Only this request's own requester or an admin can upload documents")
 
     request_dir = os.path.join(UPLOAD_ROOT, req.request_id)
     os.makedirs(request_dir, exist_ok=True)

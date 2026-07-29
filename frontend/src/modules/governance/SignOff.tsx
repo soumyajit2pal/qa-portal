@@ -117,6 +117,13 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   const [eligibleRequests, setEligibleRequests] = useState<FunctionalOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  // Supporting documents picked before the certificate exists yet -- there's
+  // no signoff id to upload against until POST /api/signoffs returns one, so
+  // these are held here and uploaded right after creation succeeds (see
+  // submit() below), same files-then-upload two-step every other module's
+  // own Documents tab does post-raise (see Common.tsx::RequestDocuments),
+  // just folded into this one form instead of a separate step.
+  const [files, setFiles] = useState<File[]>([])
   function set<K extends keyof SignOffForm>(k: K, v: SignOffForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   const applyRequest = useCallback((r: FunctionalOut) => {
@@ -160,7 +167,18 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // ever filled in via picking a Testing Request above.
     if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name/Owner/Department/Change Request ID(s) are derived from it.'); return }
     setBusy(true)
-    try { onCreated(await api.post<SignOffOut>('/api/signoffs', form)) }
+    try {
+      const created = await api.post<SignOffOut>('/api/signoffs', form)
+      // Best-effort: the certificate itself is already created at this point,
+      // so a failed upload shouldn't block onCreated -- surface the error but
+      // still hand back the created certificate (its own Documents tab, via
+      // RequestDocuments in SignOffDetail below, can always retry the upload).
+      if (files.length > 0) {
+        try { await api.uploadFiles(`/api/signoffs/${created.id}/documents`, files) }
+        catch (err) { setError(err) }
+      }
+      onCreated(created)
+    }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
 
@@ -215,6 +233,14 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
         <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
         <Field label="Open Defect Review Summary *"><textarea required value={form.open_defect_summary} onChange={(e) => set('open_defect_summary', e.target.value)} /></Field>
         <Field label="Residual Risk Documentation *"><textarea required value={form.residual_risk_notes} onChange={(e) => set('residual_risk_notes', e.target.value)} /></Field>
+        <Field label="Supporting Documents">
+          <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
+          {files.length > 0 && (
+            <div className="muted small" style={{ marginTop: 4 }}>
+              {files.map((f) => f.name).join(', ')}
+            </div>
+          )}
+        </Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
           <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Draft Certificate'}</button>
@@ -352,15 +378,30 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
       <div className="grid grid-2">
         <div><strong>Application:</strong> {item.application_name}</div>
         <div><strong>Status:</strong> <Badge status={item.status} /></div>
+        <div><strong>Testing Request ID:</strong> {item.testing_request_id || '—'}</div>
+        <div><strong>Change Request ID(s):</strong> {item.change_request_ids || '—'}</div>
+        <div><strong>Application Owner:</strong> {item.application_owner || '—'}</div>
+        <div><strong>Department:</strong> {item.department || '—'}</div>
         <div><strong>Requested By (Tester):</strong> {userName(users, item.requester_id) || '—'}</div>
         <div><strong>Reviewed By (SM):</strong> {userName(users, item.reviewed_by_id) || '—'}</div>
         <div><strong>Approved By (Department Head COE):</strong> {userName(users, item.approved_by_id) || '—'}</div>
         <div><strong>Certificate Type:</strong> {item.certificate_type}</div>
         <div><strong>Testing Type:</strong> {item.testing_type}</div>
+        <div><strong>Certificate Date:</strong> {item.certificate_date || '—'}</div>
+        <div><strong>Vendor / SI Partner:</strong> {item.vendor_si_partner || '—'}</div>
+        <div><strong>Technology Stack:</strong> {item.technology_stack || '—'}</div>
         <div><strong>Release / Build:</strong> {item.release_version || '—'} / {item.build_number || '—'}</div>
         <div><strong>Environment Tested:</strong> {item.environment_tested || '—'}</div>
         <div><strong>Target Promotion:</strong> {item.target_promotion_environment || '—'}</div>
         <div><strong>Risk Tier:</strong> {item.risk_tier || '—'}</div>
+        <div><strong>Validity:</strong> {item.validity_from || '—'} to {item.validity_to || '—'}</div>
+      </div>
+
+      <div className="section-title">Exit Criteria &amp; Risk</div>
+      <div className="grid grid-2">
+        <div><strong>Exit Criteria Validation Notes:</strong> {item.exit_criteria_notes || '—'}</div>
+        <div><strong>Open Defect Review Summary:</strong> {item.open_defect_summary || '—'}</div>
+        <div><strong>Residual Risk Documentation:</strong> {item.residual_risk_notes || '—'}</div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>

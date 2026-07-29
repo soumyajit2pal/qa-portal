@@ -273,6 +273,27 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     )
 
 
+def _can_upload_documents(obj: "models.QASignOff", user: models.User) -> bool:
+    """Reported bug: upload had no restriction at all -- any logged-in user
+    could attach documents to any QA Sign-off certificate. Scoped to the
+    original requester (Tester/QA Lead who raised it, always) plus whoever
+    the certificate's *current* status is actually sitting with: SM during
+    SM_APPROVAL_PENDING or Department Head COE during
+    DEPT_HEAD_COE_APPROVAL_PENDING, both same-department-scoped, matching
+    those stages' own decision endpoints above. Admin always bypasses, same
+    convention as every other permission check in this file."""
+    if user.has_role(Role.ADMIN):
+        return True
+    if obj.requester_id == user.id:
+        return True
+    status = obj.status
+    if status == "SM_APPROVAL_PENDING":
+        return user.has_role(Role.SM) and user.department == obj.department
+    if status == "DEPT_HEAD_COE_APPROVAL_PENDING":
+        return user.has_role(Role.DEPARTMENT_HEAD_COE) and user.department == obj.department
+    return False
+
+
 # ---- Supporting documents (multiple files, uploaded any time after the
 # certificate has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/{signoff_id}/documents", response_model=List[schemas.RequestDocumentOut])
@@ -284,6 +305,8 @@ def list_signoff_documents(signoff_id: int, db: Session = Depends(get_db), curre
 def upload_signoff_documents(signoff_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                               current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, signoff_id)
+    if not _can_upload_documents(obj, current_user):
+        raise HTTPException(403, "Only the requester or this certificate's current stage owner (SM or Department Head COE currently reviewing it) can upload documents")
     return doc_store.save_documents(db, "SIGNOFF", signoff_id, obj.certificate_id, files, current_user.id)
 
 
