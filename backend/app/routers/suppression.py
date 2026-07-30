@@ -1,6 +1,8 @@
 import datetime
 import os
 from typing import List
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
@@ -205,7 +207,7 @@ def sm_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = De
     _require(obj, "SM_APPROVAL_PENDING", "SM decision")
     obj.sm_decision = payload.decision
     obj.sm_id = current_user.id
-    obj.sm_decided_at = datetime.datetime.utcnow()
+    obj.sm_decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     if payload.decision == "Approved":
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
     elif payload.decision == "Returned":
@@ -230,7 +232,7 @@ def dept_head_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Sessi
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
     obj.dept_head_decision = payload.decision
     obj.dept_head_id = current_user.id
-    obj.dept_head_decided_at = datetime.datetime.utcnow()
+    obj.dept_head_decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     if payload.decision == "Approved":
         obj.status = "SECURITY_TEAM_VERIFICATION"
     elif payload.decision == "Returned":
@@ -263,7 +265,7 @@ def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: S
         raise HTTPException(400, "decision must be one of: Accepted, Rejected, Returned")
     obj.security_decision = decision
     obj.security_id = current_user.id
-    obj.security_decided_at = datetime.datetime.utcnow()
+    obj.security_decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     if decision in ("Accepted", "Approved"):
         obj.status = "Done"
     elif decision == "Rejected":
@@ -342,7 +344,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
         subtitle="Suppression / False Positive Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -405,6 +407,16 @@ def download_suppression_document(sup_id: int, doc_id: int, db: Session = Depend
     return FileResponse(full_path, filename=doc.file_name, media_type=doc.content_type or "application/octet-stream")
 
 
+@router.delete("/{sup_id}/documents/{doc_id}")
+def delete_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(get_db),
+                                 current_user: models.User = Depends(get_current_user)):
+    doc = doc_store.get_document_or_404(db, "SUPPRESSION", sup_id, doc_id)
+    if not doc_store.can_delete_document(doc, current_user):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
+    doc_store.delete_document(db, doc)
+    return {"ok": True}
+
+
 # ---- Walkthrough sessions ----
 # Own dedicated table (SuppressionWalkthrough), mirroring Functional's
 # WalkthroughSession -- see routers/functional.py for the same pattern.
@@ -437,7 +449,7 @@ def acknowledge_walkthrough(sup_id: int, wt_id: int, db: Session = Depends(get_d
     if not obj:
         raise HTTPException(404, "Walkthrough session not found")
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow()
+    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     db.commit()
     db.refresh(obj)
     return obj

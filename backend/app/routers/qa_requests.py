@@ -4,12 +4,15 @@ import os
 import shutil
 import uuid
 from typing import Optional, List
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
+from .. import documents as doc_store
 from ..database import get_db
 from ..deps import get_current_user, require_roles
 from ..constants import (
@@ -248,7 +251,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         db.add(functional)
         db.flush()  # need functional.id before the checklist items below can reference it
         checked_set = checked_items or set()
-        for item, owner in DEFAULT_CHECKLIST_ITEMS:
+        for item, owner, is_mandatory in DEFAULT_CHECKLIST_ITEMS:
             # `requester_checked` is the requester's own self-declaration made
             # at raise-time -- it is reference/pre-fill only. It does NOT set
             # `is_complete`; the QA Lead must still independently verify every
@@ -256,7 +259,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
             # mandatory (see constants.DEFAULT_CHECKLIST_ITEMS).
             db.add(models.ReadinessChecklistItem(
                 functional_request_id=functional.id, item=item, owner=owner,
-                is_mandatory=False,
+                is_mandatory=is_mandatory,
                 requester_checked=item in checked_set,
             ))
         _raise_child_to_sm(db, functional, "FUNCTIONAL_REQUEST", qa_request, current_user)
@@ -619,6 +622,19 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # with a mandatory item still unchecked and the linked SAST/DAST request
     # would be born already sitting at SM Approval despite that. Scoped to
     # SAST/DAST only -- Functional/Performance have no such gate by design.
+
+    pending_checklist_items = []
+    print(request_types)
+    if "Functional Testing" in request_types:
+        print("here")
+        functional_checked_set = set(checked_items)
+        print("fun", functional_checked_set)
+        pending_checklist_items += [
+            item for item, owner, is_mandatory in DEFAULT_CHECKLIST_ITEMS
+            if is_mandatory and item not in functional_checked_set
+        ]
+        print("Pend",pending_checklist_items)
+
     pending_checklist_items = []
     if "SAST" in request_types:
         sast_checked_set = set(sast_checked_items)
@@ -728,7 +744,8 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         subtitle="QA Request (Gateway) — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST"),
+
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -809,3 +826,24 @@ def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "File is missing on disk")
     return FileResponse(full_path, filename=doc.file_name,
                          media_type=doc.content_type or "application/octet-stream")
+
+
+@router.delete("/{req_id}/documents/{doc_id}")
+def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
+                     current_user: models.User = Depends(get_current_user)):
+    # Own document table/UPLOAD_ROOT layout (UPLOAD_ROOT/<request_id>/<filename>,
+    # not documents.py's UPLOAD_ROOT/<module>/<folder>/<filename>), so this
+    # can't call doc_store.delete_document() -- only reuses doc_store's
+    # can_delete_document() for the permission check, which is duck-typed
+    # (just needs .uploaded_by_id) and applies here unchanged.
+    doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    if not doc_store.can_delete_document(doc, current_user):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
+    full_path = os.path.join(UPLOAD_ROOT, doc.stored_path)
+    if os.path.exists(full_path):
+        os.remove(full_path)
+    db.delete(doc)
+    db.commit()
+    return {"ok": True}

@@ -16,18 +16,18 @@ DEMO_PASSWORD = "Password@123"
 # (username, full_name, role, department) -- one user per role, in the exact
 # order of the role list.
 DEMO_USERS = [
-    ("requester1", "Rahul Deshmukh", Role.REQUESTER, "Digital Banking Department (DBD)"),
-    ("ba1", "Ananya Kulkarni", Role.BUSINESS_ANALYST, "Digital Banking Department (DBD)"),
-    ("qa1", "Sanjay Patil", Role.QA_ENGINEER, "QA Team"),
-    ("qalead1", "Priya Sharma", Role.QA_LEAD, "QA Team"),
-    ("exec1", "Vikram Joshi", Role.DEPARTMENT_HEAD_COE, "QA Team"),
-    ("security1", "Neha Kale", Role.SECURITY_ANALYST, "Information Security"),
-    ("appowner1", "Manoj Bhosale", Role.APPLICATION_OWNER, "Core Banking Systems (CBS)"),
-    ("depthead1", "Suresh Rane", Role.DEPARTMENT_HEAD, "Information Technology Department"),
+    ("requester1", "Requester 1", Role.REQUESTER, "IT - Software"),
+    ("ba1", "BA 1", Role.BUSINESS_ANALYST, "IT - Software"),
+    ("qa1", "QA 1", Role.QA_ENGINEER, "IT - QA"),
+    ("qalead1", "QA Lead 1", Role.QA_LEAD, "IT - QA"),
+    ("exec1", "Dep head COE 1", Role.DEPARTMENT_HEAD_COE, "IT - QA"),
+    ("security1", "SA 1", Role.SECURITY_ANALYST, "IT - QA"),
+    ("appowner1", "App Owner 1", Role.APPLICATION_OWNER, "IT - Software"),
+    ("depthead1", "Dep Head Of Req 1", Role.DEPARTMENT_HEAD, "IT - Software"),
     # New SM checkpoint role (sits between Requester and Department Head on
     # QA Request / SAST-DAST / Suppression workflows).
-    ("sm1", "Alok Mehta", Role.SM, "Information Technology Department"),
-    ("admin", "QA Portal Administrator", Role.ADMIN, "QA Team"),
+    ("sm1", "SM Of Req 1", Role.SM, "IT - Software"),
+    ("admin", "Administrator", Role.ADMIN, "IT - QA"),
 ]
 
 

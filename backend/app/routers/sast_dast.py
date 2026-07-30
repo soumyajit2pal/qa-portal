@@ -1,6 +1,8 @@
 import datetime
 import os
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
@@ -804,7 +806,7 @@ def export_sast(req_id: int, db: Session = Depends(get_db), current_user: models
         subtitle="SAST Request — Full Detail Export",
         sections=sections, history=history, history_note=history_note,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -836,6 +838,16 @@ def download_sast_document(req_id: int, doc_id: int, db: Session = Depends(get_d
     if not os.path.exists(full_path):
         raise HTTPException(404, "File is missing on disk")
     return FileResponse(full_path, filename=doc.file_name, media_type=doc.content_type or "application/octet-stream")
+
+
+@router.delete("/api/sast-requests/{req_id}/documents/{doc_id}")
+def delete_sast_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
+                          current_user: models.User = Depends(get_current_user)):
+    doc = doc_store.get_document_or_404(db, "SAST", req_id, doc_id)
+    if not doc_store.can_delete_document(doc, current_user):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
+    doc_store.delete_document(db, doc)
+    return {"ok": True}
 
 
 # ---- Security Readiness checklist -- SAST previously had no checklist
@@ -872,7 +884,7 @@ def update_sast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     item.is_complete = payload.is_complete
     if payload.is_complete:
         item.approved_by_id = current_user.id
-        item.approved_at = datetime.datetime.utcnow()
+        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -908,7 +920,7 @@ def acknowledge_sast_walkthrough(req_id: int, wt_id: int, db: Session = Depends(
     if not obj:
         raise HTTPException(404, "Walkthrough session not found")
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow()
+    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     db.commit()
     db.refresh(obj)
     return obj
@@ -1156,7 +1168,7 @@ def export_dast(req_id: int, db: Session = Depends(get_db), current_user: models
         subtitle="DAST Request — Full Detail Export",
         sections=sections, history=history, history_note=history_note,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -1190,6 +1202,16 @@ def download_dast_document(req_id: int, doc_id: int, db: Session = Depends(get_d
     return FileResponse(full_path, filename=doc.file_name, media_type=doc.content_type or "application/octet-stream")
 
 
+@router.delete("/api/dast-requests/{req_id}/documents/{doc_id}")
+def delete_dast_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
+                          current_user: models.User = Depends(get_current_user)):
+    doc = doc_store.get_document_or_404(db, "DAST", req_id, doc_id)
+    if not doc_store.can_delete_document(doc, current_user):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
+    doc_store.delete_document(db, doc)
+    return {"ok": True}
+
+
 # ---- Security Readiness checklist -- see the equivalent SAST block above
 # for the full reasoning; identical pattern, DAST's own table. ----
 @router.get("/api/dast-requests/{req_id}/checklist", response_model=List[schemas.ChecklistItemOut])
@@ -1221,7 +1243,7 @@ def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     item.is_complete = payload.is_complete
     if payload.is_complete:
         item.approved_by_id = current_user.id
-        item.approved_at = datetime.datetime.utcnow()
+        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -1255,7 +1277,7 @@ def acknowledge_dast_walkthrough(req_id: int, wt_id: int, db: Session = Depends(
     if not obj:
         raise HTTPException(404, "Walkthrough session not found")
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow()
+    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     db.commit()
     db.refresh(obj)
     return obj

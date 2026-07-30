@@ -27,12 +27,40 @@ export function AddDocuments({ reqId, onAdded }: Props) {
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
+  function removeStaged(idx: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== idx))
+  }
+
   return (
-    <form onSubmit={submit} style={{ marginTop: 14, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-      <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
-      <button className="btn btn-sm" disabled={busy || files.length === 0}>
-        {busy ? 'Uploading...' : 'Upload'}
-      </button>
+    <form onSubmit={submit} style={{ marginTop: 14 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          type="file"
+          multiple
+          onChange={(e) => setFiles((prev) => [...prev, ...Array.from(e.target.files || [])])}
+        />
+        <button className="btn btn-sm" disabled={busy || files.length === 0}>
+          {busy ? 'Uploading...' : 'Upload'}
+        </button>
+      </div>
+      {files.length > 0 && (
+        <ul style={{ listStyle: 'none', margin: '8px 0 0', padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {files.map((f, idx) => (
+            <li key={`${f.name}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+              <span>{f.name}</span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={() => removeStaged(idx)}
+                aria-label={`Remove ${f.name}`}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       <ErrorText error={error} />
     </form>
   )

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { IconSearch } from './Icons'
+import { computePanelPos, PanelPos } from './panelPosition'
 
 interface SearchableSelectProps {
   value: string
@@ -15,7 +16,7 @@ interface SearchableSelectProps {
 export default function SearchableSelect({ value, onChange, options, placeholder, disabled }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [panelPos, setPanelPos] = useState({ top: 0, left: 0, width: 0 })
+  const [panelPos, setPanelPos] = useState<PanelPos>({ top: 0, bottom: 'auto', left: 0, width: 0 })
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -48,7 +49,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
     if (!open) return
     function reposition() {
       const rect = triggerRef.current?.getBoundingClientRect()
-      if (rect) setPanelPos({ top: rect.bottom + 4, left: rect.left, width: rect.width })
+      if (rect) setPanelPos(computePanelPos(rect))
     }
     window.addEventListener('scroll', reposition, true)
     window.addEventListener('resize', reposition)
@@ -81,7 +82,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
   function toggleOpen() {
     if (open) { setOpen(false); return }
     const rect = triggerRef.current?.getBoundingClientRect()
-    if (rect) setPanelPos({ top: rect.bottom + 4, left: rect.left, width: rect.width })
+    if (rect) setPanelPos(computePanelPos(rect))
     setOpen(true)
   }
 
@@ -100,7 +101,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
       {open && (
         <div
           className="searchable-select-panel searchable-select-panel-fixed"
-          style={{ top: panelPos.top, left: panelPos.left, width: panelPos.width }}
+          style={{ top: panelPos.top, bottom: panelPos.bottom, left: panelPos.left, width: panelPos.width }}
         >
           <div className="searchable-select-search">
             <IconSearch width={13} height={13} />

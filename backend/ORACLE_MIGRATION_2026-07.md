@@ -3835,3 +3835,461 @@ code -- this is purely a wizard-step-layout change (fewer steps, same fields col
 (clean); grepped the repo to confirm `ChecklistStep`/the `'checklist'` step key have no remaining
 references before deleting the file; Documents and outputs copies re-synced and confirmed identical via
 `diff -rq`.
+
+## 94. Fixed `AttributeError: module 'datetime' has no attribute 'utcnow'` across the backend
+
+**Why:** reported directly via a traceback at login (`app/auth.py`'s `create_access_token`, the line
+computing the JWT's `exp` claim). Every file in `app/` imports the module with plain `import datetime`
+(not `from datetime import datetime`), so `datetime` inside those files refers to the *module*, not the
+`datetime.datetime` class. `datetime.utcnow()` is a classmethod on `datetime.datetime`, so calling it as
+`datetime.utcnow()` against the module raises `AttributeError`. The same lines' `datetime.timedelta(...)`
+calls were never affected -- `timedelta` is a class defined directly in the module, so that half of the
+same import style already worked. This bug was latent everywhere a timestamp gets generated (row
+defaults, ID generation, JWT expiry) but had gone unnoticed until a path calling `create_access_token`
+(login) actually ran.
+
+**Fix:** mechanical find/replace of every `datetime.utcnow()` call to `datetime.datetime.utcnow()`,
+leaving the `import datetime` statements and every `datetime.timedelta(...)`/`datetime.date`/
+`datetime.datetime` type-annotation usage untouched, across: `app/models.py` (`now()`/`gen_id()` helpers),
+`app/auth.py` (`create_access_token`'s `exp` claim -- the exact reported line), and the routers
+`qa_requests.py`, `performance.py`, `signoff.py`, `functional.py`, `sast_dast.py`, `applications.py`,
+`dashboard.py`, `suppression.py`, `export.py` (25 call sites total across 11 files). `app/schemas.py`
+already used `datetime.datetime`/`datetime.date` correctly as Pydantic type annotations and needed no
+change.
+
+Also found an orphaned top-level `backend/auth.py` (not `app/auth.py`) with the identical bug pattern --
+confirmed via repo-wide grep that nothing imports it (`app/deps.py` and `app/seed.py` both import from
+`app/auth.py` via `.auth`), so it's dead code and was left as-is rather than edited.
+
+**No schema change, no behavioral change** (the computed timestamps are identical to what was always
+intended -- this only fixes the crash preventing them from being computed at all). **Verification:**
+`python3 -m py_compile` on all 11 touched files (clean); repo-wide grep confirmed zero remaining
+`datetime.utcnow()` call sites outside of `datetime.datetime.utcnow()`; Documents and outputs copies
+re-synced via the standard rsync/diff check -- the only reported difference was `app/auth.py` itself,
+which is expected and intentional since it's on the sync exclude list (edited directly in Documents per
+the reported bug, per the established convention of never overwriting excluded files during sync).
+
+## 95. Fixed `/api/dashboard/3w` 500 error -- missing `ZoneInfo` import + stray extra `()` call
+
+**Why:** reported directly as "internal server error" on `GET /api/dashboard/3w`. Two independent,
+pre-existing bugs in `dashboard.py`'s `_age_days(dt)` helper (called for every item on that dashboard):
+the function referenced `ZoneInfo(...)` but the file never imported it (`NameError: name 'ZoneInfo' is
+not defined`), and even past that, the expression had a stray `()` sitting between the `.astimezone(...)`
+chain and the subtraction -- i.e. `...astimezone(ZoneInfo("Asia/Kolkata"))() - dt` -- which calls the
+resulting `datetime` object like a function (`TypeError: 'datetime.datetime' object is not callable`).
+While fixing this, the same stray-`()` pattern was found copy-pasted into the "generated_at" timestamp
+used by every PDF report footer: `suppression.py`, `sast_dast.py`, `functional.py`, `performance.py`, and
+`export.py` all had `...astimezone(ZoneInfo("Asia/Kolkata"))\n().strftime(...)` -- same bug, would have
+thrown the same `TypeError` the first time any of those PDFs was exported. `export.py` was also missing
+the `ZoneInfo` import outright.
+
+**Fix:** added `from zoneinfo import ZoneInfo` to `dashboard.py` and `export.py` (the other four already
+had it). Removed the stray `()` in all six spots, joining the expression back into one call chain --
+`dashboard.py`'s `_age_days` now computes `now = datetime.datetime.utcnow().replace(...).astimezone(...)`
+then returns `(now - dt).days`; the five PDF-export "generated_at" lines now read
+`...astimezone(ZoneInfo("Asia/Kolkata")).strftime(...)` directly, no line break, no extra call.
+
+**No schema change, no behavioral change** (same IST timestamp that was always intended -- this only
+fixes the crash preventing it from being computed). **Verification:** `python3 -m py_compile` on all 6
+touched files (clean); repo-wide grep confirmed no remaining stray leading-`()` lines or files using
+`ZoneInfo` without importing it; Documents and outputs re-synced, only the expected (excluded)
+`app/auth.py` difference reported.
+
+## 96. Fixed `/api/dashboard/3w` 500 -- "can't subtract offset-naive and offset-aware datetimes"
+
+**Why:** the user re-tested after section 95 and got a new (real, server-reproduced) traceback from the
+same `_age_days` helper: `TypeError: can't subtract offset-naive and offset-aware datetimes` at
+`return (now - dt).days`. Root cause: `created_at`/`updated_at` are plain `Column(DateTime)` (no
+`timezone=True`) on every request model, so Oracle round-trips them as naive `datetime` objects even
+though `models.now()` computes them as tz-aware IST at write time -- the tzinfo is silently dropped on
+the way into/out of the non-timezone-aware column. Section 95's fix computed `now` as tz-*aware* IST but
+still subtracted it directly against the naive `dt` coming out of the DB, which Python's `datetime`
+refuses to do.
+
+**Fix:** `_age_days` now checks `dt.tzinfo is None` and, if so, attaches `ZoneInfo("Asia/Kolkata")`
+directly via `.replace(tzinfo=...)` (no UTC conversion -- the naive value already represents IST
+wall-clock time, exactly what it was before Oracle stripped the zone) before subtracting against the
+tz-aware `now`. This mirrors the existing `isinstance(dt, datetime.date)` branch just above it, which
+already anticipated dt arriving in a different shape than expected.
+
+**No schema change** (the DateTime columns stay `timezone`-naive by design; this fixes the comparison
+logic to match how they're actually stored, rather than changing storage). **Verification:** reproduced
+against the live app (the user's own uvicorn/Oracle instance) -- confirmed the exact traceback pointed at
+this line; added a standalone script exercising `_age_days` with a naive datetime, a plain `date`, and
+`None` (matches the three branches) -- all return the expected day counts with no exception;
+`python3 -m py_compile app/routers/dashboard.py` clean; Documents/outputs re-synced, only the expected
+(excluded) `app/auth.py` difference reported.
+
+## 97. Redesigned the "Assign QA Lead / Security Lead / Engineer" control -- own labeled row instead of buried in the button row
+
+**Why:** reported directly with a screenshot -- the Department Head decision step's "Assign QA Lead"
+searchable picker (`components/UserAssignSelect.tsx`) sat inline inside the same wrapping flex row as
+Export PDF / Edit Details / Sign / Approve / Return to Requester / Reject (see
+`ApprovalDecisionButtons`'s `extraControl` prop in `components/Common.tsx`). On a typical detail-drawer
+width that row wraps awkwardly, and the picker's own search popover opened right on top of/below the
+neighbouring buttons -- a required "pick someone before you can approve" step reading as just another
+crowded button instead of its own action.
+
+**Fix:** `ApprovalDecisionButtons` now renders `extraControl` (when present) inside a `.approval-assign-row`
+div with `width: 100%`, which forces it onto its own full-width line within the parent's flex-wrap row --
+Export PDF/Edit Details stay on the row above it, Sign/Approve/Return/Reject flow onto the row below it,
+and the picker's popover now has a predictable, uncluttered spot to open into. Added a new
+`extraControlLabel?: string` prop so the row carries a proper caption instead of being an unlabeled
+dropdown; wired it at all four call sites: Functional ("Assign QA Lead"), SAST/DAST ("Assign Security
+Lead"), Performance ("Assign Engineer"). Widened each `UserAssignSelect`'s `minWidth` from 220 to 260 now
+that it isn't competing for space with five other buttons on the same line. New `.approval-assign-row`
+CSS in `index.css` gives it a shaded `--navy-50` background + border + label styling, consistent with
+`.actions-panel`'s existing "give the actionable area its own surface" pattern.
+
+**No schema/backend change** (`UserAssignSelect` and the decision endpoints themselves are untouched --
+this only changes where/how the picker is laid out on screen). **Verification:** `npx tsc --noEmit -p .`
+from `frontend/` (clean); Documents and outputs re-synced, only the expected (excluded) `app/auth.py`
+difference reported.
+
+## 98. Replaced the inline "Assign QA Lead / Security Lead / Engineer" row with a proper confirmation modal
+
+**Why:** section 97's inline `.approval-assign-row` fix (own labeled row above Sign/Approve/Return/Reject)
+still overlapped -- reported again with a screenshot showing the picker's search popover (`position:
+fixed`, opens below its trigger without pushing anything else down) visually covering the Sign field,
+Return to Requester/Reject buttons, and the Comments box underneath, and the visible part of the option
+list cut short ("lower options are missing"). Any inline layout has the same structural problem: the
+popover floats independently of document flow, so whatever sits below the trigger in the same panel is
+always at risk of being covered. Requested directly: rework this as a pop-up instead, or redo the whole
+panel.
+
+**Fix:** `ApprovalDecisionButtons` (`components/Common.tsx`) no longer renders `extraControl` inline at
+all. Clicking "Approve" on a step that has one (still gated on having signed first, same as before) now
+opens a small `Modal` (`variant="dialog"`, `preventBackdropClose`) titled e.g. "Assign QA Lead & Approve",
+containing just the picker (full width, `extraControlLabel` as its caption) and a "Confirm Approve"
+button that stays disabled until `extraReady`, plus Cancel. Being a dedicated overlay with its own
+stacking context, there's nothing behind it for the search popover to collide with -- the picker has the
+entire 640px-wide dialog to itself. Return/Reject/Sign stay in the main action row exactly as before
+(unaffected -- they never needed the picker). Removed the now-unused `.approval-assign-row` CSS from
+`index.css`; widened each `UserAssignSelect` to `width: '100%'` at all four call sites (Functional/SAST/
+DAST/Performance) now that it fills the modal rather than competing for space with buttons.
+
+**No schema/backend change** (`onApprove`'s payload and the decision endpoints are untouched -- this only
+moves *when* the picker is visible and *where* it renders). **Verification:** `npx tsc --noEmit -p .` from
+`frontend/` (clean); Documents and outputs re-synced, only the expected (excluded) `app/auth.py`
+difference reported.
+
+## 99. "Require Department Head re-approval on return" -- checkbox replaced with a confirmation pop-up
+
+**Why:** requested directly, with a screenshot of Functional QA's "Readiness Passed / Readiness Failed"
+row -- the "Require Department Head re-approval on return" checkbox sat permanently visible next to the
+Failed button across five near-identical copy-pasted blocks (Functional/SAST/DAST/Performance's
+`readiness-decision`, and Suppression's `security-team-decision` "Return to Requester"). Being just
+another always-on control in the row, it was easy to forget to tick before clicking Failed/Returned.
+
+**Fix:** all five now ask at the moment of the decision instead of relying on a pre-set checkbox.
+Clicking "Readiness Failed" (or, in Suppression, "Return to Requester") opens `components/ConfirmModal.tsx`
+(already used for SAST/DAST's scan-complete flow) with the question "Require Department Head re-approval
+when this request is returned to the requester?" -- "Yes, require re-approval" submits the decision with
+`require_dept_head_reapproval: true`; "No, skip re-approval" submits it with `false`. Both options submit
+the underlying decision (Failed/Returned) -- this pop-up only decides the flag, matching exactly what the
+checkbox used to control, just asked explicitly instead of silently defaulting to unchecked. Replaced each
+file's `requireDeptHeadReapproval`/`setRequireDeptHeadReapproval` state (now unused everywhere -- confirmed
+via repo-wide grep) with a `showReapprovalConfirm` boolean gating the modal. Added the `ConfirmModal`
+import to `Functional.tsx`, `Performance.tsx`, and `Suppression.tsx` (SAST/DAST already had it).
+
+**No schema/backend change** (`require_dept_head_reapproval` is sent with the exact same shape/values as
+before -- only how the value is chosen changed). **Verification:** `npx tsc --noEmit -p .` from
+`frontend/` (clean); repo-wide grep confirms no remaining references to the old checkbox state; Documents
+and outputs re-synced, only the expected (excluded) `app/auth.py` difference reported.
+
+## 100. Redesigned "Assign Tester(s)" -- native `<select multiple>` replaced with a searchable chip picker
+
+**Why:** reported directly with a screenshot -- "Assign Tester(s)" (Functional QA's Planning step) used a
+bare native `<select multiple>`, which renders as a tall, unstyled listbox with no search and a
+ctrl/cmd-click-to-multi-select interaction most people don't discover on their own. Called out as "too
+much basic UI" needing a modern revamp, consistent with the searchable single-picker
+(`UserAssignSelect.tsx`) already used everywhere else in the app for lead/engineer assignment.
+
+**Fix:** new `components/MultiUserAssignSelect.tsx` -- a multi-value sibling of `UserAssignSelect`, same
+searchable dropdown-panel mechanics (fixed-position panel anchored to the trigger, click-away to close,
+follows the trigger on scroll/resize), but the trigger itself renders each already-picked tester as a
+removable pill/chip (name + an "x" button) instead of a single label, and the dropdown list marks already-
+selected names with a checkmark rather than hiding them -- so picking several testers is just repeated
+clicks without the panel closing in between, and removing one is a single click on its chip's "x" without
+reopening the dropdown at all. Wired into `Functional.tsx`'s `canAssignTester` block in place of the old
+`<select multiple>`; `selectedTesters`/`setSelectedTesters` state and the "Assign Tester(s)" button/
+`act('assign-tester', ...)` call are unchanged. New `.multi-user-select*`/`.multi-user-chip*`/
+`.multi-user-checkbox` CSS in `index.css`, reusing the existing `.searchable-select-panel` family for the
+dropdown itself so it looks consistent with every other picker in the app.
+
+**No schema/backend change** (`tester_ids` is still sent as the same array of numeric IDs -- only the
+picker UI changed). **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean); Documents and
+outputs re-synced, only the expected (excluded) `app/auth.py` difference reported.
+
+## 101. Fixed searchable dropdowns rendering off-screen near the bottom of the viewport
+
+**Why:** reported directly with a screenshot -- opening the new "Assign Tester(s)" picker (section 100)
+showed only the search box, no option list beneath it, "nothing is visible". Root cause: every searchable
+dropdown in the app (`UserAssignSelect`, the new `MultiUserAssignSelect`, and the generic
+`SearchableSelect` used for the Department picker and Suppression's Request ID search) always opened
+downward -- `top: rect.bottom + 4` -- computed once from the trigger's on-screen position with no regard
+for how much room was actually left below it. The "Assign Tester(s)" trigger in that screenshot sat near
+the bottom of the browser window, so the option list rendered mostly or entirely below the visible
+viewport; being `position: fixed`, page scrolling can't bring it into view either, so it just looked
+empty/broken even though it had opened correctly.
+
+**Fix:** new shared helper `components/panelPosition.ts` (`computePanelPos(rect, minWidth?)`) -- compares
+space below vs. above the trigger against a rough estimate of the panel's own height (search box + option
+list, ~280px) and flips the panel to open *upward* (anchored to the trigger's top edge instead of its
+bottom) whenever there isn't enough room below but there's more room above. Returns both `top` and
+`bottom` (one a pixel offset, the other the literal string `'auto'`) so the caller's inline style always
+explicitly cancels whichever edge isn't being used, rather than leaving `.searchable-select-panel-fixed`'s
+CSS `top: 0` default fighting with a newly-set `bottom`. All three components (`UserAssignSelect.tsx`,
+`MultiUserAssignSelect.tsx`, `SearchableSelect.tsx`) now call this same helper in both `toggleOpen` and
+their scroll/resize `reposition` handler, instead of each computing `top: rect.bottom + 4` inline.
+
+**No schema/backend change** (pure client-side positioning logic). **Verification:** `npx tsc --noEmit -p .`
+from `frontend/` (clean); repo-wide grep confirms all three components now route through the same
+`computePanelPos` helper with no leftover inline `rect.bottom + 4` computations; Documents and outputs
+re-synced, only the expected (excluded) `app/auth.py` difference reported.
+
+## 102. Dashboard clarity pass -- every metric now explains what it counts, in plain English, on screen
+
+**Why:** reported directly -- "what is Active Project, What is pending Approval, What is Active requests /
+Aging distribution 16 pending how is calculating?" The four Command Centre "At a Glance" cards and the
+Ageing Distribution donut each use a genuinely different scope under the hood: Active Projects counts
+*distinct project epics* with a Functional Testing request in an in-flight `QAStatus` (see
+`ACTIVE_QA_STATUSES` in `dashboard.py`); Pending Approvals counts Functional requests sitting at an
+approval-gate status plus SAST/DAST requests at their own gate statuses plus every open Suppression
+request; Active Requests (org-wide) counts *individual requests* of any type (QA/Functional/SAST/DAST/
+Performance) not yet Closed/Cancelled (computed client-side in `Dashboard.tsx`'s `isActiveRequest`); and
+the Ageing Distribution donut's total is `/api/dashboard/3w`'s `total_pending` -- yet another set (every
+Functional/SAST/DAST/Suppression request not in a terminal status), grouped by `_age_days()`/
+`_ageing_bucket()` into 0-3/4-7/8-15/16-30/30+ day buckets. None of these four numbers are supposed to
+match each other, but nothing on screen said so -- a person had to ask (as happened here) rather than
+being able to tell from the dashboard itself.
+
+**Fix:** added a `hint` prop to `StatCard` (`Dashboard.tsx`) and `MetricCard` (`components/Common.tsx`) --
+one always-visible, plain-English line under the label explaining exactly what's counted (not a hover-only
+tooltip, since the ask was for the dashboard to be "self portrayed"). Wired hints onto: all 4 Command
+Centre "At a Glance" cards; SAST/DAST's request-count and open-vulnerability cards; Suppression's open/
+critical-exception cards; and 3W's "Total Pending Items" card. Added a one-line note directly above the
+"At a Glance" grid stating outright that these four numbers use different scopes and aren't meant to
+reconcile. Expanded the "Project Visibility & Governance" card's subtitle, the "Pending by Team" subpanel
+caption (now states the SLA day-bands: 0-7 within, 8-15 near, 16+ breached), the "Ageing Distribution"
+subpanel caption, and the standalone "Ageing" tab caption to all explicitly name the same
+Functional+SAST+DAST+Suppression, non-terminal-status scope and the total item count, so the donut's
+"pending" is self-explanatory wherever it appears. New `.stat-card .hint`/`.metric-card .hint` CSS
+(muted, 11.5px, matches the existing `.footline` treatment).
+
+**No calculation/schema/backend change whatsoever** -- every number is computed exactly as before; this is
+purely explanatory copy added around the existing values. **Verification:** `npx tsc --noEmit -p .` from
+`frontend/` (clean); Documents and outputs re-synced, only the expected (excluded) `app/auth.py`
+difference reported.
+
+## 103. Fixed topbar "Search projects, requests or IDs" -- only worked for QA Request IDs
+
+**Why:** reported directly ("search project, request id not working"). `Layout.tsx`'s `submitSearch`
+always navigated to `/qa-requests?search=...` regardless of what was typed -- but that endpoint's
+`search` param (see `routers/qa_requests.py`) only matches the QA Request gateway's own `request_id`/
+`application_name`/`epic_number`. Every other module generates its own distinctly-prefixed ID
+(`models.py`'s `gen_id` calls: `TQA-FUNC-...`, `SAST-...`, `DAST-...`, `PERF-...`, `SUP-...`,
+`QA-CERT-...`), so typing any of those into the topbar box landed on an empty/irrelevant QA Requests list
+every time -- the search box only ever "worked" for a `TQA-REQ-...` ID or an application name/epic number
+that happened to match the gateway.
+
+**Fix:** `submitSearch` now upper-cases the typed term and checks it against a small ordered prefix table
+(`ID_PREFIX_ROUTES`: `TQA-FUNC`→`/functional-requests`, `SAST`→`/sast`, `DAST`→`/dast`, `PERF`→
+`/performance`, `SUP`→`/suppression`, `QA-CERT`→`/signoff`). A match deep-links straight to that module
+with `?open=<the typed id>`, reusing the same "open this exact request's detail drawer" pattern
+Functional/SAST/DAST/Performance already supported (originally built for the Linked Requests table's
+cross-module navigation, section 179). Anything that doesn't match a known prefix -- a `TQA-REQ-...` ID
+itself, or free-text application name/epic number -- still falls through to the QA Request gateway search
+exactly as before.
+
+Suppression and Sign-off didn't have `?open=` support at all (only Functional/SAST/DAST/Performance did),
+so it was added to both: `Suppression.tsx` matches on `suppression_id`, `SignOff.tsx` on `certificate_id`,
+both wired via the same `useSearchParams`-based effect (find the row, select it, strip the query param)
+as the other four modules.
+
+**No schema/backend change** (`?open=` matches against data these pages already fetch; no new API calls).
+**Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean); Documents and outputs re-synced, only
+the expected (excluded) `app/auth.py` difference reported.
+
+## 104. Fixed Change Request ID / Epic Number format validation not actually blocking Next/Submit
+
+**Why:** reported directly -- "there are field validation, but... error also allowing user to submit."
+`QARequests/steps/DetailsStep.tsx` showed an inline "Invalid format. Example: CR-1234"/"...EPIC-1234"
+message under Change Request ID(s)/Epic Number on blur, using its own local `crError`/`epicError`
+component state and regexes (`/^[A-Z]{2,4}-[0-9]{1,4}$/`, `/^[A-Z]{2,4}-[0-9]{1,6}$/`). But
+`NewRequestModal.tsx`'s `goNext`/`submit` only ever called `validation.ts`'s `detailsStepError()`, which
+checked that the fields were non-empty and nothing else -- it never looked at that format regex or the
+local error state at all. So a value that visibly failed validation on screen still advanced the wizard
+and still got submitted to the backend.
+
+**Fix:** moved the two regexes into `validation.ts` as exported constants (`CR_NUMBER_REGEX`,
+`EPIC_NUMBER_REGEX`) and added the actual format check to `detailsStepError()` itself, right after the
+existing required-field check -- the same single gate `goNext`/`submit` already call, so it's now
+enforced everywhere that function is (advancing past the Details step, and the final pre-submit safety
+net for a step the wizard has since navigated away from). `DetailsStep.tsx`'s `onBlur` handlers now import
+and reuse those same two constants instead of keeping their own separate copies, so the on-screen inline
+message and the actual gate can never silently drift out of sync again.
+
+Audited every other Edit Details modal (Functional/SAST/DAST/Performance) for the same "shows an error but
+still lets you submit" pattern -- none of them run any format validation on Change Request ID/Epic Number
+at all (they're plain admin-only-editable text inputs with no error state), so this bug was unique to the
+wizard's own Details step; nothing else needed changing.
+
+**No schema/backend change** (the backend never validated this format either way -- purely a frontend
+gating fix). **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean); ran both regexes against
+sample valid/invalid values in isolation to confirm the expected pass/fail; repo-wide grep confirmed no
+other component has its own duplicate copy of this validation; Documents and outputs re-synced, only the
+expected (excluded) `app/auth.py` difference reported.
+
+## 105. Documents could be uploaded but never deleted -- added delete support everywhere
+
+**Why:** reported directly -- "while uploading document system should allow user to delete document if
+any mistake happen." Every upload endpoint (both document systems -- see below) only ever supported
+list/upload/download; once a file landed on a request there was no way to remove it, even if the wrong
+file had been picked by mistake.
+
+**Fix -- backend:** added `documents.py::can_delete_document(doc, user)` -- `True` for an Admin or
+whoever's own `uploaded_by_id` matches the acting user, and nothing else. Deliberately narrower than the
+existing upload permission (`_can_upload_documents`, section 171-178), which also lets the request's
+*current* stage owner (SM, Department Head, assigned Lead/tester/Engineer) upload -- letting a reviewer
+delete evidence someone *else* attached would be a different, more dangerous feature than "let me undo my
+own mistake," so delete stays scoped to the uploader (or an admin) only. Paired with
+`documents.py::delete_document(db, doc)` (removes the file from disk, then the DB row), and a new
+`DELETE /{req_id}/documents/{doc_id}` endpoint added to every one of the six routers that share this table
+(`functional.py`, `sast_dast.py` -- both SAST and DAST, `performance.py`, `suppression.py`, `signoff.py`),
+all following the identical guard-then-delete shape.
+
+The QA Request gateway keeps its own separate, older document system (`models.QARequestDocument`, its own
+`UPLOAD_ROOT/<request_id>/<filename>` layout predating `documents.py` -- see section header note in
+`documents.py`), so it got its own `DELETE /{req_id}/documents/{doc_id}` in `qa_requests.py` that reuses
+`can_delete_document()` for the permission check only (that function is duck-typed, just needs
+`.uploaded_by_id`) but does its own file removal/DB delete inline, since its storage path layout doesn't
+match `documents.py`'s `full_path()`.
+
+**Fix -- frontend:** added a "Delete" button next to "Download" on every documents table --
+`components/Common.tsx`'s shared `RequestDocuments` (used by Functional/SAST/DAST/Performance/
+Suppression/Sign-off) and `QARequests/RequestDetail.tsx`'s own Documents tab -- gated on
+`isAdmin || doc.uploaded_by_id === user.id`, matching the backend check exactly so the button simply
+doesn't render when the click would 403 anyway. Clicking it opens a small confirmation `Modal` ("Delete
+document? ... This cannot be undone.") before calling the new `DELETE` endpoint and reloading the list.
+
+Also added the ability to remove a file *before* it's uploaded -- picking files no longer replaces the
+staged selection, it appends to it, and each staged file now shows in a list with its own "✕" remove
+button. Applied to all three places a file gets staged pre-upload: `components/Common.tsx`'s
+`RequestDocuments` upload form, `QARequests/AddDocuments.tsx` (the gateway's own "add more documents"
+form), and `QARequests/steps/DocumentsStep.tsx` (the wizard's initial document-picker step).
+
+**Schema/DB change:** none -- deletion just removes existing rows/files, no new columns.
+**Verification:** `python3 -m py_compile` on all seven touched backend files (`documents.py`,
+`functional.py`, `sast_dast.py`, `performance.py`, `suppression.py`, `signoff.py`, `qa_requests.py`) --
+clean; `npx tsc --noEmit -p .` from `frontend/` -- clean; Documents and outputs re-synced with no
+unexpected differences.
+
+## 106. "Type name / employee ID to sign" replaced with the logged-in user's own name
+
+**Why:** reported directly -- "Disable 'Type name / employee ID' to sign, whatever name is present on
+system that will be log." `components/Common.tsx`'s `SignField` (used by every SM/Department Head decision
+step via `ApprovalDecisionButtons`) was a free-text input pre-filled with the acting user's name but fully
+editable before clicking Sign -- so in principle an approval could be logged under any typed name/employee
+ID, not necessarily the account that was actually logged in and performing the action.
+
+**Fix:** `SignField` no longer renders an editable input at all -- it shows the logged-in user's own name
+(`userName`, already passed in by every caller as `user?.full_name` from `AuthContext`) as plain read-only
+text, with the "Sign" button now recording that exact name directly (`onSignedChange(userName)`) instead of
+whatever had been typed. If `userName` is somehow unavailable, it shows "Unknown user" and Sign stays
+disabled. No caller changes were needed -- `Functional.tsx`, `SAST.tsx`, `DAST.tsx`, `Performance.tsx`,
+`Suppression.tsx`, `SignOff.tsx` already passed `userName={user?.full_name}` into
+`ApprovalDecisionButtons`, so every decision step across all six modules picked up the fix automatically.
+
+**No schema/backend change** (the signed name still travels inside `comments` via the existing
+`withSignature()` helper -- only how that name gets populated changed). **Verification:**
+`npx tsc --noEmit -p .` from `frontend/` -- clean; Documents and outputs re-synced with no unexpected
+differences.
+
+## 107. Command Centre: added a "Raised" date-range filter (within 1 hour / within 1 month / custom From-To)
+
+**Why:** reported directly -- "In dashboard add filter like within 1 hr raised, 1 month, from date to to
+date." The Command Centre had no way to narrow any of its data down to a specific time window; everything
+shown was always all-time.
+
+**Fix:** added a new `RaisedRangeFilter` control (`Dashboard.tsx`) rendered above the "At a Glance" cards,
+with four options as pill-tabs -- All time, Within 1 hour, Within 1 month, Custom range -- the last of
+which reveals a From/To native date-input pair. `isWithinRaisedRange(dateStr, range)` does the actual
+matching: `1h`/`1m` compare against `Date.now()` minus 1 hour / 1 calendar month, `custom` compares against
+the picked From/To (To is treated as end-of-day so the selected day itself is included).
+
+Applied it to the two things on the page that are actually keyed by a raise/created timestamp:
+- **"Active requests (org-wide)" stat card** -- `unifiedRequests` (the combined QA/Functional/SAST/DAST/
+  Performance list already built for this card) is now filtered by the selected range before computing
+  both the card's value and its footline count; the card's hint/footline text changes wording when a
+  non-"all" range is active so it's clear the number is scoped.
+- **Recent Activity** -- previously fetched all approval actions and immediately sliced to the 6 most
+  recent before storing state, which left nothing for a range filter to narrow down; now the full list is
+  kept in state and the range filter + the 6-item cap are both applied together in a `filteredActivity`
+  memo, so picking e.g. "Within 1 hour" actually narrows what's shown instead of always displaying the same
+  fixed 6 regardless of the filter.
+
+The other three At-a-Glance cards (Active projects, Open security findings, Pending approvals) are
+backend-aggregated all-time counts with no per-item created_at to filter by client-side, so they're
+deliberately left unaffected -- a caption under the filter control says so explicitly, matching this
+dashboard's existing convention (section 102) of never leaving a scope difference unexplained on screen.
+
+**No schema/backend change** (purely client-side filtering of data already being fetched).
+**Verification:** `npx tsc --noEmit -p .` from `frontend/` -- clean; Documents and outputs re-synced with
+no unexpected differences.
+
+## 108. Renamed the "My Requests" dashboard tab to "Requests", hidden for 4 roles
+
+**Why:** reported directly -- rename "My Requests" to "Requests", and hide the tab entirely for QA
+Engineer, QA Lead, Security Analyst, and Executive COE (AGM/QA -- `Role.DEPARTMENT_HEAD_COE`). Those 4
+roles work across every team's requests as part of the job, so "requests I personally raised" isn't a
+relevant view for them the way it is for a Requester/Business Analyst/SM/Department Head.
+
+**Fix:** `Dashboard.tsx`'s tab label changed from `'My Requests'` to `'Requests'` (the tab's own `key` stays
+`'my-requests'` -- internal only, not shown anywhere). The tab entry is now conditionally spread into the
+`tabs` array based on a new `hideRequestsTab` check: `user.roles` includes any of `QA_ENGINEER`, `QA_LEAD`,
+`SECURITY_ANALYST`, `DEPARTMENT_HEAD_COE`. Checked directly against `user.roles` rather than the shared
+`hasRole()` helper, since `hasRole` treats holding `ADMIN` as satisfying *any* role check -- using it here
+would have also hidden the tab from Admins, which isn't the intent ("Admin always sees everything"
+elsewhere in the app). The tab body render (`{tab === 'my-requests' && ...}`) also checks `!hideRequestsTab`
+as a second guard, purely defensive since the tab button that sets that state no longer exists for those
+roles.
+
+The pill-tab *inside* the Requests tab body ("My Requests (n)" vs. "{department} (n)") was left as-is --
+that's a different, still-meaningful distinction (raised by me vs. raised by my department) unrelated to
+the outer dashboard tab's own label.
+
+**No schema/backend change** (purely a frontend visibility/label change).
+**Verification:** `npx tsc --noEmit -p .` from `frontend/` -- clean; Documents and outputs re-synced with
+no unexpected differences.
+
+## 109. New "Tester Overview" dashboard tab -- per-tester completed/pending/sign-off, by department (Executive COE only)
+
+**Why:** reported directly -- a broad-level view showing, per tester, how many requests they've completed,
+how many are still pending, and their sign-off count, grouped by department, visible only to Executive COE
+(CM/AGM).
+
+**Fix:** new `TesterOverviewTab` component in `Dashboard.tsx`, added as a tab (`'Tester Overview'`) only
+when `hasRole(user, 'DEPARTMENT_HEAD_COE')` is true -- unlike the Requests-tab hide list added in section
+108, this one deliberately *does* use the shared `hasRole()` helper (ADMIN-bypass and all), since this is a
+"show to X" gate rather than a "hide from X" one, and an Admin seeing it too is the wanted behavior.
+
+Built entirely from data already fetched elsewhere on this dashboard -- no new backend endpoint:
+- Fetches `/api/functional-requests`, `/api/signoffs`, and `/api/auth/users`.
+- For every Functional Testing Request with one or more `assigned_tester_ids` (comma-separated numeric IDs,
+  same field/format `Functional.tsx` already parses for its own Overview), each assigned tester accumulates:
+  a **Total Assigned** count; a **Completed** count (status has reached `QA_COMPLETED` or later -- i.e. the
+  tester's own execution work is done, regardless of how much further the request still has to go through
+  sign-off/closure); a **Pending** count (still active, but earlier than `QA_COMPLETED` -- `TESTER_ASSIGNED`
+  through `REGRESSION_TESTING`); and a **Signed Off** count (the request's linked `signoff_id`, looked up
+  against the fetched sign-off list, has `status === 'ISSUED'`).
+- Each tester's own `department` (from the fetched user list) is shown alongside them, and the table is
+  sorted by department then tester name so it reads as a grouped, broad-level overview rather than a flat
+  list.
+
+A caption above the table spells out exactly what each column counts, matching this dashboard's existing
+convention of never leaving a metric's definition unstated on screen.
+
+**No schema/backend change** (reuses 3 endpoints already called elsewhere in the app; purely a new
+frontend view over existing data). **Verification:** `npx tsc --noEmit -p .` from `frontend/` -- clean;
+Documents and outputs re-synced with no unexpected differences.

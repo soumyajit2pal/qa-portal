@@ -1,5 +1,6 @@
 import datetime
 from collections import Counter
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -45,7 +46,16 @@ def _age_days(dt) -> int:
         return 0
     if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
         dt = datetime.datetime(dt.year, dt.month, dt.day)
-    return (datetime.datetime.utcnow() - dt).days
+    if dt.tzinfo is None:
+        # `updated_at`/`created_at` are plain `Column(DateTime)` (no
+        # timezone=True), so Oracle round-trips them as naive datetimes even
+        # though `models.now()` writes them as IST wall-clock time -- treat a
+        # naive value as already being in IST rather than comparing it
+        # against a UTC-derived "now" (which raised "can't subtract
+        # offset-naive and offset-aware datetimes").
+        dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    return (now - dt).days
 
 
 _SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Informational"]

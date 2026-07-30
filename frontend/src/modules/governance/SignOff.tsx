@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
@@ -495,6 +496,7 @@ export default function SignOff() {
   const [selected, setSelected] = useState<SignOffOut | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const load = useCallback(async () => {
     try { setRows(await api.get<SignOffOut[]>('/api/signoffs')) } catch (err) { setError(err) }
@@ -503,6 +505,18 @@ export default function SignOff() {
   useEffect(() => {
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names just stay empty */ })
   }, [])
+
+  // Same "?open=<certificate_id>" deep-link pattern as Functional/SAST/DAST/
+  // Performance/Suppression -- lets the topbar search box jump straight to a
+  // specific sign-off certificate's detail drawer instead of just landing on
+  // this list.
+  useEffect(() => {
+    const openId = searchParams.get('open')
+    if (!openId || rows.length === 0) return
+    const match = rows.find((r) => r.certificate_id === openId)
+    if (match) setSelected(match)
+    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+  }, [rows, searchParams, setSearchParams])
 
   // Tester (QA Engineer) raises the certificate now, per the Tester -> SM ->
   // Department Head COE approval chain -- QA Lead keeps create access too

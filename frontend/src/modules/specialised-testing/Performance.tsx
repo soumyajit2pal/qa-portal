@@ -5,6 +5,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments } from '../../components/Common'
 import { ApplicationNameBanner } from '../../components/ApplicationNameBanner'
 import UserAssignSelect from '../../components/UserAssignSelect'
+import ConfirmModal from '../../components/ConfirmModal'
 import { IconCheckCircle } from '../../components/Icons'
 import {
   PRIORITIES, RISK_RATINGS, ENVIRONMENTS, PERFORMANCE_EDITABLE_STATUSES,
@@ -190,7 +191,11 @@ function PerformanceDetail({ req, onClose, onChanged, users, engineers }: {
   const [editing, setEditing] = useState(false)
   const [comments, setComments] = useState('')
   const [selectedEngineer, setSelectedEngineer] = useState('')
-  const [requireDeptHeadReapproval, setRequireDeptHeadReapproval] = useState(false)
+  // Whether the "require Department Head re-approval on return" popup (see
+  // canCompleteReadiness below) is open -- an always-visible checkbox next to
+  // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
+  // the moment of failing readiness instead.
+  const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [tab, setTab] = useState<'overview' | 'checklist' | 'walkthroughs' | 'documents' | 'history'>('overview')
   const [checklist, setChecklist] = useState<PerformanceChecklistItemOut[]>(req.checklist_items || [])
@@ -379,13 +384,14 @@ function PerformanceDetail({ req, onClose, onChanged, users, engineers }: {
                 extraReady={!!selectedEngineer}
                 signBlocked={applicationNameBlocking}
                 signBlockedMessage="This request's Application Name is not yet approved by SM."
+                extraControlLabel="Assign Engineer"
                 extraControl={
                   <UserAssignSelect
                     value={selectedEngineer}
                     onChange={setSelectedEngineer}
                     users={engineers}
                     placeholder="Assign Engineer..."
-                    style={{ minWidth: 220 }}
+                    style={{ width: "100%" }}
                   />
                 }
                 onApprove={(signed) => act('department-head-decision', { decision: 'Approved', engineer_id: Number(selectedEngineer), comments: signed })}
@@ -401,15 +407,27 @@ function PerformanceDetail({ req, onClose, onChanged, users, engineers }: {
                   Readiness Passed
                 </button>
                 <button className="btn btn-danger btn-sm" disabled={busy}
-                        onClick={() => act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: requireDeptHeadReapproval })}>
+                        onClick={() => setShowReapprovalConfirm(true)}>
                   Readiness Failed
                 </button>
-                <label className="muted small" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <input type="checkbox" checked={requireDeptHeadReapproval}
-                         onChange={(e) => setRequireDeptHeadReapproval(e.target.checked)} />
-                  Require Department Head re-approval on return
-                </label>
               </>
+            )}
+            {showReapprovalConfirm && (
+              <ConfirmModal
+                title="Readiness Failed"
+                message="Require Department Head re-approval when this request is returned to the requester?"
+                confirmLabel="Yes, require re-approval"
+                cancelLabel="No, skip re-approval"
+                busy={busy}
+                onConfirm={() => {
+                  setShowReapprovalConfirm(false)
+                  act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: true })
+                }}
+                onCancel={() => {
+                  setShowReapprovalConfirm(false)
+                  act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: false })
+                }}
+              />
             )}
             {canCompleteFeasibility && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-feasibility')}>Complete Feasibility</button>}
             {canCompletePlanning && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-planning')}>Complete Planning</button>}

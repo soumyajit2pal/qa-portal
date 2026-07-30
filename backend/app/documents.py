@@ -14,6 +14,7 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from . import models
+from .constants import Role
 
 # Shares the same physical uploads folder as QARequest's own documents
 # (routers/qa_requests.py::UPLOAD_ROOT), just under a per-module
@@ -75,3 +76,24 @@ def get_document_or_404(db: Session, module: str, request_id: int, doc_id: int) 
 
 def full_path(doc: models.RequestDocument) -> str:
     return os.path.join(UPLOAD_ROOT, doc.stored_path)
+
+
+def can_delete_document(doc, user: "models.User") -> bool:
+    """Reported directly: uploading a document had no way back if the wrong
+    file got picked -- once uploaded, it just sat there forever. Scoped to
+    whoever actually uploaded it (self-correcting their own mistake) or an
+    Admin -- deliberately narrower than the upload permission itself (which
+    also lets the request's *current* stage owner upload), since letting an
+    SM/Department Head/QA Lead reviewing a request delete evidence someone
+    else attached would be a very different, more dangerous feature than
+    just "let me undo my own mistake." Shared by every module's delete
+    endpoint below and by qa_requests.py's own separate document table."""
+    return bool(user.has_role(Role.ADMIN) or (doc.uploaded_by_id and doc.uploaded_by_id == user.id))
+
+
+def delete_document(db: Session, doc: models.RequestDocument) -> None:
+    path = full_path(doc)
+    if os.path.exists(path):
+        os.remove(path)
+    db.delete(doc)
+    db.commit()

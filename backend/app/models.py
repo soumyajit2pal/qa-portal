@@ -2,6 +2,8 @@ import datetime
 import json
 import uuid
 from typing import List
+from zoneinfo import ZoneInfo
+
 from sqlalchemy import (
     Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, UniqueConstraint
 )
@@ -19,11 +21,17 @@ def pk_column():
 
 
 def now():
-    return datetime.datetime.utcnow()
+    return datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
 
 
 def gen_id(prefix):
-    return f"{prefix}-{datetime.datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    ist_time = (
+        datetime.datetime.utcnow()
+        .replace(tzinfo=ZoneInfo('UTC'))
+        .astimezone(ZoneInfo('Asia/Kolkata'))
+    )
+
+    return f"{prefix}-{ist_time:%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
 
 
 class User(Base):

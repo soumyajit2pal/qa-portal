@@ -233,7 +233,11 @@ function DASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
   const [editing, setEditing] = useState(false)
   const [comments, setComments] = useState('')
   const [selectedLead, setSelectedLead] = useState('')
-  const [requireDeptHeadReapproval, setRequireDeptHeadReapproval] = useState(false)
+  // Whether the "require Department Head re-approval on return" popup (see
+  // canReadinessDecide below) is open -- an always-visible checkbox next to
+  // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
+  // the moment of failing readiness instead.
+  const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [walkthroughs, setWalkthroughs] = useState<WalkthroughOut[]>([])
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
@@ -492,13 +496,14 @@ function DASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
                   extraReady={!!selectedLead}
                   signBlocked={applicationNameBlocking}
                   signBlockedMessage="This request's Application Name is not yet approved by SM."
+                  extraControlLabel="Assign Security Lead"
                   extraControl={
                     <UserAssignSelect
                       value={selectedLead}
                       onChange={setSelectedLead}
                       users={securityAnalysts}
                       placeholder="Assign Security Lead..."
-                      style={{ minWidth: 220 }}
+                      style={{ width: "100%" }}
                     />
                   }
                   onApprove={(signed) => act('department-head-decision', { decision: 'Approved', security_lead_id: Number(selectedLead), comments: signed })}
@@ -514,15 +519,27 @@ function DASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
                     Readiness Passed
                   </button>
                   <button className="btn btn-danger btn-sm" disabled={busy}
-                          onClick={() => act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: requireDeptHeadReapproval })}>
+                          onClick={() => setShowReapprovalConfirm(true)}>
                     Readiness Failed
                   </button>
-                  <label className="muted small" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                    <input type="checkbox" checked={requireDeptHeadReapproval}
-                           onChange={(e) => setRequireDeptHeadReapproval(e.target.checked)} />
-                    Require Department Head re-approval on return
-                  </label>
                 </>
+              )}
+              {showReapprovalConfirm && (
+                <ConfirmModal
+                  title="Readiness Failed"
+                  message="Require Department Head re-approval when this request is returned to the requester?"
+                  confirmLabel="Yes, require re-approval"
+                  cancelLabel="No, skip re-approval"
+                  busy={busy}
+                  onConfirm={() => {
+                    setShowReapprovalConfirm(false)
+                    act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: true })
+                  }}
+                  onCancel={() => {
+                    setShowReapprovalConfirm(false)
+                    act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: false })
+                  }}
+                />
               )}
               {canReadinessDecide && pendingChecklistItems.length > 0 && (
                 <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>

@@ -22,12 +22,24 @@ export function DocumentsStep({ form, set, editing, files, setFiles }: Props) {
           <input
             type="file"
             multiple
-            onChange={(e) => setFiles(Array.from(e.target.files || []))}
+            onChange={(e) => setFiles([...files, ...Array.from(e.target.files || [])])}
           />
           {files.length > 0 && (
-            <p className="muted small" style={{ marginTop: 4 }}>
-              {files.length} file{files.length > 1 ? 's' : ''} selected: {files.map((f) => f.name).join(', ')}
-            </p>
+            <ul style={{ listStyle: 'none', margin: '8px 0 0', padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {files.map((f, idx) => (
+                <li key={`${f.name}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5 }}>
+                  <span>{f.name}</span>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => setFiles(files.filter((_, i) => i !== idx))}
+                    aria-label={`Remove ${f.name}`}
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
         </Field>
       </div>

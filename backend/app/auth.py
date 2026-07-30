@@ -1,5 +1,7 @@
 import os
 import datetime
+from zoneinfo import ZoneInfo
+
 import bcrypt
 from jose import jwt, JWTError
 from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE
@@ -7,7 +9,7 @@ from ldap3.core.exceptions import LDAPException
 
 SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-in-production-please")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "480"))
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 # Hashing goes straight through the `bcrypt` package rather than passlib's
 # CryptContext wrapper: passlib 1.7.4 (its last release) runs an internal
@@ -31,7 +33,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(data: dict, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES) -> str:
     to_encode = data.copy()
-    expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=expires_minutes)
+    expire = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")) + datetime.timedelta(minutes=expires_minutes)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -48,15 +50,15 @@ def decode_access_token(token: str) -> dict:
 # bank's directory server every time they log in. All connection details are
 # environment-driven so the same code works against on-prem AD or OpenLDAP
 # without a code change -- only the .env needs updating per environment.
-LDAP_SERVER_URI = os.getenv("LDAP_SERVER_URI", "")               # e.g. ldaps://ldap.bankofmaharashtra.bank.in:636
-LDAP_USE_SSL = os.getenv("LDAP_USE_SSL", "true").lower() == "true"
-LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "")                      # e.g. dc=bankofmaharashtra,dc=bank,dc=in
+LDAP_SERVER_URI = os.getenv("LDAP_SERVER_URI", "ldap://bomldap.mahabank.co.in:389")               # e.g. ldaps://ldap.bankofmaharashtra.bank.in:636
+LDAP_USE_SSL = os.getenv("LDAP_USE_SSL", "false").lower() == "false"
+LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "dc=mahabank,dc=co,dc=in")                      # e.g. dc=bankofmaharashtra,dc=bank,dc=in
 LDAP_USER_SEARCH_FILTER = os.getenv("LDAP_USER_SEARCH_FILTER", "(sAMAccountName={username})")
 # Strategy 1 (recommended): a read-only service account searches for the
 # user's DN, then a second connection binds as that DN with the supplied
 # password. Works regardless of how deep/irregular the directory tree is.
-LDAP_BIND_DN = os.getenv("LDAP_BIND_DN", "")
-LDAP_BIND_PASSWORD = os.getenv("LDAP_BIND_PASSWORD", "")
+LDAP_BIND_DN = os.getenv("LDAP_BIND_DN", "cn=qasso,ou=ServerAdmins,ou=Users,ou=PuneDc,dc=mahabank,dc=co,dc=in")
+LDAP_BIND_PASSWORD = os.getenv("LDAP_BIND_PASSWORD", "QaLdap#123456")
 # Strategy 2 (simpler, no service account needed): build the user's DN
 # directly from a fixed template, e.g. "uid={username},ou=people,dc=bank,dc=in".
 LDAP_USER_DN_TEMPLATE = os.getenv("LDAP_USER_DN_TEMPLATE", "")

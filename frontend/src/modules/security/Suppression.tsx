@@ -1,7 +1,9 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RequestDocuments } from '../../components/Common'
+import ConfirmModal from '../../components/ConfirmModal'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
 import { SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
 
@@ -277,7 +279,11 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [comments, setComments] = useState('')
-  const [requireDeptHeadReapproval, setRequireDeptHeadReapproval] = useState(false)
+  // Whether the "require Department Head re-approval on return" popup (see
+  // canSecurityDecide below) is open -- an always-visible checkbox next to
+  // "Return to Requester" was easy to miss, so this is now asked as a pop-up
+  // at the moment of returning it instead.
+  const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const loadExtras = useCallback(async () => {
@@ -384,16 +390,28 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
               <>
                 <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('security-team-decision', { decision: 'Accepted', comments })}>Accept (mark Done)</button>
                 <button className="btn btn-sm" disabled={busy}
-                        onClick={() => act('security-team-decision', { decision: 'Returned', comments, require_dept_head_reapproval: requireDeptHeadReapproval })}>
+                        onClick={() => setShowReapprovalConfirm(true)}>
                   Return to Requester
                 </button>
                 <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('security-team-decision', { decision: 'Rejected', comments })}>Reject</button>
-                <label className="muted small" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <input type="checkbox" checked={requireDeptHeadReapproval}
-                         onChange={(e) => setRequireDeptHeadReapproval(e.target.checked)} />
-                  Require Department Head re-approval on return
-                </label>
               </>
+            )}
+            {showReapprovalConfirm && (
+              <ConfirmModal
+                title="Return to Requester"
+                message="Require Department Head re-approval when this suppression request is returned to the requester?"
+                confirmLabel="Yes, require re-approval"
+                cancelLabel="No, skip re-approval"
+                busy={busy}
+                onConfirm={() => {
+                  setShowReapprovalConfirm(false)
+                  act('security-team-decision', { decision: 'Returned', comments, require_dept_head_reapproval: true })
+                }}
+                onCancel={() => {
+                  setShowReapprovalConfirm(false)
+                  act('security-team-decision', { decision: 'Returned', comments, require_dept_head_reapproval: false })
+                }}
+              />
             )}
           </div>
         </div>
@@ -476,6 +494,7 @@ export default function Suppression() {
   const [selected, setSelected] = useState<SuppressionOut | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const load = useCallback(async () => {
     try { setRows(await api.get<SuppressionOut[]>('/api/suppressions')) } catch (err) { setError(err) }
@@ -484,6 +503,18 @@ export default function Suppression() {
   useEffect(() => {
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names just stay empty */ })
   }, [])
+
+  // Same "?open=<suppression_id>" deep-link pattern as Functional/SAST/DAST/
+  // Performance (see e.g. Functional.tsx) -- lets the topbar search box and
+  // the Linked Requests table jump straight to a specific suppression's
+  // detail drawer instead of just landing on this list.
+  useEffect(() => {
+    const openId = searchParams.get('open')
+    if (!openId || rows.length === 0) return
+    const match = rows.find((r) => r.suppression_id === openId)
+    if (match) setSelected(match)
+    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+  }, [rows, searchParams, setSearchParams])
 
   // Anyone can raise a suppression request now (Application Owner step was
   // removed from the flow entirely) -- see backend routers/suppression.py

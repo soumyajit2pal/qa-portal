@@ -1,6 +1,8 @@
 import datetime
 import os
 from typing import List
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
@@ -335,7 +337,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.Performanc
     if payload.is_complete:
         item.approved_by_id = current_user.id
         import datetime
-        item.approved_at = datetime.datetime.utcnow()
+        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -471,7 +473,7 @@ def acknowledge_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_d
         raise HTTPException(404, "Walkthrough session not found")
     import datetime
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow()
+    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     db.commit()
     db.refresh(obj)
     return obj
@@ -549,7 +551,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
         subtitle="Performance Testing Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -641,3 +643,13 @@ def download_performance_document(req_id: int, doc_id: int, db: Session = Depend
     if not os.path.exists(full_path):
         raise HTTPException(404, "File is missing on disk")
     return FileResponse(full_path, filename=doc.file_name, media_type=doc.content_type or "application/octet-stream")
+
+
+@router.delete("/{req_id}/documents/{doc_id}")
+def delete_performance_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
+                                 current_user: models.User = Depends(get_current_user)):
+    doc = doc_store.get_document_or_404(db, "PERFORMANCE", req_id, doc_id)
+    if not doc_store.can_delete_document(doc, current_user):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
+    doc_store.delete_document(db, doc)
+    return {"ok": True}

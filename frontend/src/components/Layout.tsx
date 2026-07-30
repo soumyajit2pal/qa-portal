@@ -90,6 +90,19 @@ function isOpenSecurityStatus(status: string): boolean {
   return !SAST_DAST_TERMINAL_STATUSES.includes(status)
 }
 
+// Maps each request type's own ID prefix (see models.py's gen_id calls) to
+// the module that owns it, for the topbar search box (submitSearch below).
+// "TQA-FUNC" must be checked before any shorter/generic prefix since it also
+// starts with "TQA-" -- order matters here, most-specific first.
+const ID_PREFIX_ROUTES: { prefix: string; path: string }[] = [
+  { prefix: 'TQA-FUNC', path: '/functional-requests' },
+  { prefix: 'SAST', path: '/sast' },
+  { prefix: 'DAST', path: '/dast' },
+  { prefix: 'PERF', path: '/performance' },
+  { prefix: 'SUP', path: '/suppression' },
+  { prefix: 'QA-CERT', path: '/signoff' },
+]
+
 function initials(name?: string | null): string {
   if (!name) return '?'
   const parts = name.trim().split(/\s+/)
@@ -159,9 +172,28 @@ export default function Layout({ children }: { children?: ReactNode }) {
 
   function submitSearch(e: React.FormEvent) {
     e.preventDefault()
-    // Broad search -- matches Request ID, Application Name, or Epic Number
-    // (see the `search` query param on GET /api/qa-requests).
-    if (search.trim()) navigate(`/qa-requests?search=${encodeURIComponent(search.trim())}`)
+    const term = search.trim()
+    if (!term) return
+    // Reported directly: this used to always navigate to
+    // `/qa-requests?search=...`, whose own search only matches the QA
+    // Request gateway's own request_id/application_name/epic_number (see
+    // `search` on GET /api/qa-requests) -- so typing in a SAST/DAST/
+    // Functional QA/Performance/Suppression/Sign-off request ID (which all
+    // use their own distinct ID prefix, see models.py's gen_id calls) landed
+    // on an empty/irrelevant QA Requests list every time. Detect the prefix
+    // and deep-link straight to that request's own module instead, reusing
+    // the `?open=<request_id>` pattern each of those pages already supports
+    // (see e.g. Functional.tsx) for jumping straight to a specific row's
+    // detail drawer. Anything that doesn't match a known ID prefix (a QA
+    // Request ID itself, or a free-text application name/epic number) still
+    // falls through to the QA Request gateway search, unchanged.
+    const upper = term.toUpperCase()
+    const idRoute = ID_PREFIX_ROUTES.find((r) => upper.startsWith(r.prefix))
+    if (idRoute) {
+      navigate(`${idRoute.path}?open=${encodeURIComponent(term)}`)
+    } else {
+      navigate(`/qa-requests?search=${encodeURIComponent(term)}`)
+    }
   }
 
   return (

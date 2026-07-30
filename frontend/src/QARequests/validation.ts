@@ -16,6 +16,12 @@ const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
   // { key: 'build_number', label: 'Build Number / Hash Value' },
 ]
 
+// Exported so steps/DetailsStep.tsx's inline onBlur error text checks the
+// exact same rule as the real gate below, instead of keeping its own
+// separate copy that could silently drift out of sync with this one.
+export const CR_NUMBER_REGEX = /^[A-Z]{2,4}-[0-9]{1,4}$/
+export const EPIC_NUMBER_REGEX = /^[A-Z]{2,4}-[0-9]{1,6}$/
+
 // Because each wizard step's fields are unmounted once you move to another
 // step, the browser's native `required` attribute can't catch a missing
 // field from an earlier step at final-submit time -- these checks run
@@ -24,7 +30,21 @@ const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
 // NewRequestModal.tsx's `goNext`/`submit`).
 export function detailsStepError(f: QARequestForm): string | null {
   const missing = REQUIRED_DETAIL_FIELDS.filter(({ key }) => !String(f[key] || '').trim())
-  return missing.length > 0 ? `Please fill in: ${missing.map((m) => m.label).join(', ')}` : null
+  if (missing.length > 0) return `Please fill in: ${missing.map((m) => m.label).join(', ')}`
+  // Reported directly: DetailsStep.tsx already showed an inline "Invalid
+  // format" message under Change Request ID/Epic Number on blur, but that
+  // check lived only in local component state -- Next/Submit never
+  // consulted it, so a clearly-flagged invalid value still went through.
+  // Enforced here instead, the same place every other mandatory-field rule
+  // already lives, so it actually blocks Next/Submit like the on-screen
+  // error implies it should.
+  if (!CR_NUMBER_REGEX.test(f.cr_number.trim())) {
+    return 'Change Request ID(s) is not in a valid format. Example: CR-1234'
+  }
+  if (!EPIC_NUMBER_REGEX.test(f.epic_number.trim())) {
+    return 'Epic Number is not in a valid format. Example: EPIC-1234'
+  }
+  return null
 }
 
 export function typeStepError(f: QARequestForm): string | null {

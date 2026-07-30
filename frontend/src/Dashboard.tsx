@@ -8,12 +8,12 @@ import {
 } from './components/Icons'
 import {
   GATEWAY_TERMINAL_STATUSES, QA_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES,
-  PERFORMANCE_TERMINAL_STATUSES,
+  PERFORMANCE_TERMINAL_STATUSES, hasRole,
 } from './constants'
 import {
   QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut,
   ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut,
-  SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard,
+  SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard, SignOffOut, UserOut,
 } from './types'
 
 // A single request, whatever its underlying type, reduced to the handful of
@@ -78,6 +78,78 @@ const TYPE_TO_PATH: Record<string, string> = {
 
 const DONUT_COLORS = ['#4f46e5', '#16a34a', '#d97706', '#dc2626', '#7c3aed']
 
+// "Raised" date-range filter -- reported directly ("add filter like within 1
+// hr raised, 1 month, from date to to date"). Applies to whatever on-screen
+// data is actually keyed by a raise/created timestamp (the "Active requests"
+// stat + its footline, and Recent Activity) -- the other three At-a-Glance
+// cards are backend-aggregated all-time counts (distinct applications, open
+// findings, pending-approval gates) with no per-request created_at of their
+// own to filter by, so they intentionally stay as-is; a note next to the
+// filter says so rather than silently doing nothing.
+type RaisedRangePreset = 'all' | '1h' | '1m' | 'custom'
+interface RaisedRange {
+  preset: RaisedRangePreset
+  from: string
+  to: string
+}
+const DEFAULT_RAISED_RANGE: RaisedRange = { preset: 'all', from: '', to: '' }
+
+function isWithinRaisedRange(dateStr: string, range: RaisedRange): boolean {
+  if (range.preset === 'all') return true
+  const t = new Date(dateStr).getTime()
+  if (range.preset === '1h') return t >= Date.now() - 60 * 60 * 1000
+  if (range.preset === '1m') {
+    const oneMonthAgo = new Date()
+    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
+    return t >= oneMonthAgo.getTime()
+  }
+  // custom
+  if (range.from && t < new Date(range.from).getTime()) return false
+  if (range.to) {
+    const toEnd = new Date(range.to)
+    toEnd.setHours(23, 59, 59, 999)
+    if (t > toEnd.getTime()) return false
+  }
+  return true
+}
+
+const RAISED_RANGE_PRESETS: { key: RaisedRangePreset; label: string }[] = [
+  { key: 'all', label: 'All time' },
+  { key: '1h', label: 'Within 1 hour' },
+  { key: '1m', label: 'Within 1 month' },
+  { key: 'custom', label: 'Custom range' },
+]
+
+function RaisedRangeFilter({ range, onChange }: { range: RaisedRange; onChange: (r: RaisedRange) => void }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="pill-tabs">
+          {RAISED_RANGE_PRESETS.map((p) => (
+            <button
+              key={p.key}
+              className={range.preset === p.key ? 'active' : ''}
+              onClick={() => onChange({ ...range, preset: p.key })}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        {range.preset === 'custom' && (
+          <span style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 }}>
+            <label className="muted small">From <input type="date" value={range.from} onChange={(e) => onChange({ ...range, from: e.target.value })} /></label>
+            <label className="muted small">To <input type="date" value={range.to} onChange={(e) => onChange({ ...range, to: e.target.value })} /></label>
+          </span>
+        )}
+      </div>
+      <p className="muted small" style={{ marginTop: 6, marginBottom: 0 }}>
+        Filters "Active requests (org-wide)" and Recent Activity below by when they were raised. The other
+        three At-a-Glance cards are all-time totals and aren't affected by this filter.
+      </p>
+    </div>
+  )
+}
+
 function timeAgo(dateStr: string): string {
   const diffMs = Date.now() - new Date(dateStr).getTime()
   const mins = Math.max(1, Math.round(diffMs / 60000))
@@ -136,12 +208,20 @@ interface StatCardProps {
   tag?: string
   value: React.ReactNode
   label: React.ReactNode
+  // One plain-English line describing exactly what's being counted --
+  // reported directly ("what is Active Projects, what is pending Approval,
+  // what is Active requests") -- these four numbers each use a different
+  // scope/definition under the hood (distinct project epics vs. individual
+  // requests vs. specific approval-gate statuses), so they were never meant
+  // to add up to each other -- without this line there was nothing on
+  // screen saying so. Always visible, not a hover-only tooltip.
+  hint?: React.ReactNode
   footline?: React.ReactNode
   spark?: Record<string, number>
   segments?: Segment[]
 }
 
-function StatCard({ icon: Icon, iconClass, tag, value, label, footline, spark, segments }: StatCardProps) {
+function StatCard({ icon: Icon, iconClass, tag, value, label, hint, footline, spark, segments }: StatCardProps) {
   return (
     <div className="stat-card">
       <div className="top-row">
@@ -150,6 +230,7 @@ function StatCard({ icon: Icon, iconClass, tag, value, label, footline, spark, s
       </div>
       <div className="value">{value}</div>
       <div className="label">{label}</div>
+      {hint && <div className="hint">{hint}</div>}
       {footline && <div className="footline">{footline}</div>}
       {spark && <Sparkline values={spark} />}
       {segments && <SegmentBar segments={segments} />}
@@ -278,6 +359,7 @@ function CommandCentre() {
   const [error, setError] = useState<unknown>(null)
   const [govTab, setGovTab] = useState('Overview')
   const [teamFilter, setTeamFilter] = useState('')
+  const [raisedRange, setRaisedRange] = useState<RaisedRange>(DEFAULT_RAISED_RANGE)
 
   useEffect(() => {
     Promise.all([
@@ -290,7 +372,10 @@ function CommandCentre() {
       api.get<DASTOut[]>('/api/dast-requests'),
       api.get<PerformanceOut[]>('/api/performance-requests'),
     ]).then(([p, w, r, f, a, sast, dast, perf]) => {
-      setProj(p); setThreeW(w); setRequests(r); setFunctionalRequests(f); setActivity(a.slice(0, 6))
+      // Kept as the full list (not pre-sliced to 6) so the Raised filter
+      // below has something to actually narrow down before RecentActivity
+      // takes its top-6 slice for display.
+      setProj(p); setThreeW(w); setRequests(r); setFunctionalRequests(f); setActivity(a)
       setSastRequests(sast); setDastRequests(dast); setPerformanceRequests(perf)
     }).catch(setError)
   }, [])
@@ -317,7 +402,19 @@ function CommandCentre() {
     return all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
   }, [requests, functionalRequests, sastRequests, dastRequests, performanceRequests])
 
-  const activeRequestsCount = unifiedRequests.filter(isActiveRequest).length
+  // Everything below this point that's keyed off a raise/created timestamp
+  // -- narrowed to whatever window RaisedRangeFilter above has selected (see
+  // its own comment for why the other 3 At-a-Glance cards aren't included).
+  const filteredUnifiedRequests = useMemo(
+    () => unifiedRequests.filter((r) => isWithinRaisedRange(r.created_at, raisedRange)),
+    [unifiedRequests, raisedRange]
+  )
+  const filteredActivity = useMemo(
+    () => activity.filter((a) => isWithinRaisedRange(a.created_at, raisedRange)).slice(0, 6),
+    [activity, raisedRange]
+  )
+
+  const activeRequestsCount = filteredUnifiedRequests.filter(isActiveRequest).length
 
   if (error) return <ErrorText error={error} />
   if (!proj || !threeW) return <p className="muted">Loading...</p>
@@ -366,22 +463,33 @@ function CommandCentre() {
       )}
 
       <div className="section-title" style={{ marginTop: m.pending_approvals > 0 ? 18 : 0 }}>At a Glance</div>
+      <p className="muted small" style={{ marginTop: -8, marginBottom: 14 }}>
+        Each number below counts a different slice of the same underlying requests -- see the line under
+        each card for exactly what it includes. They're not meant to add up to each other.
+      </p>
+      <RaisedRangeFilter range={raisedRange} onChange={setRaisedRange} />
       <div className="grid grid-4">
         <StatCard icon={IconGrid} iconClass="blue" tag="Live" value={m.active_projects} label="Active projects"
+                  hint="Distinct applications with a Functional Testing request currently in progress (excludes Draft and Closed/Cancelled)."
                   footline={`${nearingRelease} nearing release`} spark={proj.charts.risk_distribution} />
         <StatCard icon={IconWarning} iconClass="red" tag="Live" value={m.sast_findings + m.dast_findings} label="Open security findings"
+                  hint="SAST + DAST findings still marked Open (not yet Fixed, Accepted, or suppressed)."
                   footline={`${m.sast_findings} SAST · ${m.dast_findings} DAST findings open`}
                   segments={[{ label: 'SAST', value: m.sast_findings, color: '#dc2626' }, { label: 'DAST', value: m.dast_findings, color: '#f97316' }]} />
         <StatCard icon={IconApprove} iconClass="amber" tag="Action queue" value={m.pending_approvals} label="Pending approvals"
+                  hint="Requests sitting at an SM, Department Head, or Security decision point, plus every open Suppression request."
                   footline={`${criticalPending} critical`} />
         <StatCard icon={IconWorkflow} iconClass="purple" tag="Live" value={activeRequestsCount} label="Active requests (org-wide)"
-                  footline={`${unifiedRequests.length} raised in total across all departments`} />
+                  hint={raisedRange.preset === 'all'
+                    ? 'Every request of any type (QA, Functional, SAST, DAST, Performance) not yet Closed or Cancelled.'
+                    : 'Every request of any type (QA, Functional, SAST, DAST, Performance) not yet Closed or Cancelled, raised within the selected range above.'}
+                  footline={`${filteredUnifiedRequests.length} raised in total${raisedRange.preset === 'all' ? ' across all departments' : ' in the selected range'}`} />
       </div>
 
       <Card
         style={{ marginTop: 18 }}
         title="Project Visibility & Governance"
-        subtitle="Know what's pending, where, and since when"
+        subtitle="Know what's pending, where, and since when -- across every open QA, SAST, DAST and Suppression request (excludes Drafts and anything already Closed/Cancelled)."
         right={(
           <div className="pill-tabs">
             {['Overview', 'Projects', 'Ageing'].map((t) => (
@@ -395,16 +503,24 @@ function CommandCentre() {
             <div className="grid grid-2" style={{ marginTop: 12 }}>
               <div className="subpanel">
                 <div className="subpanel-title">Pending by Team</div>
-                <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>{threeW.total_pending} open items</p>
+                <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>
+                  {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} awaiting action, grouped by which team currently owns them.
+                </p>
                 <BarChart data={threeW.team_wise_distribution} />
                 <div style={{ display: 'flex', gap: 16, marginTop: 14, fontSize: 13.5 }}>
                   <span><span className="dot" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#2563eb', marginRight: 5 }} />Within SLA {slaWithin}</span>
                   <span><span className="dot" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#d97706', marginRight: 5 }} />Near SLA {slaNear}</span>
                   <span><span className="dot" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#dc2626', marginRight: 5 }} />Breached {slaBreached}</span>
                 </div>
+                <p className="muted small" style={{ marginTop: 8 }}>
+                  SLA bands: 0-7 days = within SLA, 8-15 = near SLA, 16+ = breached (based on days since last update).
+                </p>
               </div>
               <div className="subpanel">
                 <div className="subpanel-title">Ageing Distribution</div>
+                <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>
+                  The same {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} above, grouped by days since they were last updated.
+                </p>
                 <Donut data={threeW.ageing_bucket_distribution} />
               </div>
             </div>
@@ -453,6 +569,10 @@ function CommandCentre() {
 
         {govTab === 'Ageing' && (
           <div className="subpanel" style={{ marginTop: 12 }}>
+            <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>
+              All {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} (QA, SAST, DAST & Suppression,
+              excluding Drafts and Closed/Cancelled), grouped by days since last update.
+            </p>
             <Donut data={threeW.ageing_bucket_distribution} size={160} />
           </div>
         )}
@@ -470,8 +590,8 @@ function CommandCentre() {
         >
           <LifecycleStepper requests={functionalRequests} />
         </Card>
-        <Card title="Recent Activity" subtitle="Live updates from across the portal">
-          <RecentActivity items={activity} />
+        <Card title="Recent Activity" subtitle={raisedRange.preset === 'all' ? 'Live updates from across the portal' : 'Live updates from across the portal, within the selected range above'}>
+          <RecentActivity items={filteredActivity} />
         </Card>
       </div>
     </div>
@@ -492,18 +612,19 @@ function SecurityTab() {
     <div>
       <div className="section-title">SAST</div>
       <div className="grid grid-3">
-        <MetricCard label="SAST Requests Raised" value={sast.total_requests} />
-        <MetricCard label="Applications Scanned" value={sast.applications_scanned} />
-        <MetricCard label="Open Vulnerabilities" value={sast.open_vulnerabilities} />
+        <MetricCard label="SAST Requests Raised" value={sast.total_requests} hint="Every SAST request ever raised, in any status." />
+        <MetricCard label="Applications Scanned" value={sast.applications_scanned} hint="Distinct applications whose SAST request has reached Report Ready or Closed." />
+        <MetricCard label="Open Vulnerabilities" value={sast.open_vulnerabilities} hint="SAST findings still marked Open." />
       </div>
       <div className="section-title" style={{ marginTop: 16 }}>DAST</div>
       <div className="grid grid-2">
-        <MetricCard label="DAST Requests Raised" value={dast.total_requests} />
+        <MetricCard label="DAST Requests Raised" value={dast.total_requests} hint="Every DAST request ever raised, in any status." />
         {/* Only counts requests that actually finished scanning
             (REPORT_READY/CLOSED) -- see security_dast in dashboard.py --
             not every DAST request ever raised, so a pile of Draft/pending
             requests doesn't inflate this number. */}
-        <MetricCard label="Scan Coverage (Scanned Applications)" value={dast.scan_coverage} />
+        <MetricCard label="Scan Coverage (Scanned Applications)" value={dast.scan_coverage}
+                    hint="Distinct application URLs whose DAST request has reached Report Ready or Closed." />
       </div>
       <div className="grid grid-2" style={{ marginTop: 16 }}>
         <Card title="SAST Severity Distribution"><BarChart data={sast.severity_distribution} /></Card>
@@ -522,8 +643,9 @@ function SuppressionTab() {
   return (
     <div>
       <div className="grid grid-4">
-        <MetricCard label="Open Suppressions" value={data.open_suppressions} />
-        <MetricCard label="Critical/High Risk Exceptions" value={data.critical_high_risk_exceptions} />
+        <MetricCard label="Open Suppressions" value={data.open_suppressions} hint="Suppression requests not yet Done, Rejected, or otherwise closed out." />
+        <MetricCard label="Critical/High Risk Exceptions" value={data.critical_high_risk_exceptions}
+                    hint="Of those open suppressions, how many cover at least one Critical or High severity finding." />
       </div>
       <Card title="Status Breakdown" style={{ marginTop: 16 }}><BarChart data={data.status_breakdown} /></Card>
     </div>
@@ -552,7 +674,8 @@ function ThreeWTab() {
         lifecycle.
       </p>
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <MetricCard label="Total Pending Items" value={data.total_pending} />
+        <MetricCard label="Total Pending Items" value={data.total_pending}
+                    hint="Open QA, SAST, DAST & Suppression requests -- excludes Drafts and anything already Closed/Cancelled." />
       </div>
       <div className="grid grid-3" style={{ marginBottom: 16 }}>
         <Card title="Team-wise Distribution"><BarChart data={data.team_wise_distribution} /></Card>
@@ -710,15 +833,141 @@ function MyRequestsTab() {
   )
 }
 
+interface TesterOverviewRow {
+  testerId: number
+  testerName: string
+  department: string
+  totalAssigned: number
+  completed: number
+  pending: number
+  signedOff: number
+}
+
+// Statuses at which a tester's own testing execution work is considered
+// done for that request -- QA_COMPLETED onwards, regardless of how much
+// further the request still has to go through sign-off/closure. Anything
+// still active but earlier than this (TESTER_ASSIGNED through
+// REGRESSION_TESTING) counts as still pending on the tester's plate.
+const TESTER_WORK_DONE_STATUSES = ['QA_COMPLETED', 'QA_SIGNOFF_PENDING', 'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION', 'CLOSED']
+
+// Reported directly: a broad, per-tester overview -- how many requests each
+// tester has completed, how many are still pending, and how many have
+// reached an issued sign-off -- grouped by the tester's own department.
+// Visible only to Executive COE (CM/AGM) (see the role gate in Dashboard()
+// below, which is the only place this component is ever mounted).
+function TesterOverviewTab() {
+  const [functionalRequests, setFunctionalRequests] = useState<FunctionalOut[]>([])
+  const [signoffs, setSignoffs] = useState<SignOffOut[]>([])
+  const [users, setUsers] = useState<UserOut[]>([])
+  const [error, setError] = useState<unknown>(null)
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    Promise.all([
+      api.get<FunctionalOut[]>('/api/functional-requests'),
+      api.get<SignOffOut[]>('/api/signoffs'),
+      api.get<UserOut[]>('/api/auth/users'),
+    ]).then(([f, s, u]) => {
+      setFunctionalRequests(f); setSignoffs(s); setUsers(u); setLoaded(true)
+    }).catch(setError)
+  }, [])
+
+  const signoffById = useMemo(() => {
+    const m = new Map<number, SignOffOut>()
+    signoffs.forEach((s) => m.set(s.id, s))
+    return m
+  }, [signoffs])
+
+  const rows = useMemo<TesterOverviewRow[]>(() => {
+    const byTester = new Map<number, TesterOverviewRow>()
+    for (const req of functionalRequests) {
+      if (!req.assigned_tester_ids) continue
+      const ids = req.assigned_tester_ids.split(',').map((s) => Number(s.trim())).filter((n) => !Number.isNaN(n))
+      for (const id of ids) {
+        if (!byTester.has(id)) {
+          const u = users.find((x) => x.id === id)
+          byTester.set(id, {
+            testerId: id, testerName: u?.full_name || `User #${id}`, department: u?.department || '—',
+            totalAssigned: 0, completed: 0, pending: 0, signedOff: 0,
+          })
+        }
+        const row = byTester.get(id)!
+        row.totalAssigned += 1
+        if (TESTER_WORK_DONE_STATUSES.includes(req.status)) row.completed += 1
+        else if (!QA_TERMINAL_STATUSES.includes(req.status)) row.pending += 1
+        const so = req.signoff_id ? signoffById.get(req.signoff_id) : undefined
+        if (so?.status === 'ISSUED') row.signedOff += 1
+      }
+    }
+    return Array.from(byTester.values()).sort(
+      (a, b) => a.department.localeCompare(b.department) || a.testerName.localeCompare(b.testerName)
+    )
+  }, [functionalRequests, users, signoffById])
+
+  if (error) return <ErrorText error={error} />
+  if (!loaded) return <p className="muted">Loading...</p>
+
+  return (
+    <div>
+      <p className="muted small">
+        Every tester ever assigned to a Functional QA request -- how many of those requests have finished
+        testing (QA Completed or later), how many are still active on their plate, and how many have
+        reached an Issued sign-off certificate. Grouped by the tester's own department.
+      </p>
+      <Card>
+        <Table
+          rowKey="testerId"
+          columns={[
+            { key: 'department', header: 'Department' },
+            { key: 'testerName', header: 'Tester' },
+            { key: 'totalAssigned', header: 'Total Assigned' },
+            { key: 'completed', header: 'Completed' },
+            { key: 'pending', header: 'Pending' },
+            { key: 'signedOff', header: 'Signed Off' },
+          ]}
+          rows={rows}
+        />
+        {rows.length === 0 && (
+          <p className="muted small" style={{ marginTop: 8 }}>No testers have been assigned to any Functional QA request yet.</p>
+        )}
+      </Card>
+    </div>
+  )
+}
+
+// Reported directly: the "My Requests" tab (renamed to just "Requests" --
+// see below) should be hidden for these 4 roles -- QA Engineer, QA Lead,
+// Security Analyst, and Executive COE (AGM/QA, i.e. DEPARTMENT_HEAD_COE) --
+// they work across every team's requests as part of their job, so a
+// "requests I personally raised" view isn't relevant to them the way it is
+// for a Requester/Business Analyst/SM/Department Head. Checked directly
+// against `user.roles` (not the shared `hasRole` helper, which treats ADMIN
+// as satisfying any role check) so an Admin who also happens to hold one of
+// these roles still sees the tab, matching "Admin always sees everything"
+// elsewhere in the app.
+const REQUESTS_TAB_HIDDEN_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'DEPARTMENT_HEAD_COE']
+
 export default function Dashboard() {
+  const { user } = useAuth()
   const [tab, setTab] = useState('command')
+  const hideRequestsTab = !!user?.roles?.some((r) => REQUESTS_TAB_HIDDEN_ROLES.includes(r))
+    && !user?.roles?.includes('ADMIN')
+  // Reported directly: a broad, per-tester completed/pending/sign-off
+  // overview, visible only to Executive COE (CM/AGM). Uses the shared
+  // hasRole() helper here (not a direct user.roles check like
+  // hideRequestsTab above) since this is a "show to X" gate, not a "hide
+  // from X" one -- hasRole's ADMIN bypass is exactly the wanted behavior so
+  // an Admin can see it too, matching "Admin always sees everything" as used
+  // for the Administration nav group.
+  const showTesterOverviewTab = hasRole(user, 'DEPARTMENT_HEAD_COE')
 
   const tabs = [
     { key: 'command', label: 'Command Centre' },
-    { key: 'my-requests', label: 'My Requests' },
+    ...(hideRequestsTab ? [] : [{ key: 'my-requests', label: 'Requests' }]),
     { key: 'security', label: 'Security (SAST/DAST)' },
     { key: 'suppression', label: 'Suppression' },
     { key: '3w', label: '3W Pending Items' },
+    ...(showTesterOverviewTab ? [{ key: 'tester-overview', label: 'Tester Overview' }] : []),
   ]
 
   return (
@@ -733,10 +982,11 @@ export default function Dashboard() {
         ))}
       </div>
       {tab === 'command' && <CommandCentre />}
-      {tab === 'my-requests' && <MyRequestsTab />}
+      {tab === 'my-requests' && !hideRequestsTab && <MyRequestsTab />}
       {tab === 'security' && <SecurityTab />}
       {tab === 'suppression' && <SuppressionTab />}
       {tab === '3w' && <ThreeWTab />}
+      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab />}
     </div>
   )
 }

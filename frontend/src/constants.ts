@@ -1,12 +1,12 @@
 export const ROLE_LABELS: Record<string, string> = {
-  REQUESTER: 'Requester (Developer) / Others',
+  REQUESTER: 'Requester / Others',
   BUSINESS_ANALYST: 'Business Analyst',
   QA_ENGINEER: 'QA Engineer (QA)',
   QA_LEAD: 'QA Lead',
-  DEPARTMENT_HEAD_COE: 'Executive COE (AGM-QA)',
+  DEPARTMENT_HEAD_COE: 'Executive COE (CM/AGM)',
   SECURITY_ANALYST: 'Security Analyst (QA)',
   APPLICATION_OWNER: 'Application Owner',
-  DEPARTMENT_HEAD: 'Department Head - CM/AGM',
+  DEPARTMENT_HEAD: 'Requester Department Head - CM/AGM',
   // New checkpoint between Requester and Department Head on QA Request/
   // SAST-DAST/Suppression workflows. Label deliberately left as literal
   // "SM" per how it was specified -- rename to a fuller name here any time.
@@ -40,6 +40,7 @@ export function hasRole(user: RoleBearer | null | undefined, ...roles: string[])
 export interface ChecklistItemDef {
   item: string
   owner: string
+  is_mandatory: boolean
 }
 
 // Mirrors backend constants.py DEFAULT_CHECKLIST_ITEMS. Used to also include
@@ -48,14 +49,14 @@ export interface ChecklistItemDef {
 // DAST each have their own dedicated "Security Readiness" checklist, the
 // correct place for that concern to live.
 export const DEFAULT_CHECKLIST_ITEMS: ChecklistItemDef[] = [
-  { item: 'BRD / FRS / User Stories approved', owner: 'Business / BA' },
-  { item: 'Scope finalized & change freeze', owner: 'Business / IT' },
-  { item: 'Test Environment availability (UAT / SIT)', owner: 'Business' },
-  { item: 'Test data creation', owner: 'User dept / Dev team' },
-  { item: 'Assess Test Scenarios', owner: 'User Dept' },
-  { item: 'Project walkthrough to QA', owner: 'User Dept / Dev team' },
-  { item: 'Application builds deployed & validated', owner: 'Dev team / Business' },
-  { item: 'Security access (VPN Proxy/URLs whitelisting/credentials/firewall)', owner: 'User dept' },
+  { item: 'BRD / FRS / User Stories approved', owner: 'Business / BA' , is_mandatory: true},
+  { item: 'Scope finalized & change freeze', owner: 'Business / IT',is_mandatory: true },
+  { item: 'Test Environment availability (UAT / SIT)', owner: 'Business' , is_mandatory: true},
+  { item: 'Test data creation', owner: 'User dept / Dev team' , is_mandatory: false},
+  { item: 'Assess Test Scenarios', owner: 'User Dept' , is_mandatory: false},
+  { item: 'Project walkthrough to QA', owner: 'User Dept / Dev team' , is_mandatory: false},
+  { item: 'Application builds deployed & validated', owner: 'Dev team / Business' , is_mandatory: false},
+  { item: 'Security access (VPN Proxy/URLs whitelisting/credentials/firewall)', owner: 'User dept' , is_mandatory: false},
 ]
 
 // The QA Request is a pure intake/gateway record ("QA request form is the

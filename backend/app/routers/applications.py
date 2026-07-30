@@ -1,5 +1,7 @@
 import datetime
 from typing import List
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -90,7 +92,7 @@ def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecis
         raise HTTPException(400, "decision must be one of: Approved, Rejected")
     obj.status = "APPROVED" if payload.decision == "Approved" else "REJECTED"
     obj.decided_by_id = current_user.id
-    obj.decided_at = datetime.datetime.utcnow()
+    obj.decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
     obj.comments = payload.comments
     if obj.status == "REJECTED":
         reason = f"Application Name '{obj.name}' was rejected by SM"
