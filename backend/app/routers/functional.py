@@ -112,20 +112,13 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
     Number/CR Number are further restricted to Admins only -- see
     _ADMIN_ONLY_FIELDS."""
     obj = _get_or_404(db, req_id)
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        # SM/Department Head editing is their own recourse after they've
-        # actually reviewed the request and returned it for changes
-        # (RETURNED_BY_SM/RETURNED_BY_DEPARTMENT_HEAD/RETURNED_BY_QA_LEAD) --
-        # while it's still a plain DRAFT, it hasn't reached their approval
-        # checkpoint at all yet, so only the requester (or an admin) may
-        # touch it.
-        if obj.status == QAStatus.DRAFT:
-            raise HTTPException(403, "Only the requester or an admin can edit a request while it is still in Draft")
-        if not current_user.has_role(Role.SM, Role.DEPARTMENT_HEAD):
-            raise HTTPException(403, "Only the requester, SM, Department Head, or an admin can edit this request")
-        require_same_department(current_user, obj.department)
+    # See _can_edit_details's own docstring below for the full permission
+    # model (requester while it's theirs/returned to them; SM/Department
+    # Head only while it's genuinely pending their own decision).
     if obj.status not in FUNCTIONAL_EDITABLE_STATUSES:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
+    if not _can_edit_details(obj, current_user):
+        raise HTTPException(403, "You do not have permission to edit this request in its current status")
     data = payload.model_dump(exclude_unset=True)
     if not current_user.has_role(Role.ADMIN):
         for f in _ADMIN_ONLY_FIELDS:
@@ -754,6 +747,34 @@ def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) ->
         return user.id in assigned
     # DRAFT/SUBMITTED/RETURNED_BY_*/REQUESTER_VERIFICATION/terminal statuses --
     # nothing pending on anyone but the requester (already covered above).
+    return False
+
+
+def _can_edit_details(obj: "models.FunctionalRequest", user: models.User) -> bool:
+    """Reported bug: an SM could still edit a request's own details after
+    already returning it themselves (status RETURNED_BY_SM) -- a dead end,
+    since only the requester/admin can ever call resubmit_request, so the SM
+    ended up with edit access they could never actually push forward.
+    Clarified: edit access for a reviewer (SM/Department Head) should exist
+    only while the request is genuinely pending *their own* decision
+    (SM_APPROVAL_PENDING / DEPARTMENT_HEAD_APPROVAL_PENDING) -- fix
+    something, then Approve/Return/Reject -- and disappears the moment
+    they've decided either way. Once returned to the requester
+    (RETURNED_BY_SM/RETURNED_BY_DEPARTMENT_HEAD/RETURNED_BY_QA_LEAD), only
+    the requester (or admin) may edit; reviewers are never involved again
+    for a request already past their own checkpoint -- edit access for SM/
+    Department Head stops at Department Head's own decision, never
+    extending into QA's post-approval readiness/execution stages. Same
+    department-scoping as those stages' own decision endpoints."""
+    if user.has_role(Role.ADMIN):
+        return True
+    status = obj.status
+    if status in (QAStatus.DRAFT, QAStatus.RETURNED_BY_SM, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD):
+        return obj.requester_id == user.id
+    if status == QAStatus.SM_APPROVAL_PENDING:
+        return user.has_role(Role.SM) and user.department == obj.department
+    if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
+        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
     return False
 
 

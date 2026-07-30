@@ -176,11 +176,19 @@ QA_REQUEST_STATUSES = [
 
 # Statuses from which the Functional Testing Request's own descriptive
 # fields (currently just priority/risk_rating -- see models.FunctionalRequest
-# and PUT /api/functional-requests/{id}) can still be edited by the
-# requester -- same pattern/values as SAST_DAST_EDITABLE_STATUSES/
-# PERFORMANCE_EDITABLE_STATUSES below.
+# and PUT /api/functional-requests/{id}) can still be edited -- same
+# pattern/values as SAST_DAST_EDITABLE_STATUSES/PERFORMANCE_EDITABLE_STATUSES
+# below. Who specifically may edit at each of these statuses is further
+# scoped by routers/functional.py::_can_edit_details -- being in this list
+# only means "editable by *someone*", not "editable by the requester" (e.g.
+# SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are only editable by
+# that stage's own reviewer, not the requester -- see that helper's own
+# docstring).
 FUNCTIONAL_EDITABLE_STATUSES = [
-    QAStatus.DRAFT, QAStatus.RETURNED_BY_SM, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD,
+    QAStatus.DRAFT,
+    QAStatus.SM_APPROVAL_PENDING, QAStatus.RETURNED_BY_SM,
+    QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.RETURNED_BY_DEPARTMENT_HEAD,
+    QAStatus.RETURNED_BY_QA_LEAD,
 ]
 
 # Terminal statuses -- no further transitions possible.
@@ -264,15 +272,23 @@ ENVIRONMENTS = ["Dev", "SIT", "UAT", "Pre-Production", "Production"]
 #   assigned on the QA Request) -> Security Readiness (readiness check by the
 #   assigned Security Lead or a QA Lead) -> Planning -> Configuration (scan
 #   setup -- "SAST Configuration"/"DAST Configuration" depending on scan type)
-#   -> Scanning -> Finding Validation -> Remediation, which itself cycles:
-#   Assigned To Requester -> Waiting For Fix -> Assigned To Lead -> Rescan ->
-#   (back to Scanning if more issues, otherwise) Security Complete -> Report
-#   Ready.
+#   -> Scanning -> Complete Scan, gated on a confirmation pop-up ("Are you
+#   sure no security findings were identified during the scan?"):
+#     - Yes (clean scan) -> Security Complete -> Report Ready -> Closed, all
+#       chained automatically in one step.
+#     - No (findings identified) -> Finding Validation -> Remediation, which
+#       itself cycles: Assigned To Requester -> Waiting For Fix -> Assigned
+#       To Lead -> Rescan -> the same confirmation pop-up again -> either the
+#       clean-scan chain above (Security Complete -> Report Ready -> Closed)
+#       or back to Finding Validation to repeat remediation/rescan.
 #
-# The final Security Complete -> Report Ready step additionally checks whether
-# any Suppression request was raised against this SAST/DAST id -- if so, ALL
-# such suppression requests must be "Done" before Report Ready is allowed (see
-# routers/sast_dast.py::_mark_report_ready and SUPPRESSION_STATUSES below).
+# Reaching Security Complete itself (from Finding Validation, a clean
+# Complete Scan, or a Passed Rescan Decision) and the subsequent Security
+# Complete -> Report Ready step both additionally check whether any
+# Suppression request was raised against this SAST/DAST id -- if so, ALL such
+# suppression requests must be "Done" before either is allowed (see
+# routers/sast_dast.py::_require_no_pending_suppressions and
+# SUPPRESSION_STATUSES below).
 SAST_DAST_STATUSES = [
     "DRAFT", "SUBMITTED",
     "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
@@ -282,14 +298,46 @@ SAST_DAST_STATUSES = [
     "ASSIGNED_TO_REQUESTER", "WAITING_FOR_FIX", "ASSIGNED_TO_LEAD", "RESCAN",
     "SECURITY_COMPLETE", "REPORT_READY", "CLOSED",
 ]
+# Reported directly: a Suppression / False Positive request's SAST/DAST
+# Request ID picker should only offer (and its create/update endpoints
+# should only accept) a SAST/DAST request that has actually reached
+# Scanning or later -- a suppression is a decision about a *finding*, and
+# there's nothing to suppress yet while the request is still sitting
+# somewhere before a scan has even started (Draft through Scan
+# Configuration). Everything from "SCANNING" onward in SAST_DAST_STATUSES
+# above is eligible; this lists the everything-before-that set explicitly
+# (rather than slicing the list by index) so it stays correct even if
+# SAST_DAST_STATUSES is ever reordered.
+SAST_DAST_PRE_SCANNING_STATUSES = [
+    "DRAFT", "SUBMITTED",
+    "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD", "DEPARTMENT_HEAD_REJECTED",
+    "SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS", "RETURNED_BY_SECURITY_LEAD",
+    "PLANNING", "CONFIGURATION",
+]
+# The other end of the window: once a SAST/DAST request has been declared
+# Security Complete (no more open findings -- see routers/sast_dast.py's
+# suppression gate on reaching that status), it's considered finalized, so a
+# NEW suppression can no longer be raised against it either -- pairs with
+# SAST_DAST_PRE_SCANNING_STATUSES above to define the eligible window as
+# "Scanning through the stage right before Security Complete". Report Ready
+# and Closed are both strictly later than Security Complete in
+# SAST_DAST_STATUSES, so they're included here too.
+SAST_DAST_COMPLETED_STATUSES = ["SECURITY_COMPLETE", "REPORT_READY", "CLOSED"]
 # Terminal states -- a linked SAST/DAST request must be in one of these before
 # its parent QA Request can be marked QA_COMPLETED (see QAStatus docstring
 # above and routers/qa_requests.py::complete_qa). Rejections at either
 # approval checkpoint count as "resolved" for this purpose too.
 SAST_DAST_TERMINAL_STATUSES = ["REPORT_READY", "CLOSED", "SM_REJECTED", "DEPARTMENT_HEAD_REJECTED"]
-# Statuses from which the requester may still edit mandatory details (repo
-# URL/branch/commit/tech stack for SAST; target URL/env/credentials for DAST).
-SAST_DAST_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"]
+# Statuses from which mandatory details (repo URL/branch/commit/tech stack
+# for SAST; target URL/env/credentials for DAST) can still be edited by
+# *someone* -- see routers/sast_dast.py::_can_edit_details for exactly who,
+# at each of these (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are
+# that stage's own reviewer only, not the requester).
+SAST_DAST_EDITABLE_STATUSES = [
+    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD",
+]
 
 SAST_DAST_STATUS_LABELS = {
     "DRAFT": "Draft",
@@ -372,7 +420,13 @@ PERFORMANCE_STATUSES = [
     "SIGNOFF_PENDING", "SIGNED_OFF", "REQUESTER_VERIFICATION", "CLOSED", "CANCELLED",
 ]
 PERFORMANCE_TERMINAL_STATUSES = ["CLOSED", "CANCELLED", "SM_REJECTED", "DEPARTMENT_HEAD_REJECTED"]
-PERFORMANCE_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER"]
+# See routers/performance.py::_can_edit_details for exactly who may edit at
+# each of these (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are
+# that stage's own reviewer only, not the requester).
+PERFORMANCE_EDITABLE_STATUSES = [
+    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER",
+]
 PERFORMANCE_STATUS_LABELS = {
     "DRAFT": "Draft", "SUBMITTED": "Submitted",
     "SM_APPROVAL_PENDING": "SM Approval Pending", "RETURNED_BY_SM": "Returned by SM",

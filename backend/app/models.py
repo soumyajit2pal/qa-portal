@@ -535,6 +535,11 @@ class SASTRequest(Base):
     walkthroughs = relationship("SASTWalkthrough", back_populates="sast_request", cascade="all,delete-orphan")
     checklist_items = relationship("SASTChecklistItem", back_populates="sast_request", cascade="all,delete-orphan")
     qa_request = relationship("QARequest", back_populates="linked_sast_requests")
+    # Every Suppression / False Positive request raised against this SAST
+    # request (see SuppressionRequest.sast_request_id) -- lets the Overview
+    # tab show "Suppression Requested? Yes/No" and, if so, which suppression
+    # id(s), without a separate round trip.
+    suppressions = relationship("SuppressionRequest", back_populates="sast_request")
     # One row per repository -- a project can span more than one, each with
     # its own branch/commit/tech stack/build number. Used to be packed as the
     # Nth comma-separated value across 5 parallel columns directly on this
@@ -712,6 +717,8 @@ class DASTRequest(Base):
     walkthroughs = relationship("DASTWalkthrough", back_populates="dast_request", cascade="all,delete-orphan")
     checklist_items = relationship("DASTChecklistItem", back_populates="dast_request", cascade="all,delete-orphan")
     qa_request = relationship("QARequest", back_populates="linked_dast_requests")
+    # See SASTRequest.suppressions above -- same idea, for DAST.
+    suppressions = relationship("SuppressionRequest", back_populates="dast_request")
     # One row per scan target -- a project can span more than one target URL,
     # each with its own environment/auth requirement/credentials. Used to be
     # packed as the Nth newline-separated value across 4 parallel columns
@@ -1042,8 +1049,17 @@ class SuppressionRequest(Base):
     items = relationship("SuppressionItem", back_populates="suppression_request", cascade="all,delete-orphan")
     walkthroughs = relationship("SuppressionWalkthrough", back_populates="suppression_request",
                                  cascade="all,delete-orphan")
-    sast_request = relationship("SASTRequest")
-    dast_request = relationship("DASTRequest")
+    sast_request = relationship("SASTRequest", back_populates="suppressions")
+    dast_request = relationship("DASTRequest", back_populates="suppressions")
+
+    @property
+    def linked_request(self):
+        """Whichever of sast_request/dast_request is actually set, matching
+        scan_type -- lets the UI show the raw SAST-xxxx/DAST-xxxx Request ID
+        this suppression was raised against (see schemas.LinkedRequestRef),
+        the same way SAST/DAST/Functional/Performance already show their own
+        linked QA Request."""
+        return self.sast_request if self.sast_request_id else self.dast_request
 
 
 class SuppressionItem(Base):

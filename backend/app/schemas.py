@@ -119,6 +119,19 @@ class LinkedRequestRef(ORMModel):
     risk_category: Optional[str] = None
 
 
+class LinkedSuppressionRef(ORMModel):
+    """Minimal cross-reference the other direction from LinkedRequestRef --
+    one of the Suppression / False Positive requests raised against a given
+    SAST/DAST request (see models.SASTRequest.suppressions/
+    models.DASTRequest.suppressions). Lets a SAST/DAST request's own Overview
+    show "Suppression Requested? Yes/No" and, if Yes, which suppression
+    id(s), without pulling the full nested SuppressionOut payload (items,
+    approval decisions, etc.)."""
+    id: int
+    suppression_id: str
+    status: Optional[str] = None
+
+
 class QARequestDocumentOut(ORMModel):
     id: int
     file_name: str
@@ -506,6 +519,17 @@ class RequesterDecisionIn(BaseModel):
     comments: Optional[str] = None
 
 
+class ScanCompletionIn(BaseModel):
+    """Payload for SAST/DAST's Complete Scan confirmation pop-up ("Are you
+    sure no security findings were identified during the scan?"). True ->
+    no findings, request fast-tracks toward Security Complete/Report Ready/
+    Closed; False -> findings were identified, request goes to Finding
+    Validation and the UI switches to the Findings tab so they can be
+    logged."""
+    no_findings: bool
+    comments: Optional[str] = None
+
+
 class CommentIn(BaseModel):
     """Payload for simple, non-branching lifecycle transitions (raise defect,
     mark waiting for fix, start retesting/regression, etc.)."""
@@ -625,6 +649,10 @@ class SASTOut(ORMModel):
     # and constants.DEFAULT_SECURITY_CHECKLIST_ITEMS. Reuses ChecklistItemOut
     # (Functional's own checklist item shape) since the fields are identical.
     checklist_items: List[ChecklistItemOut] = []
+    # Every Suppression / False Positive request raised against this SAST
+    # request (see models.SASTRequest.suppressions) -- lets the Overview tab
+    # show "Suppression Requested? Yes/No" and the suppression id(s) if so.
+    suppressions: List[LinkedSuppressionRef] = []
 
 
 class DASTCreate(BaseModel):
@@ -708,6 +736,8 @@ class DASTOut(ORMModel):
     # and constants.DEFAULT_SECURITY_CHECKLIST_ITEMS. Reuses ChecklistItemOut,
     # same as SASTOut.checklist_items above.
     checklist_items: List[ChecklistItemOut] = []
+    # See SASTOut.suppressions above -- same idea, for DAST.
+    suppressions: List[LinkedSuppressionRef] = []
 
 
 # ---------------- Module 4c: Performance Testing ----------------
@@ -861,6 +891,12 @@ class SuppressionOut(ORMModel):
     application_owner: Optional[str] = None
     sast_request_id: Optional[int] = None
     dast_request_id: Optional[int] = None
+    # Whichever of sast_request_id/dast_request_id is actually set, resolved
+    # to its human-readable Request ID (e.g. "SAST-20260730-93A71B") -- see
+    # models.SuppressionRequest.linked_request. Lets the Overview tab show
+    # which SAST/DAST request this suppression was raised against, instead
+    # of just the scan type.
+    linked_request: Optional[LinkedRequestRef] = None
     risk_assessment: Optional[str] = None
     items: List[SuppressionItemOut] = []
     status: str

@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments } from '../../components/Common'
 import { ApplicationNameBanner } from '../../components/ApplicationNameBanner'
+import ConfirmModal from '../../components/ConfirmModal'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import { SEVERITIES, PRIORITIES, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_STATUS_LABELS, hasRole } from '../../constants'
 import { SASTOut, SASTComponentOut, ChecklistItemOut, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
@@ -210,6 +212,11 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>(req.checklist_items || [])
   useEffect(() => { setChecklist(req.checklist_items || []) }, [req])
+  // Complete Scan (at Scanning) and the Rescan decision (at Rescan) both ask
+  // the same "were any findings identified?" confirmation before branching --
+  // this tracks which of the two triggered the pop-up currently showing (or
+  // null when it's closed).
+  const [scanConfirmAction, setScanConfirmAction] = useState<null | 'complete-scan' | 'rescan-decision'>(null)
 
   const load = useCallback(async () => {
     try {
@@ -236,6 +243,22 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
     setBusy(true)
     try { onChanged(await api.post<SASTOut>(`/api/sast-requests/${req.id}/${action}`, extra || {})) }
     catch (err) { setError(err) } finally { setBusy(false) }
+  }
+  // Answers the "were any findings identified?" pop-up -- Yes (no findings)
+  // fast-tracks toward Security Complete/Report Ready/Closed on the backend
+  // (see _auto_close_if_clean); No switches straight to the Findings tab so
+  // they can be logged, matching the requested "navigate to the Findings
+  // tab" behaviour for both Complete Scan and a failed Rescan.
+  async function answerScanConfirm(noFindings: boolean) {
+    const action = scanConfirmAction
+    setScanConfirmAction(null)
+    if (!action) return
+    if (action === 'complete-scan') {
+      await act('complete-scan', { no_findings: noFindings, comments })
+    } else {
+      await act('rescan-decision', { decision: noFindings ? 'Passed' : 'Failed', comments })
+    }
+    if (!noFindings) setTab('findings')
   }
   async function addFinding(e: React.FormEvent) {
     e.preventDefault()
@@ -272,13 +295,22 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
   // comment in QARequests.tsx. Doesn't apply to the QA-side steps below.
   const sameDept = !!user?.department && user.department === req.department
 
-  // Editing is a business-side (requester/SM/Department Head) concern, not
-  // Security's -- see the matching backend comment on update_sast. SM/
-  // Department Head editing is their own recourse after actually reviewing
-  // and returning the request -- while it's still a plain DRAFT (not yet
-  // even submitted), only the requester/admin may edit.
-  const canEditDetails = (isRequester || hasRole(user, 'ADMIN') || (hasRole(user, 'SM', 'DEPARTMENT_HEAD') && sameDept && status !== 'DRAFT'))
-    && SAST_DAST_EDITABLE_STATUSES.includes(status)
+  // Edit access mirrors the backend's own _can_edit_details exactly (see
+  // update_sast): the requester (or admin) may edit while it's Draft or
+  // sitting with them after a return (RETURNED_BY_SM/
+  // RETURNED_BY_DEPARTMENT_HEAD/RETURNED_BY_SECURITY_LEAD) -- returning a
+  // request hands it back to the requester to fix and resubmit, so the
+  // reviewer who returned it doesn't also keep edit access. Separately, the
+  // SM/Department Head may edit while the request is genuinely pending
+  // *their own* decision (SM_APPROVAL_PENDING/
+  // DEPARTMENT_HEAD_APPROVAL_PENDING) -- fix something, then decide -- but
+  // that access disappears the moment they've approved/returned/rejected;
+  // it never extends past Department Head's own decision into Security's
+  // post-approval readiness stage.
+  const canEditDetails = hasRole(user, 'ADMIN')
+    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status))
+    || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
+    || (hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   // Blocks Sign/Approve on both the SM and Department Head decision panels
   // below while this request's Application Name is still PENDING/REJECTED
   // (not yet APPROVED) -- see ApplicationNameBanner.
@@ -298,13 +330,25 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
   const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
   const canStartConfiguration = hasRole(user, 'SECURITY_ANALYST') && status === 'PLANNING'
   const canStartScan = hasRole(user, 'SECURITY_ANALYST') && status === 'CONFIGURATION'
-  const canAddFinding = hasRole(user, 'SECURITY_ANALYST') && status === 'SCANNING'
+  // Findings can be logged while still scanning, and -- this is the bit that
+  // was missing -- after Complete Scan answers "findings identified", which
+  // moves the request to Finding Validation rather than leaving it at
+  // Scanning. Answering "no findings" instead skips straight past Finding
+  // Validation to Security Complete (see _complete_scan), so this naturally
+  // stays blocked once that's confirmed -- no separate check needed.
+  const canAddFinding = hasRole(user, 'SECURITY_ANALYST') && ['SCANNING', 'FINDING_VALIDATION'].includes(status)
   const canCompleteScan = hasRole(user, 'SECURITY_ANALYST') && status === 'SCANNING'
   const canValidateFindings = hasRole(user, 'SECURITY_ANALYST') && status === 'FINDING_VALIDATION'
   const canAssignToRequester = hasRole(user, 'SECURITY_ANALYST') && status === 'REMEDIATION'
   const canMarkFixed = (isRequester || hasRole(user, 'SECURITY_ANALYST')) && status === 'WAITING_FOR_FIX'
   const canRescanDecide = hasRole(user, 'SECURITY_ANALYST') && status === 'RESCAN'
   const canMarkReportReady = hasRole(user, 'SECURITY_ANALYST') && status === 'SECURITY_COMPLETE'
+  // Report Ready -> Closed. Usually reached automatically as part of the
+  // Complete Scan/Rescan "no findings" confirmation, but this manual action
+  // covers the case where that auto-chain stopped at Report Ready's
+  // suppression gate and the analyst needs to finish the last hop themselves
+  // once the linked suppression(s) are Done.
+  const canCloseRequest = hasRole(user, 'SECURITY_ANALYST') && status === 'REPORT_READY'
 
   return (
     <Modal title={`${req.request_id} — ${req.application_name}`} onClose={onClose} wide>
@@ -341,6 +385,13 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
             </DetailField>
             <DetailField label="Priority">{req.priority || '—'}</DetailField>
             <DetailField label="Risk Category">{req.risk_category || '—'}</DetailField>
+            {/* For clear reporting/visibility -- whether any Suppression / False
+                Positive request has ever been raised against this SAST request,
+                and if so, which one(s) (see backend models.SASTRequest.suppressions). */}
+            <DetailField label="Suppression Requested?">{req.suppressions.length > 0 ? 'Yes' : 'No'}</DetailField>
+            {req.suppressions.length > 0 && (
+              <DetailField label="Suppression ID">{req.suppressions.map((s) => s.suppression_id).join(', ')}</DetailField>
+            )}
             <DetailField label="Created">{new Date(req.created_at).toLocaleString()}</DetailField>
             <DetailField label="Last Updated">{new Date(req.updated_at).toLocaleString()}</DetailField>
           </DetailSection>
@@ -463,17 +514,15 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
               )}
               {canStartConfiguration && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-configuration')}>Start Configuration</button>}
               {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-scan')}>Start Scan</button>}
-              {canCompleteScan && <button className="btn btn-sm" disabled={busy} onClick={() => act('complete-scan')}>Complete Scan</button>}
+              {canCompleteScan && <button className="btn btn-sm" disabled={busy} onClick={() => setScanConfirmAction('complete-scan')}>Complete Scan</button>}
               {canValidateFindings && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('validate-findings')}>Validate Findings</button>}
               {canAssignToRequester && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('assign-to-requester')}>Assign to Requester</button>}
               {canMarkFixed && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('mark-fixed')}>Mark Fixed (send to Rescan)</button>}
               {canRescanDecide && (
-                <>
-                  <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('rescan-decision', { decision: 'Passed', comments })}>Rescan Passed</button>
-                  <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('rescan-decision', { decision: 'Failed', comments })}>Rescan Failed</button>
-                </>
+                <button className="btn btn-sm" disabled={busy} onClick={() => setScanConfirmAction('rescan-decision')}>Rescan Decision</button>
               )}
               {canMarkReportReady && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('mark-report-ready')}>Mark Report Ready</button>}
+              {canCloseRequest && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('close')}>Close Request</button>}
             </div>
           </div>
 
@@ -482,6 +531,18 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
               editing={req}
               onClose={() => setEditing(false)}
               onSaved={(saved) => { setEditing(false); onChanged(saved) }}
+            />
+          )}
+
+          {scanConfirmAction && (
+            <ConfirmModal
+              title={scanConfirmAction === 'complete-scan' ? 'Complete Scan' : 'Rescan Decision'}
+              message="Are you sure no security findings were identified during the scan?"
+              confirmLabel="Yes, no findings"
+              cancelLabel="No, findings identified"
+              busy={busy}
+              onConfirm={() => answerScanConfirm(true)}
+              onCancel={() => answerScanConfirm(false)}
             />
           )}
         </div>
@@ -639,6 +700,7 @@ export default function SAST() {
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const securityAnalysts = users.filter((u) => (u.roles || []).includes('SECURITY_ANALYST'))
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const load = useCallback(async () => {
     try { setRows(await api.get<SASTOut[]>('/api/sast-requests')) } catch (err) { setError(err) }
@@ -650,6 +712,17 @@ export default function SAST() {
     // can resolve names from a single fetch.
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
   }, [])
+
+  // Deep-link support -- see the matching effect in Functional.tsx for the
+  // full reasoning; the gateway's "Linked Requests" table opens a specific
+  // SAST request here via `?open=<request_id>`.
+  useEffect(() => {
+    const openId = searchParams.get('open')
+    if (!openId || rows.length === 0) return
+    const match = rows.find((r) => r.request_id === openId)
+    if (match) setSelected(match)
+    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+  }, [rows, searchParams, setSearchParams])
 
   return (
     <div>

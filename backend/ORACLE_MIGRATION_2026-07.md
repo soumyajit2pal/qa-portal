@@ -3359,7 +3359,38 @@ need this -- they're not used inside a table).
 **No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean);
 Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
 
-## 79. Bug fix: dropdown panel froze in place on scroll (follow-up to section 78)
+## 79. Gateway "Linked Requests" becomes a clickable table, navigating to each request's own detail
+
+**Why:** requested directly, with a screenshot of the QA Request gateway's Overview -- "Linked Requests"
+was a flat wrapped line of colour-coded badges (`Functional QA TQA-FUNC-... — QA Completed`, `SAST
+SAST-... — Returned by Security Lead`, etc.), informational only, with no way to click through to the
+request it named. The user asked for a proper table (`Request Type || Request Id || Current Status`)
+with each row opening that specific request's own detail page.
+
+**Fix:** `QARequests/RequestDetail.tsx` now builds a `linkedRows` array (one entry per item across all
+four `linked_functional_requests`/`linked_sast_requests`/`linked_dast_requests`/`linked_performance_requests`
+arrays already on `QARequestOut`) and renders it with the existing `Table` component instead of the old
+`<p>` of badges -- three columns, `Request Type` / `Request Id` / `Current Status` (the last using the
+existing `Badge` component, which already resolves any request type's status via `ALL_STATUS_LABELS`
+internally, so no new label lookup was needed). Each row carries its own module page path
+(`/functional-requests`, `/sast`, `/dast`, `/performance`); clicking a row calls a new `openLinked(row)`
+which closes the gateway modal (`onClose()`) and navigates to `` `${row.path}?open=${row.request_id}` ``
+via `useNavigate`.
+
+**No prior deep-link mechanism existed** to open one specific request's detail view directly from a URL
+-- every module list page (`Functional.tsx`/`SAST.tsx`/`DAST.tsx`/`Performance.tsx`) only opens its detail
+modal in response to a table row click, with no query-param awareness. Added a matching `useSearchParams`
+effect to all four: once that page's own request list has loaded, if an `?open=<request_id>` param is
+present, find the row whose `request_id` matches and `setSelected` it exactly as a row click would, then
+strip the `open` param from the URL (`replace: true`, so back-navigation/refresh doesn't re-trigger it).
+This is a general-purpose deep-link entry point, not specific to the gateway -- any future link (email,
+notification, another page) can reuse the same `?open=<request_id>` convention against any of these four
+routes.
+
+**No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean);
+Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 80. Bug fix: dropdown panel froze in place on scroll (follow-up to section 78)
 
 **Why:** reported directly, with a screenshot, right after section 78 shipped -- "on scroll select position
 fixed to the position, so it is not working." Root cause: section 78's `position: fixed` panel had its
@@ -3384,3 +3415,423 @@ immediately, before the first scroll/resize event has any chance to fire.
 
 **No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/` (clean);
 Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 81. Bug fix: Download & Export Centre's PDF export had misaligned/overflowing columns
+
+**Why:** reported directly, with two exported PDFs attached (`qa-request-summary`, `audit-evidence`) --
+"columns are not aligned, not fitted properly." Root cause, in `routers/export.py::_rows_to_pdf`: the
+`Table(data, repeatRows=1)` call passed no `colWidths` at all, and every cell held a plain Python string
+rather than a `Paragraph`. With no fixed column widths and nothing to wrap, reportlab sizes each column
+to fit its *longest single unwrapped line* with no page-width ceiling whatsoever -- a handful of long
+`Comments`/`Priority / Risk (per type)` values (audit-evidence's history comments, qa-request-summary's
+per-type priority/risk breakdown) made the table's total natural width far exceed the actual landscape-A4
+page. The excess silently ran off the right edge of the printable area instead of wrapping or shrinking,
+which is exactly what the two sample exports showed: `Department` reading as `ent (DBD)` (the start of
+"Digital Banking Department (DBD)" pushed past the left content boundary as later columns shifted
+everything over) and trailing columns (`Timestamp`, the `TQA-FUNC-...` ID) losing their tail past the right
+edge. This is the Download & Export Centre's generic multi-row report export (any of the 9
+`REPORT_REGISTRY` reports) -- a different code path from `pdf_export.py`'s per-request "detail
+certificate" PDF (used by each module's own Export PDF button), which already wraps cells in `Paragraph`
+with fixed `colWidths` and was never affected.
+
+**Fix:** added `_fit_col_widths(headers, rows, available_width)` -- for each column, takes the ~85th
+percentile of that column's cell-length distribution (header included) as a proxy for how much room it
+typically needs (a percentile rather than the max so one freak 300-character comment doesn't single-handedly
+dictate a column's width), turns those into proportional weights clamped to a sane `[42, 190]` point range,
+then rescales the whole set so the widths always sum to *exactly* `available_width` -- the landscape-A4 page
+width minus margins -- regardless of how many columns a given report has or how verbose its content is.
+Every cell (header and data) is now wrapped in a `Paragraph` (small `6.5pt`/`7pt`-ish styles, matching
+`pdf_export.py`'s existing convention) instead of a plain string, so any text still too long for its
+allotted column width wraps onto additional lines (taller rows) rather than overflowing sideways. Margins
+were also tightened from reportlab's 1-inch default to `10mm`/`12mm` to reclaim more usable width. Verified
+by rendering both of the user's exact reported reports (`qa-request-summary`'s 10-column shape,
+`audit-evidence`'s 8-column shape incl. its long `Comments` field) through the new code standalone and
+converting to PNG for visual inspection -- every column now renders fully inside the page with no
+clipping, and long values wrap cleanly onto extra lines instead of running off the edge.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `routers/export.py` (clean); rendered
+both reported reports' exact column shapes through the new `_rows_to_pdf`/`_fit_col_widths` standalone and
+visually confirmed (via `pdftoppm`) no column clipping/overflow on either; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq`.
+
+## 82. Bug fix: SM/Department Head could still edit a request after returning it themselves
+
+**Why:** reported directly, on the SAST module -- "After request returned to requester during SM
+approval, though request is return till 'Edit Details' button is showing and SM able to edit." Root
+cause, present identically across all four editable request types (`update_sast`/`update_dast` in
+`sast_dast.py`, `update_functional`, `update_performance`): once a request left `DRAFT`, the edit-access
+check let the *requester or an SM/Department Head in the same department* edit it, for any status in that
+module's `*_EDITABLE_STATUSES` list -- which is entirely made up of `DRAFT` plus the various
+`RETURNED_BY_*` statuses. So when an SM returned their own request (status -> `RETURNED_BY_SM`), that
+same SM still passed the edit-access check and the frontend still showed them an "Edit Details" button.
+But `resubmit`/`_resubmit` (the endpoint that actually advances a returned request back into the approval
+chain) has always been requester-or-admin-only, with no SM/Department Head path at all -- so an SM editing
+a request they'd just returned could change its fields but could never push it forward again themselves,
+a dead-end permission that just caused confusion (exactly what got reported).
+
+**Fix:** removed the SM/Department Head edit-bypass entirely, in both the backend permission check and
+the frontend's matching `canEditDetails` computation, on all four modules (SAST, DAST, Functional,
+Performance) -- editing is now requester-or-admin-only, for every status in that module's own
+`*_EDITABLE_STATUSES` list (`DRAFT` and every `RETURNED_BY_*` value), exactly matching who's actually
+allowed to resubmit. Returning a request (by SM, Department Head, Security Lead, QA Lead, or Engineer,
+depending on module/stage) now consistently means "the ball is with the requester to fix and resubmit" --
+the reviewer who returned it no longer also gets a dangling edit permission they can't do anything useful
+with. `require_same_department` and the `sameDept` frontend variable are both still used elsewhere on
+every one of these files (their own SM/Department Head *decision* endpoints/buttons, which is a genuinely
+different, still-correct permission point) -- only the edit-access bypass was removed.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `sast_dast.py`/`functional.py`/
+`performance.py` (clean); `npx tsc --noEmit -p .` from `frontend/` (clean); grepped every touched file to
+confirm `require_same_department`/`sameDept` still have a live use elsewhere; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq`.
+
+## 83. Follow-up to section 82: SM/Department Head regain edit access while their own decision is pending
+
+**Why:** clarified directly, on the SAST module again -- "edit option only be allowed till department
+head approval." Section 82 made editing requester-or-admin-only for every status in each module's
+`*_EDITABLE_STATUSES` list, which removed the SM/Department Head's edit access entirely, including while
+a request is genuinely sitting with them awaiting their own decision. That went further than intended: the
+actual requirement is that a reviewer (SM or Department Head) should be able to open Edit Details, fix
+something, and then Approve/Return/Reject while the request is pending *their own* checkpoint -- but lose
+that edit access the instant they've decided either way (approved, returned, or rejected). Two follow-up
+questions confirmed the exact boundary: readiness-stage returns (Security Lead/QA Lead/Engineer, all of
+which happen *after* Department Head has already approved) stay requester-only, unchanged from section 82
+-- reviewer edit access never extends past Department Head's own decision.
+
+**Fix:** `SM_APPROVAL_PENDING` and `DEPARTMENT_HEAD_APPROVAL_PENDING` were added to each module's
+`*_EDITABLE_STATUSES` list (`FUNCTIONAL_EDITABLE_STATUSES`/`SAST_DAST_EDITABLE_STATUSES`/
+`PERFORMANCE_EDITABLE_STATUSES`, both backend `constants.py` and frontend `constants.ts` -- these lists
+were previously just `DRAFT` + every `RETURNED_BY_*` value). A new `_can_edit_details(obj, user)` helper
+was added to each router (`sast_dast.py` -- shared by both SAST and DAST -- plus `functional.py` and
+`performance.py`, mirroring the existing `_can_upload_documents` helper's exact shape/style in each of
+those same files) replacing the plain requester-or-admin check from section 82:
+
+- Admin: always.
+- `DRAFT`/`RETURNED_BY_SM`/`RETURNED_BY_DEPARTMENT_HEAD`/`RETURNED_BY_SECURITY_LEAD` (SAST/DAST) /
+  `RETURNED_BY_QA_LEAD` (Functional) / `RETURNED_BY_ENGINEER` (Performance): requester only -- unchanged
+  from section 82, this is "returned to the requester to fix and resubmit."
+- `SM_APPROVAL_PENDING`: an SM in the same department as the request -- **new**.
+- `DEPARTMENT_HEAD_APPROVAL_PENDING`: a Department Head in the same department -- **new**.
+- Any other status (e.g. the SAST/DAST/QA execution/readiness statuses beyond Department Head approval):
+  nobody but the requester, and only once/if it's returned back to them.
+
+The frontend's `canEditDetails` in `SAST.tsx`/`DAST.tsx`/`Functional.tsx`/`Performance.tsx` mirrors this
+exactly (same four-branch shape, reusing each file's existing `sameDept`/`isRequester`/`hasRole` helpers)
+so the "Edit Details" button only ever appears for whoever the backend would actually let edit. Resubmit
+itself (`_resubmit`/`resubmit_request`) is unchanged and remains requester-or-admin-only -- an SM/
+Department Head editing a pending request doesn't gain the ability to advance its status themselves; they
+still make that decision through their own normal Approve/Return/Reject action.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `constants.py`/`sast_dast.py`/
+`functional.py`/`performance.py` (clean); `npx tsc --noEmit -p .` from `frontend/` (clean); Documents and
+outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 84. Fix header/footer scrolling away -- app shell now pins them and scrolls content instead
+
+**Why:** requested directly -- "make header and footer means application name, username logout fix
+position." The sidebar's app-name header (`.brand` -- "QualityHub / Centralized QA Portal") and its
+username/logout footer (`.sidebar-bottom`), plus the top `.topbar` (search box/status/+New button), were
+scrolling away with the rest of the page on any screen with enough content to exceed the viewport height.
+Root cause: `.app-shell` only set `min-height: 100vh` (not a fixed `height`), so once `.content` grew
+taller than the viewport, the *entire page* -- including the sidebar -- grew and scrolled together via the
+normal document/body scrollbar. `.sidebar` had no height of its own to clip against, so its nav's existing
+`overflow-y: auto` never actually had a chance to engage; the whole sidebar just scrolled off along with
+everything else.
+
+**Fix:** converted the layout into a standard fixed app-shell -- `.app-shell` is now `height: 100vh;
+overflow: hidden` (was `min-height`, no overflow control) so the page itself never scrolls. `.sidebar` and
+`.main` are both pinned to that same `height: 100vh` with `overflow: hidden`. Inside `.sidebar`, `.brand`
+(header) and `.sidebar-bottom` (footer, username/logout) both got `flex-shrink: 0` so they hold their
+size, while `.sidebar nav` (the middle scrollable nav list) got `flex: 1; min-height: 0` added alongside
+its existing `overflow-y: auto` -- `min-height: 0` is required here because a flex column child's default
+min-height is `auto` ("at least as tall as my content"), which silently defeats `overflow-y: auto` unless
+overridden. Inside `.main`, `.topbar` got `flex-shrink: 0` (stays fixed) and `.content` got the matching
+`flex: 1; min-height: 0; overflow-y: auto` treatment -- `.content` is now the *only* element that actually
+scrolls, everything else (brand/app name, nav, username+logout, topbar) stays fixed in the viewport
+regardless of how tall a given page's content grows. `.modal-overlay` (`position: fixed; inset: 0`) was
+confirmed unaffected -- it was already independent of page scroll, not nested inside `.content`.
+
+**No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/`
+(clean; full `vite build` couldn't run in this sandbox due to a pre-existing, unrelated native-binary
+platform mismatch -- `@rollup/rollup-linux-arm64-gnu` missing -- not something this change touched);
+reviewed every touched selector for conflicting/duplicate rules elsewhere in `index.css` (none found);
+`.modal-overlay`'s own `position: fixed` confirmed independent of this change; Documents and outputs
+copies re-synced and confirmed identical via `diff -rq`.
+
+## 85. Suppression / False Positive: linked SAST/DAST request must have reached Scanning
+
+**Why:** requested directly -- the Suppression / False Positive request's SAST/DAST Request ID picker
+should only offer (and only accept) requests whose status is `SCANNING` or later; a request still sitting
+anywhere before that -- Draft, any approval-pending/returned/rejected stage, Security Lead Assigned,
+Security Readiness, Returned by Security Lead, Planning, or Configuration -- must never appear as a
+choice. A suppression/false-positive is a decision about a *finding*, and there's nothing to suppress
+until a scan has actually produced findings, which can't happen before `SCANNING`.
+
+**Fix:** added a new explicit `SAST_DAST_PRE_SCANNING_STATUSES` constant listing the 13 pre-scanning
+statuses (`DRAFT, SUBMITTED, SM_APPROVAL_PENDING, RETURNED_BY_SM, SM_REJECTED,
+DEPARTMENT_HEAD_APPROVAL_PENDING, RETURNED_BY_DEPARTMENT_HEAD, DEPARTMENT_HEAD_REJECTED,
+SECURITY_LEAD_ASSIGNED, SECURITY_READINESS, RETURNED_BY_SECURITY_LEAD, PLANNING, CONFIGURATION`) to both
+backend `constants.py` and frontend `constants.ts`, listed out explicitly rather than sliced by index off
+`SAST_DAST_STATUSES` so it stays correct even if that list is ever reordered.
+
+Backend (`routers/suppression.py`): `_require_linked_request` now takes the `db: Session` in addition to
+the submitted `data`, loads the linked `SASTRequest`/`DASTRequest` row, and raises `400` if its `status`
+is in `SAST_DAST_PRE_SCANNING_STATUSES` ("The linked {kind} request hasn't reached Scanning yet..."). Both
+`create_suppression` and `update_suppression` call this updated helper, so a hand-crafted or stale request
+against a pre-scanning SAST/DAST request is rejected server-side regardless of what the UI shows.
+
+Frontend (`Suppression.tsx`, `NewSuppressionModal`): added a `hasReachedScanning(r)` check alongside the
+existing `inScope(r)` department/requester scoping, applied to both the SAST and DAST arrays before they're
+combined into `combinedRequests` -- so the Request ID autosuggest never lists a pre-scanning request in the
+first place. (There's no separate Edit-Suppression modal in the frontend today -- `NewSuppressionModal` is
+the only place this picker exists.)
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `constants.py`/`suppression.py`
+(clean); `npx tsc --noEmit -p .` from `frontend/` (clean); Documents and outputs copies re-synced and
+confirmed identical via `diff -rq`.
+
+## 86. SAST/DAST: findings confirmation pop-up at Complete Scan/Rescan, and a real Closed step
+
+**Why:** requested directly -- the SAST/DAST post-scan workflow wasn't actually walking through all of
+its own defined statuses. Complete Scan (at `SCANNING`) unconditionally moved to `FINDING_VALIDATION`
+with no pop-up asking whether findings were identified, and nothing anywhere ever transitioned a request
+out of `REPORT_READY` into `CLOSED` -- `CLOSED` was defined in `SAST_DAST_STATUSES`/
+`SAST_DAST_TERMINAL_STATUSES` but unreachable, so every SAST/DAST request's real terminal state was
+`REPORT_READY`. The requested workflow: Complete Scan asks "Are you sure no security findings were
+identified during the scan?" -- Yes walks `SECURITY_COMPLETE -> REPORT_READY -> CLOSED`; No moves to
+`FINDING_VALIDATION` and switches the UI to the Findings tab so they can be logged, following
+`FINDING_VALIDATION -> REMEDIATION -> ASSIGNED_TO_REQUESTER -> WAITING_FOR_FIX -> ASSIGNED_TO_LEAD ->
+RESCAN`. After a rescan, the same pop-up repeats: no findings remain -> the same
+`SECURITY_COMPLETE -> REPORT_READY -> CLOSED` chain; findings still exist -> back to the Findings tab to
+repeat remediation/rescan.
+
+**Fix:**
+
+Backend (`routers/sast_dast.py`, shared by both SAST and DAST as before):
+
+- New `_close_request(db, obj, current_user)`: `REPORT_READY -> CLOSED`, the lifecycle's actual terminal
+  step -- previously unreachable.
+- New `_auto_close_if_clean(db, obj, current_user, sup_filter_col)`: chains `_mark_report_ready` then
+  `_close_request` in one call, used right after the confirmation pop-up confirms no findings. If
+  `_mark_report_ready`'s existing suppression gate (any linked Suppression request not yet "Done") raises,
+  the chain stops cleanly at `SECURITY_COMPLETE` (already committed) without propagating the error --
+  the analyst finishes the remaining hop(s) manually via the existing Mark Report Ready button plus a new
+  Close Request button once the suppression is resolved.
+- `_complete_scan` now takes `no_findings: bool` (from the new `schemas.ScanCompletionIn` payload,
+  `{no_findings, comments}`) and `sup_filter_col`: `True` sets `SECURITY_COMPLETE` and calls
+  `_auto_close_if_clean`, skipping `FINDING_VALIDATION`/`REMEDIATION` entirely since the analyst has
+  confirmed the scan was clean; `False` sets `FINDING_VALIDATION` as before.
+- `_rescan_decision` now also takes `sup_filter_col`: `"Passed"` (no findings remain) sets
+  `SECURITY_COMPLETE` and calls `_auto_close_if_clean`, same as a clean Complete Scan; `"Failed"` (findings
+  still exist) now routes to `FINDING_VALIDATION` instead of back to `SCANNING` -- matches "return to the
+  Findings tab and repeat the remediation and rescan workflow" rather than re-running the full
+  Planning/Configuration/Scanning cycle.
+- New `/api/sast-requests/{id}/close` and `/api/dast-requests/{id}/close` endpoints (Security Analyst
+  role, `REPORT_READY` only) wired to `_close_request`, for the manual fallback above.
+- `complete-scan`'s endpoint signature changed from no body to `payload: schemas.ScanCompletionIn` on
+  both SAST and DAST -- this is a breaking change to that one endpoint's request shape (previously took no
+  body at all).
+
+Frontend (`SAST.tsx`/`DAST.tsx`, both mirrored identically as always):
+
+- New shared `components/ConfirmModal.tsx` -- a small Yes/No dialog-variant `Modal` (`preventBackdropClose`
+  so an accidental outside click can't silently pick "No" and lose the confirmation), reusable anywhere a
+  Yes/No branch is needed (as opposed to `InfoModal`'s single-button acknowledgement).
+- "Complete Scan" and the old separate "Rescan Passed"/"Rescan Failed" buttons now open this pop-up
+  ("Rescan Decision" is a single button, replacing the two) instead of calling the API directly. Answering
+  Yes calls `complete-scan`/`rescan-decision` with `no_findings: true` / `decision: 'Passed'`; answering No
+  calls the same endpoint with the opposite value and then switches `tab` to `'findings'`, so the analyst
+  lands straight on the Findings tab to log what was found, matching "the system should navigate to the
+  Findings tab" from the request.
+- New "Close Request" button at `REPORT_READY` (Security Analyst role) calling the new `/close` endpoint --
+  the manual fallback for when `_auto_close_if_clean` stopped short on a pending suppression.
+
+Both backend router-comment docstrings (top of `sast_dast.py`) and the `SAST_DAST_STATUSES` lifecycle
+comment in `constants.py` were updated to describe the new branching flow instead of the old linear one.
+
+**No schema change** (`CLOSED` was already a valid value in the existing `status` column -- this only
+makes it reachable). **Verification:** `python3 -m py_compile` on `constants.py`/`schemas.py`/
+`sast_dast.py` (clean); `npx tsc --noEmit -p .` from `frontend/` (clean); Documents and outputs copies
+re-synced and confirmed identical via `diff -rq`.
+
+## 87. SAST/DAST: Security Complete also blocked while a suppression is pending, not just Report Ready
+
+**Why:** requested directly -- Report Ready was already blocked while any linked Suppression / False
+Positive request wasn't yet "Done" (see `_mark_report_ready`), but that gate only fired one step later.
+A request could still be marked Security Complete with an outstanding suppression sitting against it,
+which reads as "security review finished" while a finding's disposition is still an open decision.
+Confirmed with the user that the rule should match Report Ready's existing definition of "pending" --
+blocked only while a suppression is not yet Done, not permanently blocked if one was ever raised (once
+every linked suppression reaches Done, Security Complete becomes reachable again same as before).
+
+**Fix:** in `routers/sast_dast.py`, factored the suppression lookup out of `_mark_report_ready` into two
+shared helpers: `_pending_suppression_ids(db, obj, sup_filter_col)` (the query itself) and
+`_require_no_pending_suppressions(db, obj, sup_filter_col, action)` (raises 400 with the pending
+suppression IDs if any exist, `action` naming whichever checkpoint is being blocked in the message).
+`_mark_report_ready` now calls the shared helper instead of inlining the check. The same helper is now
+also called immediately before every place that sets `obj.status = "SECURITY_COMPLETE"`:
+
+- `_complete_scan`'s `no_findings=True` branch (Complete Scan confirmed clean).
+- `_validate_findings`'s no-open-findings branch (Finding Validation resolves clean after all).
+- `_rescan_decision`'s `"Passed"` branch (Rescan confirmed clean).
+
+All three already had `sup_filter_col` threaded through from section 86's work (or gained it here, for
+`_validate_findings` -- its two endpoints now pass `models.SuppressionRequest.sast_request_id`/
+`dast_request_id` the same way the others do). If blocked, the request stays at its current status
+(`SCANNING`/`FINDING_VALIDATION`/`RESCAN` respectively) and the analyst sees the same "suppression
+request(s) still pending" message already used at Report Ready, just naming "Security Complete" instead.
+No new frontend UI was added -- the existing `ErrorText` display on the Workflow Actions panel already
+surfaces this the same way it does every other backend validation error in this app.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `constants.py`/`schemas.py`/
+`sast_dast.py` (clean); no frontend files touched, so the last `npx tsc --noEmit -p .` run (section 86)
+still applies; Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 88. Fix: Add Finding button vanished after Complete Scan answered "findings identified"
+
+**Why:** bug report -- selecting "No, findings identified" on the Complete Scan confirmation pop-up (see
+section 86) correctly moves the request to `FINDING_VALIDATION` and switches to the Findings tab, but the
+Add Finding form itself disappeared. `canAddFinding` in `SAST.tsx`/`DAST.tsx` was still gated to
+`status === 'SCANNING'` only -- a leftover from before section 86, when Complete Scan unconditionally
+landed on `FINDING_VALIDATION` and findings were expected to already be logged during `SCANNING` itself.
+Now that "findings identified" moves the status *out* of `SCANNING` before the analyst has had a chance
+to log anything, the form vanished right when it was needed.
+
+**Fix:** `canAddFinding` now also allows `FINDING_VALIDATION`: `hasRole(user, 'SECURITY_ANALYST') &&
+['SCANNING', 'FINDING_VALIDATION'].includes(status)`. The other half of the request -- findings must stay
+blocked when "Yes, no findings" is answered -- already holds with no extra change needed: that path skips
+straight past `FINDING_VALIDATION` to `SECURITY_COMPLETE` (see `_complete_scan`'s `no_findings=True`
+branch from section 86), so the status is never one `canAddFinding` matches once that's confirmed. The
+backend's own `add_sast_finding`/`add_dast_finding` endpoints were already unrestricted by status (no
+`_require` call in `_add_finding`), so this was purely a frontend gating bug -- no backend change needed.
+
+**No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/`
+(clean); Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 89. Suppression Overview now shows the SAST/DAST Request ID it was raised against
+
+**Why:** requested directly -- the Suppression detail view's Overview tab showed "Scan Type: SAST" but
+never the actual SAST/DAST Request ID (e.g. "SAST-20260730-93A71B") the suppression was raised against,
+even though that's exactly the traceability link the whole feature exists for. The PDF export
+(`export_suppression`) already included it via `obj.sast_request.request_id`/`obj.dast_request.request_id`
+-- only the in-app Overview tab (and the list table) were missing it.
+
+**Fix:** `models.SuppressionRequest` gained a `linked_request` property returning whichever of its
+existing `sast_request`/`dast_request` relationships is actually set (mirrors the `qa_request` pattern
+already used on SAST/DAST/Functional/Performance to show *their* linked parent). `schemas.SuppressionOut`
+exposes it as `linked_request: Optional[LinkedRequestRef] = None` -- the same minimal cross-reference
+schema (`id`/`request_id`/`status`/`priority`/`risk_category`) already used everywhere else in the app for
+this exact "show the other side of a link" need, so FastAPI's `from_attributes` picks it up automatically
+with no router code changes. Frontend `types.ts`'s `SuppressionOut` mirrors the new field.
+`Suppression.tsx`'s Overview tab now shows a `"{scan_type} Request ID:"` row rendering
+`sup.linked_request?.request_id`, and the list table gained a matching "Linked Request" column (filterable,
+same as every other column there) -- both fall back to "—" for the pre-existing legacy suppressions raised
+before a SAST/DAST link was required (see section 183's Scanning+ eligibility fix, which only applies
+going forward).
+
+**No schema change** (`sast_request_id`/`dast_request_id` columns already existed -- this only exposes the
+relationship they already had). **Verification:** `python3 -m py_compile` on `models.py`/`schemas.py`
+(clean); `npx tsc --noEmit -p .` from `frontend/` (clean); Documents and outputs copies re-synced and
+confirmed identical via `diff -rq`.
+
+## 90. Suppression Request ID picker also excludes SAST/DAST requests that already reached Security Complete
+
+**Why:** requested directly -- once a SAST/DAST request has been marked Security Complete (declaring its
+security review finished with no more open findings), it shouldn't be possible to raise a *new*
+suppression against it -- symmetric with section 87's rule blocking a request from reaching Security
+Complete while a suppression is still pending. Confirmed with the user that "completed" means Security
+Complete onward (`SECURITY_COMPLETE`, `REPORT_READY`, `CLOSED`) -- together with the existing
+Scanning-or-later floor from section 85, this narrows the eligible linking window to Scanning through the
+stage right before Security Complete. (The DAST side of the Overview Request ID display added in section
+89 was also re-checked while making this change -- `Suppression.tsx` has one shared detail component for
+both scan types with no SAST-specific branching, and `models.SuppressionRequest.linked_request` resolves
+`dast_request` the same way it resolves `sast_request`, so it was already rendering correctly for DAST;
+no separate fix was needed there.)
+
+**Fix:** new `SAST_DAST_COMPLETED_STATUSES = ["SECURITY_COMPLETE", "REPORT_READY", "CLOSED"]` added to both
+backend `constants.py` and frontend `constants.ts`, mirroring `SAST_DAST_PRE_SCANNING_STATUSES`'s existing
+"explicit list, not an index slice" style. Backend `routers/suppression.py`'s `_require_linked_request`
+gained a second status check alongside the existing pre-scanning one, rejecting a link to a SAST/DAST
+request already in `SAST_DAST_COMPLETED_STATUSES` with a 400 explaining the security review is already
+complete. Frontend `Suppression.tsx`'s `NewSuppressionModal` gained a matching `isNotYetCompleted(r)`
+filter, chained onto the existing `inScope`/`hasReachedScanning` filters for both the SAST and DAST arrays
+before they're combined into `combinedRequests` -- so a completed request never appears in the picker for
+either scan type.
+
+**No schema change.** **Verification:** `python3 -m py_compile` on `constants.py`/`suppression.py`
+(clean); `npx tsc --noEmit -p .` from `frontend/` (clean); Documents and outputs copies re-synced and
+confirmed identical via `diff -rq`.
+
+## 91. SAST/DAST Overview: "Suppression Requested? Yes/No" + Suppression ID(s)
+
+**Why:** requested directly, for clear reporting/visibility -- a SAST/DAST request's own detail window
+had no indication of whether a Suppression / False Positive request had ever been raised against it, or
+which one. This is the reverse direction of section 89 (which showed the SAST/DAST id *on* the Suppression
+view) -- this adds the same relationship visible from the SAST/DAST side.
+
+**Fix:** `models.SASTRequest`/`models.DASTRequest` each gained a `suppressions` relationship
+(`back_populates` wired up against the existing `SuppressionRequest.sast_request`/`dast_request`
+relationships, which previously had no back-reference). New minimal schema `LinkedSuppressionRef` (`id`,
+`suppression_id`, `status`) -- the reverse-direction counterpart to the existing `LinkedRequestRef` --
+exposed as `suppressions: List[LinkedSuppressionRef] = []` on both `SASTOut` and `DASTOut`; picked up
+automatically via `from_attributes` with no router code changes (SAST's plain `response_model` conversion
+and DAST's `_dast_out` both already build off the live ORM row). Frontend `types.ts` mirrors both
+interfaces, adding a new shared `LinkedSuppressionRef` type. `SAST.tsx`/`DAST.tsx`'s Overview "Status"
+section gained two fields right after Priority/Risk Category: "Suppression Requested?" (Yes if
+`req.suppressions.length > 0`, else No), and "Suppression ID" (comma-separated list of every linked
+`suppression_id`) -- shown only when the answer is Yes, per the request.
+
+**No schema change** (`sast_request_id`/`dast_request_id` already existed on `SuppressionRequest` -- this
+only exposes the relationship the other direction). **Verification:** `python3 -m py_compile` on
+`models.py`/`schemas.py`/`sast_dast.py`/`suppression.py` (clean); `npx tsc --noEmit -p .` from `frontend/`
+(clean); Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 92. Functional QA: renamed its "Checklist" tab to "Functional Details"
+
+**Why:** requested directly (clarified via follow-up question, since the original wording didn't match
+any existing element) -- the Functional QA request's readiness-checklist tab was just labeled "Checklist"
+like every other module's own tab. Renamed to "Functional Details" per the request.
+
+**Fix:** `Functional.tsx`'s tab bar renders its label conditionally now -- `t === 'checklist' ?
+'Functional Details' : t[0].toUpperCase() + t.slice(1)` -- so only the *displayed* label changed. The tab
+key itself stays `'checklist'` internally (unchanged), since that's what drives `tab === 'checklist'`'s
+content block, the `/api/functional-requests/{id}/checklist` route, and everything else already wired to
+it -- a pure display-string change with zero behavioral risk.
+
+**No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/`
+(clean); Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 93. Correction to section 92 -- reverted, and the real fix: no separate Readiness Checklist wizard step for Functional QA
+
+**Why:** section 92 was a misread of the original (typo-heavy) request -- it targeted `Functional.tsx`'s
+detail-view tab, but the actual ask was about the QA Request wizard: raising a request currently shows
+Functional Testing's own "Ready for Testing" readiness checklist as its own separate wizard step
+(`buildSteps.ts`'s `{ key: 'checklist', label: 'Readiness Checklist' }`, rendered via `ChecklistStep.tsx`),
+while SAST and DAST already fold their own Security Readiness checklist directly into their own step
+(`SastStep.tsx`/`DastStep.tsx`) instead of a separate one -- "same behaviour like sast dast and other."
+Confirmed directly: no separate step/tab at all: the checklist belongs inside the "Functional QA
+Classification" step.
+
+**Fix:** section 92's tab-label change in `Functional.tsx` (the request detail view, unrelated to the
+wizard) was reverted back to plain "Checklist" -- untouched otherwise, no other part of section 92 was a
+mistake, just the wrong target entirely.
+
+The real fix is in the QA Request wizard (`QARequests/`):
+- `steps/FunctionalStep.tsx` now renders the "Readiness Checklist — Self-Declaration" section (item list,
+  checkboxes, `toggleChecked`) directly underneath its existing Priority/Risk Rating fields -- the same
+  content `ChecklistStep.tsx` used to render on its own separate step, now folded in here instead, mirroring
+  exactly how `SastStep.tsx` already combines its own Priority/Risk/Repository Details with its Security
+  Readiness Checklist self-declaration in one step.
+- `buildSteps.ts` no longer pushes a separate `{ key: 'checklist', ... }` step for Functional-bucket
+  request types -- the `'functional'` step is now the only one added for them.
+- `NewRequestModal.tsx` dropped its `ChecklistStep` import and the `step.key === 'checklist'` render line.
+- `steps/ChecklistStep.tsx` deleted -- no longer referenced anywhere (confirmed via full-repo grep before
+  removing).
+
+No change to `form.checked_items`, the payload shape sent to `POST/PUT /api/qa-requests`, or any backend
+code -- this is purely a wizard-step-layout change (fewer steps, same fields collected).
+
+**No schema change, no backend change.** **Verification:** `npx tsc --noEmit -p .` from `frontend/`
+(clean); grepped the repo to confirm `ChecklistStep`/the `'checklist'` step key have no remaining
+references before deleting the file; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq`.

@@ -80,6 +80,15 @@ export interface LinkedRequestRef {
   risk_category?: string | null
 }
 
+// Minimal cross-reference the other direction from LinkedRequestRef -- one
+// of the Suppression / False Positive requests raised against a given
+// SAST/DAST request -- see backend schemas.LinkedSuppressionRef.
+export interface LinkedSuppressionRef {
+  id: number
+  suppression_id: string
+  status?: string | null
+}
+
 export interface QARequestDocumentOut {
   id: number
   file_name: string
@@ -279,6 +288,9 @@ export interface SASTOut {
   // models.SASTChecklistItem. Reuses ChecklistItemOut, same shape as
   // Functional's own checklist item.
   checklist_items: ChecklistItemOut[]
+  // Every Suppression / False Positive request raised against this SAST
+  // request -- see backend models.SASTRequest.suppressions.
+  suppressions: LinkedSuppressionRef[]
 }
 
 export interface DASTFindingOut {
@@ -350,6 +362,8 @@ export interface DASTOut {
   // "Security Readiness" pre-scan checklist -- see backend
   // models.DASTChecklistItem, same shape as SASTOut.checklist_items above.
   checklist_items: ChecklistItemOut[]
+  // See SASTOut.suppressions above -- same idea, for DAST.
+  suppressions: LinkedSuppressionRef[]
 }
 
 // A combined SAST/DAST record used by the Suppression "Request ID"
@@ -426,6 +440,9 @@ export interface SuppressionOut {
   application_owner?: string | null
   sast_request_id?: number | null
   dast_request_id?: number | null
+  // Whichever of sast_request_id/dast_request_id is set, resolved to its
+  // human-readable Request ID -- see backend schemas.SuppressionOut.
+  linked_request?: LinkedRequestRef | null
   risk_assessment?: string | null
   items: SuppressionItemOut[]
   status: string

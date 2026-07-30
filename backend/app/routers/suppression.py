@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role
+from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -41,14 +41,51 @@ def _require(obj, expected, action: str):
         raise HTTPException(400, f"'{action}' requires status in {expected} (currently '{obj.status}')")
 
 
-def _require_linked_request(data: dict):
+def _require_linked_request(db: Session, data: dict):
     """Every field on the New/Edit Suppression form is now mandatory --
     including the SAST/DAST Request ID link itself (previously optional,
     allowing a "standalone" finding with no linked scan). Enforced here
     rather than in schemas.py to match this router's existing validation
-    style (see the decision-endpoint checks above/below)."""
+    style (see the decision-endpoint checks above/below).
+
+    Reported directly: also reject a link to a SAST/DAST request that
+    hasn't reached Scanning yet -- a suppression is a decision about a
+    *finding*, and nothing exists to suppress before a scan has actually
+    started (Draft through Scan Configuration -- see
+    constants.SAST_DAST_PRE_SCANNING_STATUSES). Mirrors the frontend's own
+    dropdown filter in Suppression.tsx, which hides those requests from the
+    picker entirely -- this is the server-side backstop in case the client
+    submits a stale/hand-crafted id anyway.
+
+    Reported directly (follow-up): also reject a link to a SAST/DAST request
+    that has already reached Security Complete or later (see
+    constants.SAST_DAST_COMPLETED_STATUSES) -- once a request is declared
+    Security Complete it's finalized, so a new suppression can no longer be
+    raised against it either. Combined with the Scanning-or-later check
+    above, this narrows the eligible window to Scanning through the stage
+    right before Security Complete."""
     if bool(data.get("sast_request_id")) == bool(data.get("dast_request_id")):
         raise HTTPException(400, "Exactly one of SAST or DAST Request ID must be selected")
+    if data.get("sast_request_id"):
+        linked = db.query(models.SASTRequest).get(data["sast_request_id"])
+        kind = "SAST"
+    else:
+        linked = db.query(models.DASTRequest).get(data["dast_request_id"])
+        kind = "DAST"
+    if not linked:
+        raise HTTPException(400, f"Linked {kind} request not found")
+    if linked.status in SAST_DAST_PRE_SCANNING_STATUSES:
+        raise HTTPException(
+            400,
+            f"The linked {kind} request hasn't reached Scanning yet (currently "
+            f"'{linked.status}') -- a suppression can only be raised once scanning has started.",
+        )
+    if linked.status in SAST_DAST_COMPLETED_STATUSES:
+        raise HTTPException(
+            400,
+            f"The linked {kind} request has already reached '{linked.status}' -- a suppression can no "
+            f"longer be raised against it once the security review is complete.",
+        )
 
 
 @router.get("", response_model=List[schemas.SuppressionOut])
@@ -68,7 +105,7 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
     items_data = data.pop("items")
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
-    _require_linked_request(data)
+    _require_linked_request(db, data)
     obj = models.SuppressionRequest(**data, created_by_id=current_user.id, status="Draft")
     obj.items = [models.SuppressionItem(**item) for item in items_data]
     db.add(obj)
@@ -99,7 +136,7 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
     data = payload.model_dump()
     items_data = data.pop("items", None)
-    _require_linked_request(data)
+    _require_linked_request(db, data)
     for k, v in data.items():
         setattr(obj, k, v)
     if items_data is not None:

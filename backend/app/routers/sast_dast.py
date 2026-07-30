@@ -81,12 +81,25 @@ _ADMIN_ONLY_FIELDS = {"application_name", "epic_number", "cr_number"}
 #   Draft -> Submit -> SM Approval -> Department Head Approval (also assigns
 #   a Security Lead) -> Security Readiness (passed by the assigned Security
 #   Lead or a QA Lead) -> Planning -> Configuration -> Scanning -> Complete
-#   Scan -> Finding Validation -> [no findings need remediation ->] Security
-#   Complete, or [findings need remediation ->] Remediation -> Assigned To
-#   Requester -> Waiting For Fix -> (requester marks fixed) -> Assigned To
-#   Lead -> Rescan -> Rescan Decision (Passed -> Security Complete / Failed ->
-#   back to Scanning) -> Report Ready (gated on any linked Suppression
-#   request being "Done").
+#   Scan, gated on a confirmation pop-up ("Are you sure no security findings
+#   were identified during the scan?"):
+#     - Yes (clean scan) -> Security Complete -> Report Ready -> Closed, all
+#       chained automatically in one step (see _auto_close_if_clean). Every
+#       hop into Security Complete (here, in _validate_findings, and in
+#       _rescan_decision's Passed branch) and the Security Complete ->
+#       Report Ready hop are both gated on any linked Suppression request
+#       being "Done" (see _require_no_pending_suppressions) -- a request
+#       can't be called Security Complete while a suppression raised against
+#       it is still an open decision.
+#     - No (findings identified) -> Finding Validation, and the UI switches
+#       to the Findings tab -> [no open findings after all ->] Security
+#       Complete, or [open findings ->] Remediation -> Assigned To Requester
+#       -> Waiting For Fix -> (requester marks fixed) -> Assigned To Lead ->
+#       Rescan -> the same confirmation pop-up again (Rescan Decision):
+#         - Passed (no findings remain) -> Security Complete -> Report Ready
+#           -> Closed, same auto-chain (and same suppression gate) as above.
+#         - Failed (findings still exist) -> back to Finding Validation, UI
+#           returns to the Findings tab -> repeat remediation/rescan.
 #
 # Implemented once as generic helpers parameterized by model instance (a
 # models.SASTRequest or models.DASTRequest row), with a thin pair of route
@@ -172,6 +185,34 @@ def _can_upload_documents(obj, user: models.User) -> bool:
         return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
     if status in _SECURITY_OWNED_STATUSES:
         return obj.security_lead_id == user.id
+    return False
+
+
+def _can_edit_details(obj, user: models.User) -> bool:
+    """Reported bug: an SM could still edit a request's own details after
+    already returning it themselves (status RETURNED_BY_SM) -- a dead end,
+    since only the requester/admin can ever call resubmit (see _resubmit),
+    so the SM ended up with edit access they could never actually push
+    forward. Clarified: edit access for a reviewer (SM/Department Head)
+    should exist only while the request is genuinely pending *their own*
+    decision (SM_APPROVAL_PENDING / DEPARTMENT_HEAD_APPROVAL_PENDING) -- fix
+    something, then Approve/Return/Reject -- and disappears the moment
+    they've decided either way. Once returned to the requester
+    (RETURNED_BY_SM/RETURNED_BY_DEPARTMENT_HEAD/RETURNED_BY_SECURITY_LEAD),
+    only the requester (or admin) may edit; reviewers are never involved
+    again for a request already past their own checkpoint -- edit access for
+    SM/Department Head stops at Department Head's own decision, never
+    extending into Security's post-approval readiness stage. Same
+    department-scoping as those stages' own decision endpoints above."""
+    if user.has_role(Role.ADMIN):
+        return True
+    status = obj.status
+    if status in ("DRAFT", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
+        return obj.requester_id == user.id
+    if status == "SM_APPROVAL_PENDING":
+        return user.has_role(Role.SM) and user.department == obj.department
+    if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
+        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
     return False
 
 
@@ -375,18 +416,59 @@ def _start_scan(db: Session, obj, current_user):
     return obj
 
 
-def _complete_scan(db: Session, obj, current_user):
-    _require(obj, "SCANNING", "Complete scan")
-    obj.status = "FINDING_VALIDATION"
-    _log(db, obj, "Scanning", current_user, "Scan Complete", None)
+def _close_request(db: Session, obj, current_user):
+    """Report Ready -> Closed. This is the lifecycle's actual terminal step
+    (see constants.SAST_DAST_TERMINAL_STATUSES) -- previously nothing ever
+    moved a SAST/DAST request out of Report Ready, so Closed was defined but
+    unreachable."""
+    _require(obj, "REPORT_READY", "Close request")
+    obj.status = "CLOSED"
+    _log(db, obj, "Report Ready", current_user, "Closed", None)
     db.commit()
     db.refresh(obj)
     return obj
 
 
-def _validate_findings(db: Session, obj, current_user):
+def _auto_close_if_clean(db: Session, obj, current_user, sup_filter_col):
+    """Best-effort chain from Security Complete through Report Ready to
+    Closed -- used right after the Complete Scan / Rescan confirmation
+    pop-up confirms no findings were identified, so a clean scan reaches
+    Closed in one step instead of three separate manual clicks. Stops
+    (without raising) at Report Ready's existing suppression gate if any
+    linked Suppression / False Positive request isn't Done yet -- the
+    analyst then finishes the remaining hop(s) manually via the existing
+    Mark Report Ready / Close actions once that's resolved."""
+    try:
+        _mark_report_ready(db, obj, current_user, sup_filter_col)
+    except HTTPException:
+        return obj  # left at SECURITY_COMPLETE; suppression still pending
+    return _close_request(db, obj, current_user)
+
+
+def _complete_scan(db: Session, obj, current_user, no_findings: bool, comments, sup_filter_col):
+    _require(obj, "SCANNING", "Complete scan")
+    if no_findings:
+        # Confirmed clean -- skip Finding Validation/Remediation entirely
+        # and fast-track toward closure, unless a suppression raised earlier
+        # against this same request is still outstanding.
+        _require_no_pending_suppressions(db, obj, sup_filter_col, "Security Complete")
+        obj.status = "SECURITY_COMPLETE"
+        _log(db, obj, "Scanning", current_user, "Scan Complete - No Findings", comments)
+        db.commit()
+        db.refresh(obj)
+        return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
+    obj.status = "FINDING_VALIDATION"
+    _log(db, obj, "Scanning", current_user, "Scan Complete - Findings Identified", comments)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def _validate_findings(db: Session, obj, current_user, sup_filter_col):
     """Moves from Finding Validation into Remediation if any findings need
-    fixing, or straight to Security Complete if the scan came back clean."""
+    fixing, or straight to Security Complete if the scan came back clean --
+    unless a suppression raised against this request is still outstanding,
+    in which case Security Complete stays blocked until it's Done."""
     _require(obj, "FINDING_VALIDATION", "Validate findings")
     open_findings = [f for f in obj.findings if f.status == "Open"]
     if open_findings:
@@ -394,6 +476,7 @@ def _validate_findings(db: Session, obj, current_user):
         _log(db, obj, "Finding Validation", current_user, "Findings Confirmed",
              f"{len(open_findings)} finding(s) require remediation")
     else:
+        _require_no_pending_suppressions(db, obj, sup_filter_col, "Security Complete")
         obj.status = "SECURITY_COMPLETE"
         _log(db, obj, "Finding Validation", current_user, "No Findings", "Nothing to remediate")
     db.commit()
@@ -430,13 +513,23 @@ def _mark_fixed(db: Session, obj, current_user):
     return obj
 
 
-def _rescan_decision(db: Session, obj, payload, current_user):
+def _rescan_decision(db: Session, obj, payload, current_user, sup_filter_col):
+    """Driven by the same "any findings identified?" confirmation pop-up as
+    Complete Scan -- Passed means the rescan confirmed no findings remain
+    (fast-track to Closed, same as a clean Complete Scan); Failed means
+    findings still exist, so this loops back to Finding Validation (not a
+    fresh Scanning cycle) so the analyst can log the remaining findings and
+    repeat the remediation/rescan workflow."""
     _require(obj, "RESCAN", "Rescan decision")
     if payload.decision == "Passed":
+        _require_no_pending_suppressions(db, obj, sup_filter_col, "Security Complete")
         obj.status = "SECURITY_COMPLETE"
+        _log(db, obj, "Rescan", current_user, payload.decision, payload.comments)
+        db.commit()
+        db.refresh(obj)
+        return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
     elif payload.decision == "Failed":
-        # Still more to fix -- back to Scanning so new findings can be logged.
-        obj.status = "SCANNING"
+        obj.status = "FINDING_VALIDATION"
     else:
         raise HTTPException(400, "decision must be one of: Passed, Failed")
     _log(db, obj, "Rescan", current_user, payload.decision, payload.comments)
@@ -445,18 +538,35 @@ def _rescan_decision(db: Session, obj, payload, current_user):
     return obj
 
 
-def _mark_report_ready(db: Session, obj, current_user, sup_filter_col):
-    """Blocked while any Suppression request raised against this SAST/DAST id
-    hasn't been marked 'Done' (see constants.SUPPRESSION_STATUSES)."""
-    _require(obj, "SECURITY_COMPLETE", "Mark report ready")
+def _pending_suppression_ids(db: Session, obj, sup_filter_col) -> list:
+    """IDs of any Suppression / False Positive requests raised against this
+    SAST/DAST id that aren't marked 'Done' yet (see constants.
+    SUPPRESSION_STATUSES). Shared by the Security Complete gate (below, in
+    _validate_findings/_complete_scan/_rescan_decision) and Report Ready's own
+    gate in _mark_report_ready -- a suppression is still an open decision
+    about a finding, so neither checkpoint should be reachable while one's
+    outstanding."""
     linked_sups = db.query(models.SuppressionRequest).filter(sup_filter_col == obj.id).all()
-    not_done = [s.suppression_id for s in linked_sups if s.status != "Done"]
-    if not_done:
+    return [s.suppression_id for s in linked_sups if s.status != "Done"]
+
+
+def _require_no_pending_suppressions(db: Session, obj, sup_filter_col, action: str):
+    pending = _pending_suppression_ids(db, obj, sup_filter_col)
+    if pending:
         raise HTTPException(
             400,
-            "Cannot mark Report Ready -- suppression request(s) still pending: "
-            + ", ".join(not_done) + ". They must be marked Done first.",
+            f"Cannot mark {action} -- suppression request(s) still pending: "
+            + ", ".join(pending) + ". They must be marked Done first.",
         )
+
+
+def _mark_report_ready(db: Session, obj, current_user, sup_filter_col):
+    """Blocked while any Suppression request raised against this SAST/DAST id
+    hasn't been marked 'Done' (see constants.SUPPRESSION_STATUSES) -- same
+    gate as Security Complete below, checked again here since Report Ready is
+    reachable independently via its own manual button too."""
+    _require(obj, "SECURITY_COMPLETE", "Mark report ready")
+    _require_no_pending_suppressions(db, obj, sup_filter_col, "Report Ready")
     obj.status = "REPORT_READY"
     _log(db, obj, "Security Complete", current_user, "Report Ready", None)
     db.commit()
@@ -506,21 +616,13 @@ def create_sast(payload: schemas.SASTCreate, db: Session = Depends(get_db),
 def update_sast(req_id: int, payload: schemas.SASTUpdate, db: Session = Depends(get_db),
                  current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
-    # Editing is a business-side (requester/SM/Department Head) concern, not
-    # Security's -- Security's own recourse is to Return the request, which
-    # puts it back into an editable status for the requester (see the
-    # equivalent comment on update_functional).
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        # SM/Department Head editing is their own recourse after actually
-        # reviewing and returning the request -- while it's still a plain
-        # DRAFT (not yet even submitted), only the requester/admin may edit.
-        if obj.status == "DRAFT":
-            raise HTTPException(403, "Only the requester or an admin can edit a request while it is still in Draft")
-        if not current_user.has_role(Role.SM, Role.DEPARTMENT_HEAD):
-            raise HTTPException(403, "Only the requester, SM, Department Head, or an admin can edit this request")
-        require_same_department(current_user, obj.department)
+    # See _can_edit_details's own docstring above for the full permission
+    # model (requester while it's theirs/returned to them; SM/Department
+    # Head only while it's genuinely pending their own decision).
     if obj.status not in SAST_DAST_EDITABLE_STATUSES:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
+    if not _can_edit_details(obj, current_user):
+        raise HTTPException(403, "You do not have permission to edit this request in its current status")
     data = payload.model_dump(exclude_unset=True)
     if not current_user.has_role(Role.ADMIN):
         for f in _ADMIN_ONLY_FIELDS:
@@ -596,15 +698,18 @@ def sast_start_scan(req_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/api/sast-requests/{req_id}/complete-scan", response_model=schemas.SASTOut)
-def sast_complete_scan(req_id: int, db: Session = Depends(get_db),
+def sast_complete_scan(req_id: int, payload: schemas.ScanCompletionIn, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    return _complete_scan(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
+    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    return _complete_scan(db, obj, current_user, payload.no_findings, payload.comments,
+                           models.SuppressionRequest.sast_request_id)
 
 
 @router.post("/api/sast-requests/{req_id}/validate-findings", response_model=schemas.SASTOut)
 def sast_validate_findings(req_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    return _validate_findings(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
+    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    return _validate_findings(db, obj, current_user, models.SuppressionRequest.sast_request_id)
 
 
 @router.post("/api/sast-requests/{req_id}/assign-to-requester", response_model=schemas.SASTOut)
@@ -621,7 +726,8 @@ def sast_mark_fixed(req_id: int, db: Session = Depends(get_db), current_user: mo
 @router.post("/api/sast-requests/{req_id}/rescan-decision", response_model=schemas.SASTOut)
 def sast_rescan_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    return _rescan_decision(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), payload, current_user)
+    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    return _rescan_decision(db, obj, payload, current_user, models.SuppressionRequest.sast_request_id)
 
 
 @router.post("/api/sast-requests/{req_id}/mark-report-ready", response_model=schemas.SASTOut)
@@ -629,6 +735,13 @@ def sast_mark_report_ready(req_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
     return _mark_report_ready(db, obj, current_user, models.SuppressionRequest.sast_request_id)
+
+
+@router.post("/api/sast-requests/{req_id}/close", response_model=schemas.SASTOut)
+def sast_close_request(req_id: int, db: Session = Depends(get_db),
+                        current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
+    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    return _close_request(db, obj, current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/findings", response_model=schemas.SASTFindingOut)
@@ -845,15 +958,12 @@ def create_dast(payload: schemas.DASTCreate, db: Session = Depends(get_db),
 def update_dast(req_id: int, payload: schemas.DASTUpdate, db: Session = Depends(get_db),
                  current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
-    # See the identical comment on update_sast above -- same reasoning.
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        if obj.status == "DRAFT":
-            raise HTTPException(403, "Only the requester or an admin can edit a request while it is still in Draft")
-        if not current_user.has_role(Role.SM, Role.DEPARTMENT_HEAD):
-            raise HTTPException(403, "Only the requester, SM, Department Head, or an admin can edit this request")
-        require_same_department(current_user, obj.department)
+    # See _can_edit_details's own docstring (above, on update_sast) for the
+    # full permission model -- same reasoning applies here.
     if obj.status not in SAST_DAST_EDITABLE_STATUSES:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
+    if not _can_edit_details(obj, current_user):
+        raise HTTPException(403, "You do not have permission to edit this request in its current status")
     data = payload.model_dump(exclude_unset=True)
     # `targets` is a relationship, not a plain column -- see the identical
     # `components` handling in update_sast above for why this replaces the
@@ -930,16 +1040,19 @@ def dast_start_scan(req_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/api/dast-requests/{req_id}/complete-scan", response_model=schemas.DASTOut)
-def dast_complete_scan(req_id: int, db: Session = Depends(get_db),
+def dast_complete_scan(req_id: int, payload: schemas.ScanCompletionIn, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _complete_scan(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
+    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    obj = _complete_scan(db, obj, current_user, payload.no_findings, payload.comments,
+                          models.SuppressionRequest.dast_request_id)
     return _dast_out(obj, current_user)
 
 
 @router.post("/api/dast-requests/{req_id}/validate-findings", response_model=schemas.DASTOut)
 def dast_validate_findings(req_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _validate_findings(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
+    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    obj = _validate_findings(db, obj, current_user, models.SuppressionRequest.dast_request_id)
     return _dast_out(obj, current_user)
 
 
@@ -959,7 +1072,8 @@ def dast_mark_fixed(req_id: int, db: Session = Depends(get_db), current_user: mo
 @router.post("/api/dast-requests/{req_id}/rescan-decision", response_model=schemas.DASTOut)
 def dast_rescan_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _rescan_decision(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), payload, current_user)
+    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    obj = _rescan_decision(db, obj, payload, current_user, models.SuppressionRequest.dast_request_id)
     return _dast_out(obj, current_user)
 
 
@@ -968,6 +1082,14 @@ def dast_mark_report_ready(req_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
     obj = _mark_report_ready(db, obj, current_user, models.SuppressionRequest.dast_request_id)
+    return _dast_out(obj, current_user)
+
+
+@router.post("/api/dast-requests/{req_id}/close", response_model=schemas.DASTOut)
+def dast_close_request(req_id: int, db: Session = Depends(get_db),
+                        current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
+    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    obj = _close_request(db, obj, current_user)
     return _dast_out(obj, current_user)
 
 

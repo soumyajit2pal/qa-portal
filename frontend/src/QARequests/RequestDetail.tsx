@@ -1,12 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Badge, DetailField, DetailSection, ErrorText, Modal, Table } from '../components/Common'
 import InfoModal from '../components/InfoModal'
 import {
   GATEWAY_CANCELLABLE_STATUSES, GATEWAY_EDITABLE_STATUSES, GATEWAY_STATUS_LABELS,
-  QA_STATUS_LABELS, SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
   DEFAULT_SAST_CHECKLIST_ITEMS, DEFAULT_DAST_CHECKLIST_ITEMS,
   hasRole,
 } from '../constants'
@@ -28,6 +27,7 @@ interface RequestDetailProps {
 // Request" wizard (reuses NewRequestModal in its `editing` mode).
 export function RequestDetail({ req, onClose, onChanged, users }: RequestDetailProps) {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [tab, setTab] = useState('overview')
   const [documents, setDocuments] = useState<QARequestDocumentOut[]>([])
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
@@ -102,6 +102,33 @@ export function RequestDetail({ req, onClose, onChanged, users }: RequestDetailP
     || (req.linked_dast_requests?.length > 0)
     || (req.linked_performance_requests?.length > 0)
 
+  // One row per linked request across all four request types, feeding the
+  // "Linked Requests" table below. `path` is that type's own module page --
+  // clicking a row closes this gateway modal and navigates there with
+  // `?open=<request_id>` so the module page can auto-open that specific
+  // request's own detail view (see Functional.tsx/SAST.tsx/DAST.tsx/
+  // Performance.tsx's matching `useSearchParams`-based deep-link effect).
+  interface LinkedRow { key: string; type: string; request_id: string; status?: string | null; path: string }
+  const linkedRows: LinkedRow[] = [
+    ...(req.linked_functional_requests || []).map((f) => ({
+      key: `func-${f.id}`, type: 'Functional QA', request_id: f.request_id, status: f.status, path: '/functional-requests',
+    })),
+    ...(req.linked_sast_requests || []).map((s) => ({
+      key: `sast-${s.id}`, type: 'SAST', request_id: s.request_id, status: s.status, path: '/sast',
+    })),
+    ...(req.linked_dast_requests || []).map((d) => ({
+      key: `dast-${d.id}`, type: 'DAST', request_id: d.request_id, status: d.status, path: '/dast',
+    })),
+    ...(req.linked_performance_requests || []).map((p) => ({
+      key: `perf-${p.id}`, type: 'Performance', request_id: p.request_id, status: p.status, path: '/performance',
+    })),
+  ]
+
+  function openLinked(row: LinkedRow) {
+    onClose()
+    navigate(`${row.path}?open=${encodeURIComponent(row.request_id)}`)
+  }
+
   return (
     <Modal title={`${req.request_id} — ${req.application_name}`} onClose={onClose} wide>
       <div className="tabs">
@@ -156,29 +183,19 @@ export function RequestDetail({ req, onClose, onChanged, users }: RequestDetailP
           </DetailSection>
 
           {hasLinked && (
-            <p>
-              <strong>Linked Requests:</strong>{' '}
-              {(req.linked_functional_requests || []).map((f) => (
-                <span key={`func-${f.id}`} className="badge badge-purple" style={{ marginRight: 6 }}>
-                  Functional QA {f.request_id} — {QA_STATUS_LABELS[f.status || ''] || f.status}
-                </span>
-              ))}
-              {req.linked_sast_requests.map((s) => (
-                <span key={`sast-${s.id}`} className="badge badge-blue" style={{ marginRight: 6 }}>
-                  SAST {s.request_id} — {SAST_DAST_STATUS_LABELS[s.status || ''] || s.status}
-                </span>
-              ))}
-              {req.linked_dast_requests.map((d) => (
-                <span key={`dast-${d.id}`} className="badge badge-blue" style={{ marginRight: 6 }}>
-                  DAST {d.request_id} — {SAST_DAST_STATUS_LABELS[d.status || ''] || d.status}
-                </span>
-              ))}
-              {(req.linked_performance_requests || []).map((p) => (
-                <span key={`perf-${p.id}`} className="badge badge-purple" style={{ marginRight: 6 }}>
-                  Performance {p.request_id} — {PERFORMANCE_STATUS_LABELS[p.status || ''] || p.status}
-                </span>
-              ))}
-            </p>
+            <div style={{ marginTop: 8 }}>
+              <div className="section-title">Linked Requests</div>
+              <Table
+                rowKey="key"
+                onRowClick={openLinked}
+                columns={[
+                  { key: 'type', header: 'Request Type' },
+                  { key: 'request_id', header: 'Request Id' },
+                  { key: 'status', header: 'Current Status', render: (r) => <Badge status={r.status} /> },
+                ]}
+                rows={linkedRows}
+              />
+            </div>
           )}
           {status === 'DRAFT' && (
             <p className="muted small">

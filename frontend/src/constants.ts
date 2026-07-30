@@ -118,11 +118,16 @@ export const QA_STATUS_LABELS: Record<string, string> = {
 
 // Statuses from which the Functional Testing Request's own descriptive
 // fields (currently just Priority/Risk Rating -- see PUT
-// /api/functional-requests/{id}) can still be edited by the requester (or
-// QA) -- mirrors backend constants.FUNCTIONAL_EDITABLE_STATUSES, same
-// pattern/values as SAST_DAST_EDITABLE_STATUSES/
-// PERFORMANCE_EDITABLE_STATUSES below.
-export const FUNCTIONAL_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_QA_LEAD']
+// /api/functional-requests/{id}) can still be edited by *someone* --
+// mirrors backend constants.FUNCTIONAL_EDITABLE_STATUSES, same pattern/
+// values as SAST_DAST_EDITABLE_STATUSES/PERFORMANCE_EDITABLE_STATUSES below.
+// Exactly who may edit at each of these is further scoped in Functional.tsx
+// (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are that stage's
+// own reviewer only, not the requester -- see canEditDetails there).
+export const FUNCTIONAL_EDITABLE_STATUSES: string[] = [
+  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
+  'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_QA_LEAD',
+]
 // Terminal statuses -- no further transitions possible.
 export const QA_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED']
 // Statuses from which the request may still be cancelled -- mirrors backend
@@ -156,6 +161,30 @@ export const SAST_DAST_STATUSES: string[] = [
   'SECURITY_COMPLETE', 'REPORT_READY', 'CLOSED',
 ]
 
+// Statuses before scanning has actually started -- must mirror backend
+// app/constants.py SAST_DAST_PRE_SCANNING_STATUSES exactly. A suppression /
+// false-positive request is a decision about a *finding*, and there's
+// nothing to suppress yet while the linked request is still sitting
+// somewhere before a scan has even started, so Suppression's Request ID
+// picker (Suppression.tsx) excludes these. Listed explicitly (not sliced
+// from SAST_DAST_STATUSES by index) so it stays correct even if that list
+// is ever reordered.
+export const SAST_DAST_PRE_SCANNING_STATUSES: string[] = [
+  'DRAFT', 'SUBMITTED',
+  'SM_APPROVAL_PENDING', 'RETURNED_BY_SM', 'SM_REJECTED',
+  'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'DEPARTMENT_HEAD_REJECTED',
+  'SECURITY_LEAD_ASSIGNED', 'SECURITY_READINESS', 'RETURNED_BY_SECURITY_LEAD',
+  'PLANNING', 'CONFIGURATION',
+]
+
+// The other end of the window -- must mirror backend app/constants.py
+// SAST_DAST_COMPLETED_STATUSES exactly. Once a SAST/DAST request has been
+// declared Security Complete, it's finalized, so it's excluded from
+// Suppression's Request ID picker too -- pairs with
+// SAST_DAST_PRE_SCANNING_STATUSES above to define the eligible window as
+// Scanning through the stage right before Security Complete.
+export const SAST_DAST_COMPLETED_STATUSES: string[] = ['SECURITY_COMPLETE', 'REPORT_READY', 'CLOSED']
+
 export const SAST_DAST_STATUS_LABELS: Record<string, string> = {
   DRAFT: 'Draft', SUBMITTED: 'Submitted',
   SM_APPROVAL_PENDING: 'SM Approval Pending',
@@ -181,8 +210,12 @@ export const SAST_DAST_STATUS_LABELS: Record<string, string> = {
   CLOSED: 'Closed',
 }
 
+// Who may edit at each of these is further scoped in SAST.tsx/DAST.tsx
+// (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are that stage's
+// own reviewer only, not the requester -- see canEditDetails there).
 export const SAST_DAST_EDITABLE_STATUSES: string[] = [
-  'DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD',
+  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
+  'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD',
 ]
 export const SAST_DAST_TERMINAL_STATUSES: string[] = ['REPORT_READY', 'CLOSED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED']
 
@@ -243,7 +276,13 @@ export const PERFORMANCE_STATUS_LABELS: Record<string, string> = {
   REQUESTER_VERIFICATION: 'Requester Verification', CLOSED: 'Closed', CANCELLED: 'Cancelled',
 }
 export const PERFORMANCE_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED']
-export const PERFORMANCE_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER']
+// Who may edit at each of these is further scoped in Performance.tsx
+// (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are that stage's
+// own reviewer only, not the requester -- see canEditDetails there).
+export const PERFORMANCE_EDITABLE_STATUSES: string[] = [
+  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
+  'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER',
+]
 
 // Request type checkboxes shown on the Performance Testing page of the QA
 // Request form (Annexure VIII, item 3) -- must mirror backend

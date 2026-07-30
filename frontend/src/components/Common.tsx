@@ -500,7 +500,7 @@ interface TableProps<T> {
   pageSize?: number
 }
 
-export function Table<T extends Record<string, any>>({ columns, rows, rowKey, onRowClick, pageSize = 5 }: TableProps<T>) {
+export function Table<T extends Record<string, any>>({ columns, rows, rowKey, onRowClick, pageSize = 10 }: TableProps<T>) {
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [page, setPage] = useState(1)
   // Which column's filter popover is currently open -- at most one at a

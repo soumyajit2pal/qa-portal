@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments } from '../../components/Common'
@@ -241,13 +242,12 @@ function PerformanceDetail({ req, onClose, onChanged, users, engineers }: {
   const status = req.status
   const sameDept = !!user?.department && user.department === req.department
 
-  // Editing is a business-side (requester/SM/Department Head) concern, not
-  // QA's -- see the matching backend comment on update_performance. SM/
-  // Department Head editing is their own recourse after actually reviewing
-  // and returning the request -- while it's still a plain DRAFT (not yet
-  // even submitted), only the requester/admin may edit.
-  const canEditDetails = (isRequester || hasRole(user, 'ADMIN') || (hasRole(user, 'SM', 'DEPARTMENT_HEAD') && sameDept && status !== 'DRAFT'))
-    && PERFORMANCE_EDITABLE_STATUSES.includes(status)
+  // Edit access -- see the matching (and more detailed) comment in
+  // SAST.tsx's canEditDetails for the full reasoning; same rule here.
+  const canEditDetails = hasRole(user, 'ADMIN')
+    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status))
+    || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
+    || (hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   const canSubmit = isRequester && status === 'DRAFT'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status)
   // Blocks Sign/Approve on both the SM and Department Head decision panels
@@ -556,6 +556,7 @@ export default function Performance() {
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const engineers = users.filter((u) => (u.roles || []).includes('QA_ENGINEER') || (u.roles || []).includes('QA_LEAD'))
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const load = useCallback(async () => {
     try { setRows(await api.get<PerformanceOut[]>('/api/performance-requests')) } catch (err) { setError(err) }
@@ -567,6 +568,17 @@ export default function Performance() {
     // resolve names from a single fetch.
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
   }, [])
+
+  // Deep-link support -- see the matching effect in Functional.tsx for the
+  // full reasoning; the gateway's "Linked Requests" table opens a specific
+  // Performance request here via `?open=<request_id>`.
+  useEffect(() => {
+    const openId = searchParams.get('open')
+    if (!openId || rows.length === 0) return
+    const match = rows.find((r) => r.request_id === openId)
+    if (match) setSelected(match)
+    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+  }, [rows, searchParams, setSearchParams])
 
   return (
     <div>

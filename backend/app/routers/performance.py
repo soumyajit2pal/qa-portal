@@ -77,21 +77,13 @@ def create_performance(payload: schemas.PerformanceCreate, db: Session = Depends
 def update_performance(req_id: int, payload: schemas.PerformanceUpdate, db: Session = Depends(get_db),
                         current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
-    # Editing is a business-side (requester/SM/Department Head) concern, not
-    # QA's -- QA's own recourse is to Return the request, which puts it back
-    # into an editable status for the requester (see the equivalent comment
-    # on functional.py::update_functional).
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        # SM/Department Head editing is their own recourse after actually
-        # reviewing and returning the request -- while it's still a plain
-        # DRAFT (not yet even submitted), only the requester/admin may edit.
-        if obj.status == "DRAFT":
-            raise HTTPException(403, "Only the requester or an admin can edit a request while it is still in Draft")
-        if not current_user.has_role(Role.SM, Role.DEPARTMENT_HEAD):
-            raise HTTPException(403, "Only the requester, SM, Department Head, or an admin can edit this request")
-        require_same_department(current_user, obj.department)
+    # See _can_edit_details's own docstring below for the full permission
+    # model (requester while it's theirs/returned to them; SM/Department
+    # Head only while it's genuinely pending their own decision).
     if obj.status not in PERFORMANCE_EDITABLE_STATUSES:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
+    if not _can_edit_details(obj, current_user):
+        raise HTTPException(403, "You do not have permission to edit this request in its current status")
     data = payload.model_dump(exclude_unset=True)
     if not current_user.has_role(Role.ADMIN):
         for f in _ADMIN_ONLY_FIELDS:
@@ -594,6 +586,34 @@ def _can_upload_documents(obj: "models.PerformanceRequest", user: models.User) -
         return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
     if status in _ENGINEER_OWNED_STATUSES:
         return obj.engineer_id == user.id
+    return False
+
+
+def _can_edit_details(obj: "models.PerformanceRequest", user: models.User) -> bool:
+    """Reported bug: an SM could still edit a request's own details after
+    already returning it themselves (status RETURNED_BY_SM) -- a dead end,
+    since only the requester/admin can ever call resubmit, so the SM ended
+    up with edit access they could never actually push forward. Clarified:
+    edit access for a reviewer (SM/Department Head) should exist only while
+    the request is genuinely pending *their own* decision
+    (SM_APPROVAL_PENDING / DEPARTMENT_HEAD_APPROVAL_PENDING) -- fix
+    something, then Approve/Return/Reject -- and disappears the moment
+    they've decided either way. Once returned to the requester
+    (RETURNED_BY_SM/RETURNED_BY_DEPARTMENT_HEAD/RETURNED_BY_ENGINEER), only
+    the requester (or admin) may edit; reviewers are never involved again
+    for a request already past their own checkpoint -- edit access for SM/
+    Department Head stops at Department Head's own decision, never
+    extending into the post-approval Readiness stage. Same department-
+    scoping as those stages' own decision endpoints above."""
+    if user.has_role(Role.ADMIN):
+        return True
+    status = obj.status
+    if status in ("DRAFT", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER"):
+        return obj.requester_id == user.id
+    if status == "SM_APPROVAL_PENDING":
+        return user.has_role(Role.SM) and user.department == obj.department
+    if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
+        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
     return False
 
 

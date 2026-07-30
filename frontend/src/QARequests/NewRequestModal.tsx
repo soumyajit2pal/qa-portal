@@ -14,7 +14,6 @@ import { FunctionalStep } from './steps/FunctionalStep'
 import { SastStep } from './steps/SastStep'
 import { DastStep } from './steps/DastStep'
 import { PerformanceStep } from './steps/PerformanceStep'
-import { ChecklistStep } from './steps/ChecklistStep'
 import { DocumentsStep } from './steps/DocumentsStep'
 
 interface NewRequestModalProps {
@@ -296,7 +295,6 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
           {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} />}
           {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} />}
           {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} />}
-          {step.key === 'checklist' && <ChecklistStep form={form} set={set} />}
           {step.key === 'documents' && (
             <DocumentsStep form={form} set={set} editing={editing} files={files} setFiles={setFiles} />
           )}

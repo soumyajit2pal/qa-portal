@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments } from '../../components/Common'
@@ -333,20 +334,22 @@ function FunctionalDetail({ req, onClose, onChanged, users }: FunctionalDetailPr
   // "QA Sign-off Pending" with no action available on this side -- correct,
   // since it's genuinely waiting on someone else's decision, not on QA.
   const canRequesterDecide = isRequesterVerifier && status === 'REQUESTER_VERIFICATION'
-  // Mirrors backend FUNCTIONAL_EDITABLE_STATUSES -- same requester-or-QA role
-  // gate as SAST/DAST/Performance's own Edit Details.
-  // Editing is a business-side (requester/SM/Department Head) concern, not
-  // QA's -- QA's own recourse is to Return the request, which puts it back
-  // into an editable status for the requester (see the matching backend
-  // comment on update_functional). hasRole(user, 'ADMIN') is checked
-  // separately (not folded into the SM/DEPARTMENT_HEAD group) so an admin
-  // isn't also required to pass the `sameDept` check.
-  // SM/Department Head editing is their own recourse after actually
-  // reviewing and returning the request -- while it's still a plain DRAFT
-  // (not yet even submitted), only the requester/admin may edit (mirrors the
-  // backend's identical DRAFT check in update_functional).
-  const canEditDetails = (isRequester || hasRole(user, 'ADMIN') || (hasRole(user, 'SM', 'DEPARTMENT_HEAD') && sameDept && status !== 'DRAFT'))
-    && FUNCTIONAL_EDITABLE_STATUSES.includes(status)
+  // Mirrors backend FUNCTIONAL_EDITABLE_STATUSES/_can_edit_details exactly:
+  // the requester (or admin) may edit while it's Draft or sitting with them
+  // after a return (RETURNED_BY_SM/RETURNED_BY_DEPARTMENT_HEAD/
+  // RETURNED_BY_QA_LEAD) -- returning a request hands it back to the
+  // requester to fix and resubmit, so the reviewer who returned it doesn't
+  // also keep edit access. Separately, the SM/Department Head may edit
+  // while the request is genuinely pending *their own* decision
+  // (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING) -- fix
+  // something, then decide -- but that access disappears the moment
+  // they've approved/returned/rejected; it never extends past Department
+  // Head's own decision into QA's post-approval readiness/execution
+  // stages.
+  const canEditDetails = isAdmin
+    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_QA_LEAD'].includes(status))
+    || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
+    || (hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
 
   return (
     <Modal title={`${req.request_id} — ${req.application_name || ''}`} onClose={onClose} wide>
@@ -691,6 +694,7 @@ export default function Functional() {
   const [statusFilter, setStatusFilter] = useState('')
   const [selected, setSelected] = useState<FunctionalOut | null>(null)
   const [error, setError] = useState<unknown>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const load = useCallback(async () => {
     try {
@@ -704,6 +708,20 @@ export default function Functional() {
   }, [statusFilter])
 
   useEffect(() => { load() }, [load])
+
+  // Deep-link support: the gateway QA Request's "Linked Requests" table
+  // opens a specific request here via `?open=<request_id>`, e.g. navigating
+  // straight from /qa-requests to /functional-requests?open=TQA-FUNC-...
+  // Once the list has loaded, find the matching row and open its detail
+  // exactly as a row click would, then drop the query param so it doesn't
+  // re-trigger on refresh/back-navigation.
+  useEffect(() => {
+    const openId = searchParams.get('open')
+    if (!openId || requests.length === 0) return
+    const match = requests.find((r) => r.request_id === openId)
+    if (match) setSelected(match)
+    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+  }, [requests, searchParams, setSearchParams])
 
   return (
     <div>

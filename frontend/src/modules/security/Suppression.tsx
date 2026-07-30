@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RequestDocuments } from '../../components/Common'
-import { SEVERITIES, SUPPRESSION_STATUS_LABELS, hasRole } from '../../constants'
+import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
 import { SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -126,12 +126,28 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
     return r.requester_id === user?.id || (!!user?.department && r.department === user.department)
   }
 
+  // A suppression is a decision about a *finding* -- there's nothing to
+  // suppress yet while the linked request hasn't even started scanning, so
+  // it's excluded from the picker entirely (mirrors the backend's
+  // _require_linked_request check in routers/suppression.py).
+  function hasReachedScanning(r: SASTOut | DASTOut): boolean {
+    return !SAST_DAST_PRE_SCANNING_STATUSES.includes(r.status)
+  }
+
+  // The other end of the window -- once a SAST/DAST request has been
+  // declared Security Complete (or later), it's finalized, so a new
+  // suppression can no longer be raised against it either (same backend
+  // check, mirrored here so it never even shows up as a choice).
+  function isNotYetCompleted(r: SASTOut | DASTOut): boolean {
+    return !SAST_DAST_COMPLETED_STATUSES.includes(r.status)
+  }
+
   // Searched together, not one-scan-type-at-a-time -- tag each so scan type
   // can be derived from whichever one gets picked, and the badge/label knows
   // which it was.
   const combinedRequests: CombinedSecurityRequest[] = [
-    ...sastRequests.filter(inScope).map((r) => ({ ...r, _kind: 'SAST' as const })),
-    ...dastRequests.filter(inScope).map((r) => ({ ...r, _kind: 'DAST' as const })),
+    ...sastRequests.filter(inScope).filter(hasReachedScanning).filter(isNotYetCompleted).map((r) => ({ ...r, _kind: 'SAST' as const })),
+    ...dastRequests.filter(inScope).filter(hasReachedScanning).filter(isNotYetCompleted).map((r) => ({ ...r, _kind: 'DAST' as const })),
   ]
 
   function selectRequest(r: CombinedSecurityRequest) {
@@ -313,6 +329,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
           <div className="grid grid-2">
             <div><strong>Status:</strong> <Badge status={status} /> <span className="muted small">{SUPPRESSION_STATUS_LABELS[status] || status}</span></div>
             <div><strong>Scan Type:</strong> {sup.scan_type}</div>
+            <div><strong>{sup.scan_type} Request ID:</strong> {sup.linked_request?.request_id || '—'}</div>
             <div><strong>Requester:</strong> {userName(users, sup.created_by_id) || '—'}</div>
             <div><strong>Department:</strong> {sup.department || '—'}</div>
             <div><strong>Application Owner:</strong> {sup.application_owner || '—'}</div>
@@ -486,6 +503,7 @@ export default function Suppression() {
           { key: 'application_name', header: 'Application' },
           { key: 'created_by_id', header: 'Requester', render: (r) => userName(users, r.created_by_id) || '—', filterValue: (r) => userName(users, r.created_by_id) || '' },
           { key: 'scan_type', header: 'Scan Type' },
+          { key: 'linked_request', header: 'Linked Request', render: (r) => r.linked_request?.request_id || '—', filterValue: (r) => r.linked_request?.request_id || '' },
           { key: 'findings', header: 'Findings', render: (r) => r.items.length, filterValue: (r) => String(r.items.length) },
           { key: 'severity', header: 'Worst Severity', render: (r) => worstSeverity(r.items) || '—', filterValue: (r) => worstSeverity(r.items) || '' },
           { key: 'status', header: 'Status', render: (r) => (

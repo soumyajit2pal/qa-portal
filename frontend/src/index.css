@@ -48,14 +48,27 @@ a { color: inherit; }
 
 :focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; border-radius: 4px; }
 
-.app-shell { display: flex; min-height: 100vh; }
+/* Reported request: the sidebar's app-name header (.brand) and its
+   username/logout footer (.sidebar-bottom), plus the top .topbar (search/
+   status/+New), should stay fixed in place instead of scrolling away with
+   long page content. Previously .app-shell only set `min-height: 100vh`, so
+   once .content grew taller than the viewport the *whole page* (including
+   the sidebar) scrolled together -- .sidebar had no height of its own to
+   clip against, so its nav's own `overflow-y: auto` never actually engaged.
+   Constraining .app-shell to exactly the viewport height with
+   `overflow: hidden`, and giving .sidebar/.main that same fixed height,
+   turns this into the standard fixed-shell layout: only .sidebar nav and
+   .content scroll internally now (see their own `overflow-y: auto` below);
+   .brand, .sidebar-bottom, and .topbar never move. */
+.app-shell { display: flex; height: 100vh; overflow: hidden; }
 
 .sidebar {
-  width: 250px; background: linear-gradient(180deg, var(--sidebar-bg) 0%, #150f2e 55%, #1a1338 100%);
+  width: 250px; height: 100vh; overflow: hidden;
+  background: linear-gradient(180deg, var(--sidebar-bg) 0%, #150f2e 55%, #1a1338 100%);
   color: #fff; flex-shrink: 0; display: flex; flex-direction: column;
   box-shadow: 2px 0 16px rgba(0, 0, 0, 0.22); position: relative; z-index: 5;
 }
-.sidebar .brand { padding: 18px 18px 16px; display: flex; align-items: center; gap: 10px; }
+.sidebar .brand { padding: 18px 18px 16px; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .sidebar .brand .logo-mark {
   width: 34px; height: 34px; border-radius: 9px;
   background: linear-gradient(135deg, #818cf8, var(--accent-2));
@@ -69,7 +82,12 @@ a { color: inherit; }
   padding: 6px 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.07em;
   text-transform: uppercase; color: #5c6884;
 }
-.sidebar nav { padding: 4px 10px 12px; overflow-y: auto; }
+/* flex: 1 + min-height: 0 is required (not just overflow-y: auto) for this
+   to actually scroll *within* the fixed-height .sidebar instead of pushing
+   .sidebar-bottom off the bottom edge -- a flex column child's default
+   min-height is `auto` (i.e. "at least as tall as my content"), which
+   silently defeats overflow-y: auto unless overridden here. */
+.sidebar nav { padding: 4px 10px 12px; overflow-y: auto; flex: 1; min-height: 0; }
 .nav-group + .nav-group { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.06); }
 .sidebar nav a {
   display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin: 2px 0; border-radius: 8px;
@@ -90,7 +108,7 @@ a { color: inherit; }
 .sidebar nav a.active .nav-count { background: var(--navy); color: #fff; }
 .sidebar nav a.active svg { opacity: 1; color: #7fa8ff; }
 
-.sidebar-bottom { margin-top: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.sidebar-bottom { flex-shrink: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 .audit-card {
   background: var(--sidebar-bg-light); border-radius: 10px; padding: 12px; font-size: 12px;
   display: flex; gap: 8px; align-items: flex-start; border: 1px solid rgba(255,255,255,0.06);
@@ -115,8 +133,9 @@ a { color: inherit; }
 }
 .user-chip button:hover { background: rgba(255,255,255,0.08); color: #fff; }
 
-.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.main { flex: 1; min-width: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 .topbar {
+  flex-shrink: 0;
   background: #fff; border-bottom: 1px solid var(--border); padding: 12px 24px;
   display: flex; align-items: center; gap: 16px; box-shadow: var(--shadow-xs); position: relative; z-index: 4;
 }
@@ -157,7 +176,11 @@ a { color: inherit; }
   .topbar .search-box kbd { display: none; }
 }
 .topbar h2 { margin: 0; font-size: 17.5px; }
-.content { padding: 24px; flex: 1; animation: fade-in .18s var(--ease); }
+/* This is now the only element that actually scrolls in the main column --
+   flex: 1 + min-height: 0 + overflow-y: auto (same flex-in-a-column fix as
+   .sidebar nav above) so .topbar stays fixed in place above it regardless
+   of how tall the page's own content grows. */
+.content { padding: 24px; flex: 1; min-height: 0; overflow-y: auto; animation: fade-in .18s var(--ease); }
 
 /* Consistent page header -- title + optional record count + description,
    with primary actions right-aligned. Used at the top of every page instead
