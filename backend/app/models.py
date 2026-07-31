@@ -1211,3 +1211,160 @@ class QASignOff(Base):
 
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
+
+
+# ---------------------------------------------------------------------------
+# Module 10: Test Management (Project Management / Test Repository / Test
+# Execution) -- a Zephyr-style test case management layer, built per direct
+# request to mirror Zephyr's own 3-part structure: Projects contain a Test
+# Repository (a folder tree of Test Cases, each with its own Steps), and
+# Test Cycles under Test Execution which record a Pass/Fail/Blocked/NA/
+# Retest Passed result per test case run. Deliberately its own standalone
+# module rather than bolted onto Functional Testing -- a test case here can
+# be authored/reused/executed independently of any one QA Request's
+# lifecycle, same as in a real standalone test-management tool.
+#
+# Project <-> existing data: by explicit product decision, one TestProject
+# maps to one Application (reusing ApplicationMaster rather than inventing a
+# second, parallel "application name" list) -- application_master_id is kept
+# purely for that traceability link; `name`/`department` are their own
+# columns (not read live off ApplicationMaster) since a Project's own name
+# may reasonably diverge from the master list over time (e.g. renamed) and
+# should not silently change history on every existing Test Case/Cycle.
+# ---------------------------------------------------------------------------
+class TestProject(Base):
+    __tablename__ = "qap_test_projects"
+    id = pk_column()
+    project_key = Column(String(40), unique=True, default=lambda: gen_id("TPROJ"))
+    name = Column(String(150), nullable=False)
+    application_master_id = Column(Integer, ForeignKey("qap_application_master.id"), nullable=True)
+    department = Column(String(150))
+    description = Column(Text)
+    is_active = Column(Boolean, default=True)
+    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    application_master = relationship("ApplicationMaster", foreign_keys=[application_master_id])
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    folders = relationship("TestFolder", back_populates="project", cascade="all,delete-orphan")
+    test_cases = relationship("TestCase", back_populates="project", cascade="all,delete-orphan")
+    cycles = relationship("TestCycle", back_populates="project", cascade="all,delete-orphan")
+
+
+class TestFolder(Base):
+    """Hierarchical folder tree within one Project's Test Repository --
+    self-referential parent_id for nesting (e.g. 'Regression' > 'Login').
+    A test case may sit directly under the Project with no folder at all
+    (folder_id NULL on TestCase) -- folders are an organizing convenience,
+    not mandatory."""
+    __tablename__ = "qap_test_folders"
+    id = pk_column()
+    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
+    parent_id = Column(Integer, ForeignKey("qap_test_folders.id"), nullable=True)
+    name = Column(String(150), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    project = relationship("TestProject", back_populates="folders")
+    parent = relationship("TestFolder", remote_side=[id], backref="children")
+
+
+class TestCase(Base):
+    """A single reusable test case in the Test Repository. Columns mirror the
+    fixed xlsx upload template exactly (Test Case ID, Epic ID, Feature ID,
+    User Story ID, Test Type, Module Name, Test Scenario, Pre-Condition,
+    Test Case Description, Priority) -- see routers/test_repository.py's
+    import_test_cases for the parser. Steps (with their own Expected Result)
+    live in the separate TestStep table below, one row per step. Note this
+    table holds the test case *definition* only -- Actual Result/Status/
+    Test Run Artifacts/Defect ID from the template are execution-time facts
+    and are imported into TestExecution instead (see import_test_cases),
+    not stored here."""
+    __tablename__ = "qap_test_cases"
+    id = pk_column()
+    test_case_key = Column(String(60), unique=True, nullable=False)
+    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
+    folder_id = Column(Integer, ForeignKey("qap_test_folders.id"), nullable=True)
+    epic_id = Column(String(60))
+    feature_id = Column(String(60))
+    user_story_id = Column(String(60))
+    test_type = Column(String(60))
+    module_name = Column(String(150))
+    test_scenario = Column(String(255))
+    pre_condition = Column(Text)
+    description = Column(Text)
+    priority = Column(String(16))
+    # Test case lifecycle state (Active/Draft/Deprecated) -- distinct from
+    # any execution result; a Deprecated test case can still have historical
+    # TestExecution rows, it's just no longer offered when adding cases to a
+    # new cycle (see routers/test_execution.py).
+    status = Column(String(20), default="Active")
+    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    project = relationship("TestProject", back_populates="test_cases")
+    folder = relationship("TestFolder")
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    steps = relationship("TestStep", back_populates="test_case", cascade="all,delete-orphan",
+                          order_by="TestStep.step_no")
+    executions = relationship("TestExecution", back_populates="test_case", cascade="all,delete-orphan")
+
+
+class TestStep(Base):
+    __tablename__ = "qap_test_steps"
+    id = pk_column()
+    test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False)
+    step_no = Column(Integer, nullable=False)
+    step_text = Column(Text)
+    expected_result = Column(Text)
+
+    test_case = relationship("TestCase", back_populates="steps")
+
+
+class TestCycle(Base):
+    """Test Execution module -- a named run (e.g. 'Sprint 12 Regression',
+    'CR-XX UAT Cycle 1') under a Project. Test cases are explicitly added to
+    a cycle (creating a Not-Executed TestExecution row each) and then run
+    against it -- the same case can be added to several different cycles
+    over time, each getting its own independent execution history."""
+    __tablename__ = "qap_test_cycles"
+    id = pk_column()
+    cycle_key = Column(String(40), unique=True, default=lambda: gen_id("CYCLE"))
+    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
+    name = Column(String(150), nullable=False)
+    description = Column(Text)
+    status = Column(String(20), default="Not Started")
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    project = relationship("TestProject", back_populates="cycles")
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    executions = relationship("TestExecution", back_populates="cycle", cascade="all,delete-orphan")
+
+
+class TestExecution(Base):
+    """One test case's result within one cycle. Created (status defaults to
+    Not Executed) the moment a test case is added to a cycle; updated in
+    place as it's actually run. Field names mirror the xlsx template's own
+    execution-time columns (Actual Result, Status, Test Run Artifacts,
+    Defect ID) so the same shape is used whether the result was typed in
+    the UI or came in via the Excel import."""
+    __tablename__ = "qap_test_executions"
+    __table_args__ = (UniqueConstraint("cycle_id", "test_case_id", name="uq_qap_test_exec_cycle_case"),)
+    id = pk_column()
+    cycle_id = Column(Integer, ForeignKey("qap_test_cycles.id"), nullable=False)
+    test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False)
+    status = Column(String(20), default="Not Executed")
+    actual_result = Column(Text)
+    test_run_artifacts = Column(String(255))
+    defect_id = Column(String(60))
+    executed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    cycle = relationship("TestCycle", back_populates="executions")
+    test_case = relationship("TestCase", back_populates="executions")
+    executed_by = relationship("User", foreign_keys=[executed_by_id])

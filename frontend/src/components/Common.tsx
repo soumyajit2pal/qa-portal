@@ -114,6 +114,19 @@ export function Badge({ status }: { status?: string | null }) {
     REPORT: "badge-teal",
     // Suppression lifecycle
     SECURITY_TEAM_VERIFICATION: "badge-teal",
+    // Test Management: Test Case lifecycle + Test Execution result (see
+    // constants.ts TEST_CASE_STATUSES/TEST_EXECUTION_STATUSES) -- "Pass"/
+    // "Fail" here are deliberately distinct keys from the legacy "Passed"/
+    // "Failed" above (different modules, different exact wording).
+    Active: "badge-green",
+    Deprecated: "badge-gray",
+    "Not Executed": "badge-gray",
+    Pass: "badge-green",
+    Fail: "badge-red",
+    Blocked: "badge-yellow",
+    NA: "badge-gray",
+    "Retest Passed": "badge-blue",
+    "Not Started": "badge-gray",
   };
   const label = (status && ALL_STATUS_LABELS[status]) || status || "";
   return (

@@ -617,5 +617,34 @@ SIGNOFF_STATUS_LABELS = {
     "ISSUED": "Issued",
 }
 
+# ---- Module 10: Test Management (Project Management / Test Repository / Test Execution) ----
+# A Zephyr-style test case management layer -- see the header comment on
+# models.TestProject for the full rationale. Test Type/Priority/execution
+# Status values below match the attached xlsx upload template exactly
+# (routers/test_repository.py's import parser reads these same strings).
+TEST_CASE_TYPES = [
+    "Functional Positive", "Functional Negative", "Regression", "Sanity",
+    "Integration", "Security", "Performance", "UAT", "Other",
+]
+# Test case's own lifecycle state -- distinct from any execution result
+# (see models.TestCase.status docstring).
+TEST_CASE_STATUSES = ["Active", "Draft", "Deprecated"]
+# Reuses the same Critical/High/Medium/Low vocabulary as PRIORITIES above
+# (kept as its own alias rather than importing PRIORITIES directly at every
+# call site, so this module's own statuses/labels read as a self-contained
+# block -- same convention SEVERITIES already follows for SAST/DAST).
+TEST_CASE_PRIORITIES = PRIORITIES
+
+TEST_CYCLE_STATUSES = ["Not Started", "In Progress", "Completed"]
+
+# Exact wording from the xlsx template's "Status (Pass/Fail/Blocked/NA/Retest
+# Passed)" column, plus "Not Executed" as this app's own default for a test
+# case that's been added to a cycle but not yet run (the template has no
+# equivalent since every row it ever contains was already executed).
+TEST_EXECUTION_STATUSES = ["Not Executed", "Pass", "Fail", "Blocked", "NA", "Retest Passed"]
+# Terminal in the sense of "this run is done, no further action expected" --
+# used to decide whether a test case still counts as pending within a cycle.
+TEST_EXECUTION_TERMINAL_STATUSES = ["Pass", "Fail", "NA", "Retest Passed"]
+
 # ---- Module 11: Export ----
 EXPORT_FORMATS = ["xlsx", "pdf", "csv"]

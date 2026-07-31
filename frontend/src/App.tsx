@@ -32,6 +32,15 @@ const Approvals = lazy(() => import('./modules/governance/Approvals'))
 const Reports = lazy(() => import('./modules/governance/Reports'))
 const Admin = lazy(() => import('./modules/governance/Admin'))
 
+// Test Management module (Project Management / Test Repository / Test
+// Execution) -- a Zephyr-style test case management layer, kept as its own
+// nav group rather than folded into Functional/Specialised Testing since
+// it's a distinct workflow (author/import/execute test cases) rather than a
+// request-approval flow like every other module.
+const TestProjects = lazy(() => import('./modules/test-management/TestProjects'))
+const TestRepository = lazy(() => import('./modules/test-management/TestRepository'))
+const TestExecution = lazy(() => import('./modules/test-management/TestExecution'))
+
 function Protected({ children }: { children?: ReactNode }) {
   const { user, loading } = useAuth()
   if (loading) return <div style={{ padding: 40 }}>Loading...</div>
@@ -88,6 +97,11 @@ export default function App() {
         <Route path="/approvals" element={<Protected><ModuleBoundary moduleName="Governance"><Approvals /></ModuleBoundary></Protected>} />
         <Route path="/reports" element={<Protected><ModuleBoundary moduleName="Governance"><Reports /></ModuleBoundary></Protected>} />
         <Route path="/admin" element={<Protected><ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary></Protected>} />
+
+        {/* Test Management module */}
+        <Route path="/test-projects" element={<Protected><ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary></Protected>} />
+        <Route path="/test-repository" element={<Protected><ModuleBoundary moduleName="Test Management"><TestRepository /></ModuleBoundary></Protected>} />
+        <Route path="/test-execution" element={<Protected><ModuleBoundary moduleName="Test Management"><TestExecution /></ModuleBoundary></Protected>} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

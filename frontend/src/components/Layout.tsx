@@ -10,7 +10,7 @@ import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, Suppress
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
   IconCertificate, IconApprove, IconChart, IconSearch, IconWorkflow,
-  IconPlus, IconCheckCircle, IconLogout, IconUsers,
+  IconPlus, IconCheckCircle, IconLogout, IconUsers, IconApps, IconPlay,
 } from './Icons'
 
 interface NavCounts {
@@ -70,6 +70,19 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
         { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate, count: counts.signoff },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
+      ],
+    },
+    {
+      // Zephyr-style test case management -- Project Management (Test
+      // Projects, one per Application), Test Repository (folders + test
+      // cases, xlsx import), and Test Execution (cycles + results). Kept as
+      // its own group since it's a distinct authoring/execution workflow
+      // rather than a request-approval flow like every other module.
+      label: 'Test Management',
+      items: [
+        { to: '/test-projects', label: 'Project Management', icon: IconApps },
+        { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
+        { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
       ],
     },
   ]

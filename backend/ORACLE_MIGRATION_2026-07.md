@@ -4293,3 +4293,207 @@ convention of never leaving a metric's definition unstated on screen.
 **No schema/backend change** (reuses 3 endpoints already called elsewhere in the app; purely a new
 frontend view over existing data). **Verification:** `npx tsc --noEmit -p .` from `frontend/` -- clean;
 Documents and outputs re-synced with no unexpected differences.
+
+## 110. New "Test Management" module -- Project Management / Test Repository / Test Execution, Zephyr-style (6 new tables -- schema change)
+
+**Why:** requested directly -- "implement same behaviour like Zephyr tool management tool has, exact
+clone" for three sub-areas (Project Management, Test Repository, Test Execution), plus the ability to
+bulk-import test cases from the bank's own "Test Cases - CR-XX - Template" xlsx format straight into the
+Test Repository. Given the size of this ask, scope was pinned down with `AskUserQuestion` before writing
+any code: build all three sub-areas at once (not phased); one Test Project per existing Application
+(reusing `ApplicationMaster` from section 57, rather than a second parallel "project name" concept); and
+QA Engineer + QA Lead both author (create/edit/import/delete test cases) and execute them, with Admin
+bypassing as usual via `require_roles`.
+
+This is a deliberately standalone module (its own tables, its own nav group) rather than folded into
+Functional/Specialised Testing -- it is an authoring/execution workflow (write test cases, run them
+against cycles, record results), not a request-raise-and-approve workflow like every other module in this
+app, so it doesn't fit the existing `QARequest`-linked-child pattern at all.
+
+**Domain model, mirroring Zephyr's own structure:** a `TestProject` (container, one per Application)
+holds a `TestRepository` (a folder tree of `TestCase` rows, each with its own ordered `TestStep` rows) and
+a `TestExecution` area (named `TestCycle`s, each holding one `TestExecution` result row per test case
+added to it -- Pass/Fail/Blocked/NA/Retest Passed/Not Executed, see new
+`constants.TEST_EXECUTION_STATUSES`).
+
+**6 new tables:**
+- `qap_test_projects` (`TestProject`): `project_key` (unique, `TPROJ-<date>-<hex>`), `name`,
+  `application_master_id` (FK to `qap_application_master`, nullable), `department` (auto-filled from the
+  linked Application when one is picked), `description`, `is_active`, `created_by_id`, `created_at`.
+- `qap_test_folders` (`TestFolder`): `project_id`, `parent_id` (self-referential FK, nullable -- a folder
+  tree), `name`, `created_by_id`, `created_at`.
+- `qap_test_cases` (`TestCase`): `test_case_key` (unique -- either typed by the author or auto-generated
+  as `TC-<date>-<hex>`), `project_id`, `folder_id` (nullable -- "Unfiled"), `epic_id`, `feature_id`,
+  `user_story_id`, `test_type`, `module_name`, `test_scenario`, `pre_condition`, `description`,
+  `priority`, `status` (`Active`/`Draft`/`Deprecated`), `created_by_id`, `created_at`, `updated_at`.
+- `qap_test_steps` (`TestStep`): `test_case_id`, `step_no`, `step_text`, `expected_result` -- one row per
+  step, cascade-deleted with its test case.
+- `qap_test_cycles` (`TestCycle`): `cycle_key` (unique, `CYCLE-<date>-<hex>`), `project_id`, `name`,
+  `description`, `status` (`Not Started`/`In Progress`/`Completed`), `start_date`, `end_date`,
+  `created_by_id`, `created_at`.
+- `qap_test_executions` (`TestExecution`): `cycle_id`, `test_case_id` (unique together -- a test case can
+  only appear once per cycle), `status`, `actual_result`, `test_run_artifacts`, `defect_id`,
+  `executed_by_id`, `executed_at`, `created_at`.
+
+**New routers, all under `require_roles(Role.QA_ENGINEER, Role.QA_LEAD)` for anything that writes (Admin
+always bypasses); reads are open to any authenticated user:**
+- `routers/test_projects.py` (`/api/test-projects`): list/create/get/patch Test Projects. Creating one
+  with an `application_master_id` auto-fills `department` from that Application's own record.
+- `routers/test_repository.py` (`/api/test-repository`): folder CRUD (delete blocked while the folder
+  still has children or test cases inside it) and test case CRUD (steps are replaced wholesale on
+  update, matching the wizard-style "resubmit the whole steps list" pattern used elsewhere in this app).
+- `routers/test_execution.py` (`/api/test-execution`): cycle CRUD; adding test cases to a cycle
+  (silently skips any already added, since `(cycle_id, test_case_id)` is unique); recording/removing a
+  result, which stamps `executed_by_id`/`executed_at` off the acting user, same convention as every other
+  "who did this and when" field in the app.
+
+**xlsx import** (`POST /api/test-repository/projects/{id}/import-xlsx`, `openpyxl`, already a
+dependency): parses the bank's standard template -- one row per test step, with each test case's own
+descriptive fields (Epic ID, Feature ID, User Story ID, Test Type, Module, Scenario, Pre-Condition,
+Description, Priority) filled in **only on the first row of that test case's block**, left blank on every
+subsequent step row (the template's own merged-cell-style layout); a new block starts whenever the "Test
+Case ID" column is non-empty again. Header row is matched case/whitespace-insensitively against a
+`_HEADER_MAP`, so extra columns added to the template later are simply ignored rather than rejected. If a
+test case's first row *also* carries a Status/Actual Result/Test Run Artifacts/Defect ID (someone had
+already run it and recorded the outcome directly in the sheet before uploading), an initial
+`TestExecution` is seeded under a get-or-created "Imported from Excel" cycle for that project, so
+pre-existing results aren't silently discarded on import. Returns a summary (`created_test_cases`,
+`imported_executions`, `skipped_rows`, `errors[]`, e.g. duplicate Test Case IDs). This parsing logic was
+validated against the actual uploaded template file (16 test cases, 0 duplicates, 0 zero-step cases,
+correct grouping) via a standalone dry-run script before being trusted in the router.
+
+**Frontend:** three new pages under `modules/test-management/` -- `TestProjects.tsx` (list + create,
+Application picker reusing the same approved-names list as the QA Request wizard), `TestRepository.tsx`
+(project switcher, folder-tree sidebar, test case table, "+ New Test Case" with an inline step editor,
+"Import from Excel" upload), `TestExecution.tsx` (project + cycle switcher, "+ Add Test Cases" picker,
+per-row "Record Result" modal showing the test case's own steps alongside the result fields). All three
+gate their write actions on `hasRole(user, 'QA_ENGINEER', 'QA_LEAD')`, matching the backend. New
+`api.uploadForm()` helper added (single named file field + optional extra form fields, unlike the
+existing `uploadFiles()` which always uses field name `'files'` with no other data) to support the xlsx
+import's `file` + optional `folder_id` fields. New "Test Management" nav group (Project Management / Test
+Repository / Test Execution) added to the sidebar for everyone, and the shared `Badge` component's status
+color map extended with `Active`/`Deprecated`/`Not Executed`/`Pass`/`Fail`/`Blocked`/`NA`/`Retest
+Passed`/`Not Started`.
+
+**Oracle migration needed:** six new tables, all purely additive -- no existing table's columns changed.
+`Base.metadata.create_all()` (called on every app startup) will create these automatically on a fresh
+database, but on an already-deployed one the same caveat as every prior new-table section applies: if
+schema migrations aren't run automatically in that environment, create these by hand before starting the
+app on this version.
+
+```sql
+CREATE TABLE qap_test_projects (
+    id                      NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    project_key             VARCHAR2(40) NOT NULL,
+    name                    VARCHAR2(150) NOT NULL,
+    application_master_id   NUMBER,
+    department              VARCHAR2(150),
+    description             CLOB,
+    is_active               NUMBER(1) DEFAULT 1,
+    created_by_id           NUMBER,
+    created_at              DATE DEFAULT SYSDATE,
+    CONSTRAINT uq_qap_test_projects_key UNIQUE (project_key),
+    CONSTRAINT fk_qap_test_projects_app FOREIGN KEY (application_master_id) REFERENCES qap_application_master(id),
+    CONSTRAINT fk_qap_test_projects_by FOREIGN KEY (created_by_id) REFERENCES qap_users(id)
+);
+
+CREATE TABLE qap_test_folders (
+    id              NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    project_id      NUMBER NOT NULL,
+    parent_id       NUMBER,
+    name            VARCHAR2(150) NOT NULL,
+    created_by_id   NUMBER,
+    created_at      DATE DEFAULT SYSDATE,
+    CONSTRAINT fk_qap_test_folders_project FOREIGN KEY (project_id) REFERENCES qap_test_projects(id),
+    CONSTRAINT fk_qap_test_folders_parent FOREIGN KEY (parent_id) REFERENCES qap_test_folders(id),
+    CONSTRAINT fk_qap_test_folders_by FOREIGN KEY (created_by_id) REFERENCES qap_users(id)
+);
+
+CREATE TABLE qap_test_cases (
+    id              NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    test_case_key   VARCHAR2(60) NOT NULL,
+    project_id      NUMBER NOT NULL,
+    folder_id       NUMBER,
+    epic_id         VARCHAR2(60),
+    feature_id      VARCHAR2(60),
+    user_story_id   VARCHAR2(60),
+    test_type       VARCHAR2(60),
+    module_name     VARCHAR2(150),
+    test_scenario   VARCHAR2(255),
+    pre_condition   CLOB,
+    description     CLOB,
+    priority        VARCHAR2(16),
+    status          VARCHAR2(20) DEFAULT 'Active',
+    created_by_id   NUMBER,
+    created_at      DATE DEFAULT SYSDATE,
+    updated_at      DATE DEFAULT SYSDATE,
+    CONSTRAINT uq_qap_test_cases_key UNIQUE (test_case_key),
+    CONSTRAINT fk_qap_test_cases_project FOREIGN KEY (project_id) REFERENCES qap_test_projects(id),
+    CONSTRAINT fk_qap_test_cases_folder FOREIGN KEY (folder_id) REFERENCES qap_test_folders(id),
+    CONSTRAINT fk_qap_test_cases_by FOREIGN KEY (created_by_id) REFERENCES qap_users(id)
+);
+
+CREATE TABLE qap_test_steps (
+    id              NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    test_case_id    NUMBER NOT NULL,
+    step_no         NUMBER NOT NULL,
+    step_text       CLOB,
+    expected_result CLOB,
+    CONSTRAINT fk_qap_test_steps_case FOREIGN KEY (test_case_id) REFERENCES qap_test_cases(id)
+);
+
+CREATE TABLE qap_test_cycles (
+    id              NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    cycle_key       VARCHAR2(40) NOT NULL,
+    project_id      NUMBER NOT NULL,
+    name            VARCHAR2(150) NOT NULL,
+    description     CLOB,
+    status          VARCHAR2(20) DEFAULT 'Not Started',
+    start_date      DATE,
+    end_date        DATE,
+    created_by_id   NUMBER,
+    created_at      DATE DEFAULT SYSDATE,
+    CONSTRAINT uq_qap_test_cycles_key UNIQUE (cycle_key),
+    CONSTRAINT fk_qap_test_cycles_project FOREIGN KEY (project_id) REFERENCES qap_test_projects(id),
+    CONSTRAINT fk_qap_test_cycles_by FOREIGN KEY (created_by_id) REFERENCES qap_users(id)
+);
+
+CREATE TABLE qap_test_executions (
+    id                  NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    cycle_id            NUMBER NOT NULL,
+    test_case_id        NUMBER NOT NULL,
+    status              VARCHAR2(20) DEFAULT 'Not Executed',
+    actual_result       CLOB,
+    test_run_artifacts  VARCHAR2(255),
+    defect_id           VARCHAR2(60),
+    executed_by_id      NUMBER,
+    executed_at         DATE,
+    created_at          DATE DEFAULT SYSDATE,
+    CONSTRAINT uq_qap_test_exec_cycle_case UNIQUE (cycle_id, test_case_id),
+    CONSTRAINT fk_qap_test_exec_cycle FOREIGN KEY (cycle_id) REFERENCES qap_test_cycles(id),
+    CONSTRAINT fk_qap_test_exec_case FOREIGN KEY (test_case_id) REFERENCES qap_test_cases(id),
+    CONSTRAINT fk_qap_test_exec_by FOREIGN KEY (executed_by_id) REFERENCES qap_users(id)
+);
+
+CREATE INDEX ix_qap_test_folders_project ON qap_test_folders(project_id);
+CREATE INDEX ix_qap_test_cases_project ON qap_test_cases(project_id);
+CREATE INDEX ix_qap_test_cycles_project ON qap_test_cycles(project_id);
+CREATE INDEX ix_qap_test_exec_cycle ON qap_test_executions(cycle_id);
+```
+
+No existing columns changed or dropped -- purely additive.
+
+Verified via `py_compile` across every touched/new backend file (`models.py`, `schemas.py`,
+`constants.py`, `main.py`, `routers/test_projects.py`, `routers/test_repository.py`,
+`routers/test_execution.py` -- all clean) and `npx tsc --noEmit -p .` on the frontend (clean, including
+the 3 new `.tsx` modules). The xlsx-import row-grouping logic was additionally validated against the real
+uploaded template file with a standalone parsing dry-run, independent of the router code, before being
+trusted. **Not verified:** an actual FastAPI app boot / SQLAlchemy mapper-configuration check -- this
+sandbox has no network access to install the project's runtime dependencies (`pip install` fails with a
+proxy `403`), so only syntax-level (`py_compile`) verification plus manual review of every `back_populates`
+relationship pair was possible for the new ORM models; a real app boot against a live Oracle instance
+should be the first smoke test after this DDL is applied. Documents and outputs copies re-synced and
+confirmed identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files). The
+DDL above was not (and cannot be) run from this environment -- no direct network access to the target
+Oracle instance -- so it must be applied to the actual database by whoever administers it before this
+version is deployed/restarted there.

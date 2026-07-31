@@ -88,6 +88,20 @@ export const api = {
     const blob = await request<Blob>(path, { isBlob: true })
     triggerDownload(blob, filename)
   },
+
+  // Uploads a single named file plus optional extra form fields -- unlike
+  // uploadFiles above (always field name 'files', no other data), this is
+  // for endpoints that take one specific file field alongside other form
+  // data (e.g. Test Repository's xlsx import, which also takes an optional
+  // folder_id). Fields with an undefined/null value are omitted entirely
+  // rather than sent as the string "undefined"/"null".
+  uploadForm: <T = any>(path: string, fields: Record<string, string | Blob | undefined | null>): Promise<T> => {
+    const form = new FormData()
+    Object.entries(fields).forEach(([k, v]) => {
+      if (v !== undefined && v !== null) form.append(k, v)
+    })
+    return request<T>(path, { method: 'POST', body: form, formEncoded: true })
+  },
 }
 
 export function setToken(token: string | null | undefined): void {

@@ -1045,3 +1045,177 @@ class ApplicationMasterOut(ORMModel):
 class ApplicationMasterDecision(BaseModel):
     decision: str          # "Approved" or "Rejected"
     comments: Optional[str] = None
+
+
+# ---------------- Module 11: Test Management (Project Management / Test Repository / Test Execution) ----------------
+class TestProjectCreate(BaseModel):
+    name: str
+    application_master_id: Optional[int] = None
+    department: Optional[str] = None
+    description: Optional[str] = None
+
+
+class TestProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    department: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class TestProjectOut(ORMModel):
+    id: int
+    project_key: str
+    name: str
+    application_master_id: Optional[int] = None
+    department: Optional[str] = None
+    description: Optional[str] = None
+    is_active: bool
+    created_by_id: Optional[int] = None
+    created_at: datetime.datetime
+
+
+class TestFolderCreate(BaseModel):
+    name: str
+    parent_id: Optional[int] = None
+
+
+class TestFolderOut(ORMModel):
+    id: int
+    project_id: int
+    parent_id: Optional[int] = None
+    name: str
+    created_by_id: Optional[int] = None
+    created_at: datetime.datetime
+
+
+class TestStepIn(BaseModel):
+    step_no: int
+    step_text: Optional[str] = None
+    expected_result: Optional[str] = None
+
+
+class TestStepOut(ORMModel):
+    id: int
+    step_no: int
+    step_text: Optional[str] = None
+    expected_result: Optional[str] = None
+
+
+class TestCaseCreate(BaseModel):
+    # Left optional -- if not supplied, the router auto-generates one
+    # (gen_id("TC")), same as every other business ID in this app.
+    test_case_key: Optional[str] = None
+    folder_id: Optional[int] = None
+    epic_id: Optional[str] = None
+    feature_id: Optional[str] = None
+    user_story_id: Optional[str] = None
+    test_type: Optional[str] = None
+    module_name: Optional[str] = None
+    test_scenario: Optional[str] = None
+    pre_condition: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    status: str = "Active"
+    steps: List[TestStepIn] = []
+
+
+class TestCaseUpdate(BaseModel):
+    folder_id: Optional[int] = None
+    epic_id: Optional[str] = None
+    feature_id: Optional[str] = None
+    user_story_id: Optional[str] = None
+    test_type: Optional[str] = None
+    module_name: Optional[str] = None
+    test_scenario: Optional[str] = None
+    pre_condition: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    status: Optional[str] = None
+    steps: Optional[List[TestStepIn]] = None
+
+
+class TestCaseOut(ORMModel):
+    id: int
+    test_case_key: str
+    project_id: int
+    folder_id: Optional[int] = None
+    epic_id: Optional[str] = None
+    feature_id: Optional[str] = None
+    user_story_id: Optional[str] = None
+    test_type: Optional[str] = None
+    module_name: Optional[str] = None
+    test_scenario: Optional[str] = None
+    pre_condition: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    status: str
+    created_by_id: Optional[int] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    steps: List[TestStepOut] = []
+
+
+# Summary shown when importing an xlsx sheet -- how many test cases were
+# created, and (since Status/Actual Result columns double as an initial
+# execution result -- see routers/test_repository.py) how many of those also
+# seeded a "Imported from Excel" TestExecution row.
+class TestCaseImportResult(ORMModel):
+    created_test_cases: int
+    imported_executions: int
+    skipped_rows: int
+    errors: List[str] = []
+
+
+class TestCycleCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    start_date: Optional[datetime.date] = None
+    end_date: Optional[datetime.date] = None
+
+
+class TestCycleUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    start_date: Optional[datetime.date] = None
+    end_date: Optional[datetime.date] = None
+
+
+class TestCycleOut(ORMModel):
+    id: int
+    cycle_key: str
+    project_id: int
+    name: str
+    description: Optional[str] = None
+    status: str
+    start_date: Optional[datetime.date] = None
+    end_date: Optional[datetime.date] = None
+    created_by_id: Optional[int] = None
+    created_at: datetime.datetime
+
+
+class TestExecutionAdd(BaseModel):
+    """Add one or more existing test cases to a cycle -- creates a
+    Not-Executed TestExecution row for each (see routers/test_execution.py)."""
+    test_case_ids: List[int]
+
+
+class TestExecutionUpdate(BaseModel):
+    status: str
+    actual_result: Optional[str] = None
+    test_run_artifacts: Optional[str] = None
+    defect_id: Optional[str] = None
+
+
+class TestExecutionOut(ORMModel):
+    id: int
+    cycle_id: int
+    test_case_id: int
+    test_case: Optional[TestCaseOut] = None
+    status: str
+    actual_result: Optional[str] = None
+    test_run_artifacts: Optional[str] = None
+    defect_id: Optional[str] = None
+    executed_by_id: Optional[int] = None
+    executed_at: Optional[datetime.datetime] = None
+    created_at: datetime.datetime

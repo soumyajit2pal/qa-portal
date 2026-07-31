@@ -404,3 +404,16 @@ export const REPORTS: ReportDef[] = [
   { key: 'application-quality-scorecard', label: 'Application-wise Quality Scorecard', group: 'Management' },
   { key: 'audit-evidence', label: 'Audit Evidence Report', group: 'Management' },
 ]
+
+// ---- Test Management (Project Management / Test Repository / Test Execution) ----
+// Mirrors backend constants.py's own Test Management block exactly -- see
+// models.TestProject's header comment for the feature's overall design.
+export const TEST_CASE_TYPES: string[] = [
+  'Functional Positive', 'Functional Negative', 'Regression', 'Sanity',
+  'Integration', 'Security', 'Performance', 'UAT', 'Other',
+]
+export const TEST_CASE_STATUSES: string[] = ['Active', 'Draft', 'Deprecated']
+export const TEST_CASE_PRIORITIES: string[] = PRIORITIES
+export const TEST_CYCLE_STATUSES: string[] = ['Not Started', 'In Progress', 'Completed']
+export const TEST_EXECUTION_STATUSES: string[] = ['Not Executed', 'Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed']
+export const TEST_EXECUTION_TERMINAL_STATUSES: string[] = ['Pass', 'Fail', 'NA', 'Retest Passed']

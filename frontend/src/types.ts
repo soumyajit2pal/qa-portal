@@ -565,3 +565,92 @@ export interface SuppressionDashboard {
   critical_high_risk_exceptions: number
   status_breakdown: Record<string, number>
 }
+
+// ---------------- Test Management (Project Management / Test Repository / Test Execution) ----------------
+// See backend models.TestProject's header comment for the full design --
+// one Project per Application, a folder tree of Test Cases (with Steps)
+// under it, and Test Cycles that record a Pass/Fail/Blocked/NA/Retest
+// Passed result per test case run.
+export interface TestProjectOut {
+  id: number
+  project_key: string
+  name: string
+  application_master_id?: number | null
+  department?: string | null
+  description?: string | null
+  is_active: boolean
+  created_by_id?: number | null
+  created_at: string
+}
+
+export interface TestFolderOut {
+  id: number
+  project_id: number
+  parent_id?: number | null
+  name: string
+  created_by_id?: number | null
+  created_at: string
+}
+
+export interface TestStepIn {
+  step_no: number
+  step_text?: string | null
+  expected_result?: string | null
+}
+
+export type TestStepOut = TestStepIn & { id: number }
+
+export interface TestCaseOut {
+  id: number
+  test_case_key: string
+  project_id: number
+  folder_id?: number | null
+  epic_id?: string | null
+  feature_id?: string | null
+  user_story_id?: string | null
+  test_type?: string | null
+  module_name?: string | null
+  test_scenario?: string | null
+  pre_condition?: string | null
+  description?: string | null
+  priority?: string | null
+  status: string
+  created_by_id?: number | null
+  created_at: string
+  updated_at: string
+  steps: TestStepOut[]
+}
+
+export interface TestCaseImportResult {
+  created_test_cases: number
+  imported_executions: number
+  skipped_rows: number
+  errors: string[]
+}
+
+export interface TestCycleOut {
+  id: number
+  cycle_key: string
+  project_id: number
+  name: string
+  description?: string | null
+  status: string
+  start_date?: string | null
+  end_date?: string | null
+  created_by_id?: number | null
+  created_at: string
+}
+
+export interface TestExecutionOut {
+  id: number
+  cycle_id: number
+  test_case_id: number
+  test_case?: TestCaseOut | null
+  status: string
+  actual_result?: string | null
+  test_run_artifacts?: string | null
+  defect_id?: string | null
+  executed_by_id?: number | null
+  executed_at?: string | null
+  created_at: string
+}
