@@ -11,6 +11,7 @@ from ..deps import get_current_user, require_roles, require_same_department
 from ..constants import (
     Role, QAStatus, FUNCTIONAL_EDITABLE_STATUSES,
     SAST_DAST_TERMINAL_STATUSES, AUTOMATION_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
+    validate_promotion_environment,
 )
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -127,6 +128,11 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
             # guard just avoids a crash on the theoretical legacy row with
             # none, rather than silently pretending the edit succeeded.
             setattr(obj.qa_request, k, v)
+    if obj.qa_request:
+        promotion_error = validate_promotion_environment(
+            obj.qa_request.environment, obj.qa_request.target_promotion_environment)
+        if promotion_error:
+            raise HTTPException(400, promotion_error)
     db.commit()
     db.refresh(obj)
     return obj

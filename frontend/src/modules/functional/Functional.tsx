@@ -5,6 +5,7 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisi
 import UserAssignSelect from '@qa-portal/shared/components/UserAssignSelect'
 import {
   QA_STATUSES, QA_STATUS_LABELS, PRIORITIES, RISK_RATINGS, ENVIRONMENTS, CHANGE_TYPES,
+  promotionEnvironmentOptions, promotionEnvironmentError,
   FUNCTIONAL_EDITABLE_STATUSES, hasRole,
 } from '@qa-portal/shared/constants'
 import { FunctionalOut, UserOut, ChecklistItemOut, WalkthroughOut, ApprovalActionOut } from '@qa-portal/shared/types'
@@ -42,6 +43,8 @@ function FunctionalFormModal({ onClose, onSaved, editing }: {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    const promotionErr = promotionEnvironmentError(form.environment, form.target_promotion_environment)
+    if (promotionErr) { setError(promotionErr); return }
     setBusy(true)
     try {
       const saved = await api.put<FunctionalOut>(`/api/functional-requests/${editing.id}`, {
@@ -101,13 +104,20 @@ function FunctionalFormModal({ onClose, onSaved, editing }: {
               </select>
             </Field>
             <Field label="Deployment Environment">
-              <select value={form.environment} onChange={(e) => set('environment', e.target.value)}>
+              <select value={form.environment} onChange={(e) => {
+                const newEnv = e.target.value
+                setForm((f) => {
+                  const validTargets = promotionEnvironmentOptions(newEnv)
+                  const target = validTargets.includes(f.target_promotion_environment) ? f.target_promotion_environment : (validTargets[0] || '')
+                  return { ...f, environment: newEnv, target_promotion_environment: target }
+                })
+              }}>
                 {ENVIRONMENTS.filter((e_) => e_ !== 'Dev').map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
             </Field>
             <Field label="Target Promotion Environment">
               <select value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
-                {ENVIRONMENTS.filter((e_) => e_ !== 'Dev' && e_ !== 'SIT').map((o) => <option key={o} value={o}>{o}</option>)}
+                {promotionEnvironmentOptions(form.environment).map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
             </Field>
             <Field label="Release Version / Hash Value"><input value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>

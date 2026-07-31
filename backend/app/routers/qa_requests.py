@@ -16,7 +16,7 @@ from ..constants import (
     Role, DEFAULT_CHECKLIST_ITEMS, checklist_item_is_mandatory, DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
     DEFAULT_AUTOMATION_CHECKLIST_ITEMS,
     FUNCTIONAL_BUCKET_TYPES, GatewayStatus, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
-    QAStatus,
+    QAStatus, validate_promotion_environment,
 )
 from ..pdf_export import build_request_detail_pdf
 
@@ -347,6 +347,9 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # Department is always sourced from the requester's own user profile, not
     # from client input -- ignore whatever the payload sent.
     data["department"] = current_user.department
+    promotion_error = validate_promotion_environment(data.get("environment"), data.get("target_promotion_environment"))
+    if promotion_error:
+        raise HTTPException(400, promotion_error)
     request_types = data.pop("request_types", [])
     checked_items = set(data.pop("checked_items", []) or [])
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself
@@ -436,6 +439,15 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     }
     for k, v in data.items():
         setattr(obj, k, v)
+
+    # Validated against the request's resulting/effective environment fields
+    # (obj.environment/obj.target_promotion_environment already reflect
+    # whichever of the two -- one, both, or neither -- this call actually
+    # changed, thanks to the setattr loop above), not just whatever this one
+    # call's payload happened to include.
+    promotion_error = validate_promotion_environment(obj.environment, obj.target_promotion_environment)
+    if promotion_error:
+        raise HTTPException(400, promotion_error)
 
     if request_types is not None:
         obj.request_types = ",".join(request_types)

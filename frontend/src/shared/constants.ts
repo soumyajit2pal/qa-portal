@@ -350,6 +350,44 @@ export const REQUEST_TYPES: string[] = [
 export const PRIORITIES: string[] = ['Critical', 'High', 'Medium', 'Low']
 export const RISK_RATINGS: string[] = ['Critical', 'High', 'Medium', 'Low']
 export const ENVIRONMENTS: string[] = ['Dev', 'SIT', 'UAT', 'Pre-Production', 'Production']
+
+// Pipeline order for the "Deployment Environment" -> "Target Promotion
+// Environment" pair -- Target Promotion Environment must be a *later* stage
+// than Deployment Environment (e.g. Deployment Environment = UAT means
+// Target Promotion Environment must be Pre-Production or Production, never
+// SIT or UAT itself). "Dev" is excluded -- neither dropdown ever offers it
+// (see promotionEnvironmentOptions below). Mirrors
+// backend/app/constants.py::ENVIRONMENT_PROMOTION_ORDER -- keep both in sync.
+export const ENVIRONMENT_PROMOTION_ORDER: string[] = ['SIT', 'UAT', 'Pre-Production', 'Production']
+
+// Valid Target Promotion Environment choices for a given Deployment
+// Environment -- every stage strictly later in ENVIRONMENT_PROMOTION_ORDER.
+// Falls back to the full (Dev-excluded) list when `environment` isn't a
+// recognized pipeline stage yet (e.g. nothing selected yet), so the dropdown
+// still has a default of options in that case rather than being empty.
+export function promotionEnvironmentOptions(environment: string): string[] {
+  const idx = ENVIRONMENT_PROMOTION_ORDER.indexOf(environment)
+  if (idx === -1) return ENVIRONMENT_PROMOTION_ORDER
+  return ENVIRONMENT_PROMOTION_ORDER.slice(idx + 1)
+}
+
+// Mirrors backend/app/constants.py::validate_promotion_environment -- same
+// rule, client-side, so the form can show an inline error immediately
+// instead of only on submit's 400 response. Returns an error message, or
+// null if the pair is valid (or not yet checkable -- blank/unrecognized
+// values are left unchecked here, same as the backend).
+export function promotionEnvironmentError(environment: string, targetPromotionEnvironment: string): string | null {
+  if (!environment || !targetPromotionEnvironment) return null
+  const envIdx = ENVIRONMENT_PROMOTION_ORDER.indexOf(environment)
+  const targetIdx = ENVIRONMENT_PROMOTION_ORDER.indexOf(targetPromotionEnvironment)
+  if (envIdx === -1 || targetIdx === -1) return null
+  if (targetIdx <= envIdx) {
+    const laterStages = ENVIRONMENT_PROMOTION_ORDER.slice(envIdx + 1)
+    const expected = laterStages.length ? laterStages.join(', ') : 'no later stage -- Production is the last one'
+    return `Target Promotion Environment ('${targetPromotionEnvironment}') must be a later stage than Deployment Environment ('${environment}'). Expected: ${expected}.`
+  }
+  return null
+}
 export const SEVERITIES: string[] = ['Critical', 'High', 'Medium', 'Low', 'Informational']
 export const CERTIFICATE_TYPES: string[] = ['Full Clearance', 'Conditional Clearance', 'Clearance Denied']
 export const SIGNOFF_TESTING_TYPES: string[] = ['Functional', 'SAST', 'DAST']

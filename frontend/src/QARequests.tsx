@@ -5,6 +5,7 @@ import { useAuth } from '@qa-portal/shared/context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, RepeatableRows, DetailSection, DetailField } from '@qa-portal/shared/components/Common'
 import {
   REQUEST_TYPES, PRIORITIES, RISK_RATINGS, ENVIRONMENTS,
+  promotionEnvironmentOptions, promotionEnvironmentError,
   DEFAULT_CHECKLIST_ITEMS, CONDITIONAL_CHECKLIST_ITEMS, FUNCTIONAL_BUCKET_TYPES,
   GATEWAY_STATUSES, GATEWAY_STATUS_LABELS, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
   QA_STATUS_LABELS, SAST_DAST_STATUS_LABELS, AUTOMATION_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
@@ -121,7 +122,8 @@ const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
 // again as a final safety check right before submit).
 function detailsStepError(f: QARequestForm): string | null {
   const missing = REQUIRED_DETAIL_FIELDS.filter(({ key }) => !String(f[key] || '').trim())
-  return missing.length > 0 ? `Please fill in: ${missing.map((m) => m.label).join(', ')}` : null
+  if (missing.length > 0) return `Please fill in: ${missing.map((m) => m.label).join(', ')}`
+  return promotionEnvironmentError(f.environment, f.target_promotion_environment)
 }
 function typeStepError(f: QARequestForm): string | null {
   return f.request_types.length === 0 ? 'Select at least one Request Type.' : null
@@ -544,13 +546,25 @@ function NewRequestModal({ onClose, onCreated, editing, checklist }: NewRequestM
                 <Field label="Release Version / Hash Value *"><input required value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>
                 <Field label="Build Number / Hash Value *"><input required value={form.build_number} onChange={(e) => set('build_number', e.target.value)} /></Field>
                 <Field label="Deployment Environment *">
-                  <select value={form.environment} onChange={(e) => set('environment', e.target.value)}>
+                  <select value={form.environment} onChange={(e) => {
+                    // Target Promotion Environment must always be a later pipeline
+                    // stage than Deployment Environment (see promotionEnvironmentOptions) --
+                    // auto-bump it here if the newly-picked Deployment Environment makes
+                    // the current selection invalid, rather than leaving a stale, now-invalid
+                    // pairing sitting in the form until submit's validation catches it.
+                    const newEnv = e.target.value
+                    setForm((f) => {
+                      const validTargets = promotionEnvironmentOptions(newEnv)
+                      const target = validTargets.includes(f.target_promotion_environment) ? f.target_promotion_environment : (validTargets[0] || '')
+                      return { ...f, environment: newEnv, target_promotion_environment: target }
+                    })
+                  }}>
                     {ENVIRONMENTS.filter((e_) => e_ !== 'Dev').map((o) => <option key={o} value={o}>{o}</option>)}
                   </select>
                 </Field>
                 <Field label="Target Promotion Environment *">
                   <select value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
-                    {ENVIRONMENTS.filter((e_) => e_ !== 'Dev' && e_ !== 'SIT').map((o) => <option key={o} value={o}>{o}</option>)}
+                    {promotionEnvironmentOptions(form.environment).map((o) => <option key={o} value={o}>{o}</option>)}
                   </select>
                 </Field>
                 <Field label="Target Release Date"><input type="date" value={form.target_release_date} onChange={(e) => set('target_release_date', e.target.value)} /></Field>

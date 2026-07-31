@@ -274,6 +274,38 @@ PRIORITIES = ["Critical", "High", "Medium", "Low"]
 RISK_RATINGS = ["Critical", "High", "Medium", "Low"]
 ENVIRONMENTS = ["Dev", "SIT", "UAT", "Pre-Production", "Production"]
 
+# Pipeline order for the QA Request gateway's "Deployment Environment" ->
+# "Target Promotion Environment" pair -- Target Promotion Environment must be
+# a *later* stage than Deployment Environment (e.g. Deployment Environment =
+# UAT means Target Promotion Environment must be Pre-Production or
+# Production, never SIT or UAT itself). "Dev" is excluded -- the wizard's
+# Deployment Environment/Target Promotion Environment dropdowns never offer
+# it (see ENVIRONMENTS usage in frontend/src/QARequests.tsx), so it never
+# reaches this check as either value.
+ENVIRONMENT_PROMOTION_ORDER = ["SIT", "UAT", "Pre-Production", "Production"]
+
+
+def validate_promotion_environment(environment, target_promotion_environment):
+    """Returns an error message string if target_promotion_environment isn't
+    strictly later than environment in ENVIRONMENT_PROMOTION_ORDER, else
+    None. Blank values or values outside ENVIRONMENT_PROMOTION_ORDER (e.g.
+    "Dev", or not yet set) are left unchecked here -- the caller decides
+    whether either field is actually required."""
+    if not environment or not target_promotion_environment:
+        return None
+    if environment not in ENVIRONMENT_PROMOTION_ORDER or target_promotion_environment not in ENVIRONMENT_PROMOTION_ORDER:
+        return None
+    env_idx = ENVIRONMENT_PROMOTION_ORDER.index(environment)
+    target_idx = ENVIRONMENT_PROMOTION_ORDER.index(target_promotion_environment)
+    if target_idx <= env_idx:
+        later_stages = ENVIRONMENT_PROMOTION_ORDER[env_idx + 1:]
+        expected = ", ".join(later_stages) if later_stages else "no later stage -- Production is the last one"
+        return (
+            f"Target Promotion Environment ('{target_promotion_environment}') must be a later stage than "
+            f"Deployment Environment ('{environment}'). Expected: {expected}."
+        )
+    return None
+
 # ---- Module 4/5: SAST / DAST ----
 # Independent lifecycle (identical for SAST and DAST), rebuilt with the fuller
 # named stages requested:

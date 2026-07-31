@@ -6,6 +6,7 @@ import UserAssignSelect from '@qa-portal/shared/components/UserAssignSelect'
 import { IconCheckCircle } from '@qa-portal/shared/components/Icons'
 import {
   PRIORITIES, RISK_RATINGS, ENVIRONMENTS, PERFORMANCE_EDITABLE_STATUSES,
+  promotionEnvironmentOptions, promotionEnvironmentError,
   PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole,
 } from '@qa-portal/shared/constants'
 import { PerformanceOut, PerformanceChecklistItemOut, UserOut, WalkthroughOut, ApprovalActionOut } from '@qa-portal/shared/types'
@@ -57,6 +58,8 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    const promotionErr = promotionEnvironmentError(form.environment, form.target_promotion_environment)
+    if (promotionErr) { setError(promotionErr); return }
     setBusy(true)
     try {
       const { request_type, ...rest } = form
@@ -96,7 +99,14 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
             <Field label="Tool Used"><input placeholder="e.g. JMeter, LoadRunner" value={form.tool_used} onChange={(e) => set('tool_used', e.target.value)} /></Field>
             <Field label="Target Load"><input placeholder="e.g. 500 concurrent users / 200 TPS" value={form.target_load} onChange={(e) => set('target_load', e.target.value)} /></Field>
             <Field label="Environment">
-              <select value={form.environment} onChange={(e) => set('environment', e.target.value)}>
+              <select value={form.environment} onChange={(e) => {
+                const newEnv = e.target.value
+                setForm((f) => {
+                  const validTargets = promotionEnvironmentOptions(newEnv)
+                  const target = validTargets.includes(f.target_promotion_environment) ? f.target_promotion_environment : (validTargets[0] || '')
+                  return { ...f, environment: newEnv, target_promotion_environment: target }
+                })
+              }}>
                 {ENVIRONMENTS.map((e_) => <option key={e_} value={e_}>{e_}</option>)}
               </select>
             </Field>
@@ -142,7 +152,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
             <Field label="Target Promotion Environment">
               <select value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
                 <option value="">Select...</option>
-                {ENVIRONMENTS.filter((e_) => e_ !== 'Dev' && e_ !== 'SIT').map((o) => <option key={o} value={o}>{o}</option>)}
+                {promotionEnvironmentOptions(form.environment).map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
             </Field>
           </div>

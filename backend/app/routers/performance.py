@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role, PERFORMANCE_EDITABLE_STATUSES
+from ..constants import Role, PERFORMANCE_EDITABLE_STATUSES, validate_promotion_environment
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -89,6 +89,9 @@ def update_performance(req_id: int, payload: schemas.PerformanceUpdate, db: Sess
     checked_items = data.pop("checked_items", None)
     for k, v in data.items():
         setattr(obj, k, v)
+    promotion_error = validate_promotion_environment(obj.environment, obj.target_promotion_environment)
+    if promotion_error:
+        raise HTTPException(400, promotion_error)
     if checked_items is not None:
         # Lets the requester update their readiness-checklist self-declaration
         # from this same "Edit Details" modal while the request is still
