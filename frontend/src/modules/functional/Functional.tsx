@@ -24,6 +24,7 @@ import JiraActivity from "../../components/JiraActivity";
 import {
   QA_STATUSES,
   QA_STATUS_LABELS,
+  QA_PENDING_WITH,
   PRIORITIES,
   RISK_RATINGS,
   ENVIRONMENTS,
@@ -290,6 +291,7 @@ function FunctionalFormModal({
             <Field label="Target Release Date">
               <input
                 type="date"
+                min={new Date().toISOString().split("T")[0]}
                 value={form.target_release_date}
                 onChange={(e) => set("target_release_date", e.target.value)}
               />
@@ -1464,6 +1466,12 @@ export default function Functional() {
               key: "status",
               header: "Status",
               render: (r) => <Badge status={r.status} />,
+            },
+            {
+              key: "pending_with",
+              header: "Pending With",
+              render: (r) => QA_PENDING_WITH[r.status] || "—",
+              filterValue: (r) => QA_PENDING_WITH[r.status] || "",
             },
             {
               key: "qa_request",

@@ -1,5 +1,7 @@
 """Shared enumerations / constant lists used across models, schemas and routers."""
 
+import datetime
+
 # ---- Roles (Section: User Roles table in the CR document) ----
 class Role:
     REQUESTER = "REQUESTER"                    # Requester (Developer) - Raise Requests
@@ -337,6 +339,27 @@ def validate_environment_promotion(environment: str, target_promotion_environmen
             f"Target Promotion Environment ('{target_promotion_environment}') must be later than "
             f"Deployment Environment ('{environment}') in the pipeline "
             f"{' -> '.join(ENVIRONMENT_PIPELINE_ORDER)}."
+        )
+
+
+def validate_target_release_date(target_release_date) -> None:
+    """Raises ValueError if `target_release_date` is in the past. The wizard
+    (QARequests/steps/DetailsStep.tsx) already sets a `min` of today on its
+    own date input, but that's an HTML attribute only -- easily bypassed by a
+    direct API call, and Functional.tsx's own Edit Details modal (the only
+    other place this field can be changed, once the QA Request gateway itself
+    has left Draft) never had a `min` at all. Enforced here instead so every
+    write path is covered the same way validate_environment_promotion covers
+    Deployment/Target Promotion Environment. Callers (see
+    routers/qa_requests.py::create_request/edit_request and
+    routers/functional.py::update_functional -- the only 3 write paths for
+    this field) are expected to catch ValueError and re-raise as a 400
+    HTTPException. Silently passes on None (field left blank)."""
+    if target_release_date is None:
+        return
+    if target_release_date < datetime.date.today():
+        raise ValueError(
+            f"Target Release Date ('{target_release_date.isoformat()}') cannot be in the past."
         )
 
 # ---- Module 4/5: SAST / DAST ----

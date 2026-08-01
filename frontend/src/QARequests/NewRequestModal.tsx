@@ -153,25 +153,25 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
     }
     const detailsErr = detailsStepError(form)
     if (detailsErr) {
-      setError(detailsErr)
+      setError(new Error(detailsErr))
       goToStep('details')
       return
     }
     const typeErr = typeStepError(form)
     if (typeErr) {
-      setError(typeErr)
+      setError(new Error(typeErr))
       goToStep('type')
       return
     }
     const sastErr = sastStepError(form, existingSast)
     if (sastErr) {
-      setError(sastErr)
+      setError(new Error(sastErr))
       goToStep('sast')
       return
     }
     const dastErr = dastStepError(form, existingDast)
     if (dastErr) {
-      setError(dastErr)
+      setError(new Error(dastErr))
       goToStep('dast')
       return
     }
@@ -230,21 +230,33 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
   const isFirstStep = stepIndex === 0
 
   function goNext() {
+    // Every *StepError() below returns a plain string, and validation.ts's
+    // messages are fixed literals -- so hitting the same unmet requirement
+    // twice in a row (e.g. clicking Next again without having actually fixed
+    // it) produces a string that's === to the error already sitting in
+    // state. React's setState bails out of re-rendering entirely when the
+    // new value is === the current one, which meant ErrorText's popup (whose
+    // own "Close" button only clears its *local* visible state, not this
+    // component's `error`) never got a fresh `error` prop to react to --
+    // Next looked completely dead: no popup, no navigation, no feedback at
+    // all. Wrapping each message in `new Error(...)` gives every call a
+    // distinct object reference, so the state update (and re-render) always
+    // goes through, even when the underlying text is identical.
     if (step.key === 'details') {
       const err = detailsStepError(form)
-      if (err) { setError(err); return }
+      if (err) { setError(new Error(err)); return }
     }
     if (step.key === 'type') {
       const err = typeStepError(form)
-      if (err) { setError(err); return }
+      if (err) { setError(new Error(err)); return }
     }
     if (step.key === 'sast') {
       const err = sastStepError(form, existingSast)
-      if (err) { setError(err); return }
+      if (err) { setError(new Error(err)); return }
     }
     if (step.key === 'dast') {
       const err = dastStepError(form, existingDast)
-      if (err) { setError(err); return }
+      if (err) { setError(new Error(err)); return }
     }
     setError(null)
     setStepIndex((i) => i + 1)

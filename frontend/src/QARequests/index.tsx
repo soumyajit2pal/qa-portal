@@ -10,7 +10,7 @@ import {
   Table,
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
-import { GATEWAY_STATUSES, GATEWAY_STATUS_LABELS, hasRole } from "../constants";
+import { GATEWAY_STATUSES, GATEWAY_STATUS_LABELS, GATEWAY_PENDING_WITH, hasRole } from "../constants";
 import { QARequestOut, UserOut } from "../types";
 import { classificationSummary, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
@@ -151,6 +151,12 @@ export default function QARequests() {
               key: "status",
               header: "Status",
               render: (r) => <Badge status={r.status} />,
+            },
+            {
+              key: "pending_with",
+              header: "Pending With",
+              render: (r) => GATEWAY_PENDING_WITH[r.status] || "—",
+              filterValue: (r) => GATEWAY_PENDING_WITH[r.status] || "",
             },
             { key: "target_release_date", header: "Target Release" },
             {

@@ -4662,3 +4662,80 @@ endpoint.
 **No schema or backend-model change.** **Verified:** `python3 -m py_compile routers/test_repository.py` --
 clean; `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical via
 `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 115. "Pending With" column on every workflow list table (no schema or backend change)
+
+**Request:** every list table should show who currently owns the next action, not just the raw status, for
+better visibility/traceability across the app.
+
+**Frontend-only (`constants.ts`):** added one `*_PENDING_WITH: Record<string, string>` map per module --
+`GATEWAY_PENDING_WITH`, `QA_PENDING_WITH`, `SAST_DAST_PENDING_WITH`, `PERFORMANCE_PENDING_WITH`,
+`SUPPRESSION_PENDING_WITH`, `SIGNOFF_PENDING_WITH`, `TEST_CASE_PENDING_WITH` -- kept as **separate** maps
+per module rather than one merged lookup, deliberately avoiding the exact anti-pattern behind section 113's
+Badge label-collision bug (several modules reuse the same status codes for different meanings, e.g.
+Sign-off's legacy `SM_APPROVAL_PENDING`). Each map's values were derived from the actual
+`require_roles(...)`/`_require_assigned_*` gate on the router transition that moves a request *out* of that
+status -- not guessed from the status label text -- so e.g. `QA_PENDING_WITH` mirrors `dashboard.py`'s own
+`STAGE_TEAM` (already used server-side by the 3W dashboard) exactly for every status it covers, and
+`SAST_DAST_PENDING_WITH`/`PERFORMANCE_PENDING_WITH` were built the same way straight from
+`routers/sast_dast.py`/`routers/performance.py`. `DEFECT_RAISED`/`WAITING_FOR_FIX`/`DEFECT_FIX_RETEST`
+point at Requester (not QA) in every map that has them, matching `STAGE_TEAM`'s own reasoning: the actual
+fix happens on the requester/dev side even though a QA Lead/Engineer/Security Analyst clicks the button
+that logs the transition.
+
+**Frontend (8 list tables):** a new "Pending With" column added next to the existing Status column in
+`QARequests/index.tsx`, `Functional.tsx`, `SAST.tsx`, `DAST.tsx`, `Performance.tsx`, `Suppression.tsx`,
+`SignOff.tsx`, and `TestRepository.tsx`'s test case list -- each rendering `X_PENDING_WITH[row.status] ||
+'—'` with a matching `filterValue` so the existing per-column filter popover also works on it.
+`TestProjects.tsx` (Active/Inactive toggle) and `TestExecution.tsx`'s cycle/run tables were deliberately
+skipped -- neither has an approval-pending concept, so a "Pending With" column there would be "—" on every
+row and add nothing.
+
+**No schema or backend change** -- every list already returns `status` today; this is purely a frontend
+lookup added next to it. **Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime
+files).
+
+## 116. Three fixes: past Target Release Dates, Cancel confirmation, dead wizard Next button (no schema change)
+
+**1. Block a manually-entered past Target Release Date.** The wizard's own date input
+(`QARequests/steps/DetailsStep.tsx`) already had `min={today}`, but that's an HTML attribute only --
+trivially bypassed by a direct API call -- and `Functional.tsx`'s own Edit Details modal (the only other
+place this field can be changed, once the QA Request gateway itself has left Draft) never had a `min` at
+all, so a past date could be typed straight in after the request was raised. Added
+`validate_target_release_date(target_release_date)` to `constants.py`, the same pattern as the existing
+`validate_environment_promotion` -- raises `ValueError` if the date is before today, no-ops on `None`.
+Wired into all 3 backend write paths for this field: `routers/qa_requests.py::create_request` and
+`edit_request`, and `routers/functional.py::update_functional`. Also added the missing `min={today}` to
+Functional.tsx's date input, matching DetailsStep.tsx.
+
+**2. Confirmation pop-up before cancelling a QA Request.** `QARequests/RequestDetail.tsx`'s "Cancel
+Request" button called `POST /{id}/cancel` directly on click -- no confirmation, despite Cancelled being a
+terminal, unrecoverable status (see `GATEWAY_TERMINAL_STATUSES`). Now opens a `ConfirmModal` first (same
+component already used for document/folder/testcase deletion elsewhere); the actual cancel call only fires
+on "Cancel Request" inside the pop-up, and any failure is shown inside the still-open pop-up (via
+`ErrorText`) rather than silently closing it, matching the existing document-delete pop-up's own
+success-only-closes behavior.
+
+**3. Wizard's "Next" button going dead after the validation error pop-up was closed once.** Root cause: a
+genuine React footgun, not a logic bug in the validation rules themselves.
+`NewRequestModal.tsx::goNext()`/`submit()` call `setError(someString)` when a step's validation fails (e.g.
+`typeStepError` returning the fixed literal `'Select at least one Request Type.'`). `ErrorText`
+(`components/Common.tsx`) renders that error as its own pop-up modal, with an internal `visible` state that
+only responds to *reference/value* changes of the `error` prop (`useEffect(() => setVisible(Boolean(error)),
+[error])`) -- and its own "Close" button only clears that local `visible` flag, never the parent's `error`
+state. So: click Next with the same thing still missing a second time -> `typeStepError` returns the exact
+same string content again -> `setError(sameString)` is a no-op as far as React's state bailout is concerned
+(a `setState` call with a value `Object.is`-equal to the current state skips re-rendering entirely, and
+plain strings with identical content are always `===`) -> the whole component (including `ErrorText`) never
+re-renders -> no pop-up reappears, `goNext()` still `return`s before advancing the step -> Next looks
+completely unresponsive, with zero feedback. Fixed by wrapping every validation message in `new Error(...)`
+before calling `setError` in both `goNext()` and `submit()`'s safety-net checks -- a fresh `Error` object has
+a distinct reference every time even when `.message` is identical, so the state update (and the pop-up)
+never gets silently skipped again. Scoped to `NewRequestModal.tsx` only; `ErrorText` itself was left alone
+to avoid touching its ~40 other call sites across the app.
+
+**No schema or backend-model change** (item 1 adds a pure validation function, no new column). **Verified:**
+`python3 -m py_compile constants.py routers/qa_requests.py routers/functional.py` -- clean; `npx tsc
+--noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical via `diff -rq`
+(aside from the always-excluded `.env`/`uploads` runtime files).

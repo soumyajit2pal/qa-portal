@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, is_readiness_evidence_editable, validate_environment_promotion
+from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -160,6 +160,11 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
         final_target = data.get("target_promotion_environment", obj.target_promotion_environment)
         try:
             validate_environment_promotion(final_environment, final_target)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    if "target_release_date" in data:
+        try:
+            validate_target_release_date(data["target_release_date"])
         except ValueError as e:
             raise HTTPException(400, str(e))
     for k, v in data.items():

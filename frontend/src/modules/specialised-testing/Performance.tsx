@@ -12,7 +12,7 @@ import { IconCheckCircle } from '../../components/Icons'
 import {
   PRIORITIES, RISK_RATINGS, ENVIRONMENTS, PERFORMANCE_EDITABLE_STATUSES,
   PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, canManageReadinessEvidence,
-  QA_DEPARTMENT,
+  QA_DEPARTMENT, PERFORMANCE_PENDING_WITH,
 } from '../../constants'
 import { PerformanceOut, PerformanceChecklistItemOut, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
 
@@ -649,6 +649,7 @@ export default function Performance() {
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} /> },
+          { key: 'pending_with', header: 'Pending With', render: (r) => PERFORMANCE_PENDING_WITH[r.status] || '—', filterValue: (r) => PERFORMANCE_PENDING_WITH[r.status] || '' },
           { key: 'source', header: 'Source', render: (r) => (
             r.qa_request ? (
               <span className="badge badge-blue" title="Auto-created from a QA Request">Linked · {r.qa_request.request_id}</span>

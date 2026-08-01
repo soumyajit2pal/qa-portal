@@ -19,7 +19,7 @@ from ..constants import (
     Role, DEFAULT_CHECKLIST_ITEMS, DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
     DEFAULT_SAST_CHECKLIST_ITEMS, DEFAULT_DAST_CHECKLIST_ITEMS,
     FUNCTIONAL_BUCKET_TYPES, GatewayStatus, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
-    validate_environment_promotion,
+    validate_environment_promotion, validate_target_release_date,
 )
 from ..pdf_export import build_request_detail_pdf
 
@@ -527,6 +527,7 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # alone doesn't stop a stale/tampered request, so it's enforced here too.
     try:
         validate_environment_promotion(data.get("environment"), data.get("target_promotion_environment"))
+        validate_target_release_date(data.get("target_release_date"))
     except ValueError as e:
         raise HTTPException(400, str(e))
     obj = models.QARequest(
@@ -608,6 +609,7 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     final_target = data.get("target_promotion_environment", obj.target_promotion_environment)
     try:
         validate_environment_promotion(final_environment, final_target)
+        validate_target_release_date(data.get("target_release_date", obj.target_release_date))
     except ValueError as e:
         raise HTTPException(400, str(e))
     for k, v in data.items():

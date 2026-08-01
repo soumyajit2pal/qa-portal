@@ -31,6 +31,7 @@ import { classificationSummary, linkedSections, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
 import { AddDocuments } from "./AddDocuments";
 import JiraActivity from "../components/JiraActivity";
+import ConfirmModal from "../components/ConfirmModal";
 
 interface RequestDetailProps {
   req: QARequestOut;
@@ -66,6 +67,10 @@ export function RequestDetail({
   const [raisedNotice, setRaisedNotice] = useState<QARequestOut | null>(null);
   const [pendingDeleteDoc, setPendingDeleteDoc] = useState<QARequestDocumentOut | null>(null);
   const [deleteDocBusy, setDeleteDocBusy] = useState(false);
+  // Cancelling is destructive/irreversible (see GATEWAY_TERMINAL_STATUSES --
+  // Cancelled has no way back), so it's now gated behind a confirmation
+  // pop-up instead of firing straight off the button click.
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -414,7 +419,7 @@ export function RequestDetail({
                 <button
                   className="btn btn-danger btn-sm"
                   disabled={!!busyAction}
-                  onClick={() => act("cancel")}
+                  onClick={() => setConfirmCancel(true)}
                 >
                   Cancel Request
                 </button>
@@ -542,6 +547,47 @@ export function RequestDetail({
             onChanged(updated);
             load();
             if (updated.status === "DRAFT") setDraftNotice(true);
+          }}
+        />
+      )}
+
+      {confirmCancel && (
+        <ConfirmModal
+          title="Cancel this QA Request?"
+          message={
+            <div style={{ fontSize: 13.5 }}>
+              <p style={{ margin: 0 }}>
+                Cancel <strong>{req.request_id}</strong>? This cannot be
+                undone — a cancelled request cannot be resubmitted or
+                reopened.
+              </p>
+              <ErrorText error={error} />
+            </div>
+          }
+          confirmLabel={busyAction === "cancel" ? "Cancelling..." : "Cancel Request"}
+          cancelLabel="Keep Request"
+          destructive
+          busy={busyAction === "cancel"}
+          onConfirm={async () => {
+            setError(null);
+            setBusyAction("cancel");
+            try {
+              const updated = await api.post<QARequestOut>(
+                `/api/qa-requests/${req.id}/cancel`,
+                {}
+              );
+              onChanged(updated);
+              load();
+              setConfirmCancel(false);
+            } catch (err) {
+              setError(err);
+            } finally {
+              setBusyAction(null);
+            }
+          }}
+          onCancel={() => {
+            setConfirmCancel(false);
+            setError(null);
           }}
         />
       )}

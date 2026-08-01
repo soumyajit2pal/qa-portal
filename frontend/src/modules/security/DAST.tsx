@@ -7,7 +7,7 @@ import { ApplicationNameBanner } from '../../components/ApplicationNameBanner'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_STATUS_LABELS, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
+import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
 import { DASTOut, DASTTargetOut, ChecklistItemOut, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -796,6 +796,7 @@ export default function DAST() {
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} /> },
+          { key: 'pending_with', header: 'Pending With', render: (r) => SAST_DAST_PENDING_WITH[r.status] || '—', filterValue: (r) => SAST_DAST_PENDING_WITH[r.status] || '' },
           { key: 'findings', header: 'Findings', render: (r) => r.findings.length, filterValue: (r) => String(r.findings.length) },
           { key: 'source', header: 'Source', render: (r) => (
             r.qa_request ? (

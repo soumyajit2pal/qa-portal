@@ -75,6 +75,16 @@ export const GATEWAY_STATUS_LABELS: Record<string, string> = {
 export const GATEWAY_EDITABLE_STATUSES: string[] = ['DRAFT']
 export const GATEWAY_TERMINAL_STATUSES: string[] = ['RAISED', 'CANCELLED']
 export const GATEWAY_CANCELLABLE_STATUSES: string[] = ['DRAFT']
+// "Pending With" -- who needs to act next, for the list table column of the
+// same name. The gateway itself has no approval chain of its own (Draft ->
+// Submitted -> Raised happens in one step -- see routers/qa_requests.py); once
+// Raised, the real workflow lives on the linked Functional/SAST/DAST/
+// Performance request(s), so this deliberately points there rather than
+// naming a role that has nothing further to do on the gateway record itself.
+export const GATEWAY_PENDING_WITH: Record<string, string> = {
+  DRAFT: 'Requester', SUBMITTED: 'Requester',
+  RAISED: 'See linked requests', CANCELLED: '—',
+}
 
 // Every one of these request types auto-raises its own independent linked
 // request (own unique ID, own Draft -> SM -> ... lifecycle) from the QA
@@ -119,6 +129,29 @@ export const QA_STATUS_LABELS: Record<string, string> = {
   WAITING_FOR_FIX: 'Waiting For Fix', RETESTING: 'Retesting', REGRESSION_TESTING: 'Regression Testing',
   QA_COMPLETED: 'QA Completed', QA_SIGNOFF_PENDING: 'QA Sign-off Pending', QA_SIGNED_OFF: 'QA Signed Off',
   REQUESTER_VERIFICATION: 'Requester Verification', CLOSED: 'Closed', CANCELLED: 'Cancelled',
+}
+
+// "Pending With" -- who needs to act next, for the list table column of the
+// same name. Mirrors dashboard.py's own STAGE_TEAM (backend, used by the 3W
+// dashboard) exactly for every status it covers; DRAFT/CLOSED/CANCELLED/
+// SM_REJECTED/DEPARTMENT_HEAD_REJECTED are added here since STAGE_TEAM only
+// covers "in flight" statuses. "QA" (not "QA Lead") for the actual
+// design/execution stages matches STAGE_TEAM's own team names -- see that
+// map's comments for why DEFECT_RAISED/WAITING_FOR_FIX point at Requester
+// even though a QA Lead/Engineer clicks the button that logs them.
+export const QA_PENDING_WITH: Record<string, string> = {
+  DRAFT: 'Requester', SUBMITTED: 'SM',
+  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: '—',
+  DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head',
+  RETURNED_BY_DEPARTMENT_HEAD: 'Requester', DEPARTMENT_HEAD_REJECTED: '—',
+  QA_LEAD_ASSIGNED: 'QA Lead', READINESS_VERIFICATION: 'QA Lead', RETURNED_BY_QA_LEAD: 'Requester',
+  QA_ACTIVITY_INITIATED: 'QA Lead', PLANNING: 'QA Lead',
+  TESTER_ASSIGNED: 'QA', TEST_DESIGN: 'QA', EXECUTION_IN_PROGRESS: 'QA',
+  DEFECT_RAISED: 'Requester', WAITING_FOR_FIX: 'Requester',
+  RETESTING: 'QA', REGRESSION_TESTING: 'QA',
+  QA_COMPLETED: 'QA Lead', QA_SIGNOFF_PENDING: 'QA Lead',
+  QA_SIGNED_OFF: 'Requester', REQUESTER_VERIFICATION: 'Requester',
+  CLOSED: '—', CANCELLED: '—',
 }
 
 // Statuses from which the Functional Testing Request's own descriptive
@@ -232,6 +265,31 @@ export const SAST_DAST_STATUS_LABELS: Record<string, string> = {
 // Who may edit at each of these is further scoped in SAST.tsx/DAST.tsx
 // (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are that stage's
 // own reviewer only, not the requester -- see canEditDetails there).
+// "Pending With" -- who needs to act next, for the list table column of the
+// same name. Derived directly from each transition's require_roles() gate in
+// routers/sast_dast.py (not guessed from the label text): SM/Department Head
+// decide their own checkpoints; QA Lead runs Security Readiness through
+// assigning a Security Analyst (SECURITY_LEAD_ASSIGNED/SECURITY_READINESS/
+// PLANNING); the assigned Security Analyst owns everything from Configuration
+// through Report Ready (_require_assigned_security_analyst gates all of
+// those). WAITING_FOR_FIX points at Requester -- same reasoning as QA_PENDING_WITH's
+// DEFECT_RAISED/WAITING_FOR_FIX -- even though a security analyst/admin may
+// also click "Mark Fixed".
+export const SAST_DAST_PENDING_WITH: Record<string, string> = {
+  DRAFT: 'Requester', SUBMITTED: 'SM',
+  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: '—',
+  DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head',
+  RETURNED_BY_DEPARTMENT_HEAD: 'Requester', DEPARTMENT_HEAD_REJECTED: '—',
+  SECURITY_LEAD_ASSIGNED: 'QA Lead', SECURITY_READINESS: 'QA Lead', RETURNED_BY_SECURITY_LEAD: 'Requester',
+  PLANNING: 'QA Lead',
+  CONFIGURATION: 'Security Analyst', SCANNING: 'Security Analyst',
+  FINDING_VALIDATION: 'Security Analyst', REMEDIATION: 'Security Analyst',
+  ASSIGNED_TO_REQUESTER: 'Requester', WAITING_FOR_FIX: 'Requester',
+  ASSIGNED_TO_LEAD: 'Security Analyst', RESCAN: 'Security Analyst',
+  SECURITY_COMPLETE: 'Security Analyst', REPORT_READY: 'Security Analyst',
+  CLOSED: '—',
+}
+
 export const SAST_DAST_EDITABLE_STATUSES: string[] = [
   'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
   'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD',
@@ -295,6 +353,27 @@ export const PERFORMANCE_STATUS_LABELS: Record<string, string> = {
   REQUESTER_VERIFICATION: 'Requester Verification', CLOSED: 'Closed', CANCELLED: 'Cancelled',
 }
 export const PERFORMANCE_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED']
+// "Pending With" -- who needs to act next, for the list table column of the
+// same name. Derived from each transition's require_roles() gate in
+// routers/performance.py: QA Lead owns Readiness through Result Analysis/
+// Report/Sign-off; the assigned QA Lead/Engineer execution owner
+// (_require_performance_execution_owner) owns Environment Setup through Load
+// Test Execution, labeled "QA" here to match QA_PENDING_WITH's own team name
+// for the equivalent Functional stages. DEFECT_FIX_RETEST points at Requester
+// for the same reason QA_PENDING_WITH's DEFECT_RAISED does -- the actual fix
+// happens on the requester/dev side even though QA clicks "Complete".
+export const PERFORMANCE_PENDING_WITH: Record<string, string> = {
+  DRAFT: 'Requester', SUBMITTED: 'SM',
+  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: '—',
+  DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head',
+  RETURNED_BY_DEPARTMENT_HEAD: 'Requester', DEPARTMENT_HEAD_REJECTED: '—',
+  ENGINEER_ASSIGNED: 'QA Lead', RETURNED_BY_ENGINEER: 'Requester',
+  READINESS: 'QA Lead', FEASIBILITY: 'QA Lead', PLANNING: 'QA Lead',
+  ENVIRONMENT_SETUP: 'QA', SCRIPT_DEVELOPMENT: 'QA', BASELINE: 'QA', LOAD_TEST_EXECUTION: 'QA',
+  RESULT_ANALYSIS: 'QA Lead', DEFECT_FIX_RETEST: 'Requester', REPORT: 'QA Lead',
+  SIGNOFF_PENDING: 'QA Lead', SIGNED_OFF: 'Requester', REQUESTER_VERIFICATION: 'Requester',
+  CLOSED: '—', CANCELLED: '—',
+}
 // Who may edit at each of these is further scoped in Performance.tsx
 // (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are that stage's
 // own reviewer only, not the requester -- see canEditDetails there).
@@ -362,6 +441,16 @@ export const SUPPRESSION_STATUS_LABELS: Record<string, string> = {
 }
 
 export const SUPPRESSION_TERMINAL_STATUSES: string[] = ['Done', 'Rejected']
+// "Pending With" -- who needs to act next, for the list table column of the
+// same name. Derived from each transition's require_roles() gate in
+// routers/suppression.py.
+export const SUPPRESSION_PENDING_WITH: Record<string, string> = {
+  Draft: 'Requester',
+  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester',
+  DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head', RETURNED_BY_DEPARTMENT_HEAD: 'Requester',
+  SECURITY_TEAM_VERIFICATION: 'Security Analyst', RETURNED_BY_SECURITY_TEAM: 'Requester',
+  Done: '—', Rejected: '—',
+}
 
 // QASignOff's own QA Engineer -> QA Lead -> Executive COE approval chain.
 export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
@@ -382,6 +471,17 @@ export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
 }
 export const SIGNOFF_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE']
 export const SIGNOFF_TERMINAL_STATUSES: string[] = ['ISSUED', 'SM_REJECTED', 'DEPT_HEAD_COE_REJECTED']
+// "Pending With" -- who needs to act next, for the list table column of the
+// same name. Derived from each transition's require_roles() gate in
+// routers/signoff.py -- "Tester" (not "Requester") for the originator here,
+// since that role is QA_ENGINEER, matching the "Tester -> QA Lead -> Executive
+// COE" chain this workflow was built around.
+export const SIGNOFF_PENDING_WITH: Record<string, string> = {
+  DRAFT: 'Tester', SUBMITTED: 'QA Lead',
+  SM_APPROVAL_PENDING: 'QA Lead', RETURNED_BY_SM: 'Tester', SM_REJECTED: '—',
+  DEPT_HEAD_COE_APPROVAL_PENDING: 'Executive COE', RETURNED_BY_DEPT_HEAD_COE: 'Tester', DEPT_HEAD_COE_REJECTED: '—',
+  ISSUED: '—',
+}
 
 // Admin section: account authentication type (must mirror backend LoginType).
 export const LOGIN_TYPES: string[] = ['STANDARD', 'LDAP']
@@ -466,6 +566,13 @@ export const TEST_CASE_STATUS_LABELS: Record<string, string> = {
   Draft: 'Pending QA Lead Review',
   Active: 'Approved',
   Deprecated: 'Deprecated',
+}
+// "Pending With" -- who needs to act next, for the Test Repository list
+// table's column of the same name. A testcase's only checkpoint is QA Lead
+// verification (see TestRepository.tsx's review/bulk-approve flow); Active/
+// Deprecated have nothing further pending.
+export const TEST_CASE_PENDING_WITH: Record<string, string> = {
+  Draft: 'QA Lead', Active: '—', Deprecated: '—',
 }
 export const TEST_CASE_PRIORITIES: string[] = PRIORITIES
 export const TEST_CYCLE_STATUSES: string[] = ['Not Started', 'In Progress', 'Completed']

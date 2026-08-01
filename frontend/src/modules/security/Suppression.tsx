@@ -5,7 +5,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
+import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
 import { SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -533,6 +533,7 @@ export default function Suppression() {
               <Badge status={r.status} /> <span className="muted small">{SUPPRESSION_STATUS_LABELS[r.status] || ''}</span>
             </>
           ), filterValue: (r) => `${r.status} ${SUPPRESSION_STATUS_LABELS[r.status] || ''}` },
+          { key: 'pending_with', header: 'Pending With', render: (r) => SUPPRESSION_PENDING_WITH[r.status] || '—', filterValue: (r) => SUPPRESSION_PENDING_WITH[r.status] || '' },
         ]} rows={rows} />
       </Card>
       {showNew && <NewSuppressionModal onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load() }} />}

@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
-import { hasRole, TEST_CASE_TYPES, TEST_CASE_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PRIORITIES } from '../../constants'
+import { hasRole, TEST_CASE_TYPES, TEST_CASE_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES } from '../../constants'
 import { TestProjectOut, TestFolderOut, TestCaseOut, TestStepIn, TestCaseImportResult, ApprovalActionOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
@@ -914,6 +914,7 @@ export default function TestRepository() {
                 { key: 'test_type', header: 'Type', render: (c) => c.test_type || '—' },
                 { key: 'priority', header: 'Priority', render: (c) => c.priority ? <Badge status={c.priority} /> : '—' },
                 { key: 'status', header: 'Workflow Status', render: (c) => <Badge status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />, filterValue: (c) => TEST_CASE_STATUS_LABELS[c.status] || c.status },
+                { key: 'pending_with', header: 'Pending With', render: (c) => TEST_CASE_PENDING_WITH[c.status] || '—', filterValue: (c) => TEST_CASE_PENDING_WITH[c.status] || '' },
                 { key: 'steps', header: 'Steps', render: (c) => c.steps.length, filterable: false },
               ]}
               rows={visibleCases}
