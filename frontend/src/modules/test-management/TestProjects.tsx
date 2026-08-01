@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
+import { Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import { hasRole } from '../../constants'
-import { ApplicationMasterOut, TestProjectOut } from '../../types'
+import { ApplicationMasterOut, TestProjectOut, TestCaseOut, TestCycleOut, ApprovalActionOut } from '../../types'
+import JiraActivity from '../../components/JiraActivity'
 
 // Project Management module -- one Test Project per Application, by
 // explicit product decision (reuses the existing Application Name Master
@@ -80,53 +82,152 @@ function NewProjectModal({ applications, onClose, onCreated }: {
 }
 
 export default function TestProjects() {
+  const navigate = useNavigate()
   const { user } = useAuth()
   const canManage = hasRole(user, ...CAN_MANAGE_ROLES)
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [applications, setApplications] = useState<ApplicationMasterOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [showNew, setShowNew] = useState(false)
+  const [summaries, setSummaries] = useState<Record<number, { cases: number; cycles: number }>>({})
+  const [activityProject, setActivityProject] = useState<TestProjectOut | null>(null)
+  const [activity, setActivity] = useState<ApprovalActionOut[]>([])
+  const [statusProject, setStatusProject] = useState<TestProjectOut | null>(null)
+  const [statusBusy, setStatusBusy] = useState(false)
+  const [projectFilter, setProjectFilter] = useState<'active' | 'inactive' | 'all'>('active')
+
+  async function openActivity(project: TestProjectOut) {
+    setActivityProject(project)
+    try { setActivity(await api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_PROJECT&entity_id=${project.id}`)) }
+    catch (err) { setError(err); setActivity([]) }
+  }
 
   const load = useCallback(async () => {
     try {
       const [p, a] = await Promise.all([
-        api.get<TestProjectOut[]>('/api/test-projects'),
+        api.get<TestProjectOut[]>('/api/test-projects?include_inactive=true'),
         api.get<ApplicationMasterOut[]>('/api/application-names'),
       ])
       setProjects(p); setApplications(a)
+      const stats = await Promise.all(p.map(async (project) => {
+        const [cases, cycles] = await Promise.all([
+          api.get<TestCaseOut[]>(`/api/test-repository/projects/${project.id}/test-cases`),
+          api.get<TestCycleOut[]>(`/api/test-execution/projects/${project.id}/cycles`),
+        ])
+        return [project.id, { cases: cases.length, cycles: cycles.length }] as const
+      }))
+      setSummaries(Object.fromEntries(stats))
     } catch (err) { setError(err) }
   }, [])
   useEffect(() => { load() }, [load])
 
+  const activeCount = projects.filter((project) => project.is_active).length
+  const inactiveCount = projects.length - activeCount
+  const visibleProjects = projects.filter((project) => (
+    projectFilter === 'all' || (projectFilter === 'active' ? project.is_active : !project.is_active)
+  ))
+
+  async function changeProjectStatus() {
+    if (!statusProject) return
+    setStatusBusy(true)
+    setError(null)
+    try {
+      const updated = await api.patch<TestProjectOut>(`/api/test-projects/${statusProject.id}`, {
+        is_active: !statusProject.is_active,
+      })
+      setProjects((rows) => rows.map((project) => project.id === updated.id ? updated : project))
+      setStatusProject(null)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setStatusBusy(false)
+    }
+  }
+
   return (
-    <div>
+    <div className="tm-page">
       <ErrorText error={error} />
       <PageHeader
-        title="Test Projects" count={projects.length}
-        subtitle="Project Management -- one Project per Application. Test Repository and Test Execution both start here."
+        title="Projects" count={visibleProjects.length}
+        subtitle="Plan testing work, organize reusable test assets, and monitor execution from one project workspace."
         actions={canManage && (
           <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Project</button>
         )}
       />
-      <Card>
-        <Table
-          rowKey="id"
-          columns={[
-            { key: 'project_key', header: 'Project Key' },
-            { key: 'name', header: 'Name' },
-            { key: 'department', header: 'Department', render: (p) => p.department || '—' },
-            { key: 'is_active', header: 'Status', render: (p) => <Badge status={p.is_active ? 'Active' : 'Deprecated'} /> },
-            { key: 'created_at', header: 'Created', render: (p) => new Date(p.created_at).toLocaleString() },
-          ]}
-          rows={projects}
-        />
-      </Card>
+      <div className="toolbar" style={{ marginBottom: 14 }}>
+        <div className="pill-tabs" aria-label="Filter projects by status">
+          <button className={projectFilter === 'active' ? 'active' : ''} onClick={() => setProjectFilter('active')}>
+            Active <span>{activeCount}</span>
+          </button>
+          <button className={projectFilter === 'inactive' ? 'active' : ''} onClick={() => setProjectFilter('inactive')}>
+            Inactive <span>{inactiveCount}</span>
+          </button>
+          <button className={projectFilter === 'all' ? 'active' : ''} onClick={() => setProjectFilter('all')}>
+            All <span>{projects.length}</span>
+          </button>
+        </div>
+      </div>
+      <div className="tm-project-grid">
+        {visibleProjects.map((project) => (
+          <article className="tm-project-card" key={project.id}>
+            <div className="tm-project-card-head"><span className="tm-project-key">{project.project_key}</span><Badge status={project.is_active ? 'Active' : 'Inactive'} /></div>
+            <h3>{project.name}</h3>
+            <p>{project.description || 'Test planning and execution workspace for this application.'}</p>
+            <div className="tm-project-stats">
+              <div><strong>{summaries[project.id]?.cases ?? '—'}</strong><span>Test cases</span></div>
+              <div><strong>{summaries[project.id]?.cycles ?? '—'}</strong><span>Test cycles</span></div>
+              <div><strong>{project.department || '—'}</strong><span>Department</span></div>
+            </div>
+            <div className="tm-project-actions">
+              <button onClick={() => navigate(`/test-repository?project=${project.id}`)}>Open repository</button>
+              <button onClick={() => navigate(`/test-execution?project=${project.id}`)}>View execution</button>
+              <button onClick={() => openActivity(project)}>Activity</button>
+              {canManage && (
+                <button className={project.is_active ? 'danger' : ''} onClick={() => setStatusProject(project)}>
+                  {project.is_active ? 'Deactivate' : 'Reactivate'}
+                </button>
+              )}
+            </div>
+          </article>
+        ))}
+        {visibleProjects.length === 0 && (
+          <div className="tm-empty">
+            <strong>{projectFilter === 'inactive' ? 'No inactive projects' : projectFilter === 'active' ? 'No active projects' : 'No projects yet'}</strong>
+            <span>{projectFilter === 'inactive' ? 'Deactivated projects will appear here.' : 'Create or reactivate a project to begin organizing test cases and execution cycles.'}</span>
+          </div>
+        )}
+      </div>
       {showNew && (
         <NewProjectModal
           applications={applications}
           onClose={() => setShowNew(false)}
           onCreated={(p) => { setProjects((prev) => [p, ...prev]); setShowNew(false) }}
         />
+      )}
+      {activityProject && (
+        <Modal title={`${activityProject.project_key} · Activity`} onClose={() => setActivityProject(null)} wide>
+          <JiraActivity entityType="TEST_PROJECT" entityId={activityProject.id} items={activity} onPosted={(item) => setActivity((prev) => [...prev, item])} />
+        </Modal>
+      )}
+      {statusProject && (
+        <Modal
+          title={statusProject.is_active ? 'Deactivate project?' : 'Reactivate project?'}
+          onClose={() => setStatusProject(null)}
+          variant="dialog"
+          preventBackdropClose
+        >
+          <p>
+            {statusProject.is_active
+              ? `Deactivate ${statusProject.project_key} · ${statusProject.name}? Existing folders, test cases, cycles, executions, and activity will be retained, but no new test work can be added.`
+              : `Reactivate ${statusProject.project_key} · ${statusProject.name} so it can be used for new repository and execution work again?`}
+          </p>
+          <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
+            <button className={statusProject.is_active ? 'btn btn-danger' : 'btn btn-primary'} disabled={statusBusy} onClick={changeProjectStatus}>
+              {statusBusy ? 'Updating…' : statusProject.is_active ? 'Deactivate' : 'Reactivate'}
+            </button>
+            <button className="btn" disabled={statusBusy} onClick={() => setStatusProject(null)}>Cancel</button>
+          </div>
+        </Modal>
       )}
     </div>
   )

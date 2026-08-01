@@ -9,22 +9,18 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus
+from ..deps import get_current_user, require_roles
+from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, QA_DEPARTMENT
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
 router = APIRouter(prefix="/api/signoffs", tags=["signoff"])
 
 # ---------------------------------------------------------------------------
-# Module 8: QA Sign-off Certificate lifecycle -- Draft (Tester/QA Lead fills
-# in the certificate) -> Submit -> SM Approval (SM reviews, may edit details
-# directly) -> Department Head COE Approval -> Issued. Mirrors the same
-# Requester -> SM -> Department Head shape used everywhere else in the app
-# (Functional/SAST/DAST/Performance/Suppression), just with
-# "Department Head COE" standing in for the business-side Department Head and
-# no QA-side stages after it -- Department Head COE's own approval IS the
-# final sign-off now, replacing the old QA-Lead-only "Sign & Issue" step.
+# Module 8: QA Sign-off Certificate lifecycle -- Draft (QA Engineer fills
+# in the certificate) -> QA Lead Approval -> Executive COE Approval -> Issued.
+# The linked application may belong to any department, but this certificate
+# workflow is owned entirely by IT - QA.
 # ---------------------------------------------------------------------------
 
 
@@ -50,13 +46,13 @@ def _get_or_404(db: Session, signoff_id: int) -> "models.QASignOff":
 
 
 def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", current_user: models.User):
-    """Reported bug: a certificate reaching ISSUED (Department Head COE's
-    final approval) never moved the linked Functional Testing Request off
+    """A certificate reaching ISSUED after Executive COE final approval
+    previously never moved the linked Functional Testing Request off
     "QA Sign-off Pending" -- that hop only ever happened via a separate,
     manual "Confirm Sign-off" button (routers/functional.py::confirm_signoff)
     that a QA Lead had to remember to click themselves, and which didn't even
     check that the certificate was actually Issued before letting them.
-    Since the certificate's own Tester -> SM -> Department Head COE approval
+    Since the certificate's own QA Engineer -> QA Lead -> Executive COE approval
     chain already fully covers "is this sign-off actually approved", that
     separate manual step is redundant and easy to forget -- so this now
     syncs automatically the moment the certificate is Issued, and the
@@ -71,7 +67,7 @@ def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", curren
         db.add(models.ApprovalAction(
             entity_type="FUNCTIONAL_REQUEST", entity_id=fr.id, step_name="QA Sign-off",
             actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Signed Off",
-            comments=f"Certificate {obj.certificate_id} issued by Department Head COE",
+            comments=f"Certificate {obj.certificate_id} issued by Executive COE",
         ))
         fr.status = QAStatus.REQUESTER_VERIFICATION
         db.add(models.ApprovalAction(
@@ -81,19 +77,15 @@ def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", curren
         ))
 
 
-def _requester_department(db: Session, obj: "models.QASignOff"):
-    """Confirmed: "Sign off form raised by QA team, so it should be approved
-    by QA team only" -- Department Head COE approval matches against the
-    certificate's own REQUESTER's department (the Tester/QA Lead who raised
-    it -- always someone on the QA team), not `obj.department` (the
-    delegated business department of the underlying Functional Testing
-    Request, e.g. "Digital Banking Department (DBD)" -- that field is what
-    the SM step matches against instead, since SM is the genuine business-
-    side reviewer). Using the requester's own department rather than
-    hardcoding the literal string "QA Team" keeps this correct even if the
-    QA team's department is ever renamed or split in Admin > Departments."""
-    requester = db.query(models.User).get(obj.requester_id) if obj.requester_id else None
-    return requester.department if requester else None
+def _require_qa_department(user: models.User) -> None:
+    if user.has_role(Role.ADMIN):
+        return
+    if user.department != QA_DEPARTMENT:
+        raise HTTPException(
+            403,
+            f"QA Sign-off is restricted to the '{QA_DEPARTMENT}' department. "
+            f"Your profile is mapped to '{user.department or 'no department'}'.",
+        )
 
 
 @router.get("", response_model=List[schemas.SignOffOut])
@@ -108,10 +100,14 @@ def get_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: mo
 
 @router.post("", response_model=schemas.SignOffOut)
 def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db),
-                    current_user: models.User = Depends(require_roles(Role.QA_ENGINEER, Role.QA_LEAD))):
-    """Raised by the Tester (QA Engineer) who executed testing, or the QA
-    Lead -- starts life as a Draft they can keep editing until Submit."""
-    obj = models.QASignOff(**payload.model_dump(), status="DRAFT", requester_id=current_user.id)
+                    current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
+    """Raised by the QA Engineer who executed testing; starts as a Draft."""
+    _require_qa_department(current_user)
+    data = payload.model_dump()
+    # Never trust the linked business request's department for approval
+    # routing: the sign-off certificate is an IT - QA-owned record.
+    data["department"] = QA_DEPARTMENT
+    obj = models.QASignOff(**data, status="DRAFT", requester_id=current_user.id)
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -124,31 +120,30 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
 @router.put("/{signoff_id}", response_model=schemas.SignOffOut)
 def update_signoff(signoff_id: int, payload: schemas.SignOffUpdate, db: Session = Depends(get_db),
                     current_user: models.User = Depends(get_current_user)):
-    """Two different actors, two different windows: the Tester (requester)
+    """Two different actors, two different windows: the QA requester
     can edit while the certificate is DRAFT or sitting back with them after
-    an SM/Department Head COE return; an SM can additionally edit it
-    directly while it's sitting at their OWN SM_APPROVAL_PENDING review --
-    "he will have option to modify details" -- rather than having to Return
-    it to the Tester first just to fix something minor. Department Head COE
+    a QA Lead/Executive COE return; a QA Lead can additionally edit it
+    directly while it's sitting at their approval checkpoint rather than
+    returning it first just to fix something minor. Executive COE
     gets no edit window; their only actions are Approve/Return/Reject."""
     obj = _get_or_404(db, signoff_id)
     is_own = obj.requester_id == current_user.id
     is_admin = current_user.has_role(Role.ADMIN)
-    is_sm = current_user.has_role(Role.SM)
+    is_qa_lead = current_user.has_role(Role.QA_LEAD)
 
-    # Checked in this order deliberately: the SM-reviewing-right-now window
+    # Checked in this order deliberately: the QA-Lead-reviewing-right-now window
     # is checked first so a user who happens to be both the original
-    # requester AND holds the SM role isn't wrongly blocked by the
+    # requester AND holds the QA Lead role isn't wrongly blocked by the
     # requester's own (narrower) editable-status gate below.
-    if is_sm and obj.status == "SM_APPROVAL_PENDING":
-        require_same_department(current_user, obj.department)
+    if is_qa_lead and obj.status == "SM_APPROVAL_PENDING":
+        _require_qa_department(current_user)
     elif is_admin:
         pass  # admin bypasses the status gate, same convention as every other module
     elif is_own:
         if obj.status not in SIGNOFF_EDITABLE_STATUSES:
             raise HTTPException(400, f"Certificate cannot be edited while in status '{obj.status}'")
     else:
-        raise HTTPException(403, "Only the requester, an SM (during their own review), or an admin can edit this certificate")
+        raise HTTPException(403, "Only the requester, a QA Lead during approval, or an admin can edit this certificate")
 
     data = payload.model_dump(exclude_unset=True)
     for k, v in data.items():
@@ -167,7 +162,7 @@ def submit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     obj.status = "SUBMITTED"
     _log(db, obj.id, "Requester", current_user, "Submitted", None)
     obj.status = "SM_APPROVAL_PENDING"
-    _log(db, obj.id, "SM Approval", current_user, "Pending", "Awaiting SM decision")
+    _log(db, obj.id, "QA Lead Approval", current_user, "Pending", "Awaiting QA Lead decision")
     db.commit()
     db.refresh(obj)
     return obj
@@ -175,34 +170,32 @@ def submit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
 
 @router.post("/{signoff_id}/resubmit", response_model=schemas.SignOffOut)
 def resubmit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """Re-submits a certificate returned by SM or Department Head COE. A
-    return from Department Head COE goes straight back to their own queue
-    (SM already approved it once) -- same "direct return skips back through
-    SM" pattern as every other module's Department-Head-level return."""
+    """Re-submits a certificate returned by QA Lead or Executive COE. A
+    return from Executive COE goes straight back to their own queue
+    (QA Lead already approved it once) -- the direct return goes back to
+    Executive COE rather than repeating QA Lead approval."""
     obj = _get_or_404(db, signoff_id)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this certificate")
     _require(obj, ["RETURNED_BY_SM", "RETURNED_BY_DEPT_HEAD_COE"], "Resubmit")
     if obj.status == "RETURNED_BY_SM":
         obj.status = "SM_APPROVAL_PENDING"
-        _log(db, obj.id, "SM Approval", current_user, "Resubmitted", "Returned certificate re-submitted")
+        _log(db, obj.id, "QA Lead Approval", current_user, "Resubmitted", "Returned certificate re-submitted")
     else:
         obj.status = "DEPT_HEAD_COE_APPROVAL_PENDING"
-        _log(db, obj.id, "Department Head COE Approval", current_user, "Resubmitted", "Returned certificate re-submitted")
+        _log(db, obj.id, "Executive COE Approval", current_user, "Resubmitted", "Returned certificate re-submitted")
     db.commit()
     db.refresh(obj)
     return obj
 
 
-@router.post("/{signoff_id}/sm-decision", response_model=schemas.SignOffOut)
-def sm_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
-                current_user: models.User = Depends(require_roles(Role.SM))):
-    """Checkpoint between the Tester's submission and Department Head COE
-    approval -- the SM may also have directly edited the certificate's
-    details just before deciding (see update_signoff)."""
+@router.post("/{signoff_id}/qa-lead-decision", response_model=schemas.SignOffOut)
+def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
+                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+    """QA Lead approval checkpoint before Executive COE final approval."""
     obj = _get_or_404(db, signoff_id)
-    require_same_department(current_user, obj.department)
-    _require(obj, "SM_APPROVAL_PENDING", "SM decision")
+    _require_qa_department(current_user)
+    _require(obj, "SM_APPROVAL_PENDING", "QA Lead decision")
     if payload.decision == "Approved":
         obj.status = "DEPT_HEAD_COE_APPROVAL_PENDING"
         obj.reviewed_by_id = current_user.id
@@ -212,33 +205,20 @@ def sm_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session 
         obj.status = "SM_REJECTED"
     else:
         raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
-    _log(db, obj.id, "SM Approval", current_user, payload.decision, payload.comments)
+    _log(db, obj.id, "QA Lead Approval", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)
     return obj
 
 
-@router.post("/{signoff_id}/department-head-coe-decision", response_model=schemas.SignOffOut)
-def department_head_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_COE))):
-    """Final approval -- Approved issues the certificate outright (no further
-    QA-Lead sign step; this replaces the old /issue endpoint).
-
-    Department mapping IS required here, same as SM/Department Head --
-    confirmed explicitly: "Sign off form raised by QA team, so it should be
-    approved by QA team only." The certificate's own REQUESTER (the Tester/
-    QA Lead who raised it) is always someone on the QA team -- so this
-    matches against *their* department (see _requester_department above),
-    not `obj.department` (the delegated business department of the
-    underlying Functional Testing Request, e.g. "Digital Banking Department
-    (DBD)" -- that's what the SM step matches against instead, a couple of
-    lines up, since SM genuinely is the business-side reviewer). Matching
-    against `obj.department` here (an earlier revision's mistake, since
-    corrected) would have compared the Executive COE's own department
-    against the wrong side of the workflow entirely and could never pass."""
+@router.post("/{signoff_id}/department-head-coe-decision", response_model=schemas.SignOffOut, include_in_schema=False)
+@router.post("/{signoff_id}/executive-coe-decision", response_model=schemas.SignOffOut)
+def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
+                           current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_COE))):
+    """Final IT - QA approval by Executive COE; approval issues the certificate."""
     obj = _get_or_404(db, signoff_id)
-    require_same_department(current_user, _requester_department(db, obj))
-    _require(obj, "DEPT_HEAD_COE_APPROVAL_PENDING", "Department Head COE decision")
+    _require_qa_department(current_user)
+    _require(obj, "DEPT_HEAD_COE_APPROVAL_PENDING", "Executive COE decision")
     if payload.decision == "Approved":
         obj.status = "ISSUED"
         obj.approved_by_id = current_user.id
@@ -249,7 +229,7 @@ def department_head_coe_decision(signoff_id: int, payload: schemas.WorkflowDecis
         obj.status = "DEPT_HEAD_COE_REJECTED"
     else:
         raise HTTPException(400, "decision must be one of: Approved, Returned, Rejected")
-    _log(db, obj.id, "Department Head COE Approval", current_user, payload.decision, payload.comments)
+    _log(db, obj.id, "Executive COE Approval", current_user, payload.decision, payload.comments)
     db.commit()
     db.refresh(obj)
     return obj
@@ -304,13 +284,12 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Open Defect Summary", obj.open_defect_summary),
             ("Residual Risk Notes", obj.residual_risk_notes),
         ]),
-        # Mandatory on a fully-Issued certificate -- Requested By/Reviewed
-        # By/Approved By, one name per approval stage of the Tester -> SM ->
-        # Department Head COE chain (see models.QASignOff).
+        # Mandatory on a fully-Issued certificate -- one name per approval
+        # stage of the QA Team -> QA Lead -> Executive COE chain.
         ("Requested / Reviewed / Approved", [
-            ("Requested By (Tester)", uname(obj.requester_id)),
-            ("Reviewed By (SM)", uname(obj.reviewed_by_id)),
-            ("Approved By (Department Head COE)", uname(obj.approved_by_id)),
+            ("Requested By (QA Team)", uname(obj.requester_id)),
+            ("Approved By (QA Lead)", uname(obj.reviewed_by_id)),
+            ("Approved By (Executive COE)", uname(obj.approved_by_id)),
         ]),
     ]
 
@@ -339,24 +318,19 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
 def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.User) -> bool:
     """Reported bug: upload had no restriction at all -- any logged-in user
     could attach documents to any QA Sign-off certificate. Scoped to the
-    original requester (Tester/QA Lead who raised it, always) plus whoever
-    the certificate's *current* status is actually sitting with: SM during
-    SM_APPROVAL_PENDING (matches `obj.department`, the delegated business
-    department -- SM is a genuine business-side reviewer), or Department
-    Head COE during DEPT_HEAD_COE_APPROVAL_PENDING (matches the certificate's
-    own requester's department instead -- see _requester_department and the
-    matching comment on department_head_coe_decision -- "raised by QA team,
-    so should be approved by QA team only"). Admin always bypasses, same
-    convention as every other permission check in this file."""
+    original QA requester plus the IT - QA stage owner: QA Lead during
+    QA Lead approval (legacy status SM_APPROVAL_PENDING) or Executive COE
+    during final approval. Admin always
+    bypasses, same convention as every other permission check."""
     if user.has_role(Role.ADMIN):
         return True
     if obj.requester_id == user.id:
         return True
     status = obj.status
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.QA_LEAD) and user.department == QA_DEPARTMENT
     if status == "DEPT_HEAD_COE_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_COE) and user.department == _requester_department(db, obj)
+        return user.has_role(Role.DEPARTMENT_HEAD_COE) and user.department == QA_DEPARTMENT
     return False
 
 
@@ -372,7 +346,7 @@ def upload_signoff_documents(signoff_id: int, files: List[UploadFile] = File(...
                               current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, signoff_id)
     if not _can_upload_documents(db, obj, current_user):
-        raise HTTPException(403, "Only the requester or this certificate's current stage owner (SM or Department Head COE currently reviewing it) can upload documents")
+        raise HTTPException(403, "Only the QA requester, QA Lead, or Executive COE currently reviewing this certificate can upload documents")
     return doc_store.save_documents(db, "SIGNOFF", signoff_id, obj.certificate_id, files, current_user.id)
 
 

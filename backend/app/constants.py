@@ -102,6 +102,11 @@ SEED_DEPARTMENTS = [
 "Vigilance",
 ]
 
+# Central department that owns the QA Sign-off Certificate workflow. Its
+# linked testing request may belong to any business department, but the
+# certificate itself is raised and approved entirely inside IT - QA.
+QA_DEPARTMENT = "IT - QA"
+
 # ---- Module 1: QA Request (gateway) / Functional Testing Request ----
 REQUEST_TYPES = [
     "Functional Testing", "Sanity Testing", "Regression Testing", "UAT Support",
@@ -216,6 +221,21 @@ FUNCTIONAL_EDITABLE_STATUSES = [
     QAStatus.RETURNED_BY_QA_LEAD,
 ]
 
+# Readiness evidence is normally locked after Department Head approval. A
+# RETURNED_BY_* status is the explicit exception: the request is back with
+# the requester, who must be able to attach whatever evidence the returning
+# QA/Security/Engineering stage asked them to provide.
+READINESS_EVIDENCE_EDITABLE_STATUSES = [
+    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD",
+]
+
+
+def is_readiness_evidence_editable(status) -> bool:
+    value = status.value if hasattr(status, "value") else str(status or "")
+    return (value in READINESS_EVIDENCE_EDITABLE_STATUSES
+            or value.startswith("RETURNED_BY_"))
+
 # Terminal statuses -- no further transitions possible.
 QA_REQUEST_TERMINAL_STATUSES = [
     QAStatus.CLOSED, QAStatus.CANCELLED, QAStatus.SM_REJECTED, QAStatus.DEPARTMENT_HEAD_REJECTED,
@@ -241,7 +261,7 @@ QA_REQUEST_STATUS_LABELS = {
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING: "Department Head Approval Pending",
     QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Returned by Department Head",
     QAStatus.DEPARTMENT_HEAD_REJECTED: "Department Head Rejected",
-    QAStatus.QA_LEAD_ASSIGNED: "QA Lead Assigned",
+    QAStatus.QA_LEAD_ASSIGNED: "QA Readiness Verification Pending",
     QAStatus.READINESS_VERIFICATION: "Readiness Verification",
     QAStatus.RETURNED_BY_QA_LEAD: "Returned by QA Lead",
     QAStatus.QA_ACTIVITY_INITIATED: "QA Activity Initiated",
@@ -288,14 +308,44 @@ PRIORITIES = ["Critical", "High", "Medium", "Low"]
 RISK_RATINGS = ["Critical", "High", "Medium", "Low"]
 ENVIRONMENTS = ["Dev", "SIT", "UAT", "Pre-Production", "Production"]
 
+# Deployment Environment / Target Promotion Environment (see DetailsStep.tsx
+# and Functional.tsx's Edit Details modal, the only two places these are
+# editable) must move strictly forward along this pipeline -- reported
+# directly: e.g. picking "UAT" as the Deployment Environment must force the
+# Target Promotion Environment to be "Pre-Production" or "Production", never
+# "SIT"/"UAT" again or anything earlier. "Dev" is deliberately excluded here
+# (neither field's own dropdown ever offers it -- both already filter it out
+# client-side), so it's not part of this ordering at all.
+ENVIRONMENT_PIPELINE_ORDER = ["SIT", "UAT", "Pre-Production", "Production"]
+
+
+def validate_environment_promotion(environment: str, target_promotion_environment: str) -> None:
+    """Raises ValueError if `target_promotion_environment` is not strictly
+    later than `environment` in ENVIRONMENT_PIPELINE_ORDER. Callers (see
+    routers/qa_requests.py::create_request/edit_request and
+    routers/functional.py::update_functional -- the only 3 write paths for
+    these two fields) are expected to catch ValueError and re-raise as a 400
+    HTTPException; kept framework-agnostic here so it isn't tied to FastAPI.
+    Silently passes if either value isn't a recognised pipeline stage (e.g.
+    blank/None on a still-in-progress Draft) -- this is a business-rule
+    ordering check, not a substitute for "is this a valid environment name"
+    validation."""
+    if environment not in ENVIRONMENT_PIPELINE_ORDER or target_promotion_environment not in ENVIRONMENT_PIPELINE_ORDER:
+        return
+    if ENVIRONMENT_PIPELINE_ORDER.index(target_promotion_environment) <= ENVIRONMENT_PIPELINE_ORDER.index(environment):
+        raise ValueError(
+            f"Target Promotion Environment ('{target_promotion_environment}') must be later than "
+            f"Deployment Environment ('{environment}') in the pipeline "
+            f"{' -> '.join(ENVIRONMENT_PIPELINE_ORDER)}."
+        )
+
 # ---- Module 4/5: SAST / DAST ----
 # Independent lifecycle (identical for SAST and DAST), rebuilt with the fuller
 # named stages requested:
 #
 #   Draft -> Submit -> SM Approval -> Department Head Approval -> Security
-#   Lead Assigned (a Security Analyst is assigned, mirroring how a QA Lead is
-#   assigned on the QA Request) -> Security Readiness (readiness check by the
-#   assigned Security Lead or a QA Lead) -> Planning -> Configuration (scan
+#   Readiness Verification Pending (available to the central Security/QA pool) ->
+#   Security Readiness -> Planning -> Configuration (scan
 #   setup -- "SAST Configuration"/"DAST Configuration" depending on scan type)
 #   -> Scanning -> Complete Scan, gated on a confirmation pop-up ("Are you
 #   sure no security findings were identified during the scan?"):
@@ -373,9 +423,9 @@ SAST_DAST_STATUS_LABELS = {
     "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head Approval Pending",
     "RETURNED_BY_DEPARTMENT_HEAD": "Returned by Department Head",
     "DEPARTMENT_HEAD_REJECTED": "Department Head Rejected",
-    "SECURITY_LEAD_ASSIGNED": "Security Lead Assigned",
+    "SECURITY_LEAD_ASSIGNED": "Security Readiness Verification Pending",
     "SECURITY_READINESS": "Security Readiness",
-    "RETURNED_BY_SECURITY_LEAD": "Returned by Security Lead",
+    "RETURNED_BY_SECURITY_LEAD": "Returned by QA Lead",
     "PLANNING": "Planning",
     "CONFIGURATION": "Scan Configuration",
     "SCANNING": "Scanning",
@@ -429,10 +479,9 @@ DEFAULT_DAST_CHECKLIST_ITEMS = [
 # ---- Module 4c: Performance Testing ----
 # Auto-created from a QA Request when "Performance Testing" is one of its
 # request types, same pattern as SAST/DAST. Independent lifecycle
-# after the common Draft/SM/Department Head prefix: Engineer Assigned (the
-# Department Head assigns a QA Engineer/Lead at approval time, mirroring how
-# SAST/DAST assign a Security Lead) ->
-# Readiness -> Feasibility -> Planning -> Environment Setup -> Script
+# after the common Draft/SM/Department Head prefix: readiness pending (the
+# Department Head assigns an IT-QA QA Lead) -> Readiness -> Feasibility ->
+# Planning (the QA Lead assigns IT-QA QA Testers) -> Environment Setup -> Script
 # Development -> Baseline -> Load Test Execution -> Result Analysis ->
 # Defect/Fix/Retest -> Report -> Sign-off -> Requester Verification -> Closed.
 PERFORMANCE_STATUSES = [
@@ -459,7 +508,7 @@ PERFORMANCE_STATUS_LABELS = {
     "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head Approval Pending",
     "RETURNED_BY_DEPARTMENT_HEAD": "Returned by Department Head",
     "DEPARTMENT_HEAD_REJECTED": "Department Head Rejected",
-    "ENGINEER_ASSIGNED": "Engineer Assigned", "RETURNED_BY_ENGINEER": "Returned by Engineer",
+    "ENGINEER_ASSIGNED": "Readiness Verification Pending", "RETURNED_BY_ENGINEER": "Returned by QA Lead",
     "READINESS": "Readiness", "FEASIBILITY": "Feasibility", "PLANNING": "Planning",
     "ENVIRONMENT_SETUP": "Environment Setup", "SCRIPT_DEVELOPMENT": "Script Development",
     "BASELINE": "Baseline", "LOAD_TEST_EXECUTION": "Load Test Execution",
@@ -563,18 +612,18 @@ WORKFLOW_STEPS = {
     # (Drafted) -> Submitted -> Raised, or Cancelled while still Draft.
     "QA_REQUEST": ["Requester (Drafted)", "Submitted", "Raised / Cancelled"],
     "FUNCTIONAL_REQUEST": [
-        "Requester", "SM Approval", "Department Head Approval", "QA Lead Assignment", "Readiness Verification",
+        "Requester", "SM Approval", "Department Head Approval", "QA Readiness Verification Pending", "Readiness Verification",
         "QA Activity (Planning/Tester Assignment/Design/Execution)", "Defect-Retest-Regression Cycle",
         "QA Sign-off", "Requester Verification",
     ],
     "TEST_CASE": ["Author", "Reviewer", "QA Lead"],
     "SAST_DAST": [
-        "Requester", "SM Approval", "Department Head Approval", "Security Lead Assigned",
+        "Requester", "SM Approval", "Department Head Approval", "Security Readiness Verification Pending",
         "Security Readiness", "Planning", "Configuration", "Scanning", "Finding Validation",
         "Remediation (Requester)", "Security Complete", "Report Ready",
     ],
     "PERFORMANCE": [
-        "Requester", "SM Approval", "Department Head Approval", "Readiness", "Feasibility", "Planning",
+        "Requester", "SM Approval", "Department Head Approval", "Readiness Verification Pending", "Readiness", "Feasibility", "Planning",
         "Environment Setup", "Script Development", "Baseline", "Load Test Execution", "Result Analysis",
         "Defect/Fix/Retest", "Report", "Sign-off", "Requester Verification",
     ],
@@ -586,9 +635,8 @@ CERTIFICATE_TYPES = ["Full Clearance", "Conditional Clearance", "Clearance Denie
 SIGNOFF_TESTING_TYPES = ["Functional", "SAST", "DAST"]
 RISK_TIERS = ["Tier 1 (Critical)", "Tier 2 (High)", "Tier 3 (Medium)", "Tier 4 (Low)"]
 
-# QASignOff's own approval chain -- Tester (QA Engineer, or QA Lead) raises
-# the certificate, an SM reviews it (and may modify its details directly
-# while reviewing), then Department Head COE gives the final approval that
+# QASignOff's own approval chain -- QA Engineer raises the certificate, a QA
+# Lead approves it, then Executive COE gives the final approval that
 # issues it. Replaces the old, much simpler Draft/Issued-only flow (a QA Lead
 # alone could draft and immediately sign/issue) -- existing rows sitting at
 # the old "Draft"/"Issued" string values need a one-time data migration, see
@@ -599,21 +647,21 @@ SIGNOFF_STATUSES = [
     "ISSUED",
 ]
 SIGNOFF_TERMINAL_STATUSES = ["ISSUED", "SM_REJECTED", "DEPT_HEAD_COE_REJECTED"]
-# Tester's own editable statuses (Draft, or returned back to them for
-# changes). SM additionally gets its own edit window while a certificate is
-# freshly SM_APPROVAL_PENDING (its own active review) -- see
+# QA requester's own editable statuses (Draft, or returned back to them for
+# changes). QA Lead additionally gets an edit window while a certificate is
+# freshly SM_APPROVAL_PENDING (legacy internal code; QA Lead review) -- see
 # routers/signoff.py::update_signoff, not folded into this list since it's a
 # different actor/condition, not a third "requester-editable" status.
 SIGNOFF_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "RETURNED_BY_DEPT_HEAD_COE"]
 SIGNOFF_STATUS_LABELS = {
     "DRAFT": "Draft",
     "SUBMITTED": "Submitted",
-    "SM_APPROVAL_PENDING": "SM Approval Pending",
-    "RETURNED_BY_SM": "Returned by SM",
-    "SM_REJECTED": "Rejected by SM",
-    "DEPT_HEAD_COE_APPROVAL_PENDING": "Department Head COE Approval Pending",
-    "RETURNED_BY_DEPT_HEAD_COE": "Returned by Department Head COE",
-    "DEPT_HEAD_COE_REJECTED": "Rejected by Department Head COE",
+    "SM_APPROVAL_PENDING": "QA Lead Approval Pending",
+    "RETURNED_BY_SM": "Returned by QA Lead",
+    "SM_REJECTED": "Rejected by QA Lead",
+    "DEPT_HEAD_COE_APPROVAL_PENDING": "Executive COE Approval Pending",
+    "RETURNED_BY_DEPT_HEAD_COE": "Returned by Executive COE",
+    "DEPT_HEAD_COE_REJECTED": "Rejected by Executive COE",
     "ISSUED": "Issued",
 }
 

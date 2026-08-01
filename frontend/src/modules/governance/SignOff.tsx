@@ -5,9 +5,10 @@ import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
 import {
   CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, hasRole,
-  SIGNOFF_EDITABLE_STATUSES,
+  SIGNOFF_EDITABLE_STATUSES, QA_DEPARTMENT, SIGNOFF_STATUS_LABELS,
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, ApprovalActionOut } from '../../types'
+import JiraActivity from '../../components/JiraActivity'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -113,6 +114,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   onCreated: (s: SignOffOut) => void
   presetRequest?: FunctionalOut
 }) {
+  const { user } = useAuth()
   const [form, setForm] = useState<SignOffForm>(EMPTY)
   const [selectedRequest, setSelectedRequest] = useState<FunctionalOut | null>(null)
   const [eligibleRequests, setEligibleRequests] = useState<FunctionalOut[]>([])
@@ -134,7 +136,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
       testing_request_id: r.request_id,
       application_name: r.application_name || '',
       application_owner: r.application_owner || '',
-      department: r.department || '',
+      department: QA_DEPARTMENT,
       change_request_ids: r.cr_number || '',
       technology_stack: r.technology_stack || '',
       release_version: r.release_version || '',
@@ -157,7 +159,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
 
   function clearSelection() {
     setSelectedRequest(null)
-    setForm((f) => ({ ...f, testing_request_id: '', application_name: '', application_owner: '', department: '', change_request_ids: '' }))
+    setForm((f) => ({ ...f, testing_request_id: '', application_name: '', application_owner: '', department: QA_DEPARTMENT, change_request_ids: '' }))
   }
 
   async function submit(e: React.FormEvent) {
@@ -166,7 +168,11 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // entirely, so the locked Application Name/Owner/Department/Change
     // Request ID(s) fields need this explicit check instead -- they're only
     // ever filled in via picking a Testing Request above.
-    if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name/Owner/Department/Change Request ID(s) are derived from it.'); return }
+    if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and Change Request ID(s) are derived from it.'); return }
+    if (!hasRole(user, 'ADMIN') && user?.department !== QA_DEPARTMENT) {
+      setError(`QA Sign-off is restricted to the ${QA_DEPARTMENT} department.`)
+      return
+    }
     setBusy(true)
     try {
       const created = await api.post<SignOffOut>('/api/signoffs', form)
@@ -200,7 +206,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
         <div className="form-row">
           <Field label="Application Name *"><input required disabled value={form.application_name} onChange={() => {}} /></Field>
           <Field label="Application Owner *"><input required disabled value={form.application_owner} onChange={() => {}} /></Field>
-          <Field label="Department *"><input required disabled value={form.department} onChange={() => {}} /></Field>
+          <Field label="QA Approval Department *"><input required disabled value={form.department || QA_DEPARTMENT} onChange={() => {}} /></Field>
           <Field label="Change Request ID(s) *"><input required disabled value={form.change_request_ids} onChange={() => {}} /></Field>
           <Field label="Technology Stack *"><input required value={form.technology_stack} onChange={(e) => set('technology_stack', e.target.value)} /></Field>
           <Field label="Release Version *"><input required value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>
@@ -252,10 +258,10 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   )
 }
 
-// Edit Details for an already-raised certificate -- reachable by the Tester
-// (requester) while it's Draft or sitting back with them after an SM/
-// Department Head COE return, or by an SM directly while it's sitting at
-// their own SM_APPROVAL_PENDING review (see routers/signoff.py::
+// Edit Details for an already-raised certificate -- reachable by the QA requester
+// (requester) while it's Draft or sitting back with them after a QA Lead/
+// Executive COE return, or by a QA Lead directly while it's sitting at
+// their own QA Lead review (legacy status SM_APPROVAL_PENDING; see routers/signoff.py::
 // update_signoff for the exact permission windows -- "he will have option
 // to modify details" per the requested workflow). Testing Request ID/
 // Application Name/Owner/Department/Change Request ID(s) stay locked here
@@ -289,7 +295,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
           <Field label="Testing Request ID"><input disabled value={item.testing_request_id || ''} /></Field>
           <Field label="Application Name"><input disabled value={item.application_name} /></Field>
           <Field label="Application Owner"><input disabled value={item.application_owner || ''} /></Field>
-          <Field label="Department"><input disabled value={item.department || ''} /></Field>
+          <Field label="QA Approval Department"><input disabled value={item.department || QA_DEPARTMENT} /></Field>
         </div>
         <div className="form-row">
           <Field label="Certificate Type *">
@@ -354,53 +360,38 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
     try {
       const updated = await api.post<SignOffOut>(`/api/signoffs/${item.id}/${action}`, extra || {})
       onChanged(updated)
-      load()
+      setComments('')
+      await load()
     } catch (err) { setError(err) } finally { setBusyAction(null) }
   }
 
   const isRequester = item.requester_id === user?.id || hasRole(user, 'ADMIN')
   const status = item.status
-  const sameDept = !!user?.department && user.department === item.department
-  // Confirmed: "Sign off form raised by QA team, so it should be approved by
-  // QA team only" -- Department Head COE approval matches against the
-  // certificate's own REQUESTER's department (the Tester/QA Lead who raised
-  // it -- always someone on the QA team), not `item.department` (the
-  // delegated business department of the underlying Functional Testing
-  // Request, e.g. "Digital Banking Department (DBD)" -- that's what
-  // `sameDept` above is for instead, since SM genuinely is the business-side
-  // reviewer). Mirrors routers/signoff.py::_requester_department.
-  const requesterDepartment = users.find((u) => u.id === item.requester_id)?.department
-  const sameDeptAsRequester = !!user?.department && user.department === requesterDepartment
   const isAdmin = hasRole(user, 'ADMIN')
+  const isQADepartment = user?.department === QA_DEPARTMENT || isAdmin
 
   const canSubmit = isRequester && status === 'DRAFT'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status)
-  const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || isAdmin)
-  // Department mapping IS required for Department Head COE too, same as SM
-  // above -- confirmed explicitly, just matched against the requester's own
-  // department (see requesterDepartment/sameDeptAsRequester above) rather
-  // than item.department. Every real Executive COE user must be mapped, via
-  // Admin > Users, to the SAME department as this certificate's requester.
-  const canDeptHeadCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && (sameDeptAsRequester || isAdmin)
-  // Tester's own editable statuses, or an SM directly editing while it's
-  // sitting at their own SM_APPROVAL_PENDING review -- see
+  const canQALeadDecide = hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment
+  const canExecutiveCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && isQADepartment
+  // Requester's own editable statuses, or a QA Lead editing during approval.
   // routers/signoff.py::update_signoff.
   const canEditDetails = (isRequester && SIGNOFF_EDITABLE_STATUSES.includes(status))
-    || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || isAdmin))
+    || (hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment)
 
   return (
     <Modal title={item.certificate_id} onClose={onClose} wide>
       <ErrorText error={error} />
       <div className="grid grid-2">
         <div><strong>Application:</strong> {item.application_name}</div>
-        <div><strong>Status:</strong> <Badge status={item.status} /></div>
+        <div><strong>Status:</strong> <Badge status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /></div>
         <div><strong>Testing Request ID:</strong> {item.testing_request_id || '—'}</div>
         <div><strong>Change Request ID(s):</strong> {item.change_request_ids || '—'}</div>
         <div><strong>Application Owner:</strong> {item.application_owner || '—'}</div>
-        <div><strong>Department:</strong> {item.department || '—'}</div>
-        <div><strong>Requested By (Tester):</strong> {userName(users, item.requester_id) || '—'}</div>
-        <div><strong>Reviewed By (SM):</strong> {userName(users, item.reviewed_by_id) || '—'}</div>
-        <div><strong>Approved By (Department Head COE):</strong> {userName(users, item.approved_by_id) || '—'}</div>
+        <div><strong>QA Approval Department:</strong> {item.department || QA_DEPARTMENT}</div>
+        <div><strong>Requested By (QA Team):</strong> {userName(users, item.requester_id) || '—'}</div>
+        <div><strong>Approved By (QA Lead):</strong> {userName(users, item.reviewed_by_id) || '—'}</div>
+        <div><strong>Approved By (Executive COE):</strong> {userName(users, item.approved_by_id) || '—'}</div>
         <div><strong>Certificate Type:</strong> {item.certificate_type}</div>
         <div><strong>Testing Type:</strong> {item.testing_type}</div>
         <div><strong>Certificate Date:</strong> {item.certificate_date || '—'}</div>
@@ -425,38 +416,38 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
           Export PDF
         </button>
         {canEditDetails && <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setEditing(true)}>Edit Details</button>}
-        {canSubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('submit')}>Submit for SM Approval</button>}
+        {canSubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('submit')}>Submit for QA Lead Approval</button>}
         {canResubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('resubmit')}>Re-submit</button>}
       </div>
 
-      {(canSMDecide || canDeptHeadCoeDecide) && (
+      {(canQALeadDecide || canExecutiveCoeDecide) && (
         <div className="form-field" style={{ marginTop: 10 }}>
-          <label>Comments (optional)</label>
-          <textarea value={comments} onChange={(e) => setComments(e.target.value)} />
+          <label>Action note (optional)</label>
+          <textarea value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next approval action" />
         </div>
       )}
-      {canSMDecide && (
+      {canQALeadDecide && (
         <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <ApprovalDecisionButtons
             userName={user?.full_name}
             comments={comments}
             busy={!!busyAction}
-            onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-            onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
-            onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+            onApprove={(signed) => act('qa-lead-decision', { decision: 'Approved', comments: signed })}
+            onReturn={() => act('qa-lead-decision', { decision: 'Returned', comments })}
+            onReject={() => act('qa-lead-decision', { decision: 'Rejected', comments })}
           />
         </div>
       )}
-      {canDeptHeadCoeDecide && (
+      {canExecutiveCoeDecide && (
         <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <ApprovalDecisionButtons
             userName={user?.full_name}
             comments={comments}
             busy={!!busyAction}
             approveLabel="Approve & Issue Certificate"
-            onApprove={(signed) => act('department-head-coe-decision', { decision: 'Approved', comments: signed })}
-            onReturn={() => act('department-head-coe-decision', { decision: 'Returned', comments })}
-            onReject={() => act('department-head-coe-decision', { decision: 'Rejected', comments })}
+            onApprove={(signed) => act('executive-coe-decision', { decision: 'Approved', comments: signed })}
+            onReturn={() => act('executive-coe-decision', { decision: 'Returned', comments })}
+            onReject={() => act('executive-coe-decision', { decision: 'Rejected', comments })}
           />
         </div>
       )}
@@ -464,19 +455,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
       <div className="section-title">Documents</div>
       <RequestDocuments apiBase="/api/signoffs" reqId={item.id} />
 
-      <div className="section-title">History</div>
-      <Table
-        rowKey="id"
-        columns={[
-          { key: 'step_name', header: 'Step' },
-          { key: 'decision', header: 'Decision' },
-          { key: 'actor_id', header: 'Actor', render: (r) => userName(users, r.actor_id) || '—', filterValue: (r) => userName(users, r.actor_id) || '' },
-          { key: 'actor_role', header: 'Role' },
-          { key: 'comments', header: 'Comments' },
-          { key: 'created_at', header: 'When', render: (r) => new Date(r.created_at).toLocaleString() },
-        ]}
-        rows={history}
-      />
+      <JiraActivity entityType="SIGNOFF" entityId={item.id} items={history} onPosted={(entry) => setHistory((prev) => [...prev, entry])} />
 
       {editing && (
         <EditSignOffModal
@@ -518,18 +497,15 @@ export default function SignOff() {
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
   }, [rows, searchParams, setSearchParams])
 
-  // Tester (QA Engineer) raises the certificate now, per the Tester -> SM ->
-  // Department Head COE approval chain -- QA Lead keeps create access too
-  // (unchanged from before), Department Head COE no longer creates (their
-  // role is now the final approval step, not authorship).
-  const canCreate = hasRole(user, 'QA_ENGINEER', 'QA_LEAD')
+  const canCreate = hasRole(user, 'ADMIN')
+    || (hasRole(user, 'QA_ENGINEER') && user?.department === QA_DEPARTMENT)
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
         title="QA Sign-off Certificates" count={rows.length}
-        subtitle="Formal QA clearance certificates: raised by the Tester, reviewed by SM, and given final approval by Department Head COE ahead of release."
+        subtitle="IT - QA clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive COE approval."
         actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Sign-off Certificate</button>}
       />
       <Card>
@@ -541,7 +517,7 @@ export default function SignOff() {
           { key: 'approved_by_id', header: 'Approved By', render: (r) => userName(users, r.approved_by_id) || '—', filterValue: (r) => userName(users, r.approved_by_id) || '' },
           { key: 'certificate_type', header: 'Type' },
           { key: 'testing_type', header: 'Testing Type' },
-          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} /> },
+          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={SIGNOFF_STATUS_LABELS[r.status] || r.status} /> },
         ]} rows={rows} />
       </Card>
       {showNew && <NewSignOffModal onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load() }} />}

@@ -354,7 +354,7 @@ class FunctionalRequest(Base):
     risk_rating = Column(String(16))
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     department_head_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # who performed Department Head Approval
-    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # QA Lead assigned by the Department Head
+    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # IT-QA QA Lead assigned by Department Head
     assigned_tester_ids = Column(String(255))     # comma-separated QA Engineer user ids (Tester Assigned step)
     signoff_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)    # linked QA Sign-off certificate
     # Set when auto-created from a QA Request gateway (always, for new rows --
@@ -526,9 +526,10 @@ class SASTRequest(Base):
     # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # Assigned during the "Security Lead Assigned" step (Department Head
-    # approval), mirroring how a QA Lead is assigned on the QA Request itself.
+    # IT-QA QA Lead assigned by the requester's Department Head for readiness,
+    # followed by the IT-QA Security Analyst selected by that lead.
     security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     report_path = Column(String(255))
     # Set when this SAST request was auto-created because a QA Request's
     # request_types included "SAST" (see routers/qa_requests.py
@@ -712,7 +713,8 @@ class DASTRequest(Base):
     # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned IT-QA QA Lead
+    security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned IT-QA Security Analyst
     report_path = Column(String(255))
     # Set when this DAST request was auto-created because a QA Request's
     # request_types included "DAST"; null for standalone DAST requests
@@ -923,11 +925,10 @@ class PerformanceRequest(Base):
     # that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # Assigned by the Department Head at approval time (see
-    # constants.PERFORMANCE_STATUSES's "ENGINEER_ASSIGNED" stage and
-    # routers/performance.py::department_head_decision) -- mirrors how SAST/
-    # DAST assign a Security Lead.
+    # Existing column now represents the IT-QA QA Lead assigned by the
+    # requester's Department Head. Execution testers are tracked separately.
     engineer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    assigned_tester_ids = Column(String(255))  # comma-separated IT-QA QA Engineer ids
     report_path = Column(String(255))
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
     created_at = Column(DateTime, default=now)
@@ -1131,6 +1132,12 @@ class ApprovalAction(Base):
     comments = Column(Text)
     created_at = Column(DateTime, default=now)
 
+    actor = relationship("User", foreign_keys=[actor_id])
+
+    @property
+    def actor_name(self):
+        return self.actor.full_name if self.actor else None
+
 
 class RequestDocument(Base):
     """Supporting documents uploaded after a request has been raised, for
@@ -1189,17 +1196,16 @@ class QASignOff(Base):
     open_defect_summary = Column(Text)
     residual_risk_notes = Column(Text)
 
-    # Tester (QA Engineer, or QA Lead) raises the certificate -> SM reviews
-    # it (and may edit its details directly while reviewing) -> Department
-    # Head COE gives the final approval that issues it -- see
+    # IT - QA Engineer raises the certificate -> IT - QA Lead approves it ->
+    # Executive COE gives the final approval that issues it -- see
     # constants.SIGNOFF_STATUSES. Replaces the old, much simpler Draft/Issued
     # flow (a QA Lead alone could draft and immediately sign/issue); existing
     # rows at the old "Draft"/"Issued" string values need a one-time data
     # migration, see ORACLE_MIGRATION_2026-07.md.
     status = Column(String(32), default="DRAFT")
-    requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)   # Requested By (Tester / QA Lead)
-    reviewed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Reviewed By (SM)
-    approved_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Approved By (Department Head COE)
+    requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)   # Requested By (QA Team)
+    reviewed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Approved By (QA Lead)
+    approved_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Approved By (Executive COE)
     # Vestigial -- left in place (unused going forward) rather than dropped,
     # same convention as qap_requests.priority/risk_rating (see section 30 of
     # the migration notes). issued_by_id used to mean "TQA Lead - CM QA who
@@ -1267,6 +1273,12 @@ class TestFolder(Base):
 
     project = relationship("TestProject", back_populates="folders")
     parent = relationship("TestFolder", remote_side=[id], backref="children")
+    created_by = relationship("User", foreign_keys=[created_by_id])
+
+    @property
+    def created_by_name(self):
+        """Human-readable audit identity exposed by TestFolderOut."""
+        return self.created_by.full_name if self.created_by else None
 
 
 class TestCase(Base):
@@ -1278,8 +1290,7 @@ class TestCase(Base):
     live in the separate TestStep table below, one row per step. Note this
     table holds the test case *definition* only -- Actual Result/Status/
     Test Run Artifacts/Defect ID from the template are execution-time facts
-    and are imported into TestExecution instead (see import_test_cases),
-    not stored here."""
+    and are not stored until an approved definition is used in a Test Cycle."""
     __tablename__ = "qap_test_cases"
     id = pk_column()
     test_case_key = Column(String(60), unique=True, nullable=False)
@@ -1294,10 +1305,9 @@ class TestCase(Base):
     pre_condition = Column(Text)
     description = Column(Text)
     priority = Column(String(16))
-    # Test case lifecycle state (Active/Draft/Deprecated) -- distinct from
-    # any execution result; a Deprecated test case can still have historical
-    # TestExecution rows, it's just no longer offered when adding cases to a
-    # new cycle (see routers/test_execution.py).
+    # Approval lifecycle: Draft = Pending QA Lead Review, Active = Approved
+    # for Test Cycles, Deprecated = retained for history but unavailable for
+    # new execution. The API, not a client edit form, controls transitions.
     status = Column(String(20), default="Active")
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)

@@ -7,7 +7,7 @@ import openpyxl
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles
-from ..constants import Role
+from ..constants import Role, TEST_CASE_PRIORITIES
 
 router = APIRouter(prefix="/api/test-repository", tags=["test-management"])
 
@@ -17,11 +17,25 @@ router = APIRouter(prefix="/api/test-repository", tags=["test-management"])
 _AUTHOR_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD)
 
 
+def _case_workflow_action(case_id: int, current_user: models.User, decision: str,
+                          comments: Optional[str] = None) -> models.ApprovalAction:
+    return models.ApprovalAction(
+        entity_type="TEST_CASE", entity_id=case_id, step_name="QA Lead Test Case Review",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision=decision, comments=comments,
+    )
+
+
 def _get_project_or_404(db: Session, project_id: int) -> models.TestProject:
     obj = db.query(models.TestProject).get(project_id)
     if not obj:
         raise HTTPException(404, "Test Project not found")
     return obj
+
+
+def _require_active_project(project: models.TestProject) -> None:
+    if not project.is_active:
+        raise HTTPException(400, "This Test Project is inactive. Reactivate it before changing repository content")
 
 
 # ---- Folders ----
@@ -34,7 +48,7 @@ def list_folders(project_id: int, db: Session = Depends(get_db), current_user: m
 @router.post("/projects/{project_id}/folders", response_model=schemas.TestFolderOut)
 def create_folder(project_id: int, payload: schemas.TestFolderCreate, db: Session = Depends(get_db),
                    current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    _get_project_or_404(db, project_id)
+    _require_active_project(_get_project_or_404(db, project_id))
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Folder name cannot be blank")
@@ -52,10 +66,13 @@ def create_folder(project_id: int, payload: schemas.TestFolderCreate, db: Sessio
 
 @router.delete("/folders/{folder_id}")
 def delete_folder(folder_id: int, db: Session = Depends(get_db),
-                   current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+                   current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+    """Folder deletion is a governance action reserved for QA Lead/Admin.
+    QA Engineers may create and populate folders but cannot remove them."""
     obj = db.query(models.TestFolder).get(folder_id)
     if not obj:
         raise HTTPException(404, "Folder not found")
+    _require_active_project(_get_project_or_404(db, obj.project_id))
     has_children = db.query(models.TestFolder).filter_by(parent_id=folder_id).first()
     has_cases = db.query(models.TestCase).filter_by(folder_id=folder_id).first()
     if has_children or has_cases:
@@ -80,14 +97,20 @@ def list_test_cases(project_id: int, db: Session = Depends(get_db), current_user
 @router.post("/projects/{project_id}/test-cases", response_model=schemas.TestCaseOut)
 def create_test_case(project_id: int, payload: schemas.TestCaseCreate, db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    _get_project_or_404(db, project_id)
+    _require_active_project(_get_project_or_404(db, project_id))
     key = (payload.test_case_key or "").strip() or models.gen_id("TC")
     if db.query(models.TestCase).filter_by(test_case_key=key).first():
         raise HTTPException(400, f"Test Case ID '{key}' already exists")
-    data = payload.model_dump(exclude={"steps", "test_case_key"})
-    obj = models.TestCase(project_id=project_id, test_case_key=key, created_by_id=current_user.id, **data)
+    data = payload.model_dump(exclude={"steps", "test_case_key", "status"})
+    obj = models.TestCase(project_id=project_id, test_case_key=key, created_by_id=current_user.id,
+                          status="Draft", **data)
     obj.steps = [models.TestStep(**s.model_dump()) for s in payload.steps]
     db.add(obj)
+    db.flush()
+    db.add(_case_workflow_action(
+        obj.id, current_user, "Submitted for review",
+        "Test case created and submitted to the QA Lead for verification.",
+    ))
     db.commit()
     db.refresh(obj)
     return obj
@@ -107,11 +130,21 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
     obj = db.query(models.TestCase).get(case_id)
     if not obj:
         raise HTTPException(404, "Test Case not found")
+    _require_active_project(_get_project_or_404(db, obj.project_id))
+    if "status" in payload.model_fields_set:
+        raise HTTPException(400, "Test case status is controlled by QA Lead review and cannot be changed while editing")
     data = payload.model_dump(exclude_unset=True, exclude={"steps"})
+    substantive_change = bool(set(data) - {"folder_id"}) or payload.steps is not None
     for field, value in data.items():
         setattr(obj, field, value)
     if payload.steps is not None:
         obj.steps = [models.TestStep(**s.model_dump()) for s in payload.steps]
+    if substantive_change and obj.status == "Active":
+        obj.status = "Draft"
+        db.add(_case_workflow_action(
+            obj.id, current_user, "Resubmitted for review",
+            "An approved test case was edited and must be verified again before execution.",
+        ))
     db.commit()
     db.refresh(obj)
     return obj
@@ -123,9 +156,131 @@ def delete_test_case(case_id: int, db: Session = Depends(get_db),
     obj = db.query(models.TestCase).get(case_id)
     if not obj:
         raise HTTPException(404, "Test Case not found")
+    _require_active_project(_get_project_or_404(db, obj.project_id))
     db.delete(obj)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/test-cases/{case_id}/review", response_model=schemas.TestCaseOut)
+def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session = Depends(get_db),
+                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+    """QA Lead/Admin verification gate. Only Active (approved) test cases
+    may be assigned to or executed in a Test Cycle."""
+    obj = db.query(models.TestCase).get(case_id)
+    if not obj:
+        raise HTTPException(404, "Test Case not found")
+    _require_active_project(_get_project_or_404(db, obj.project_id))
+    decision = payload.decision.strip().upper()
+    comments = (payload.comments or "").strip()
+    if decision not in {"APPROVE", "RETURN"}:
+        raise HTTPException(400, "Decision must be APPROVE or RETURN")
+    if decision == "APPROVE":
+        if obj.status == "Active":
+            raise HTTPException(400, "This test case is already approved")
+        obj.status = "Active"
+        action = "Approved"
+        comments = comments or "Verified by QA Lead and approved for use in Test Cycles."
+    else:
+        if not comments:
+            raise HTTPException(400, "A reason is required when returning a test case for changes")
+        obj.status = "Draft"
+        action = "Changes requested"
+    db.add(_case_workflow_action(obj.id, current_user, action, comments))
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def _selected_project_cases(db: Session, project_id: int, ids: List[int]) -> List[models.TestCase]:
+    unique_ids = list(dict.fromkeys(ids))
+    if not unique_ids:
+        raise HTTPException(400, "Select at least one test case")
+    rows = db.query(models.TestCase).filter(
+        models.TestCase.project_id == project_id, models.TestCase.id.in_(unique_ids)).all()
+    found = {row.id for row in rows}
+    missing = [case_id for case_id in unique_ids if case_id not in found]
+    if missing:
+        raise HTTPException(404, f"{len(missing)} selected test case(s) were not found in this project")
+    return rows
+
+
+@router.post("/projects/{project_id}/test-cases/bulk-update", response_model=List[schemas.TestCaseOut])
+def bulk_update_test_cases(project_id: int, payload: schemas.TestCaseBulkUpdate,
+                           db: Session = Depends(get_db),
+                           current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    _require_active_project(_get_project_or_404(db, project_id))
+    rows = _selected_project_cases(db, project_id, payload.ids)
+    changes = payload.model_fields_set - {"ids"}
+    if not changes:
+        raise HTTPException(400, "Choose at least one field to update")
+    if "status" in changes:
+        raise HTTPException(400, "Test case status is controlled by QA Lead review and cannot be bulk updated")
+    if "folder_id" in changes and payload.folder_id is not None:
+        if not db.query(models.TestFolder).filter_by(id=payload.folder_id, project_id=project_id).first():
+            raise HTTPException(404, "Folder not found in this project")
+    if "priority" in changes and payload.priority not in TEST_CASE_PRIORITIES:
+        raise HTTPException(400, "Invalid test case priority")
+    for row in rows:
+        if "folder_id" in changes:
+            row.folder_id = payload.folder_id
+        if "priority" in changes:
+            row.priority = payload.priority
+        if "priority" in changes and row.status == "Active":
+            row.status = "Draft"
+            db.add(_case_workflow_action(
+                row.id, current_user, "Resubmitted for review",
+                "Priority was changed in a bulk update; QA Lead verification is required again.",
+            ))
+    db.commit()
+    for row in rows:
+        db.refresh(row)
+    return rows
+
+
+@router.post("/projects/{project_id}/test-cases/bulk-delete")
+def bulk_delete_test_cases(project_id: int, payload: schemas.TestCaseBulkDelete,
+                           db: Session = Depends(get_db),
+                           current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    _require_active_project(_get_project_or_404(db, project_id))
+    rows = _selected_project_cases(db, project_id, payload.ids)
+    deleted_ids = [row.id for row in rows]
+    for row in rows:
+        db.delete(row)
+    db.commit()
+    return {"deleted": len(deleted_ids), "ids": deleted_ids}
+
+
+@router.post("/projects/{project_id}/test-cases/bulk-approve", response_model=List[schemas.TestCaseOut])
+def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprove,
+                            db: Session = Depends(get_db),
+                            current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+    """Approve several pending definitions in one atomic QA Lead decision.
+    One approver message is deliberately reused for every case-specific audit
+    row, so each testcase retains a complete history without asking the lead
+    to repeat the same message."""
+    _require_active_project(_get_project_or_404(db, project_id))
+    rows = _selected_project_cases(db, project_id, payload.ids)
+    comments = payload.comments.strip()
+    if not comments:
+        raise HTTPException(400, "Enter one approval message for the selected test cases")
+    if len(comments) > 5000:
+        raise HTTPException(400, "Approval message cannot exceed 5,000 characters")
+    not_pending = [row.test_case_key for row in rows if row.status != "Draft"]
+    if not_pending:
+        preview = ", ".join(not_pending[:5])
+        suffix = "…" if len(not_pending) > 5 else ""
+        raise HTTPException(
+            400,
+            f"Bulk approval stopped because {len(not_pending)} selected test case(s) are not pending QA Lead review: {preview}{suffix}",
+        )
+    for row in rows:
+        row.status = "Active"
+        db.add(_case_workflow_action(row.id, current_user, "Approved", comments))
+    db.commit()
+    for row in rows:
+        db.refresh(row)
+    return rows
 
 
 # ---- xlsx import ----
@@ -183,13 +338,10 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
     Feature ID, Test Scenario, Priority, etc.) filled in only on the first
     row of each test case's block and left blank on every subsequent step
     row -- a new block starts whenever the "Test Case ID" column is non-empty
-    again. Creates one TestCase (+ its TestStep rows) per block; if that
-    first row also has a Status/Actual Result/Test Run Artifacts/Defect ID
-    filled in (i.e. someone already ran this test case and recorded the
-    result directly in the sheet), an initial TestExecution is created too,
-    under a get-or-created "Imported from Excel" cycle, so those results
-    aren't lost on import."""
-    _get_project_or_404(db, project_id)
+    again. Every imported definition enters Draft/Pending QA Lead Review.
+    Execution-result columns are deliberately not imported into a cycle:
+    only a QA Lead-approved test case may enter Test Execution."""
+    _require_active_project(_get_project_or_404(db, project_id))
     if folder_id:
         if not db.query(models.TestFolder).filter_by(id=folder_id, project_id=project_id).first():
             raise HTTPException(404, "Folder not found in this project")
@@ -217,28 +369,16 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
     imported_executions = 0
     skipped_rows = 0
     errors: List[str] = []
-    imported_cycle: Optional[models.TestCycle] = None
 
-    def get_imported_cycle() -> models.TestCycle:
-        nonlocal imported_cycle
-        if imported_cycle is None:
-            imported_cycle = (db.query(models.TestCycle)
-                               .filter_by(project_id=project_id, name="Imported from Excel").first())
-            if not imported_cycle:
-                imported_cycle = models.TestCycle(project_id=project_id, name="Imported from Excel",
-                                                   description="Auto-created to hold results already recorded "
-                                                                "in an uploaded Excel sheet at import time.",
-                                                   created_by_id=current_user.id)
-                db.add(imported_cycle)
-                db.flush()
-        return imported_cycle
-
-    def flush_group(case_row: dict, step_rows: List[dict]):
-        nonlocal created_test_cases, imported_executions, skipped_rows
+    def flush_group(case_row: dict, step_rows: List[dict], source_row: int):
+        nonlocal created_test_cases, skipped_rows
         key = case_row.get("test_case_key") or models.gen_id("TC")
         if db.query(models.TestCase).filter_by(test_case_key=key).first():
-            errors.append(f"'{key}' already exists in the Repository -- skipped")
-            skipped_rows += 1
+            group_rows = max(1, len(step_rows))
+            end_row = source_row + group_rows - 1
+            row_label = f"Rows {source_row}-{end_row}" if end_row > source_row else f"Row {source_row}"
+            errors.append(f"{row_label}: Test Case ID '{key}' already exists in the Repository; this test case block was skipped.")
+            skipped_rows += group_rows
             return
         tc = models.TestCase(
             project_id=project_id, folder_id=folder_id, test_case_key=key,
@@ -246,7 +386,7 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
             user_story_id=case_row.get("user_story_id"), test_type=case_row.get("test_type"),
             module_name=case_row.get("module_name"), test_scenario=case_row.get("test_scenario"),
             pre_condition=case_row.get("pre_condition"), description=case_row.get("description"),
-            priority=case_row.get("priority"), status="Active", created_by_id=current_user.id,
+            priority=case_row.get("priority"), status="Draft", created_by_id=current_user.id,
         )
         tc.steps = [
             models.TestStep(step_no=i + 1, step_text=s.get("step_text"), expected_result=s.get("expected_result"))
@@ -254,24 +394,17 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
             if s.get("step_text") or s.get("expected_result")
         ]
         db.add(tc)
+        db.flush()
+        db.add(_case_workflow_action(
+            tc.id, current_user, "Submitted for review",
+            f"Imported from Excel row {source_row} and submitted to the QA Lead for verification.",
+        ))
         created_test_cases += 1
-
-        if any(case_row.get(f) for f in _EXECUTION_LEVEL_FIELDS):
-            db.flush()  # need tc.id
-            cycle = get_imported_cycle()
-            status = case_row.get("status") or "Not Executed"
-            db.add(models.TestExecution(
-                cycle_id=cycle.id, test_case_id=tc.id, status=status,
-                actual_result=case_row.get("actual_result"),
-                test_run_artifacts=case_row.get("test_run_artifacts"),
-                defect_id=case_row.get("defect_id"),
-                executed_by_id=current_user.id, executed_at=models.now(),
-            ))
-            imported_executions += 1
 
     current_case: Optional[dict] = None
     current_steps: List[dict] = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
+    current_case_source_row = 0
+    for excel_row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if row is None or all(c is None for c in row):
             continue
         parsed = {}
@@ -282,24 +415,50 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
         starts_new_case = bool(parsed.get("test_case_key"))
         if starts_new_case:
             if current_case is not None:
-                flush_group(current_case, current_steps)
+                flush_group(current_case, current_steps, current_case_source_row)
             current_case = {f: parsed.get(f) for f in _CASE_LEVEL_FIELDS + _EXECUTION_LEVEL_FIELDS}
             current_case["test_case_key"] = parsed.get("test_case_key")
             current_steps = []
+            current_case_source_row = excel_row_number
+
+        # The supplied template deliberately allows Test Case ID to be left
+        # blank (the example block has six populated steps but no ID). When
+        # the first populated row clearly contains case-level information,
+        # treat it as a valid new test case and generate the ID in
+        # flush_group instead of reporting every following step as orphaned.
+        if current_case is None and any(parsed.get(f) for f in _CASE_LEVEL_FIELDS):
+            current_case = {f: parsed.get(f) for f in _CASE_LEVEL_FIELDS + _EXECUTION_LEVEL_FIELDS}
+            current_case["test_case_key"] = None
+            current_steps = []
+            current_case_source_row = excel_row_number
 
         if current_case is None:
             # A step-only row appeared before any Test Case ID was ever seen
             # -- malformed sheet, nothing to attach it to.
             skipped_rows += 1
+            step_label = parsed.get("step_no_label") or "unlabelled step"
+            errors.append(
+                f"Row {excel_row_number}: {step_label} was skipped because it appears before any Test Case ID "
+                "or populated test-case details. Fill in Test Case ID, Epic ID, Test Scenario, or another case field."
+            )
             continue
         if parsed.get("step_text") or parsed.get("expected_result"):
             current_steps.append({"step_text": parsed.get("step_text"), "expected_result": parsed.get("expected_result")})
 
     if current_case is not None:
-        flush_group(current_case, current_steps)
+        flush_group(current_case, current_steps, current_case_source_row)
+
+    if created_test_cases == 0 and skipped_rows == 0:
+        errors.append("No test cases were found. Confirm that data starts below the header row and uses the standard template columns.")
 
     db.commit()
+    failure_reason = None
+    if created_test_cases == 0:
+        failure_reason = errors[0] if errors else (
+            "No test cases were created. The workbook did not contain a recognizable test-case block."
+        )
+
     return schemas.TestCaseImportResult(
         created_test_cases=created_test_cases, imported_executions=imported_executions,
-        skipped_rows=skipped_rows, errors=errors,
+        skipped_rows=skipped_rows, errors=errors, failure_reason=failure_reason,
     )

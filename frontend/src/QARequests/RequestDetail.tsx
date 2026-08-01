@@ -30,6 +30,7 @@ import { GatewayPreview, gatewayStageIndex } from "./GatewayPreview";
 import { classificationSummary, linkedSections, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
 import { AddDocuments } from "./AddDocuments";
+import JiraActivity from "../components/JiraActivity";
 
 interface RequestDetailProps {
   req: QARequestOut;
@@ -223,7 +224,7 @@ export function RequestDetail({
             className={tab === t ? "active" : ""}
             onClick={() => setTab(t)}
           >
-            {t[0].toUpperCase() + t.slice(1)}
+            {t === "history" ? "Activity" : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
@@ -529,27 +530,7 @@ export function RequestDetail({
       )}
 
       {tab === "history" && (
-        <Table
-          rowKey="id"
-          columns={[
-            { key: "step_name", header: "Step" },
-            { key: "decision", header: "Decision" },
-            {
-              key: "actor_id",
-              header: "Actor",
-              render: (r) => userName(users, r.actor_id) || "—",
-              filterValue: (r) => userName(users, r.actor_id) || "",
-            },
-            { key: "actor_role", header: "Role" },
-            { key: "comments", header: "Comments" },
-            {
-              key: "created_at",
-              header: "When",
-              render: (r) => new Date(r.created_at).toLocaleString(),
-            },
-          ]}
-          rows={history}
-        />
+        <JiraActivity entityType="QA_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {editingReq && (

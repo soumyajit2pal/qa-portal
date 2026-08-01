@@ -15,6 +15,7 @@ import { SastStep } from './steps/SastStep'
 import { DastStep } from './steps/DastStep'
 import { PerformanceStep } from './steps/PerformanceStep'
 import { DocumentsStep } from './steps/DocumentsStep'
+import { EvidenceKind, evidenceKey } from './steps/ChecklistEvidencePicker'
 
 interface NewRequestModalProps {
   onClose: () => void
@@ -111,6 +112,7 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
   const existingDast = !!editing?.linked_dast_requests?.length
   const existingPerformance = !!editing?.linked_performance_requests?.length
   const [files, setFiles] = useState<File[]>([])
+  const [checklistEvidence, setChecklistEvidence] = useState<Record<string, File[]>>({})
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
@@ -127,6 +129,12 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
   if (!step) return null
 
   function set<K extends keyof QARequestForm>(k: K, v: QARequestForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
+  function evidenceFiles(kind: EvidenceKind, itemIndex: number): File[] {
+    return checklistEvidence[evidenceKey(kind, itemIndex)] || []
+  }
+  function setEvidenceFiles(kind: EvidenceKind, itemIndex: number, nextFiles: File[]) {
+    setChecklistEvidence((current) => ({ ...current, [evidenceKey(kind, itemIndex)]: nextFiles }))
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -202,6 +210,14 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
         // own request_id folder (backend/app/uploads/<request_id>/...).
         await api.uploadFiles(`/api/qa-requests/${saved.id}/documents`, files)
       }
+      await Promise.all(Object.entries(checklistEvidence).map(async ([key, evidence]) => {
+        if (evidence.length === 0) return
+        const [kind, itemIndex] = key.split(':')
+        await api.uploadFiles(
+          `/api/qa-requests/${saved.id}/checklist-evidence/${kind}/${itemIndex}/documents`,
+          evidence,
+        )
+      }))
       onCreated(saved)
     } catch (err) {
       setError(err)
@@ -290,11 +306,11 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
 
         <form onSubmit={submit}>
           {step.key === 'details' && <DetailsStep form={form} set={set} />}
-          {step.key === 'functional' && <FunctionalStep form={form} set={set} />}
+          {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} />}
           {step.key === 'type' && <TypeStep form={form} set={set} />}
-          {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} />}
-          {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} />}
-          {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} />}
+          {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} />}
+          {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} />}
+          {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} />}
           {step.key === 'documents' && (
             <DocumentsStep form={form} set={set} editing={editing} files={files} setFiles={setFiles} />
           )}

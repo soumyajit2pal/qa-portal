@@ -12,7 +12,6 @@ import {
   SAST_DAST_STATUS_LABELS,
   SUPPRESSION_STATUS_LABELS,
   PERFORMANCE_STATUS_LABELS,
-  SIGNOFF_STATUS_LABELS,
 } from "../constants";
 import { IconFolder, IconFilter } from "./Icons";
 import { api } from "../api";
@@ -23,20 +22,35 @@ import type { RequestDocumentOut } from "../types";
 // Performance, Suppression, Sign-off) funnels through this one Badge, so its
 // label lookup merges all of their *_STATUS_LABELS maps rather than just
 // QA_STATUS_LABELS -- otherwise a SAST/DAST/Performance/
-// Suppression/Sign-off status would render as its raw SNAKE_CASE value
-// instead of a human label. Shared status names (SM_APPROVAL_PENDING,
-// RETURNED_BY_SM, SM_REJECTED, DEPARTMENT_HEAD_APPROVAL_PENDING, etc.)
-// resolve identically no matter which map they came from, so merge order
-// doesn't matter for those.
+// Suppression status would render as its raw SNAKE_CASE value instead of a
+// human label.
+//
+// SIGNOFF_STATUS_LABELS is deliberately NOT part of this merge. Reported
+// bug: QASignOff reuses "SM_APPROVAL_PENDING"/"RETURNED_BY_SM"/"SM_REJECTED"
+// as legacy internal status codes for its own QA-Lead-approval checkpoint
+// (see constants.ts's own comment on SIGNOFF_STATUS_LABELS and
+// routers/signoff.py) instead of a distinct set of strings -- but gives them
+// Sign-off-specific labels ("QA Lead Approval Pending", "Returned by QA
+// Lead", "Rejected by QA Lead"). Spreading that map in here last meant it
+// silently overwrote the correct "SM Approval Pending"/"Returned by
+// SM"/"Rejected by SM" entries for every OTHER module that also uses those
+// same status codes (QA Request/Functional, SAST, DAST, Performance,
+// Suppression) -- so a freshly-raised Functional Testing Request sitting at
+// genuine SM_APPROVAL_PENDING rendered as "QA Lead Approval Pending"
+// everywhere, since this is the one shared Badge every module's status
+// renders through. Sign-off's own two Badge call sites (SignOff.tsx) pass an
+// explicit `label={SIGNOFF_STATUS_LABELS[status] || status}` override
+// instead, the same pattern Suppression.tsx/TestRepository.tsx already use
+// for their own status vocabularies -- so this map only needs to cover
+// status codes that mean the same thing everywhere they appear.
 const ALL_STATUS_LABELS: Record<string, string> = {
   ...QA_STATUS_LABELS,
   ...SAST_DAST_STATUS_LABELS,
   ...SUPPRESSION_STATUS_LABELS,
   ...PERFORMANCE_STATUS_LABELS,
-  ...SIGNOFF_STATUS_LABELS,
 };
 
-export function Badge({ status }: { status?: string | null }) {
+export function Badge({ status, label: labelOverride }: { status?: string | null; label?: ReactNode }) {
   // Colour families are semantic, not decorative: gray = neutral/closed,
   // blue = submitted/informational, purple = actively being worked
   // (planning/execution/scanning), teal = verification/sign-off checkpoints,
@@ -128,7 +142,7 @@ export function Badge({ status }: { status?: string | null }) {
     "Retest Passed": "badge-blue",
     "Not Started": "badge-gray",
   };
-  const label = (status && ALL_STATUS_LABELS[status]) || status || "";
+  const label = labelOverride ?? ((status && ALL_STATUS_LABELS[status]) || status || "");
   return (
     <span className={`badge ${(status && map[status]) || "badge-gray"}`}>
       {label}
@@ -157,6 +171,7 @@ export function PageHeader({
   return (
     <div className="page-header">
       <div className="titles">
+        <span className="page-eyebrow">Quality workspace</span>
         <h2>
           {title}
           {typeof count === "number" && (
@@ -766,10 +781,51 @@ export function RepeatableRows<T>({
   );
 }
 
-export function ErrorText({ error }: { error?: unknown }) {
-  if (!error) return null;
+function correctiveGuidance(message: string): string {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("checklist") || normalized.includes("readiness"))
+    return "Review the readiness checklist, complete every item identified in the reason, and try the action again.";
+  if (normalized.includes("required") || normalized.includes("cannot be blank") || normalized.includes("choose") || normalized.includes("select"))
+    return "Complete the required information described above, verify the entered values, and try again.";
+  if (normalized.includes("not found") || normalized.includes("404"))
+    return "The record may have changed or been removed. Close this message, refresh the page, and select the record again.";
+  if (normalized.includes("permission") || normalized.includes("permitted") || normalized.includes("role") || normalized.includes("403"))
+    return "Your account does not have the required access for this action. Contact the portal administrator or the responsible workflow owner.";
+  if (normalized.includes("inactive"))
+    return "Reactivate the related project or record before attempting this action again.";
+  if (normalized.includes("already") || normalized.includes("current status") || normalized.includes("must be in"))
+    return "Refresh the record and confirm its latest workflow status before retrying the action.";
+  if (normalized.includes("excel") || normalized.includes("workbook") || normalized.includes("import") || normalized.includes("file"))
+    return "Correct the file or data described in the reason, then upload it again. Previously successful records are unaffected.";
+  return "Review the reason, correct the data or workflow condition, and try again. If the problem continues, contact the portal administrator.";
+}
+
+export function ErrorText({ error, title = "Action could not be completed", guidance }: {
+  error?: unknown;
+  title?: string;
+  guidance?: ReactNode;
+}) {
+  const [visible, setVisible] = useState(Boolean(error));
+  useEffect(() => setVisible(Boolean(error)), [error]);
+  if (!error || !visible) return null;
   const message = error instanceof Error ? error.message : String(error);
-  return <p className="error-text">{message}</p>;
+  return (
+    <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose>
+      <div className="action-error-dialog" role="alert">
+        <div className="action-error-dialog-icon">!</div>
+        <div>
+          <strong>The requested action was stopped</strong>
+          <span>Reason</span>
+          <p>{message}</p>
+        </div>
+      </div>
+      <div className="action-error-guidance">
+        <strong>What to do</strong>
+        <p>{guidance || correctiveGuidance(message)}</p>
+      </div>
+      <button type="button" className="btn btn-primary" onClick={() => setVisible(false)}>Close</button>
+    </Modal>
+  );
 }
 
 export interface TableColumn<T> {
@@ -1271,6 +1327,148 @@ export function RequestDocuments({
             >
               Cancel
             </button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// Compact evidence uploader rendered beside one readiness-checklist item.
+// Evidence uses checklist-specific endpoints, so it stays associated with
+// this row instead of being mixed into the request's general Documents tab.
+export function ChecklistEvidence({
+  apiBase,
+  reqId,
+  itemId,
+  canManage = true,
+}: {
+  apiBase: string;
+  reqId: number;
+  itemId: number;
+  canManage?: boolean;
+}) {
+  const { user } = useAuth();
+  const isAdmin = !!user?.roles?.includes("ADMIN");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [documents, setDocuments] = useState<RequestDocumentOut[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [pendingDelete, setPendingDelete] = useState<RequestDocumentOut | null>(null);
+
+  const endpoint = `${apiBase}/${reqId}/checklist/${itemId}/documents`;
+  const load = useCallback(async () => {
+    try {
+      setDocuments(await api.get<RequestDocumentOut[]>(endpoint));
+    } catch (err) {
+      setError(err);
+    }
+  }, [endpoint]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function upload(files: FileList | null) {
+    if (!files?.length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.uploadFiles(endpoint, files);
+      await load();
+      setExpanded(true);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  async function deleteDocument() {
+    if (!pendingDelete) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.del(`${endpoint}/${pendingDelete.id}`);
+      setPendingDelete(null);
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ width: 230, minWidth: 200 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, flexWrap: "wrap" }}>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => upload(e.target.files)}
+        />
+        {canManage ? (
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={busy}
+            onClick={() => inputRef.current?.click()}
+          >
+            {busy ? "Uploading…" : "Attach evidence"}
+          </button>
+        ) : (
+          <span className="muted small" title="Evidence is locked after Department Head approval">Evidence locked</span>
+        )}
+        {documents.length > 0 && (
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {documents.length} file{documents.length !== 1 ? "s" : ""}
+          </button>
+        )}
+      </div>
+      {expanded && documents.length > 0 && (
+        <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
+          {documents.map((document) => (
+            <div key={document.id} style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                title={`Download ${document.file_name}`}
+                style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}
+                onClick={() => api.downloadFile(`${endpoint}/${document.id}/download`, document.file_name)}
+              >
+                {document.file_name}
+              </button>
+              {canManage && (isAdmin || document.uploaded_by_id === user?.id) && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger"
+                  aria-label={`Delete ${document.file_name}`}
+                  onClick={() => setPendingDelete(document)}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <ErrorText error={error} />
+      {pendingDelete && (
+        <Modal title="Delete checklist evidence?" onClose={() => setPendingDelete(null)} variant="dialog" preventBackdropClose>
+          <p>Delete <strong>{pendingDelete.file_name}</strong> from this checklist item? This cannot be undone.</p>
+          <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+            <button type="button" className="btn btn-danger" disabled={busy} onClick={deleteDocument}>
+              {busy ? "Deleting…" : "Delete"}
+            </button>
+            <button type="button" className="btn" disabled={busy} onClick={() => setPendingDelete(null)}>Cancel</button>
           </div>
         </Modal>
       )}

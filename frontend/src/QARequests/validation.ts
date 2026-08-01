@@ -1,11 +1,15 @@
 import { QARequestForm, SAST_COMPONENT_FIELDS } from './types'
+import { validEnvironmentPromotion } from '../constants'
 
 // Mandatory text fields on the "Application & Change Details" / "Release &
 // Environment" steps (everything marked "(*)" in the QA Request field spec).
 // The select-type mandatory fields (Change Type, Deployment Environment,
 // Target Promotion Environment, Priority, Risk Rating) never need a separate
-// check here -- their dropdowns always default to a real (non-blank) value,
-// so they can't be left empty through the UI.
+// "is it filled in" check here -- their dropdowns always default to a real
+// (non-blank) value, so they can't be left empty through the UI. Target
+// Promotion Environment does get one extra check below though: its *value*
+// (not just presence) must be ordered correctly against Deployment
+// Environment.
 const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
   { key: 'application_name', label: 'Application Name' },
   { key: 'application_owner', label: 'Application Owner' },
@@ -43,6 +47,16 @@ export function detailsStepError(f: QARequestForm): string | null {
   }
   if (!EPIC_NUMBER_REGEX.test(f.epic_number.trim())) {
     return 'Epic Number is not in a valid format. Example: EPIC-1234'
+  }
+  // DetailsStep.tsx's own Target Promotion Environment dropdown already
+  // only offers options strictly later than the picked Deployment
+  // Environment (and auto-corrects itself when Deployment changes), so this
+  // should never actually trip in normal use -- kept as a real gate anyway
+  // (same belt-and-braces reasoning as the CR/Epic format checks above) in
+  // case a Draft saved before this rule existed still has a stale, now-
+  // invalid combination on it.
+  if (!validEnvironmentPromotion(f.environment, f.target_promotion_environment)) {
+    return `Target Promotion Environment ('${f.target_promotion_environment}') must be later than Deployment Environment ('${f.environment}') in the pipeline SIT -> UAT -> Pre-Production -> Production.`
   }
   return null
 }

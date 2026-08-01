@@ -469,32 +469,34 @@ class WorkflowDecision(BaseModel):
 
 # ---- QA Request lifecycle-specific payloads ----
 class DepartmentHeadDecisionIn(BaseModel):
-    """Department Head reviews the freshly-submitted request and, on
-    approval, assigns the QA Lead."""
+    """Department Head reviews the request and assigns its IT-QA QA Lead."""
     decision: str                          # Approved / Returned / Rejected
     comments: Optional[str] = None
-    qa_lead_id: Optional[int] = None        # required when decision == "Approved"
+    qa_lead_id: Optional[int] = None
 
 
 class AssignTesterIn(BaseModel):
     tester_ids: List[int]
 
 
+class AssignSecurityAnalystIn(BaseModel):
+    security_analyst_id: int
+
+
 class SecurityDeptHeadDecisionIn(BaseModel):
-    """SAST/DAST equivalent of DepartmentHeadDecisionIn -- on approval, assigns
-    a Security Lead (a Security Analyst user) instead of a QA Lead."""
+    """SAST/DAST Department Head decision with IT-QA QA Lead assignment."""
     decision: str                          # Approved / Returned / Rejected
     comments: Optional[str] = None
-    security_lead_id: Optional[int] = None  # required when decision == "Approved"
+    qa_lead_id: Optional[int] = None
+    security_lead_id: Optional[int] = None  # legacy alias for qa_lead_id
 
 
 class PerformanceDeptHeadDecisionIn(BaseModel):
-    """Performance Testing equivalent of DepartmentHeadDecisionIn -- on
-    approval, assigns a QA Engineer/Lead who owns Readiness onward (mirrors
-    SecurityDeptHeadDecisionIn for SAST/DAST)."""
+    """Performance Department Head decision with IT-QA QA Lead assignment."""
     decision: str                     # Approved / Returned / Rejected
     comments: Optional[str] = None
-    engineer_id: Optional[int] = None  # required when decision == "Approved"
+    qa_lead_id: Optional[int] = None
+    engineer_id: Optional[int] = None  # legacy alias for qa_lead_id
 
 
 class ReadinessDecisionIn(BaseModel):
@@ -618,6 +620,7 @@ class SASTOut(ORMModel):
     report_path: Optional[str] = None
     requester_id: Optional[int] = None
     security_lead_id: Optional[int] = None
+    security_analyst_id: Optional[int] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     findings: List[SASTFindingOut] = []
@@ -696,6 +699,7 @@ class DASTOut(ORMModel):
     report_path: Optional[str] = None
     requester_id: Optional[int] = None
     security_lead_id: Optional[int] = None
+    security_analyst_id: Optional[int] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     findings: List[DASTFindingOut] = []
@@ -828,6 +832,7 @@ class PerformanceOut(ORMModel):
     report_path: Optional[str] = None
     requester_id: Optional[int] = None
     engineer_id: Optional[int] = None
+    assigned_tester_ids: Optional[str] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     qa_request_id: Optional[int] = None
@@ -919,10 +924,15 @@ class ApprovalActionOut(ORMModel):
     request_ref: Optional[str] = None
     step_name: Optional[str] = None
     actor_id: Optional[int] = None
+    actor_name: Optional[str] = None
     actor_role: Optional[str] = None
     decision: Optional[str] = None
     comments: Optional[str] = None
     created_at: datetime.datetime
+
+
+class CommentCreate(BaseModel):
+    body: str
 
 
 # ---------------- Module 8: QA Sign-off ----------------
@@ -950,9 +960,10 @@ class SignOffCreate(BaseModel):
 
 class SignOffUpdate(BaseModel):
     """Edits a certificate's own descriptive fields -- available to the
-    Tester while it's DRAFT/RETURNED_BY_*, and to the SM directly while it
-    sits at their own SM_APPROVAL_PENDING review (see routers/signoff.py::
-    update_signoff for the exact permission windows). Everything optional --
+    QA requester while it's DRAFT/RETURNED_BY_*, and to the QA Lead directly
+    while it sits at QA Lead approval (legacy status code
+    SM_APPROVAL_PENDING; see routers/signoff.py::update_signoff for the exact
+    permission windows). Everything optional --
     only fields actually sent are changed."""
     certificate_type: Optional[str] = None
     testing_type: Optional[str] = None
@@ -995,8 +1006,8 @@ class SignOffOut(ORMModel):
     open_defect_summary: Optional[str] = None
     residual_risk_notes: Optional[str] = None
     status: str
-    # Requested By (Tester/QA Lead) / Reviewed By (SM) / Approved By
-    # (Department Head COE) -- see models.QASignOff for the full reasoning.
+    # Requested By (QA Team) / Approved By (QA Lead) / Approved By
+    # (Executive COE) -- see models.QASignOff for the full reasoning.
     # Mandatory on a fully-Issued certificate's own report (enforced by the
     # workflow itself: a certificate can't reach ISSUED without all three
     # having acted on it), optional/blank on one still in progress.
@@ -1085,6 +1096,7 @@ class TestFolderOut(ORMModel):
     parent_id: Optional[int] = None
     name: str
     created_by_id: Optional[int] = None
+    created_by_name: Optional[str] = None
     created_at: datetime.datetime
 
 
@@ -1115,7 +1127,10 @@ class TestCaseCreate(BaseModel):
     pre_condition: Optional[str] = None
     description: Optional[str] = None
     priority: Optional[str] = None
-    status: str = "Active"
+    # The API always creates cases as Draft/Pending QA Lead Review. Kept in
+    # the input shape for backward compatibility with older clients, but the
+    # router never trusts a client-supplied lifecycle status.
+    status: str = "Draft"
     steps: List[TestStepIn] = []
 
 
@@ -1132,6 +1147,29 @@ class TestCaseUpdate(BaseModel):
     priority: Optional[str] = None
     status: Optional[str] = None
     steps: Optional[List[TestStepIn]] = None
+
+
+class TestCaseBulkUpdate(BaseModel):
+    ids: List[int]
+    # model_fields_set lets the endpoint distinguish "leave folder unchanged"
+    # from an explicit null meaning "move selected cases to Unfiled".
+    folder_id: Optional[int] = None
+    priority: Optional[str] = None
+    status: Optional[str] = None
+
+
+class TestCaseBulkDelete(BaseModel):
+    ids: List[int]
+
+
+class TestCaseBulkApprove(BaseModel):
+    ids: List[int]
+    comments: str
+
+
+class TestCaseReview(BaseModel):
+    decision: str
+    comments: Optional[str] = None
 
 
 class TestCaseOut(ORMModel):
@@ -1155,15 +1193,17 @@ class TestCaseOut(ORMModel):
     steps: List[TestStepOut] = []
 
 
-# Summary shown when importing an xlsx sheet -- how many test cases were
-# created, and (since Status/Actual Result columns double as an initial
-# execution result -- see routers/test_repository.py) how many of those also
-# seeded a "Imported from Excel" TestExecution row.
+# Summary shown when importing an xlsx sheet. imported_executions remains in
+# the response for client compatibility, but new imports deliberately report
+# zero until definitions pass QA Lead review and are assigned to a cycle.
 class TestCaseImportResult(ORMModel):
     created_test_cases: int
     imported_executions: int
     skipped_rows: int
     errors: List[str] = []
+    # Always populated when nothing was created, so the UI never has to
+    # infer the primary failure from an optional row-level errors list.
+    failure_reason: Optional[str] = None
 
 
 class TestCycleCreate(BaseModel):

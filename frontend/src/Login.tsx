@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
-import { IconGrid, IconShield, IconApprove, IconCertificate } from './components/Icons'
+import { IconApprove, IconCertificate, IconEyeOff, IconLock, IconShield, IconUsers, IconWorkflow } from './components/Icons'
+import { ErrorText } from './components/Common'
 
 // Mirrors backend app/seed.py DEMO_USERS -- one demo account per role.
 const DEMO_ACCOUNTS: [string, string][] = [
@@ -11,16 +12,10 @@ const DEMO_ACCOUNTS: [string, string][] = [
   ['sm1', 'SM'], ['admin', 'Administrator'],
 ]
 
-const HIGHLIGHTS = [
-  { Icon: IconGrid, text: 'One command centre for every QA request, from raise to sign-off.' },
-  { Icon: IconShield, text: 'Integrated SAST/DAST security testing and suppression workflows.' },
-  { Icon: IconApprove, text: 'Full approval workflow log — every decision, evidenced and traceable.' },
-  { Icon: IconCertificate, text: 'Formal QA sign-off certificates before every release.' },
-]
-
 export default function Login() {
   const [username, setUsername] = useState('requester1')
   const [password, setPassword] = useState('Password@123')
+  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const { login } = useAuth()
@@ -40,49 +35,105 @@ export default function Login() {
     }
   }
 
-  return (
-    <div className="login-page">
-      <div className="login-shell">
-        <div className="login-brand">
-          <div className="logo-mark">Q</div>
-          <h1>QualityHub</h1>
-          <p className="tagline">Centralized QA Portal &middot; Bank of Maharashtra, Information Technology Department</p>
-          <ul className="highlights">
-            {HIGHLIGHTS.map(({ Icon, text }, i) => (
-              <li key={i}><Icon width={16} height={16} /><span>{text}</span></li>
-            ))}
-          </ul>
-        </div>
+  function chooseDemoAccount(value: string) {
+    if (!value) return
+    setUsername(value)
+    setPassword('Password@123')
+    setError(null)
+  }
 
-        <div className="login-card">
-          <h1>Sign in</h1>
-          <p className="sub">Use your assigned username and password to continue.</p>
-          <form onSubmit={onSubmit}>
-            <div className="form-field" style={{ marginBottom: 12 }}>
-              <label>Username</label>
-              <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
-            </div>
-            <div className="form-field" style={{ marginBottom: 12 }}>
-              <label>Password</label>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-            </div>
-            {error && <p className="error-text">{error}</p>}
-            <button className="btn btn-primary" type="submit" disabled={busy} style={{ width: '100%' }}>
-              {busy ? 'Signing in...' : 'Sign in'}
-            </button>
-          </form>
-          <div className="hint-box">
-            <strong>Demo accounts</strong> (password: <code>Password@123</code> for all):
-            <div className="demo-accounts">
-              {DEMO_ACCOUNTS.map(([u, l]) => (
-                <button type="button" key={u} className="demo-chip" onClick={() => { setUsername(u); setPassword('Password@123') }}>
-                  {u} <span className="muted">· {l}</span>
-                </button>
-              ))}
+  return (
+    <main className="login-page">
+      <div className="login-ambient login-ambient-one" />
+      <div className="login-ambient login-ambient-two" />
+
+      <section className="login-shell" aria-label="QualityHub sign in">
+        <aside className="login-brand">
+          <div className="login-brand-top">
+            <div className="logo-mark" aria-hidden="true">Q</div>
+            <div className="brand-name">
+              <strong>QualityHub</strong>
+              <span>Enterprise QA Portal</span>
             </div>
           </div>
+
+          <div className="login-brand-copy">
+            <div className="eyebrow"><span /> Built for confident releases</div>
+            <h1>Quality, governed<br />from start to sign-off.</h1>
+            <p>One secure workspace for QA requests, testing, evidence, approvals, and release readiness.</p>
+
+            <div className="login-capabilities">
+              <div><span><IconWorkflow /></span><strong>Orchestrated workflows</strong><small>Track every request through a clear, governed lifecycle.</small></div>
+              <div><span><IconShield /></span><strong>Security built in</strong><small>SAST, DAST, and suppression reviews in one place.</small></div>
+              <div><span><IconCertificate /></span><strong>Audit-ready sign-off</strong><small>Decisions and evidence remain complete and traceable.</small></div>
+            </div>
+          </div>
+
+          <div className="login-brand-foot">
+            <span><IconApprove /> Controlled &amp; traceable</span>
+            <span>Information Technology Department</span>
+          </div>
+        </aside>
+
+        <div className="login-card">
+          <div className="login-mobile-brand">
+            <div className="logo-mark">Q</div>
+            <strong>QualityHub</strong>
+          </div>
+
+          <div className="login-card-head">
+            <div className="login-security-mark"><IconLock /></div>
+            <p className="login-kicker">Secure portal access</p>
+            <h2>Welcome back</h2>
+            <p className="sub">Sign in with your assigned credentials to continue.</p>
+          </div>
+
+          <form onSubmit={onSubmit} className="login-form">
+            <div className="login-field">
+              <label htmlFor="login-username">Username</label>
+              <div className="login-input-wrap">
+                <IconUsers />
+                <input id="login-username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus required />
+              </div>
+            </div>
+
+            <div className="login-field">
+              <div className="login-label-row"><label htmlFor="login-password">Password</label><span>Case sensitive</span></div>
+              <div className="login-input-wrap">
+                <IconLock />
+                <input id="login-password" type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+                <button className="password-toggle" type="button" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'} aria-pressed={showPassword}>
+                  <IconEyeOff />
+                </button>
+              </div>
+            </div>
+
+            <ErrorText
+              error={error}
+              title="Sign-in failed"
+              guidance="Verify your username and password, confirm that your account is active, and try signing in again."
+            />
+
+            <button className="login-submit" type="submit" disabled={busy}>
+              <span>{busy ? 'Signing you in…' : 'Sign in to QualityHub'}</span>
+              {!busy && <span aria-hidden="true">→</span>}
+            </button>
+          </form>
+
+          <div className="login-divider"><span>Demo environment</span></div>
+          <div className="demo-access">
+            <div><strong>Explore by role</strong><small>Credentials are filled automatically.</small></div>
+            <select value={DEMO_ACCOUNTS.some(([u]) => u === username) ? username : ''} onChange={(e) => chooseDemoAccount(e.target.value)} aria-label="Choose a demo role">
+              <option value="">Choose role</option>
+              {DEMO_ACCOUNTS.map(([user, role]) => <option value={user} key={user}>{role}</option>)}
+            </select>
+          </div>
+
+          <p className="login-help">Need access? Contact your QualityHub administrator.</p>
         </div>
-      </div>
-    </div>
+      </section>
+
+      <footer className="login-page-footer">Bank of Maharashtra <span>•</span> Internal systems only</footer>
+    </main>
   )
 }

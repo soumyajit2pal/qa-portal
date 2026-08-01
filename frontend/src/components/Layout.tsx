@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, ReactNode } from 'react'
+import React, { useEffect, useState, useCallback, useRef, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import {
@@ -43,11 +43,24 @@ interface NavGroup {
 function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
   const groups: NavGroup[] = [
     {
-      label: 'Workspace',
+      label: 'Overview',
       items: [
         { to: '/', label: 'Command Centre', icon: IconGrid },
+      ],
+    },
+    {
+      label: 'Request Management',
+      items: [
         { to: '/qa-requests', label: 'QA Requests', icon: IconEdit, count: counts.qaRequests },
         { to: '/functional-requests', label: 'Functional QA', icon: IconFolder, count: counts.functional },
+      ],
+    },
+    {
+      label: 'Test Management',
+      items: [
+        { to: '/test-projects', label: 'Projects', icon: IconApps },
+        { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
+        { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
       ],
     },
     {
@@ -70,19 +83,6 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
         { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate, count: counts.signoff },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
-      ],
-    },
-    {
-      // Zephyr-style test case management -- Project Management (Test
-      // Projects, one per Application), Test Repository (folders + test
-      // cases, xlsx import), and Test Execution (cycles + results). Kept as
-      // its own group since it's a distinct authoring/execution workflow
-      // rather than a request-approval flow like every other module.
-      label: 'Test Management',
-      items: [
-        { to: '/test-projects', label: 'Project Management', icon: IconApps },
-        { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
-        { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
       ],
     },
   ]
@@ -130,6 +130,59 @@ export default function Layout({ children }: { children?: ReactNode }) {
     qaRequests: 0, functional: 0, sast: 0, dast: 0, performance: 0, suppression: 0, signoff: 0, pendingReview: 0,
   })
   const [search, setSearch] = useState('')
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('qa_nav_collapsed') === 'true')
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set([
+    'Overview', 'Request Management', 'Test Management', 'Security', 'Specialized Testing', 'Governance', 'Administration',
+  ]))
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  const groups = navGroups(counts, user)
+  const activeGroup = groups.find((group) => group.items.some((item) => (
+    item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to)
+  )))
+  const activeItem = activeGroup?.items.find((item) => (
+    item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to)
+  ))
+
+  useEffect(() => { setSidebarOpen(false) }, [location.pathname])
+  useEffect(() => {
+    if (!activeGroup) return
+    setExpandedGroups((previous) => {
+      if (previous.has(activeGroup.label)) return previous
+      const next = new Set(previous)
+      next.add(activeGroup.label)
+      return next
+    })
+  }, [activeGroup?.label])
+
+  useEffect(() => {
+    function focusGlobalSearch(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', focusGlobalSearch)
+    return () => window.removeEventListener('keydown', focusGlobalSearch)
+  }, [])
+
+  function toggleSidebarSize() {
+    setSidebarCollapsed((previous) => {
+      const next = !previous
+      localStorage.setItem('qa_nav_collapsed', String(next))
+      return next
+    })
+  }
+
+  function toggleGroup(label: string) {
+    setExpandedGroups((previous) => {
+      const next = new Set(previous)
+      if (next.has(label)) next.delete(label)
+      else next.add(label)
+      return next
+    })
+  }
 
   const loadCounts = useCallback(async () => {
     try {
@@ -210,44 +263,53 @@ export default function Layout({ children }: { children?: ReactNode }) {
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className="app-shell redesigned-shell navigation-v2">
+      <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
+      <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">
           <div className="logo-mark">Q</div>
-          <div>
+          <div className="brand-copy">
             <h1>QualityHub</h1>
-            <p>Centralized QA Portal</p>
+            <p>Enterprise QA Portal</p>
           </div>
+          <button className="sidebar-collapse-control" onClick={toggleSidebarSize} aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'} title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>
+            {sidebarCollapsed ? '›' : '‹'}
+          </button>
+          <button className="sidebar-mobile-close" onClick={() => setSidebarOpen(false)} aria-label="Close navigation">×</button>
         </div>
 
-        <nav>
-          {navGroups(counts, user).map((group) => (
-            <div className="nav-group" key={group.label}>
-              <div className="sidebar-section-label">{group.label}</div>
-              {group.items.map((item) => {
-                const Icon = item.icon
-                return (
-                  <NavLink key={item.to} to={item.to} end={item.to === '/'}
-                           className={({ isActive }) => (isActive ? 'active' : '')}>
-                    <Icon />
-                    <span className="nav-label">{item.label}</span>
-                    {typeof item.count === 'number' && item.count > 0 && (
-                      <span className="nav-count">{item.count}</span>
-                    )}
-                  </NavLink>
-                )
-              })}
+        <nav aria-label="Application modules">
+          {groups.map((group) => (
+            <div className={`nav-group ${sidebarCollapsed || expandedGroups.has(group.label) ? 'group-open' : ''}`} key={group.label}>
+              <button className="nav-group-toggle" onClick={() => toggleGroup(group.label)} aria-expanded={sidebarCollapsed || expandedGroups.has(group.label)}>
+                <span>{group.label}</span><i>⌄</i>
+              </button>
+              <div className="nav-group-items">
+                {group.items.map((item) => {
+                  const Icon = item.icon
+                  return (
+                    <NavLink key={item.to} to={item.to} end={item.to === '/'} onClick={() => setSidebarOpen(false)}
+                             title={sidebarCollapsed ? item.label : undefined}
+                             className={({ isActive }) => (isActive ? 'active' : '')}>
+                      <span className="nav-icon"><Icon /></span>
+                      <span className="nav-label">{item.label}</span>
+                      {typeof item.count === 'number' && item.count > 0 && (
+                        <span className="nav-count">{item.count}</span>
+                      )}
+                    </NavLink>
+                  )
+                })}
+              </div>
             </div>
           ))}
         </nav>
 
         <div className="sidebar-bottom">
-          <div className="audit-card">
+          <div className="audit-card shell-trust-card">
             <IconCheckCircle width={16} height={16} />
             <div>
-              <div className="title">Audit ready</div>
-              <div className="desc">All activity is recorded with evidence and approvals.</div>
-              <div className="since">Bank of Maharashtra &middot; IT Department</div>
+              <div className="title">Governed workspace</div>
+              <div className="desc">Actions and approvals are audit logged.</div>
             </div>
           </div>
           {user && (
@@ -267,17 +329,18 @@ export default function Layout({ children }: { children?: ReactNode }) {
 
       <div className="main">
         <div className="topbar">
+          <button className="mobile-nav-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><span /><span /><span /></button>
+          <div className="topbar-context">
+            <span>{activeGroup?.label || 'Workspace'}</span>
+            <strong>{activeItem?.label || 'QualityHub'}</strong>
+          </div>
           <form className="search-box" onSubmit={submitSearch}>
             <IconSearch width={16} height={16} />
-            <input placeholder="Search projects, requests or IDs..." value={search} onChange={(e) => setSearch(e.target.value)} />
-            <kbd>&#8984;K</kbd>
+            <input ref={searchInputRef} aria-label="Global search" placeholder="Search request ID or application…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">
-            <span className="status-pill"><span className="status-dot" /> All systems operational</span>
-            {/* Favorites/Help/Notifications/Apps icon buttons removed -- they
-                were non-functional placeholders (no onClick handlers), so
-                hidden per request rather than left as dead UI. Re-add here
-                (with real handlers) if/when those features are built. */}
+            <span className="topbar-user-context"><span className="status-dot" />{user?.full_name || 'Signed in'}</span>
             {hasRole(user, 'REQUESTER', 'BUSINESS_ANALYST') && (
               <button className="btn btn-primary btn-sm" onClick={() => navigate('/qa-requests', { state: { openNew: true } })}>
                 <IconPlus width={14} height={14} /> New QA request

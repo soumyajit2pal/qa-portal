@@ -11,6 +11,29 @@ interface RequestOptions {
   isBlob?: boolean
 }
 
+function formatBackendReason(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail.map((item) => {
+      if (!item || typeof item !== 'object') return String(item)
+      const entry = item as Record<string, unknown>
+      const reason = entry.msg ?? entry.message ?? entry.reason ?? entry.detail
+      const location = Array.isArray(entry.loc)
+        ? entry.loc.filter((part) => part !== 'body').join(' › ')
+        : ''
+      const message = reason ? String(reason) : JSON.stringify(entry)
+      return location ? `${location}: ${message}` : message
+    }).join('\n')
+  }
+  if (detail && typeof detail === 'object') {
+    const entry = detail as Record<string, unknown>
+    const reason = entry.message ?? entry.reason ?? entry.error
+    if (reason) return String(reason)
+    return JSON.stringify(entry)
+  }
+  return String(detail || '')
+}
+
 async function request<T = any>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, formEncoded = false, isBlob = false } = opts
   const headers: Record<string, string> = {}
@@ -28,12 +51,22 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
   const res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload })
 
   if (!res.ok) {
-    let detail: unknown = res.statusText
+    let detail: unknown = res.statusText || `Request failed (${res.status})`
     try {
-      const errJson = await res.json()
-      detail = errJson.detail || JSON.stringify(errJson)
+      const responseBody = await res.text()
+      if (responseBody) {
+        try {
+          const errJson = JSON.parse(responseBody)
+          detail = errJson.detail ?? errJson.message ?? errJson.reason ?? errJson.error ?? errJson
+        } catch {
+          // Some services return a plain-text reason instead of JSON. Keep it
+          // verbatim so the popup never replaces a useful backend explanation
+          // with a generic HTTP status.
+          detail = responseBody
+        }
+      }
     } catch (e) { /* ignore */ }
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    throw new Error(formatBackendReason(detail) || res.statusText || `Request failed (${res.status})`)
   }
 
   if (isBlob) return (res.blob() as unknown) as Promise<T>

@@ -216,6 +216,7 @@ export interface ApprovalActionOut {
   request_ref?: string | null
   step_name?: string | null
   actor_id?: number | null
+  actor_name?: string | null
   actor_role?: string | null
   decision?: string | null
   comments?: string | null
@@ -267,6 +268,7 @@ export interface SASTOut {
   report_path?: string | null
   requester_id?: number | null
   security_lead_id?: number | null
+  security_analyst_id?: number | null
   created_at: string
   updated_at: string
   findings: SASTFindingOut[]
@@ -335,6 +337,7 @@ export interface DASTOut {
   report_path?: string | null
   requester_id?: number | null
   security_lead_id?: number | null
+  security_analyst_id?: number | null
   created_at: string
   updated_at: string
   findings: DASTFindingOut[]
@@ -407,6 +410,7 @@ export interface PerformanceOut {
   report_path?: string | null
   requester_id?: number | null
   engineer_id?: number | null
+  assigned_tester_ids?: string | null
   created_at: string
   updated_at: string
   qa_request_id?: number | null
@@ -478,8 +482,8 @@ export interface SignOffOut {
   open_defect_summary?: string | null
   residual_risk_notes?: string | null
   status: string
-  // Requested By (Tester/QA Lead) / Reviewed By (SM) / Approved By
-  // (Department Head COE) -- see backend models.QASignOff.
+  // Requested By (QA Team) / Approved By (QA Lead) / Approved By
+  // (Executive COE) -- see backend models.QASignOff.
   requester_id?: number | null
   reviewed_by_id?: number | null
   approved_by_id?: number | null
@@ -552,12 +556,14 @@ export interface SecuritySastDashboard {
   applications_scanned: number
   open_vulnerabilities: number
   severity_distribution: Record<string, number>
+  remediation_status: Record<string, number>
 }
 
 export interface SecurityDastDashboard {
   total_requests: number
   scan_coverage: number
   vulnerability_trends: Record<string, number>
+  compliance_status: Record<string, number>
 }
 
 export interface SuppressionDashboard {
@@ -589,6 +595,7 @@ export interface TestFolderOut {
   parent_id?: number | null
   name: string
   created_by_id?: number | null
+  created_by_name?: string | null
   created_at: string
 }
 
@@ -626,6 +633,7 @@ export interface TestCaseImportResult {
   imported_executions: number
   skipped_rows: number
   errors: string[]
+  failure_reason?: string | null
 }
 
 export interface TestCycleOut {

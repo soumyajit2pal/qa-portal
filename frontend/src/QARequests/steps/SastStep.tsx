@@ -6,6 +6,7 @@ import {
   DEFAULT_SAST_CHECKLIST_ITEMS,
 } from "../../constants";
 import { QARequestForm, SetField, SAST_COMPONENT_FIELDS } from "../types";
+import { ChecklistEvidencePicker, EvidenceKind } from "./ChecklistEvidencePicker";
 
 interface Props {
   form: QARequestForm;
@@ -13,12 +14,15 @@ interface Props {
   // Once the linked SAST request already exists (created on an earlier
   // save), further edits happen on that request's own page instead.
   existingSast: boolean;
+  draftRequestId?: number;
+  evidenceFiles: (kind: EvidenceKind, itemIndex: number) => File[];
+  setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void;
 }
 
 // Shown only while "SAST" is a selected request type -- fills in the
 // auto-created SAST request's repository details and its own Security
 // Readiness checklist self-declaration, up front.
-export function SastStep({ form, set, existingSast }: Props) {
+export function SastStep({ form, set, existingSast, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
   function toggleChecked(item: string) {
     set(
       "sast_checked_items",
@@ -97,10 +101,10 @@ export function SastStep({ form, set, existingSast }: Props) {
             once raised). Items marked "mandatory" must be ticked before the
             SAST request can be submitted for SM Approval.
           </p>
-          {DEFAULT_SAST_CHECKLIST_ITEMS.map((ci) => {
+          {DEFAULT_SAST_CHECKLIST_ITEMS.map((ci, itemIndex) => {
             const checked = form.sast_checked_items.includes(ci.item);
             return (
-              <label
+              <div
                 key={ci.item}
                 style={{
                   display: "flex",
@@ -109,18 +113,16 @@ export function SastStep({ form, set, existingSast }: Props) {
                   padding: "5px 0",
                 }}
               >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => toggleChecked(ci.item)}
-                />
-                <span>
-                  {ci.item} <span className="muted small">({ci.owner})</span>{" "}
-                  {ci.is_mandatory && (
-                    <span className="badge badge-red">Mandatory</span>
-                  )}
-                </span>
-              </label>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
+                  <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
+                  <span>
+                    {ci.item} <span className="muted small">({ci.owner})</span>{" "}
+                    {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
+                  </span>
+                </label>
+                <ChecklistEvidencePicker kind="sast" itemIndex={itemIndex} draftRequestId={draftRequestId}
+                  files={evidenceFiles('sast', itemIndex)} onFilesChange={(files) => setEvidenceFiles('sast', itemIndex, files)} />
+              </div>
             );
           })}
         </>

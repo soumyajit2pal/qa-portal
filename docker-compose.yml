@@ -33,7 +33,7 @@ services:
       # Oracle itself -- see README "Database setup" for the bank's Oracle
       # instance (Option A) or a local gvenzl/oracle-free container
       # (Option B) to run alongside this stack.
-      DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:qa_portal_pwd@host.docker.internal:1521/?service_name=FREEPDB1}
+      DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:Oracle123@localhost:1521/?service_name=FREEPDB1}
       SECRET_KEY: ${SECRET_KEY:-change-this-to-a-long-random-string-in-production}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
     volumes:

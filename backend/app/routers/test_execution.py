@@ -29,6 +29,12 @@ def _get_cycle_or_404(db: Session, cycle_id: int) -> models.TestCycle:
     return obj
 
 
+def _require_active_project(db: Session, project_id: int) -> None:
+    project = _get_project_or_404(db, project_id)
+    if not project.is_active:
+        raise HTTPException(400, "This Test Project is inactive. Reactivate it before changing test execution data")
+
+
 # ---- Cycles ----
 @router.get("/projects/{project_id}/cycles", response_model=List[schemas.TestCycleOut])
 def list_cycles(project_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -39,7 +45,7 @@ def list_cycles(project_id: int, db: Session = Depends(get_db), current_user: mo
 @router.post("/projects/{project_id}/cycles", response_model=schemas.TestCycleOut)
 def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    _get_project_or_404(db, project_id)
+    _require_active_project(db, project_id)
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Cycle name cannot be blank")
@@ -62,12 +68,32 @@ def get_cycle(cycle_id: int, db: Session = Depends(get_db), current_user: models
 def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _get_cycle_or_404(db, cycle_id)
+    _require_active_project(db, obj.project_id)
     data = payload.model_dump(exclude_unset=True)
     for field, value in data.items():
         setattr(obj, field, value)
     db.commit()
     db.refresh(obj)
     return obj
+
+
+@router.delete("/cycles/{cycle_id}")
+def delete_cycle(cycle_id: int, db: Session = Depends(get_db),
+                 current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+    """Delete an empty Test Cycle. This governance action is limited to QA
+    Lead/Admin and never silently destroys recorded execution evidence."""
+    obj = _get_cycle_or_404(db, cycle_id)
+    _require_active_project(db, obj.project_id)
+    execution_count = db.query(models.TestExecution).filter_by(cycle_id=cycle_id).count()
+    if execution_count:
+        raise HTTPException(
+            400,
+            f"Cannot delete this Test Cycle because it contains {execution_count} test case execution record"
+            f"{'s' if execution_count != 1 else ''}. Remove the test cases from the cycle first."
+        )
+    db.delete(obj)
+    db.commit()
+    return {"ok": True}
 
 
 # ---- Executions (a test case's result within one cycle) ----
@@ -85,17 +111,32 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
     that are already in this cycle (the (cycle_id, test_case_id) unique
     constraint means re-adding one would otherwise 500)."""
     cycle = _get_cycle_or_404(db, cycle_id)
+    _require_active_project(db, cycle.project_id)
     already = {
         e.test_case_id for e in
         db.query(models.TestExecution.test_case_id).filter_by(cycle_id=cycle_id).all()
     }
+    requested_ids = list(dict.fromkeys(payload.test_case_ids))
+    selected_cases = db.query(models.TestCase).filter(
+        models.TestCase.project_id == cycle.project_id,
+        models.TestCase.id.in_(requested_ids),
+    ).all() if requested_ids else []
+    selected_by_id = {case.id: case for case in selected_cases}
+    missing = [case_id for case_id in requested_ids if case_id not in selected_by_id]
+    if missing:
+        raise HTTPException(404, f"{len(missing)} selected test case(s) were not found in this project")
+    awaiting_approval = [case.test_case_key for case in selected_cases if case.status != "Active"]
+    if awaiting_approval:
+        preview = ", ".join(awaiting_approval[:5])
+        suffix = "…" if len(awaiting_approval) > 5 else ""
+        raise HTTPException(
+            400,
+            f"Cannot add {len(awaiting_approval)} test case(s) because QA Lead approval is pending: {preview}{suffix}",
+        )
     created = []
-    for case_id in payload.test_case_ids:
+    for case_id in requested_ids:
         if case_id in already:
             continue
-        case = db.query(models.TestCase).filter_by(id=case_id, project_id=cycle.project_id).first()
-        if not case:
-            raise HTTPException(404, f"Test Case #{case_id} not found in this project")
         obj = models.TestExecution(cycle_id=cycle_id, test_case_id=case_id, status="Not Executed")
         db.add(obj)
         created.append(obj)
@@ -112,6 +153,10 @@ def update_execution(execution_id: int, payload: schemas.TestExecutionUpdate, db
     obj = db.query(models.TestExecution).get(execution_id)
     if not obj:
         raise HTTPException(404, "Execution not found")
+    cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_active_project(db, cycle.project_id)
+    if not obj.test_case or obj.test_case.status != "Active":
+        raise HTTPException(400, "This test case is awaiting QA Lead approval and cannot be executed")
     obj.status = payload.status
     obj.actual_result = payload.actual_result
     obj.test_run_artifacts = payload.test_run_artifacts
@@ -131,6 +176,8 @@ def remove_execution(execution_id: int, db: Session = Depends(get_db),
     obj = db.query(models.TestExecution).get(execution_id)
     if not obj:
         raise HTTPException(404, "Execution not found")
+    cycle = _get_cycle_or_404(db, obj.cycle_id)
+    _require_active_project(db, cycle.project_id)
     db.delete(obj)
     db.commit()
     return {"ok": True}

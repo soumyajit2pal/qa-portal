@@ -14,11 +14,13 @@ import {
   DetailSection,
   DetailField,
   RequestDocuments,
+  ChecklistEvidence,
 } from "../../components/Common";
 import { ApplicationNameBanner } from "../../components/ApplicationNameBanner";
-import UserAssignSelect from "../../components/UserAssignSelect";
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
+import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
+import JiraActivity from "../../components/JiraActivity";
 import {
   QA_STATUSES,
   QA_STATUS_LABELS,
@@ -28,6 +30,10 @@ import {
   CHANGE_TYPES,
   FUNCTIONAL_EDITABLE_STATUSES,
   hasRole,
+  validTargetPromotionOptions,
+  validEnvironmentPromotion,
+  canManageReadinessEvidence,
+  QA_DEPARTMENT,
 } from "../../constants";
 import {
   FunctionalOut,
@@ -107,6 +113,19 @@ function FunctionalFormModal({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    // Same Deployment/Target Promotion Environment ordering rule as the QA
+    // Request wizard's DetailsStep.tsx -- this modal's own dropdown already
+    // only offers valid Target options and auto-corrects on Deployment
+    // change (see the two selects below), so this should never actually
+    // trip, but it's the last line of defense before the PUT goes out.
+    if (!validEnvironmentPromotion(form.environment, form.target_promotion_environment)) {
+      setError(
+        new Error(
+          `Target Promotion Environment ('${form.target_promotion_environment}') must be later than Deployment Environment ('${form.environment}') in the pipeline SIT -> UAT -> Pre-Production -> Production.`
+        )
+      );
+      return;
+    }
     setBusy(true);
     try {
       const saved = await api.put<FunctionalOut>(
@@ -219,7 +238,20 @@ function FunctionalFormModal({
             <Field label="Deployment Environment">
               <select
                 value={form.environment}
-                onChange={(e) => set("environment", e.target.value)}
+                onChange={(e) => {
+                  const nextEnv = e.target.value;
+                  set("environment", nextEnv);
+                  // Target Promotion Environment must always stay strictly
+                  // later than Deployment Environment in the SIT -> UAT ->
+                  // Pre-Production -> Production pipeline -- snap it forward
+                  // to the nearest valid stage if the already-picked target
+                  // is no longer valid against the newly-picked deployment
+                  // environment, same as DetailsStep.tsx.
+                  const validTargets = validTargetPromotionOptions(nextEnv);
+                  if (!validTargets.includes(form.target_promotion_environment)) {
+                    set("target_promotion_environment", validTargets[0] || "");
+                  }
+                }}
               >
                 {ENVIRONMENTS.filter((e_) => e_ !== "Dev").map((o) => (
                   <option key={o} value={o}>
@@ -235,13 +267,12 @@ function FunctionalFormModal({
                   set("target_promotion_environment", e.target.value)
                 }
               >
-                {ENVIRONMENTS.filter((e_) => e_ !== "Dev" && e_ !== "SIT").map(
-                  (o) => (
-                    <option key={o} value={o}>
-                      {o}
-                    </option>
-                  )
-                )}
+                <option value="">Select Target Promotion Environment</option>
+                {validTargetPromotionOptions(form.environment).map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
               </select>
             </Field>
             <Field label="Release Version / Hash Value">
@@ -280,7 +311,7 @@ function FunctionalFormModal({
               during Readiness Verification.
             </p>
             {editing.checklist_items.map((c) => (
-              <label
+              <div
                 key={c.id}
                 style={{
                   display: "flex",
@@ -289,27 +320,26 @@ function FunctionalFormModal({
                   padding: "5px 0",
                 }}
               >
-                <input
-                  type="checkbox"
-                  checked={checkedItems.includes(c.item)}
-                  onChange={() => toggleChecked(c.item)}
-                />
-                <span>
-                  {c.item}{" "}
-                  {c.owner && <span className="muted small">({c.owner})</span>}{" "}
-                  {c.is_mandatory && (
-                    <span className="badge badge-gray">Mandatory</span>
-                  )}
-                </span>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
+                  <input
+                    type="checkbox"
+                    checked={checkedItems.includes(c.item)}
+                    onChange={() => toggleChecked(c.item)}
+                  />
+                  <span>
+                    {c.item}{" "}
+                    {c.owner && <span className="muted small">({c.owner})</span>}{" "}
+                    {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
+                  </span>
+                </label>
                 {c.is_complete && (
-                  <span
-                    className="badge badge-green"
-                    style={{ marginLeft: "auto" }}
-                  >
+                  <span className="badge badge-green">
                     QA verified
                   </span>
                 )}
-              </label>
+                <ChecklistEvidence apiBase="/api/functional-requests" reqId={editing.id} itemId={c.id}
+                  canManage={canManageReadinessEvidence(editing.status)} />
+              </div>
             ))}
           </div>
         )}
@@ -435,6 +465,7 @@ function FunctionalDetail({
   // clicking, so this is now asked as a pop-up at the moment of failing
   // readiness instead.
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false);
+  const [readinessPassError, setReadinessPassError] = useState<unknown>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [editingDetails, setEditingDetails] = useState(false);
   const [showSignoffModal, setShowSignoffModal] = useState(false);
@@ -466,6 +497,8 @@ function FunctionalDetail({
 
   async function act(action: string, extra?: Record<string, unknown>) {
     setError(null);
+    const isReadinessPass = action === "readiness-decision" && extra?.decision === "Passed";
+    if (isReadinessPass) setReadinessPassError(null);
     setBusyAction(action);
     try {
       const updated = await api.post<FunctionalOut>(
@@ -473,9 +506,11 @@ function FunctionalDetail({
         extra || {}
       );
       onChanged(updated);
-      load();
+      setComments("");
+      await load();
     } catch (err) {
-      setError(err);
+      if (isReadinessPass) setReadinessPassError(err);
+      else setError(err);
     } finally {
       setBusyAction(null);
     }
@@ -516,18 +551,28 @@ function FunctionalDetail({
     }
   }
 
-  const qaLeads = users.filter((u) => (u.roles || []).includes("QA_LEAD"));
-  const testers = users.filter((u) => (u.roles || []).includes("QA_ENGINEER"));
+  const qaLeads = users.filter((u) =>
+    u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes("QA_LEAD")
+  );
+  const testers = users.filter((u) =>
+    u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes("QA_ENGINEER")
+  );
 
   const isAdmin = hasRole(user, "ADMIN");
   const isRequester = req.requester_id === user?.id || isAdmin;
-  const isAssignedQALead = req.qa_lead_id === user?.id || isAdmin;
   const isRequesterVerifier = isRequester || hasRole(user, "APPLICATION_OWNER");
 
   const status = req.status;
+  const sameDept = !!user?.department && user.department === req.department;
+  const isQALead = hasRole(user, "QA_LEAD");
+  const isAssignedQALead = isAdmin || (isQALead && req.qa_lead_id === user?.id);
+  const assignedTesterIds = new Set(
+    (req.assigned_tester_ids || "").split(",").filter(Boolean).map(Number)
+  );
+  const isAssignedTester = isAdmin || (hasRole(user, "QA_ENGINEER") && !!user?.id && assignedTesterIds.has(user.id));
 
   const canVerifyChecklist =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER", "BUSINESS_ANALYST") &&
+    isAssignedQALead &&
     status === "READINESS_VERIFICATION";
 
   const canSubmit = isRequester && status === "DRAFT";
@@ -538,12 +583,9 @@ function FunctionalDetail({
       "RETURNED_BY_DEPARTMENT_HEAD",
       "RETURNED_BY_QA_LEAD",
     ].includes(status);
-  // SM/Department Head approvals are department-scoped -- a stakeholder can
-  // only act on requests raised from their own department (enforced
-  // server-side too; this just keeps the buttons from appearing for a
-  // mismatch instead of surfacing a 403 after clicking). Doesn't apply to
-  // the QA-side steps below, since QA is the team receiving the request.
-  const sameDept = !!user?.department && user.department === req.department;
+  // SM and Department Head approvals remain requester-department scoped.
+  // QA is a central vertical, so QA Lead actions below are intentionally not
+  // bound to the requester's department.
   // Blocks Sign/Approve on both the SM and Department Head decision panels
   // below while this request's Application Name is still PENDING/REJECTED
   // (not yet APPROVED) -- see ApplicationNameBanner. An unset status (no
@@ -560,29 +602,27 @@ function FunctionalDetail({
     status === "DEPARTMENT_HEAD_APPROVAL_PENDING" &&
     (sameDept || isAdmin);
   const canStartReadiness =
-    hasRole(user, "QA_LEAD") &&
-    isAssignedQALead &&
-    status === "QA_LEAD_ASSIGNED";
+    isAssignedQALead && status === "QA_LEAD_ASSIGNED";
   const canReadinessDecide =
-    hasRole(user, "QA_LEAD") && status === "READINESS_VERIFICATION";
+    isAssignedQALead && status === "READINESS_VERIFICATION";
   const canBeginPlanning =
-    hasRole(user, "QA_LEAD") && status === "QA_ACTIVITY_INITIATED";
-  const canAssignTester = hasRole(user, "QA_LEAD") && status === "PLANNING";
+    isAssignedQALead && status === "QA_ACTIVITY_INITIATED";
+  const canAssignTester = isAssignedQALead && status === "PLANNING";
   const canStartTestDesign =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER") && status === "TESTER_ASSIGNED";
+    isAssignedTester && status === "TESTER_ASSIGNED";
   const canStartExecution =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER") && status === "TEST_DESIGN";
+    isAssignedTester && status === "TEST_DESIGN";
   const canRaiseDefect =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER") &&
+    isAssignedTester &&
     status === "EXECUTION_IN_PROGRESS";
   const canMarkWaitingForFix =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER") && status === "DEFECT_RAISED";
+    isAssignedTester && status === "DEFECT_RAISED";
   const canStartRetest =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER") && status === "WAITING_FOR_FIX";
+    isAssignedTester && status === "WAITING_FOR_FIX";
   const canStartRegression =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER") && status === "RETESTING";
+    isAssignedTester && status === "RETESTING";
   const canCompleteQA =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER") &&
+    isAssignedTester &&
     ["EXECUTION_IN_PROGRESS", "RETESTING", "REGRESSION_TESTING"].includes(
       status
     );
@@ -591,7 +631,9 @@ function FunctionalDetail({
   // -- whichever of them actually ran QA through to completion should be
   // able to raise the certificate, not just the QA Lead.
   const canRequestSignoff =
-    hasRole(user, "QA_LEAD", "QA_ENGINEER") && status === "QA_COMPLETED";
+    isAssignedTester &&
+    (hasRole(user, "ADMIN") || user?.department === QA_DEPARTMENT) &&
+    status === "QA_COMPLETED";
   // "Confirm Sign-off" (a manual QA Lead click) removed -- the linked
   // certificate reaching ISSUED now auto-advances this request straight to
   // Requester Verification (see routers/signoff.py::
@@ -642,7 +684,7 @@ function FunctionalDetail({
               className={tab === t ? "active" : ""}
               onClick={() => setTab(t)}
             >
-              {t[0].toUpperCase() + t.slice(1)}
+              {t === "history" ? "Activity" : t[0].toUpperCase() + t.slice(1)}
             </button>
           )
         )}
@@ -728,8 +770,8 @@ function FunctionalDetail({
             <DetailField label="Department Head">
               {userName(users, req.department_head_id) || "—"}
             </DetailField>
-            <DetailField label="QA Lead">
-              {userName(users, req.qa_lead_id) || "—"}
+            <DetailField label="Assigned QA Lead">
+              {userName(users, req.qa_lead_id) || "Not assigned"}
             </DetailField>
             <DetailField label="Assigned Tester(s)">
               {req.assigned_tester_ids
@@ -826,24 +868,25 @@ function FunctionalDetail({
                   userName={user?.full_name}
                   comments={comments}
                   busy={!!busyAction}
-                  extraReady={!!selectedQALead}
                   signBlocked={applicationNameBlocking}
                   signBlockedMessage="This request's Application Name is not yet approved by SM."
-                  extraControlLabel="Assign QA Lead"
+                  extraControlLabel="Assign IT-QA QA Lead"
                   extraControl={
                     <UserAssignSelect
                       value={selectedQALead}
                       onChange={setSelectedQALead}
                       users={qaLeads}
-                      placeholder="Assign QA Lead..."
-                      style={{ width: "100%" }}
+                      placeholder="Select QA Lead..."
+                      disabled={!!busyAction}
+                      style={{ minWidth: 260 }}
                     />
                   }
+                  extraReady={!!selectedQALead}
                   onApprove={(signed) =>
                     act("department-head-decision", {
                       decision: "Approved",
-                      qa_lead_id: Number(selectedQALead),
                       comments: signed,
+                      qa_lead_id: Number(selectedQALead),
                     })
                   }
                   onReturn={() =>
@@ -1088,7 +1131,7 @@ function FunctionalDetail({
               canCompleteQA ||
               canRequesterDecide) && (
               <input
-                placeholder="Comments (optional)"
+                placeholder="Action note (optional — attached to the next workflow action)"
                 value={comments}
                 onChange={(e) => setComments(e.target.value)}
                 style={{
@@ -1163,6 +1206,7 @@ function FunctionalDetail({
             <span style={{ width: 130, textAlign: "center" }}>
               QA Lead verified
             </span>
+            <span style={{ width: 230, textAlign: "center" }}>Evidence</span>
           </div>
           {checklist.map((c) => (
             <div
@@ -1206,6 +1250,8 @@ function FunctionalDetail({
                   onChange={() => toggleChecklistItem(c)}
                 />
               </span>
+              <ChecklistEvidence apiBase="/api/functional-requests" reqId={req.id} itemId={c.id}
+                canManage={canManageReadinessEvidence(req.status)} />
             </div>
           ))}
         </div>
@@ -1237,32 +1283,18 @@ function FunctionalDetail({
       )}
 
       {tab === "history" && (
-        <Table
-          rowKey="id"
-          columns={[
-            { key: "step_name", header: "Step" },
-            { key: "decision", header: "Decision" },
-            {
-              key: "actor_id",
-              header: "Actor",
-              render: (r) => userName(users, r.actor_id) || "—",
-              filterValue: (r) => userName(users, r.actor_id) || "",
-            },
-            { key: "actor_role", header: "Role" },
-            { key: "comments", header: "Comments" },
-            {
-              key: "created_at",
-              header: "When",
-              render: (r) => new Date(r.created_at).toLocaleString(),
-            },
-          ]}
-          rows={history}
-        />
+        <JiraActivity entityType="FUNCTIONAL_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {tab === "documents" && (
         <RequestDocuments apiBase="/api/functional-requests" reqId={req.id} />
       )}
+
+      <ErrorText
+        error={readinessPassError}
+        title="Readiness cannot be passed"
+        guidance="Review the Readiness Checklist, complete the listed verification items, and then try “Readiness Passed” again."
+      />
     </Modal>
   );
 }
@@ -1419,8 +1451,8 @@ export default function Functional() {
             },
             {
               key: "qa_lead_id",
-              header: "QA Lead",
-              render: (r) => userName(users, r.qa_lead_id) || "—",
+              header: "Assigned QA Lead",
+              render: (r) => userName(users, r.qa_lead_id) || "Not assigned",
               filterValue: (r) => userName(users, r.qa_lead_id) || "",
             },
             {

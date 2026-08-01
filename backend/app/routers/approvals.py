@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -53,20 +53,64 @@ def _to_out(db: Session, row: models.ApprovalAction) -> dict:
     return {
         "id": row.id, "entity_type": row.entity_type, "entity_id": row.entity_id,
         "request_ref": _resolve_request_ref(db, row.entity_type, row.entity_id),
-        "step_name": row.step_name, "actor_id": row.actor_id, "actor_role": row.actor_role,
+        "step_name": row.step_name, "actor_id": row.actor_id, "actor_name": row.actor_name, "actor_role": row.actor_role,
         "decision": row.decision, "comments": row.comments, "created_at": row.created_at,
     }
 
 
 @router.get("", response_model=List[schemas.ApprovalActionOut])
-def list_approvals(entity_type: Optional[str] = None, db: Session = Depends(get_db),
+def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] = None, db: Session = Depends(get_db),
                     current_user: models.User = Depends(get_current_user)):
     """Module 7: cross-entity approval/audit feed (QA_REQUEST, TEST_CASE, SAST_DAST, SUPPRESSION, SIGNOFF)."""
     q = db.query(models.ApprovalAction)
     if entity_type:
         q = q.filter(models.ApprovalAction.entity_type == entity_type)
+    if entity_id is not None:
+        q = q.filter(models.ApprovalAction.entity_id == entity_id)
     rows = q.order_by(models.ApprovalAction.created_at.desc()).limit(500).all()
     return [_to_out(db, r) for r in rows]
+
+
+_COMMENT_ENTITY_MODELS = {
+    "QA_REQUEST": models.QARequest,
+    "FUNCTIONAL_REQUEST": models.FunctionalRequest,
+    "SAST": models.SASTRequest,
+    "DAST": models.DASTRequest,
+    "PERFORMANCE": models.PerformanceRequest,
+    "SUPPRESSION": models.SuppressionRequest,
+    "SIGNOFF": models.QASignOff,
+    "TEST_PROJECT": models.TestProject,
+    "TEST_CASE": models.TestCase,
+    "TEST_CYCLE": models.TestCycle,
+}
+
+
+@router.post("/{entity_type}/{entity_id}/comments", response_model=schemas.ApprovalActionOut)
+def add_comment(entity_type: str, entity_id: int, payload: schemas.CommentCreate,
+                db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Append a Jira-style standalone comment to any supported module's
+    existing audit stream. Comments are immutable audit events and therefore
+    remain visible alongside workflow actions and approvals."""
+    normalized_type = entity_type.strip().upper()
+    model = _COMMENT_ENTITY_MODELS.get(normalized_type)
+    if not model:
+        raise HTTPException(400, f"Comments are not supported for entity type '{entity_type}'")
+    if not db.query(model).get(entity_id):
+        raise HTTPException(404, "Record not found")
+    body = payload.body.strip()
+    if not body:
+        raise HTTPException(400, "Comment cannot be blank")
+    if len(body) > 5000:
+        raise HTTPException(400, "Comment cannot exceed 5,000 characters")
+    row = models.ApprovalAction(
+        entity_type=normalized_type, entity_id=entity_id, step_name="Comment",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision="Commented", comments=body,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _to_out(db, row)
 
 
 @router.get("/pending-mine", response_model=List[schemas.ApprovalActionOut])

@@ -4,6 +4,7 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
+import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
 import { SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
 
@@ -303,7 +304,8 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
     try {
       const updated = await api.post<SuppressionOut>(`/api/suppressions/${sup.id}/${step}`, extra || {})
       onChanged(updated)
-      loadExtras()
+      setComments('')
+      await loadExtras()
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
@@ -326,7 +328,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
         <button type="button" className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button>
         <button type="button" className={tab === 'walkthroughs' ? 'active' : ''} onClick={() => setTab('walkthroughs')}>Walkthroughs</button>
         <button type="button" className={tab === 'documents' ? 'active' : ''} onClick={() => setTab('documents')}>Documents</button>
-        <button type="button" className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>History</button>
+        <button type="button" className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>Activity</button>
       </div>
       <ErrorText error={error} />
 
@@ -355,8 +357,8 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
           <p style={{ marginTop: 14 }}><strong>Risk Assessment:</strong> {sup.risk_assessment || '—'}</p>
 
           <div className="section-title">Workflow Actions</div>
-          <Field label="Comments (used by the next action below)">
-            <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Optional comments..." />
+          <Field label="Action note (optional)">
+            <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
           </Field>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/suppressions/${sup.id}/export`, `${sup.suppression_id}.pdf`)}>
@@ -434,18 +436,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
       )}
 
       {tab === 'history' && (
-        <Table
-          rowKey="id"
-          columns={[
-            { key: 'step_name', header: 'Step' },
-            { key: 'decision', header: 'Decision' },
-            { key: 'actor_id', header: 'Actor', render: (r) => userName(users, r.actor_id) || '—', filterValue: (r) => userName(users, r.actor_id) || '' },
-            { key: 'actor_role', header: 'Role' },
-            { key: 'comments', header: 'Comments' },
-            { key: 'created_at', header: 'When', render: (r) => new Date(r.created_at).toLocaleString() },
-          ]}
-          rows={history}
-        />
+        <JiraActivity entityType="SUPPRESSION" entityId={sup.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {tab === 'documents' && <RequestDocuments apiBase="/api/suppressions" reqId={sup.id} />}

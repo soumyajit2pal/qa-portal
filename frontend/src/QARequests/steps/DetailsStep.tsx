@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
-import { Field } from "../../components/Common";
-import { CHANGE_TYPES, ENVIRONMENTS } from "../../constants";
+import { ErrorText, Field } from "../../components/Common";
+import { CHANGE_TYPES, ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
 import { ApplicationMasterOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
 import { CR_NUMBER_REGEX, EPIC_NUMBER_REGEX } from "../validation";
@@ -134,7 +134,11 @@ export function DetailsStep({ form, set }: Props) {
                 }
               }}
             />
-            {crError && <span className="text-sm">{crError}</span>}
+            <ErrorText
+              error={crError}
+              title="Invalid Change Request ID"
+              guidance="Enter the ID in CR-1234 format, then continue with the request."
+            />
           </Field>
 
           <Field label="Epic Number *">
@@ -153,7 +157,11 @@ export function DetailsStep({ form, set }: Props) {
                 }
               }}
             />
-            {epicError && <span className="text-sm">{epicError}</span>}
+            <ErrorText
+              error={epicError}
+              title="Invalid Epic Number"
+              guidance="Enter the Epic Number in EPIC-1234 format, then continue with the request."
+            />
           </Field>
 
           <Field label="Change Type *">
@@ -214,7 +222,25 @@ export function DetailsStep({ form, set }: Props) {
           <Field label="Deployment Environment *">
             <select
               value={form.environment}
-              onChange={(e) => set("environment", e.target.value)}
+              onChange={(e) => {
+                const nextEnv = e.target.value;
+                set("environment", nextEnv);
+                // Target Promotion Environment must always stay strictly
+                // later than Deployment Environment in the SIT -> UAT ->
+                // Pre-Production -> Production pipeline -- if the
+                // already-picked target is no longer valid against the
+                // newly-picked deployment environment (e.g. Deployment
+                // flipped from SIT to Production while Target was still
+                // UAT), snap it forward to the nearest valid stage instead
+                // of silently leaving an invalid combination selected. Keeps
+                // this dropdown's own "always a real, non-blank value"
+                // invariant intact (see validation.ts's detailsStepError
+                // comment) rather than falling back to an empty selection.
+                const validTargets = validTargetPromotionOptions(nextEnv);
+                if (!validTargets.includes(form.target_promotion_environment)) {
+                  set("target_promotion_environment", validTargets[0] || "");
+                }
+              }}
             >
               {ENVIRONMENTS.filter((e_) => e_ !== "Dev").map((o) => (
                 <option key={o} value={o}>
@@ -230,13 +256,12 @@ export function DetailsStep({ form, set }: Props) {
                 set("target_promotion_environment", e.target.value)
               }
             >
-              {ENVIRONMENTS.filter((e_) => e_ !== "Dev" && e_ !== "SIT").map(
-                (o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                )
-              )}
+              <option value="">Select Target Promotion Environment</option>
+              {validTargetPromotionOptions(form.environment).map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
             </select>
           </Field>
           <Field label="Target Release Date">

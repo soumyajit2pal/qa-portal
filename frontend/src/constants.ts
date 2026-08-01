@@ -16,6 +16,10 @@ export const ROLE_LABELS: Record<string, string> = {
 
 export const ALL_ROLES = Object.keys(ROLE_LABELS)
 
+// QA Sign-off is an IT - QA-owned workflow even when its linked testing
+// request came from another business department.
+export const QA_DEPARTMENT = 'IT - QA'
+
 // Minimal shape needed by hasRole -- deliberately looser than the full
 // UserOut so it works for both the logged-in user and any user row.
 export interface RoleBearer {
@@ -107,7 +111,7 @@ export const QA_STATUS_LABELS: Record<string, string> = {
   DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head Approval Pending',
   RETURNED_BY_DEPARTMENT_HEAD: 'Returned by Department Head',
   DEPARTMENT_HEAD_REJECTED: 'Department Head Rejected',
-  QA_LEAD_ASSIGNED: 'QA Lead Assigned',
+  QA_LEAD_ASSIGNED: 'QA Readiness Verification Pending',
   READINESS_VERIFICATION: 'Readiness Verification',
   RETURNED_BY_QA_LEAD: 'Returned by QA Lead', QA_ACTIVITY_INITIATED: 'QA Activity Initiated',
   PLANNING: 'Planning', TESTER_ASSIGNED: 'Tester Assigned', TEST_DESIGN: 'Test Design',
@@ -129,6 +133,20 @@ export const FUNCTIONAL_EDITABLE_STATUSES: string[] = [
   'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
   'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_QA_LEAD',
 ]
+// Checklist evidence is normally collected before the Department Head
+// decision and locked after approval. Any RETURNED_BY_* status is the
+// deliberate exception: the request is back with the requester, who must be
+// able to attach the evidence requested by whichever later stage returned it.
+export const READINESS_EVIDENCE_EDITABLE_STATUSES: string[] = [
+  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
+  'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD',
+]
+export function canManageReadinessEvidence(status?: string | null): boolean {
+  return !!status && (
+    READINESS_EVIDENCE_EDITABLE_STATUSES.includes(status)
+    || status.startsWith('RETURNED_BY_')
+  )
+}
 // Terminal statuses -- no further transitions possible.
 export const QA_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED']
 // Statuses from which the request may still be cancelled -- mirrors backend
@@ -194,9 +212,9 @@ export const SAST_DAST_STATUS_LABELS: Record<string, string> = {
   DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head Approval Pending',
   RETURNED_BY_DEPARTMENT_HEAD: 'Returned by Department Head',
   DEPARTMENT_HEAD_REJECTED: 'Department Head Rejected',
-  SECURITY_LEAD_ASSIGNED: 'Security Lead Assigned',
+  SECURITY_LEAD_ASSIGNED: 'Security Readiness Verification Pending',
   SECURITY_READINESS: 'Security Readiness',
-  RETURNED_BY_SECURITY_LEAD: 'Returned by Security Lead',
+  RETURNED_BY_SECURITY_LEAD: 'Returned by QA Lead',
   PLANNING: 'Planning',
   CONFIGURATION: 'Scan Configuration',
   SCANNING: 'Scanning',
@@ -268,7 +286,7 @@ export const PERFORMANCE_STATUS_LABELS: Record<string, string> = {
   DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head Approval Pending',
   RETURNED_BY_DEPARTMENT_HEAD: 'Returned by Department Head',
   DEPARTMENT_HEAD_REJECTED: 'Department Head Rejected',
-  ENGINEER_ASSIGNED: 'Engineer Assigned', RETURNED_BY_ENGINEER: 'Returned by Engineer',
+  ENGINEER_ASSIGNED: 'Readiness Verification Pending', RETURNED_BY_ENGINEER: 'Returned by QA Lead',
   READINESS: 'Readiness', FEASIBILITY: 'Feasibility', PLANNING: 'Planning',
   ENVIRONMENT_SETUP: 'Environment Setup', SCRIPT_DEVELOPMENT: 'Script Development',
   BASELINE: 'Baseline', LOAD_TEST_EXECUTION: 'Load Test Execution',
@@ -345,18 +363,16 @@ export const SUPPRESSION_STATUS_LABELS: Record<string, string> = {
 
 export const SUPPRESSION_TERMINAL_STATUSES: string[] = ['Done', 'Rejected']
 
-// QASignOff's own Tester -> SM -> Department Head COE approval chain (see
-// backend constants.SIGNOFF_STATUSES) -- mirrors this same
-// Requester/SM/Department-Head shape used everywhere else in the app.
+// QASignOff's own QA Engineer -> QA Lead -> Executive COE approval chain.
 export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
   DRAFT: 'Draft',
   SUBMITTED: 'Submitted',
-  SM_APPROVAL_PENDING: 'SM Approval Pending',
-  RETURNED_BY_SM: 'Returned by SM',
-  SM_REJECTED: 'Rejected by SM',
-  DEPT_HEAD_COE_APPROVAL_PENDING: 'Department Head COE Approval Pending',
-  RETURNED_BY_DEPT_HEAD_COE: 'Returned by Department Head COE',
-  DEPT_HEAD_COE_REJECTED: 'Rejected by Department Head COE',
+  SM_APPROVAL_PENDING: 'QA Lead Approval Pending',
+  RETURNED_BY_SM: 'Returned by QA Lead',
+  SM_REJECTED: 'Rejected by QA Lead',
+  DEPT_HEAD_COE_APPROVAL_PENDING: 'Executive COE Approval Pending',
+  RETURNED_BY_DEPT_HEAD_COE: 'Returned by Executive COE',
+  DEPT_HEAD_COE_REJECTED: 'Rejected by Executive COE',
   ISSUED: 'Issued',
   // No entries for the old pre-rollout literal "Draft"/"Issued" values --
   // those keys would collide with SUPPRESSION_STATUS_LABELS.Draft in the
@@ -382,6 +398,39 @@ export const REQUEST_TYPES: string[] = [
 export const PRIORITIES: string[] = ['Critical', 'High', 'Medium', 'Low']
 export const RISK_RATINGS: string[] = ['Critical', 'High', 'Medium', 'Low']
 export const ENVIRONMENTS: string[] = ['Dev', 'SIT', 'UAT', 'Pre-Production', 'Production']
+
+// Deployment Environment / Target Promotion Environment must move strictly
+// forward along this pipeline -- reported directly (e.g. Deployment=UAT must
+// force Target=Pre-Production/Production, never SIT/UAT again or anything
+// earlier). "Dev" is deliberately excluded -- neither field's own dropdown
+// ever offers it (both already filter it out, see DetailsStep.tsx/
+// Functional.tsx's Edit Details modal), so it's not part of this ordering.
+// Mirrors backend/app/constants.py's ENVIRONMENT_PIPELINE_ORDER exactly.
+export const ENVIRONMENT_PIPELINE_ORDER: string[] = ['SIT', 'UAT', 'Pre-Production', 'Production']
+
+// Every Target Promotion Environment option that is strictly later than the
+// given Deployment Environment in the pipeline above -- used to populate the
+// Target dropdown so an invalid combination can't even be selected in the
+// first place (rather than only being caught after the fact by
+// validEnvironmentPromotion below). Returns every non-"Dev" environment if
+// `environment` isn't a recognised pipeline stage yet (e.g. still blank).
+export function validTargetPromotionOptions(environment: string): string[] {
+  const idx = ENVIRONMENT_PIPELINE_ORDER.indexOf(environment)
+  if (idx === -1) return ENVIRONMENT_PIPELINE_ORDER.slice()
+  return ENVIRONMENT_PIPELINE_ORDER.slice(idx + 1)
+}
+
+// Same ordering rule as backend/app/constants.py's
+// validate_environment_promotion -- used to gate Next/Submit/Save so a
+// combination that somehow got out of sync (e.g. Deployment Environment
+// changed after Target was already picked) is still caught, not just
+// prevented from being freshly selected via validTargetPromotionOptions.
+export function validEnvironmentPromotion(environment: string, targetPromotionEnvironment: string): boolean {
+  const envIdx = ENVIRONMENT_PIPELINE_ORDER.indexOf(environment)
+  const targetIdx = ENVIRONMENT_PIPELINE_ORDER.indexOf(targetPromotionEnvironment)
+  if (envIdx === -1 || targetIdx === -1) return true
+  return targetIdx > envIdx
+}
 export const SEVERITIES: string[] = ['Critical', 'High', 'Medium', 'Low', 'Informational']
 export const CERTIFICATE_TYPES: string[] = ['Full Clearance', 'Conditional Clearance', 'Clearance Denied']
 export const SIGNOFF_TESTING_TYPES: string[] = ['Functional', 'SAST', 'DAST']
@@ -413,6 +462,11 @@ export const TEST_CASE_TYPES: string[] = [
   'Integration', 'Security', 'Performance', 'UAT', 'Other',
 ]
 export const TEST_CASE_STATUSES: string[] = ['Active', 'Draft', 'Deprecated']
+export const TEST_CASE_STATUS_LABELS: Record<string, string> = {
+  Draft: 'Pending QA Lead Review',
+  Active: 'Approved',
+  Deprecated: 'Deprecated',
+}
 export const TEST_CASE_PRIORITIES: string[] = PRIORITIES
 export const TEST_CYCLE_STATUSES: string[] = ['Not Started', 'In Progress', 'Completed']
 export const TEST_EXECUTION_STATUSES: string[] = ['Not Executed', 'Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed']

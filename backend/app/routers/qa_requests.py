@@ -19,6 +19,7 @@ from ..constants import (
     Role, DEFAULT_CHECKLIST_ITEMS, DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
     DEFAULT_SAST_CHECKLIST_ITEMS, DEFAULT_DAST_CHECKLIST_ITEMS,
     FUNCTIONAL_BUCKET_TYPES, GatewayStatus, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
+    validate_environment_promotion,
 )
 from ..pdf_export import build_request_detail_pdf
 
@@ -69,6 +70,66 @@ def _raise_child_to_sm(db: Session, child, entity_type: str, qa_request: "models
             actor_id=current_user.id, actor_role=current_user.roles_csv,
             decision="Pending", comments="Awaiting SM decision",
         ))
+
+
+_DRAFT_EVIDENCE_DEFINITIONS = {
+    "functional": DEFAULT_CHECKLIST_ITEMS,
+    "sast": DEFAULT_SAST_CHECKLIST_ITEMS,
+    "dast": DEFAULT_DAST_CHECKLIST_ITEMS,
+    "performance": DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
+}
+_DRAFT_EVIDENCE_PREFIXES = {
+    "functional": "DRAFT_FUNCTIONAL",
+    "sast": "DRAFT_SAST",
+    "dast": "DRAFT_DAST",
+    "performance": "DRAFT_PERF",
+}
+
+
+def _draft_evidence_module(kind: str, item_index: int) -> str:
+    """Stable storage key for evidence selected before child checklist rows
+    exist. The index refers to the corresponding fixed checklist definition;
+    the document is re-keyed to the real child item during submit."""
+    definitions = _DRAFT_EVIDENCE_DEFINITIONS.get(kind)
+    if definitions is None:
+        raise HTTPException(404, "Unknown readiness checklist")
+    if item_index < 0 or item_index >= len(definitions):
+        raise HTTPException(404, "Checklist item not found")
+    return f"{_DRAFT_EVIDENCE_PREFIXES[kind]}_{item_index:02d}"
+
+
+def _promote_draft_checklist_evidence(db: Session, qa_request: "models.QARequest") -> None:
+    """Moves Draft-wizard evidence onto the actual checklist rows created by
+    _sync_linked_child_requests. Only database keys change; stored_path keeps
+    pointing at the same physical file, so promotion is atomic with submit."""
+    db.flush()
+    destinations = [
+        ("functional", "FUNCTIONAL_ITEM", models.ReadinessChecklistItem,
+         "functional_request_id", models.FunctionalRequest),
+        ("sast", "SAST_ITEM", models.SASTChecklistItem,
+         "sast_request_id", models.SASTRequest),
+        ("dast", "DAST_ITEM", models.DASTChecklistItem,
+         "dast_request_id", models.DASTRequest),
+        ("performance", "PERFORMANCE_ITEM", models.PerformanceChecklistItem,
+         "performance_request_id", models.PerformanceRequest),
+    ]
+    for kind, destination_module, item_model, parent_fk, parent_model in destinations:
+        parent = db.query(parent_model).filter_by(qa_request_id=qa_request.id).first()
+        if not parent:
+            continue
+        checklist_by_name = {
+            row.item: row for row in db.query(item_model).filter(
+                getattr(item_model, parent_fk) == parent.id).all()
+        }
+        for index, definition in enumerate(_DRAFT_EVIDENCE_DEFINITIONS[kind]):
+            item = checklist_by_name.get(definition[0])
+            if not item:
+                continue
+            staged = db.query(models.RequestDocument).filter_by(
+                module=_draft_evidence_module(kind, index), request_id=qa_request.id).all()
+            for document in staged:
+                document.module = destination_module
+                document.request_id = item.id
 
 
 def _resolve_application_name(db: Session, name: Optional[str], department: Optional[str],
@@ -458,6 +519,16 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # resolved after flush, once this row has an id to link back to.
     application_name_in = data.pop("application_name")
     name_upper = (application_name_in or "").strip().upper()
+    # Target Promotion Environment must sit strictly later than Deployment
+    # Environment in the SIT -> UAT -> Pre-Production -> Production pipeline
+    # -- reported directly (e.g. Deployment=UAT must force
+    # Target=Pre-Production/Production). DetailsStep.tsx already filters the
+    # Target dropdown's options down to this same rule client-side, but that
+    # alone doesn't stop a stale/tampered request, so it's enforced here too.
+    try:
+        validate_environment_promotion(data.get("environment"), data.get("target_promotion_environment"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     obj = models.QARequest(
         **data, application_name=name_upper, request_types=",".join(request_types), requester_id=current_user.id,
         status=GatewayStatus.DRAFT,
@@ -528,6 +599,17 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     # untouched entirely (re-resolving an unchanged, already-APPROVED name
     # would be a harmless no-op anyway, but there's no reason to bother).
     application_name_in = data.pop("application_name", None)
+    # Same Deployment/Target Promotion Environment ordering rule as
+    # create_request -- resolved against whichever of the two fields wasn't
+    # part of this particular (partial, exclude_unset=True) edit, since
+    # re-saving just one of them still needs to be checked against the
+    # other's already-saved value, not treated as if it were blank.
+    final_environment = data.get("environment", obj.environment)
+    final_target = data.get("target_promotion_environment", obj.target_promotion_environment)
+    try:
+        validate_environment_promotion(final_environment, final_target)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     for k, v in data.items():
         setattr(obj, k, v)
 
@@ -661,6 +743,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
                                  classification=classification_details,
                                  sast_checked_items=sast_checked_items,
                                  dast_checked_items=dast_checked_items)
+    _promote_draft_checklist_evidence(db, obj)
     obj.draft_child_details = None  # consumed -- no longer needed once raised
     obj.status = GatewayStatus.SUBMITTED
     _log(db, obj.id, "Requester", current_user, "Submitted", None)
@@ -754,6 +837,68 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
 
 
 # ---- Supporting documents (Module 1, field 4.1.2 -- multiple files per request) ----
+
+# Evidence selected beside readiness items while the gateway is still a
+# Draft. Child checklist IDs do not exist yet; these files are staged by the
+# fixed checklist index, then promoted by submit_request above.
+def _draft_request_for_evidence(db: Session, req_id: int, current_user: models.User,
+                                require_editable: bool = False):
+    req = db.query(models.QARequest).get(req_id)
+    if not req:
+        raise HTTPException(404, "QA Request not found")
+    if require_editable:
+        if req.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+            raise HTTPException(403, "Only the requester or an admin can attach checklist evidence")
+        if req.status != GatewayStatus.DRAFT:
+            raise HTTPException(400, "Checklist evidence can only be changed while the QA Request is in Draft")
+    return req
+
+
+@router.get("/{req_id}/checklist-evidence/{kind}/{item_index}/documents", response_model=List[schemas.RequestDocumentOut])
+def list_draft_checklist_evidence(req_id: int, kind: str, item_index: int,
+                                  db: Session = Depends(get_db),
+                                  current_user: models.User = Depends(get_current_user)):
+    _draft_request_for_evidence(db, req_id, current_user)
+    return doc_store.list_documents(db, _draft_evidence_module(kind, item_index), req_id)
+
+
+@router.post("/{req_id}/checklist-evidence/{kind}/{item_index}/documents", response_model=List[schemas.RequestDocumentOut])
+def upload_draft_checklist_evidence(req_id: int, kind: str, item_index: int,
+                                    files: List[UploadFile] = File(...), db: Session = Depends(get_db),
+                                    current_user: models.User = Depends(get_current_user)):
+    req = _draft_request_for_evidence(db, req_id, current_user, require_editable=True)
+    module = _draft_evidence_module(kind, item_index)
+    return doc_store.save_documents(db, module, req_id,
+                                    f"{req.request_id}/{kind}-{item_index}", files, current_user.id)
+
+
+@router.get("/{req_id}/checklist-evidence/{kind}/{item_index}/documents/{doc_id}/download")
+def download_draft_checklist_evidence(req_id: int, kind: str, item_index: int, doc_id: int,
+                                      db: Session = Depends(get_db),
+                                      current_user: models.User = Depends(get_current_user)):
+    _draft_request_for_evidence(db, req_id, current_user)
+    doc = doc_store.get_document_or_404(
+        db, _draft_evidence_module(kind, item_index), req_id, doc_id)
+    full_path = doc_store.full_path(doc)
+    if not os.path.exists(full_path):
+        raise HTTPException(404, "File is missing on disk")
+    return FileResponse(full_path, filename=doc.file_name,
+                        media_type=doc.content_type or "application/octet-stream")
+
+
+@router.delete("/{req_id}/checklist-evidence/{kind}/{item_index}/documents/{doc_id}")
+def delete_draft_checklist_evidence(req_id: int, kind: str, item_index: int, doc_id: int,
+                                    db: Session = Depends(get_db),
+                                    current_user: models.User = Depends(get_current_user)):
+    _draft_request_for_evidence(db, req_id, current_user, require_editable=True)
+    doc = doc_store.get_document_or_404(
+        db, _draft_evidence_module(kind, item_index), req_id, doc_id)
+    if not doc_store.can_delete_document(doc, current_user):
+        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it")
+    doc_store.delete_document(db, doc)
+    return {"ok": True}
+
+
 @router.get("/{req_id}/documents", response_model=List[schemas.QARequestDocumentOut])
 def list_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return (db.query(models.QARequestDocument)

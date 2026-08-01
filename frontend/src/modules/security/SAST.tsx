@@ -2,11 +2,12 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence } from '../../components/Common'
 import { ApplicationNameBanner } from '../../components/ApplicationNameBanner'
-import ConfirmModal from '../../components/ConfirmModal'
 import UserAssignSelect from '../../components/UserAssignSelect'
-import { SEVERITIES, PRIORITIES, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_STATUS_LABELS, hasRole } from '../../constants'
+import ConfirmModal from '../../components/ConfirmModal'
+import JiraActivity from '../../components/JiraActivity'
+import { SEVERITIES, PRIORITIES, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_STATUS_LABELS, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
 import { SASTOut, SASTComponentOut, ChecklistItemOut, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
 
 // One "SAST component" = one repository, with its own branch/commit/tech
@@ -164,14 +165,18 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
               independently verifies every item during Security Readiness.
             </p>
             {editing.checklist_items.map((c) => (
-              <label key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
-                <input type="checkbox" checked={checkedItems.includes(c.item)} onChange={() => toggleChecked(c.item)} />
-                <span>
-                  {c.item} {c.owner && <span className="muted small">({c.owner})</span>}{' '}
-                  {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
-                </span>
-                {c.is_complete && <span className="badge badge-green" style={{ marginLeft: 'auto' }}>Verified</span>}
-              </label>
+              <div key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
+                  <input type="checkbox" checked={checkedItems.includes(c.item)} onChange={() => toggleChecked(c.item)} />
+                  <span>
+                    {c.item} {c.owner && <span className="muted small">({c.owner})</span>}{' '}
+                    {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
+                  </span>
+                </label>
+                {c.is_complete && <span className="badge badge-green">Verified</span>}
+                <ChecklistEvidence apiBase="/api/sast-requests" reqId={editing.id} itemId={c.id}
+                  canManage={canManageReadinessEvidence(editing.status)} />
+              </div>
             ))}
           </div>
         )}
@@ -196,8 +201,8 @@ const SAST_COMPONENT_COLUMNS: TableColumn<SASTComponentOut>[] = [
   { key: 'build_number', header: 'Build Number', render: (c) => c.build_number || '—' },
 ]
 
-function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
-  req: SASTOut; onClose: () => void; onChanged: (s: SASTOut) => void; securityAnalysts: UserOut[]; users: UserOut[]
+function SASTDetail({ req, onClose, onChanged, users }: {
+  req: SASTOut; onClose: () => void; onChanged: (s: SASTOut) => void; users: UserOut[]
 }) {
   const { user } = useAuth()
   const [tab, setTab] = useState('overview')
@@ -205,7 +210,8 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
   const [finding, setFinding] = useState({ issue_id: '', severity: 'Medium', description: '' })
   const [editing, setEditing] = useState(false)
   const [comments, setComments] = useState('')
-  const [selectedLead, setSelectedLead] = useState('')
+  const [selectedQALead, setSelectedQALead] = useState('')
+  const [selectedAnalyst, setSelectedAnalyst] = useState('')
   // Whether the "require Department Head re-approval on return" popup (see
   // canReadinessDecide below) is open -- an always-visible checkbox next to
   // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
@@ -245,7 +251,11 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
   async function act(action: string, extra?: Record<string, unknown>) {
     setError(null)
     setBusy(true)
-    try { onChanged(await api.post<SASTOut>(`/api/sast-requests/${req.id}/${action}`, extra || {})) }
+    try {
+      onChanged(await api.post<SASTOut>(`/api/sast-requests/${req.id}/${action}`, extra || {}))
+      setComments('')
+      await load()
+    }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
   // Answers the "were any findings identified?" pop-up -- Yes (no findings)
@@ -293,11 +303,14 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
     if (updated) onChanged(updated)
   }
 
-  const isRequester = req.requester_id === user?.id || hasRole(user, 'ADMIN')
+  const isAdmin = hasRole(user, 'ADMIN')
+  const isRequester = req.requester_id === user?.id || isAdmin
   const status = req.status
-  // Department-scoped, same as QA Request's SM/Dept Head steps -- see the
-  // comment in QARequests.tsx. Doesn't apply to the QA-side steps below.
   const sameDept = !!user?.department && user.department === req.department
+  const isAssignedQALead = isAdmin || (hasRole(user, 'QA_LEAD') && req.security_lead_id === user?.id)
+  const isAssignedAnalyst = isAdmin || (hasRole(user, 'SECURITY_ANALYST') && req.security_analyst_id === user?.id)
+  const qaLeads = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('QA_LEAD'))
+  const securityAnalysts = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('SECURITY_ANALYST'))
 
   // Edit access mirrors the backend's own _can_edit_details exactly (see
   // update_sast): the requester (or admin) may edit while it's Draft or
@@ -323,36 +336,36 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
   const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN'))
   const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN'))
-  const canStartReadiness = hasRole(user, 'SECURITY_ANALYST', 'QA_LEAD') && status === 'SECURITY_LEAD_ASSIGNED'
-  const canReadinessDecide = hasRole(user, 'QA_LEAD', 'SECURITY_ANALYST') && status === 'SECURITY_READINESS'
-  const canVerifyChecklist = hasRole(user, 'QA_LEAD', 'SECURITY_ANALYST', 'BUSINESS_ANALYST') && status === 'SECURITY_READINESS'
+  const canStartReadiness = isAssignedQALead && status === 'SECURITY_LEAD_ASSIGNED'
+  const canReadinessDecide = isAssignedQALead && status === 'SECURITY_READINESS'
+  const canVerifyChecklist = isAssignedQALead && status === 'SECURITY_READINESS'
   const pendingChecklistItems = checklist.filter((c) => c.is_mandatory && !c.is_complete)
   // Mandatory checklist items must be self-declared ready BEFORE Submit is
   // even allowed (see routers/sast_dast.py::_require_checklist_ready) --
   // distinct from pendingChecklistItems above, which gates Security
   // Readiness's own independent verification instead.
   const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
-  const canStartConfiguration = hasRole(user, 'SECURITY_ANALYST') && status === 'PLANNING'
-  const canStartScan = hasRole(user, 'SECURITY_ANALYST') && status === 'CONFIGURATION'
+  const canAssignSecurityAnalyst = isAssignedQALead && status === 'PLANNING'
+  const canStartScan = isAssignedAnalyst && status === 'CONFIGURATION'
   // Findings can be logged while still scanning, and -- this is the bit that
   // was missing -- after Complete Scan answers "findings identified", which
   // moves the request to Finding Validation rather than leaving it at
   // Scanning. Answering "no findings" instead skips straight past Finding
   // Validation to Security Complete (see _complete_scan), so this naturally
   // stays blocked once that's confirmed -- no separate check needed.
-  const canAddFinding = hasRole(user, 'SECURITY_ANALYST') && ['SCANNING', 'FINDING_VALIDATION'].includes(status)
-  const canCompleteScan = hasRole(user, 'SECURITY_ANALYST') && status === 'SCANNING'
-  const canValidateFindings = hasRole(user, 'SECURITY_ANALYST') && status === 'FINDING_VALIDATION'
-  const canAssignToRequester = hasRole(user, 'SECURITY_ANALYST') && status === 'REMEDIATION'
-  const canMarkFixed = (isRequester || hasRole(user, 'SECURITY_ANALYST')) && status === 'WAITING_FOR_FIX'
-  const canRescanDecide = hasRole(user, 'SECURITY_ANALYST') && status === 'RESCAN'
-  const canMarkReportReady = hasRole(user, 'SECURITY_ANALYST') && status === 'SECURITY_COMPLETE'
+  const canAddFinding = isAssignedAnalyst && ['SCANNING', 'FINDING_VALIDATION'].includes(status)
+  const canCompleteScan = isAssignedAnalyst && status === 'SCANNING'
+  const canValidateFindings = isAssignedAnalyst && status === 'FINDING_VALIDATION'
+  const canAssignToRequester = isAssignedAnalyst && status === 'REMEDIATION'
+  const canMarkFixed = (isRequester || isAssignedAnalyst) && status === 'WAITING_FOR_FIX'
+  const canRescanDecide = isAssignedAnalyst && status === 'RESCAN'
+  const canMarkReportReady = isAssignedAnalyst && status === 'SECURITY_COMPLETE'
   // Report Ready -> Closed. Usually reached automatically as part of the
   // Complete Scan/Rescan "no findings" confirmation, but this manual action
   // covers the case where that auto-chain stopped at Report Ready's
   // suppression gate and the analyst needs to finish the last hop themselves
   // once the linked suppression(s) are Done.
-  const canCloseRequest = hasRole(user, 'SECURITY_ANALYST') && status === 'REPORT_READY'
+  const canCloseRequest = isAssignedAnalyst && status === 'REPORT_READY'
 
   return (
     <Modal title={`${req.request_id} — ${req.application_name}`} onClose={onClose} wide>
@@ -361,7 +374,7 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
           <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
             {t === 'findings' ? `Findings (${req.findings.length})`
               : t === 'checklist' && pendingChecklistItems.length > 0 ? `Checklist (${pendingChecklistItems.length} pending)`
-              : t[0].toUpperCase() + t.slice(1)}
+              : t === 'history' ? 'Activity' : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
@@ -415,7 +428,8 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
 
           <DetailSection title="People">
             <DetailField label="Requester">{userName(users, req.requester_id) || '—'}</DetailField>
-            <DetailField label="Assigned To">{userName(users, req.security_lead_id) || '—'}</DetailField>
+            <DetailField label="Assigned QA Lead">{userName(users, req.security_lead_id) || 'Not assigned'}</DetailField>
+            <DetailField label="Assigned Security Analyst">{userName(users, req.security_analyst_id) || 'Not assigned'}</DetailField>
           </DetailSection>
 
           {req.qa_request && (
@@ -424,8 +438,8 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
 
           <div className="section-title">Workflow Actions</div>
           <div className="actions-panel">
-            <Field label="Comments (used by the next action below)">
-              <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Optional comments..." />
+            <Field label="Action note (optional)">
+              <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
             </Field>
             <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
               <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/sast-requests/${req.id}/export`, `${req.request_id}.pdf`)}>
@@ -475,20 +489,21 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
                   userName={user?.full_name}
                   comments={comments}
                   busy={busy}
-                  extraReady={!!selectedLead}
                   signBlocked={applicationNameBlocking}
                   signBlockedMessage="This request's Application Name is not yet approved by SM."
-                  extraControlLabel="Assign Security Lead"
+                  extraControlLabel="Assign IT-QA QA Lead"
                   extraControl={
                     <UserAssignSelect
-                      value={selectedLead}
-                      onChange={setSelectedLead}
-                      users={securityAnalysts}
-                      placeholder="Assign Security Lead..."
-                      style={{ width: "100%" }}
+                      value={selectedQALead}
+                      onChange={setSelectedQALead}
+                      users={qaLeads}
+                      placeholder="Select QA Lead..."
+                      disabled={busy}
+                      style={{ minWidth: 260 }}
                     />
                   }
-                  onApprove={(signed) => act('department-head-decision', { decision: 'Approved', security_lead_id: Number(selectedLead), comments: signed })}
+                  extraReady={!!selectedQALead}
+                  onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed, qa_lead_id: Number(selectedQALead) })}
                   onReturn={() => act('department-head-decision', { decision: 'Returned', comments })}
                   onReject={() => act('department-head-decision', { decision: 'Rejected', comments })}
                 />
@@ -529,7 +544,25 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
                   see the Checklist tab.
                 </p>
               )}
-              {canStartConfiguration && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-configuration')}>Start Configuration</button>}
+              {canAssignSecurityAnalyst && (
+                <>
+                  <UserAssignSelect
+                    value={selectedAnalyst}
+                    onChange={setSelectedAnalyst}
+                    users={securityAnalysts}
+                    placeholder="Select Security Analyst..."
+                    disabled={busy}
+                    style={{ minWidth: 260 }}
+                  />
+                  <button
+                    className="btn btn-primary btn-sm"
+                    disabled={busy || !selectedAnalyst}
+                    onClick={() => act('assign-security-analyst', { security_analyst_id: Number(selectedAnalyst) })}
+                  >
+                    Assign Security Analyst
+                  </button>
+                </>
+              )}
               {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-scan')}>Start Scan</button>}
               {canCompleteScan && <button className="btn btn-sm" disabled={busy} onClick={() => setScanConfirmAction('complete-scan')}>Complete Scan</button>}
               {canValidateFindings && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('validate-findings')}>Validate Findings</button>}
@@ -567,7 +600,7 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
 
       {tab === 'checklist' && (
         <div>
-          <p className="muted small">Security Readiness pre-scan checklist — verified by the assigned Security Lead (or QA Lead) before Planning can begin.</p>
+          <p className="muted small">Security Readiness pre-scan checklist — verified by the central Security or QA team before Planning can begin.</p>
           <p className="muted small">
             <strong>Requester declared</strong> is the requester's own self-declaration (reference
             only). <strong>Verified</strong> is the binding, independent verification — ticking a
@@ -580,6 +613,7 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
             <span style={{ flex: 1 }}>Item</span>
             <span style={{ width: 130, textAlign: 'center' }}>Requester declared</span>
             <span style={{ width: 130, textAlign: 'center' }}>Verified</span>
+            <span style={{ width: 230, textAlign: 'center' }}>Evidence</span>
           </div>
           {checklist.length === 0 && <p className="muted small">No checklist items found.</p>}
           {checklist.map((c) => (
@@ -607,6 +641,8 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
                   onChange={() => toggleChecklistItem(c)}
                 />
               </span>
+              <ChecklistEvidence apiBase="/api/sast-requests" reqId={req.id} itemId={c.id}
+                canManage={canManageReadinessEvidence(req.status)} />
             </div>
           ))}
         </div>
@@ -663,18 +699,7 @@ function SASTDetail({ req, onClose, onChanged, securityAnalysts, users }: {
       {tab === 'documents' && <RequestDocuments apiBase="/api/sast-requests" reqId={req.id} />}
 
       {tab === 'history' && (
-        <Table
-          rowKey="id"
-          columns={[
-            { key: 'step_name', header: 'Step' },
-            { key: 'decision', header: 'Decision' },
-            { key: 'actor_id', header: 'Actor', render: (r) => userName(users, r.actor_id) || '—', filterValue: (r) => userName(users, r.actor_id) || '' },
-            { key: 'actor_role', header: 'Role' },
-            { key: 'comments', header: 'Comments' },
-            { key: 'created_at', header: 'When', render: (r) => new Date(r.created_at).toLocaleString() },
-          ]}
-          rows={history}
-        />
+        <JiraActivity entityType="SAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
     </Modal>
   )
@@ -716,7 +741,6 @@ export default function SAST() {
   const [selected, setSelected] = useState<SASTOut | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
-  const securityAnalysts = users.filter((u) => (u.roles || []).includes('SECURITY_ANALYST'))
   const [searchParams, setSearchParams] = useSearchParams()
 
   const load = useCallback(async () => {
@@ -753,7 +777,7 @@ export default function SAST() {
           { key: 'request_id', header: 'Request ID' },
           { key: 'application_name', header: 'Application' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
-          { key: 'security_lead_id', header: 'Assigned To', render: (r) => userName(users, r.security_lead_id) || '—', filterValue: (r) => userName(users, r.security_lead_id) || '' },
+          { key: 'security_lead_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.security_lead_id) || 'Not assigned', filterValue: (r) => userName(users, r.security_lead_id) || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} /> },
@@ -772,7 +796,7 @@ export default function SAST() {
       {selected && (
         <SASTDetail
           req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }}
-          securityAnalysts={securityAnalysts} users={users}
+          users={users}
         />
       )}
     </div>

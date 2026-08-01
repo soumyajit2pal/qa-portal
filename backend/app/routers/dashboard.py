@@ -1,17 +1,38 @@
 import datetime
 from collections import Counter
 from zoneinfo import ZoneInfo
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import get_db
 from ..deps import get_current_user
 from ..constants import (
-    QAStatus, QA_REQUEST_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
+    Role, QAStatus, QA_REQUEST_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
+
+
+def _date_bounds(date_from: str | None, date_to: str | None):
+    """Inclusive reporting-period bounds supplied by the dashboard."""
+    start = datetime.datetime.fromisoformat(date_from.replace("Z", "+00:00")) if date_from else None
+    end = datetime.datetime.fromisoformat(date_to.replace("Z", "+00:00")) if date_to else None
+    # Oracle columns are stored as naive IST wall-clock values.
+    if start and start.tzinfo:
+        start = start.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+    if end and end.tzinfo:
+        end = end.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+    return start, end
+
+
+def _in_period(query, column, date_from: str | None, date_to: str | None):
+    start, end = _date_bounds(date_from, date_to)
+    if start:
+        query = query.filter(column >= start)
+    if end:
+        query = query.filter(column <= end)
+    return query
 
 # Statuses that represent "work still in flight" for a QA Request (i.e. not a
 # terminal state and not sitting untouched in Draft).
@@ -39,6 +60,75 @@ PENDING_APPROVAL_STATUSES = {
 SAST_DAST_PENDING_APPROVAL_STATUSES = {
     "SM_APPROVAL_PENDING", "DEPARTMENT_HEAD_APPROVAL_PENDING", "SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS",
 }
+
+# Once a Functional QA request reaches TESTER_ASSIGNED it retains its
+# assigned_tester_ids for the rest of the lifecycle. These are every
+# non-terminal status that can therefore still be pending against an
+# assigned QA tester, in the same order used by the dashboard columns.
+TESTER_WORKLOAD_STATUSES = [
+    QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN, QAStatus.EXECUTION_IN_PROGRESS,
+    QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
+    QAStatus.REGRESSION_TESTING, QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING,
+    QAStatus.QA_SIGNED_OFF, QAStatus.REQUESTER_VERIFICATION,
+]
+
+
+@router.get("/qa-tester-workload")
+def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                       db: Session = Depends(get_db),
+                       current_user: models.User = Depends(get_current_user)):
+    """QA-team-only pending workload matrix: one tester per row and one
+    lifecycle status per column. The endpoint enforces the same role gate as
+    the tab, so non-QA users cannot retrieve the underlying team view."""
+    qa_team_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.DEPARTMENT_HEAD_COE}
+    if not qa_team_roles.intersection(current_user.roles):
+        raise HTTPException(403, "QA tester workload is restricted to the QA team")
+    qa_testers = (db.query(models.User)
+                  .join(models.UserRole, models.UserRole.user_id == models.User.id)
+                  .filter(models.User.is_active == True,  # noqa: E712
+                          models.UserRole.role == Role.QA_ENGINEER)
+                  .order_by(models.User.full_name).all())
+    requests = (_in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at,
+                           date_from, date_to)
+                .filter(models.FunctionalRequest.status.in_(TESTER_WORKLOAD_STATUSES)).all())
+
+    rows = {
+        user.id: {
+            "tester_id": user.id,
+            "tester_name": user.full_name,
+            "department": user.department or "—",
+            "status_counts": {status: 0 for status in TESTER_WORKLOAD_STATUSES},
+            "total_pending": 0,
+        }
+        for user in qa_testers
+    }
+    for request in requests:
+        assigned_ids = []
+        for raw_id in (request.assigned_tester_ids or "").split(","):
+            try:
+                assigned_ids.append(int(raw_id.strip()))
+            except (TypeError, ValueError):
+                continue
+        for tester_id in set(assigned_ids):
+            if tester_id not in rows:
+                user = db.query(models.User).get(tester_id)
+                rows[tester_id] = {
+                    "tester_id": tester_id,
+                    "tester_name": user.full_name if user else f"User #{tester_id}",
+                    "department": (user.department if user else None) or "—",
+                    "status_counts": {status: 0 for status in TESTER_WORKLOAD_STATUSES},
+                    "total_pending": 0,
+                }
+            rows[tester_id]["status_counts"][request.status] += 1
+            rows[tester_id]["total_pending"] += 1
+
+    result_rows = sorted(rows.values(), key=lambda row: (-row["total_pending"], row["tester_name"].lower()))
+    return {
+        "statuses": TESTER_WORKLOAD_STATUSES,
+        "rows": result_rows,
+        "total_pending": sum(row["total_pending"] for row in result_rows),
+        "testers_with_pending": sum(1 for row in result_rows if row["total_pending"] > 0),
+    }
 
 
 def _age_days(dt) -> int:
@@ -86,15 +176,16 @@ def _ageing_bucket(days: int) -> str:
 
 # ---------------- 4.9.1 / 4.9.2 Project-wise Dashboard ----------------
 @router.get("/project-wise")
-def project_wise(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def project_wise(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                 db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # The QA Request is now just an intake gateway (see constants.GatewayStatus)
     # -- the actual QAStatus workflow being measured here lives on the linked
     # Functional Testing Request (see models.FunctionalRequest).
-    requests = db.query(models.FunctionalRequest).all()
+    requests = _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at, date_from, date_to).all()
     active_projects = len({r.epic_number for r in requests if r.status in ACTIVE_QA_STATUSES and r.epic_number})
 
-    sast_findings = db.query(models.SASTFinding).count()
-    dast_findings = db.query(models.DASTFinding).count()
+    sast_findings = _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).count()
+    dast_findings = _in_period(db.query(models.DASTFinding).join(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).count()
 
     # Was QA-Request-only, which disagreed with the "approvals needing
     # attention" count shown elsewhere in the app (e.g. the old Approval
@@ -105,11 +196,11 @@ def project_wise(db: Session = Depends(get_db), current_user: models.User = Depe
     # plus SAST/DAST requests still "Requested", plus open Suppressions.
     pending_approvals = (
         len([r for r in requests if r.status in PENDING_APPROVAL_STATUSES])
-        + db.query(models.SASTRequest).filter(
+        + _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).filter(
             models.SASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)).count()
-        + db.query(models.DASTRequest).filter(
+        + _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).filter(
             models.DASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)).count()
-        + db.query(models.SuppressionRequest).filter(
+        + _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to).filter(
             models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES)).count()
     )
 
@@ -130,9 +221,9 @@ def project_wise(db: Session = Depends(get_db), current_user: models.User = Depe
 
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------
 @router.get("/security/sast")
-def security_sast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    reqs = db.query(models.SASTRequest).all()
-    findings = db.query(models.SASTFinding).all()
+def security_sast(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    reqs = _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).all()
+    findings = _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).all()
     return {
         # Every SAST request ever raised, any status -- distinct from
         # applications_scanned below (only those that actually finished
@@ -147,9 +238,9 @@ def security_sast(db: Session = Depends(get_db), current_user: models.User = Dep
 
 
 @router.get("/security/dast")
-def security_dast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    reqs = db.query(models.DASTRequest).all()
-    findings = db.query(models.DASTFinding).all()
+def security_dast(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    reqs = _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).all()
+    findings = _in_period(db.query(models.DASTFinding).join(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).all()
     # scan_coverage used to count every DAST request's application_url
     # regardless of status -- including ones still sitting in Draft/SM
     # Approval/Configuration that have never actually been scanned. Scoped
@@ -169,8 +260,8 @@ def security_dast(db: Session = Depends(get_db), current_user: models.User = Dep
 
 # ---------------- 4.9.7 Suppression Dashboard ----------------
 @router.get("/suppression")
-def suppression_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    sups = db.query(models.SuppressionRequest).all()
+def suppression_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    sups = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to).all()
     open_sups = [s for s in sups if s.status not in SUPPRESSION_TERMINAL_STATUSES]
     # A suppression request can cover several findings (models.SuppressionItem)
     # -- count it as critical/high risk if ANY of its findings are.
@@ -189,7 +280,7 @@ STAGE_LABELS = {
     QAStatus.RETURNED_BY_SM: "Rework by Requester Pending",
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING: "Department Head Approval Pending",
     QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Rework by Requester Pending",
-    QAStatus.QA_LEAD_ASSIGNED: "Readiness Verification Pending",
+    QAStatus.QA_LEAD_ASSIGNED: "QA Readiness Verification Pending",
     QAStatus.READINESS_VERIFICATION: "Readiness Verification In Progress",
     QAStatus.RETURNED_BY_QA_LEAD: "Rework by Requester Pending",
     QAStatus.QA_ACTIVITY_INITIATED: "Planning Pending",
@@ -209,12 +300,12 @@ STAGE_LABELS = {
 STAGE_TEAM = {
     QAStatus.SUBMITTED: "SM",
     QAStatus.SM_APPROVAL_PENDING: "SM",
-    QAStatus.RETURNED_BY_SM: "Business / BA",
+    QAStatus.RETURNED_BY_SM: "Requester",
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING: "Department Head",
-    QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Business / BA",
+    QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Requester",
     QAStatus.QA_LEAD_ASSIGNED: "QA Lead",
     QAStatus.READINESS_VERIFICATION: "QA Lead",
-    QAStatus.RETURNED_BY_QA_LEAD: "Business / BA",
+    QAStatus.RETURNED_BY_QA_LEAD: "Requester",
     QAStatus.QA_ACTIVITY_INITIATED: "QA Lead",
     QAStatus.PLANNING: "QA Lead",
     QAStatus.TESTER_ASSIGNED: "QA",
@@ -235,7 +326,7 @@ STAGE_TEAM = {
 
 
 @router.get("/3w")
-def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """
     'Know What Is Pending, Where It Is Pending, and Since When' -- section 4.9.8.
     Aggregates pending items across QA requests, SAST/DAST requests and suppression
@@ -243,7 +334,7 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
     """
     items = []
 
-    for r in db.query(models.FunctionalRequest).filter(models.FunctionalRequest.status.in_(list(STAGE_LABELS.keys()))).all():
+    for r in _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.updated_at, date_from, date_to).filter(models.FunctionalRequest.status.in_(list(STAGE_LABELS.keys()))).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
@@ -254,7 +345,7 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
             "priority": r.priority, "status": r.status, "source": "Functional Testing Request",
         })
 
-    for r in db.query(models.SASTRequest).filter(
+    for r in _in_period(db.query(models.SASTRequest), models.SASTRequest.updated_at, date_from, date_to).filter(
             models.SASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)).all():
         age = _age_days(r.updated_at)
         items.append({
@@ -266,7 +357,7 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
             "priority": r.risk_category, "status": r.status, "source": "SAST Request",
         })
 
-    for r in db.query(models.DASTRequest).filter(
+    for r in _in_period(db.query(models.DASTRequest), models.DASTRequest.updated_at, date_from, date_to).filter(
             models.DASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)).all():
         age = _age_days(r.updated_at)
         items.append({
@@ -285,7 +376,7 @@ def three_w_dashboard(db: Session = Depends(get_db), current_user: models.User =
         "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
         "SECURITY_TEAM_VERIFICATION": "Security Team",
     }
-    for s in db.query(models.SuppressionRequest).filter(
+    for s in _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to).filter(
             models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES)).all():
         age = _age_days(s.updated_at)
         team = _SUPPRESSION_STAGE_TEAM.get(s.status, "Requester")

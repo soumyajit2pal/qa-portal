@@ -2,18 +2,18 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from './api'
 import { useAuth } from './context/AuthContext'
-import { Card, MetricCard, BarChart, Table, Badge, ErrorText, PageHeader, TableColumn } from './components/Common'
+import { Card, MetricCard, BarChart, Table, Badge, ErrorText, TableColumn } from './components/Common'
 import {
-  IconGrid, IconWarning, IconApprove, IconArrowRight, IconWorkflow, IconCheckCircle,
+  IconGrid, IconWarning, IconApprove, IconWorkflow, IconCheckCircle,
 } from './components/Icons'
 import {
   GATEWAY_TERMINAL_STATUSES, QA_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES,
-  PERFORMANCE_TERMINAL_STATUSES, hasRole,
+  PERFORMANCE_TERMINAL_STATUSES, QA_STATUS_LABELS,
 } from './constants'
 import {
   QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut,
   ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut,
-  SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard, SignOffOut, UserOut,
+  SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard,
 } from './types'
 
 // A single request, whatever its underlying type, reduced to the handful of
@@ -94,6 +94,27 @@ interface RaisedRange {
 }
 const DEFAULT_RAISED_RANGE: RaisedRange = { preset: 'all', from: '', to: '' }
 
+function rangeBounds(range: RaisedRange): { start?: Date; end?: Date } {
+  if (range.preset === 'all') return {}
+  if (range.preset === '1h') return { start: new Date(Date.now() - 60 * 60 * 1000), end: new Date() }
+  if (range.preset === '1m') {
+    const start = new Date(); start.setMonth(start.getMonth() - 1)
+    return { start, end: new Date() }
+  }
+  const start = range.from ? new Date(`${range.from}T00:00:00`) : undefined
+  const end = range.to ? new Date(`${range.to}T23:59:59.999`) : undefined
+  return { start, end }
+}
+
+function rangeQuery(range: RaisedRange): string {
+  const { start, end } = rangeBounds(range)
+  const params = new URLSearchParams()
+  if (start) params.set('date_from', start.toISOString())
+  if (end) params.set('date_to', end.toISOString())
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
 function isWithinRaisedRange(dateStr: string, range: RaisedRange): boolean {
   if (range.preset === 'all') return true
   const t = new Date(dateStr).getTime()
@@ -111,43 +132,6 @@ function isWithinRaisedRange(dateStr: string, range: RaisedRange): boolean {
     if (t > toEnd.getTime()) return false
   }
   return true
-}
-
-const RAISED_RANGE_PRESETS: { key: RaisedRangePreset; label: string }[] = [
-  { key: 'all', label: 'All time' },
-  { key: '1h', label: 'Within 1 hour' },
-  { key: '1m', label: 'Within 1 month' },
-  { key: 'custom', label: 'Custom range' },
-]
-
-function RaisedRangeFilter({ range, onChange }: { range: RaisedRange; onChange: (r: RaisedRange) => void }) {
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        <div className="pill-tabs">
-          {RAISED_RANGE_PRESETS.map((p) => (
-            <button
-              key={p.key}
-              className={range.preset === p.key ? 'active' : ''}
-              onClick={() => onChange({ ...range, preset: p.key })}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-        {range.preset === 'custom' && (
-          <span style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 }}>
-            <label className="muted small">From <input type="date" value={range.from} onChange={(e) => onChange({ ...range, from: e.target.value })} /></label>
-            <label className="muted small">To <input type="date" value={range.to} onChange={(e) => onChange({ ...range, to: e.target.value })} /></label>
-          </span>
-        )}
-      </div>
-      <p className="muted small" style={{ marginTop: 6, marginBottom: 0 }}>
-        Filters "Active requests (org-wide)" and Recent Activity below by when they were raised. The other
-        three At-a-Glance cards are all-time totals and aren't affected by this filter.
-      </p>
-    </div>
-  )
 }
 
 function timeAgo(dateStr: string): string {
@@ -346,7 +330,7 @@ function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
   )
 }
 
-function CommandCentre() {
+function CommandCentre({ range }: { range: RaisedRange }) {
   const navigate = useNavigate()
   const [proj, setProj] = useState<ProjectWiseOut | null>(null)
   const [threeW, setThreeW] = useState<ThreeWOut | null>(null)
@@ -359,12 +343,15 @@ function CommandCentre() {
   const [error, setError] = useState<unknown>(null)
   const [govTab, setGovTab] = useState('Overview')
   const [teamFilter, setTeamFilter] = useState('')
-  const [raisedRange, setRaisedRange] = useState<RaisedRange>(DEFAULT_RAISED_RANGE)
+  const [priorityFilter, setPriorityFilter] = useState('')
+  const [ageingFilter, setAgeingFilter] = useState('')
+  const [governanceSearch, setGovernanceSearch] = useState('')
 
   useEffect(() => {
+    const query = rangeQuery(range)
     Promise.all([
-      api.get<ProjectWiseOut>('/api/dashboard/project-wise'),
-      api.get<ThreeWOut>('/api/dashboard/3w'),
+      api.get<ProjectWiseOut>(`/api/dashboard/project-wise${query}`),
+      api.get<ThreeWOut>(`/api/dashboard/3w${query}`),
       api.get<QARequestOut[]>('/api/qa-requests'),
       api.get<FunctionalOut[]>('/api/functional-requests'),
       api.get<ApprovalActionOut[]>('/api/approvals'),
@@ -378,14 +365,23 @@ function CommandCentre() {
       setProj(p); setThreeW(w); setRequests(r); setFunctionalRequests(f); setActivity(a)
       setSastRequests(sast); setDastRequests(dast); setPerformanceRequests(perf)
     }).catch(setError)
-  }, [])
+  }, [range])
 
   const teams = useMemo(() => threeW ? Object.keys(threeW.team_wise_distribution) : [], [threeW])
+  const priorities = useMemo(() => threeW
+    ? Array.from(new Set(threeW.items.map((i) => i.priority).filter((p): p is string => !!p)))
+    : [], [threeW])
   const visibleItems = useMemo<ThreeWItem[]>(() => {
     if (!threeW) return []
-    const items = teamFilter ? threeW.items.filter((i) => i.responsible_team === teamFilter) : threeW.items
-    return items
-  }, [threeW, teamFilter])
+    const query = governanceSearch.trim().toLowerCase()
+    return threeW.items.filter((i) => (
+      (!teamFilter || i.responsible_team === teamFilter)
+      && (!priorityFilter || i.priority === priorityFilter)
+      && (!ageingFilter || i.ageing_bucket === ageingFilter)
+      && (!query || [i.project_id, i.application_name, i.department, i.pending_stage, i.owner, i.source]
+        .some((value) => String(value || '').toLowerCase().includes(query)))
+    ))
+  }, [threeW, teamFilter, priorityFilter, ageingFilter, governanceSearch])
 
   // Combines the gateway + every linked child request type into one list --
   // org-wide, not scoped to any one user/department (that view now lives in
@@ -406,12 +402,12 @@ function CommandCentre() {
   // -- narrowed to whatever window RaisedRangeFilter above has selected (see
   // its own comment for why the other 3 At-a-Glance cards aren't included).
   const filteredUnifiedRequests = useMemo(
-    () => unifiedRequests.filter((r) => isWithinRaisedRange(r.created_at, raisedRange)),
-    [unifiedRequests, raisedRange]
+    () => unifiedRequests.filter((r) => isWithinRaisedRange(r.created_at, range)),
+    [unifiedRequests, range]
   )
   const filteredActivity = useMemo(
-    () => activity.filter((a) => isWithinRaisedRange(a.created_at, raisedRange)).slice(0, 6),
-    [activity, raisedRange]
+    () => activity.filter((a) => isWithinRaisedRange(a.created_at, range)).slice(0, 6),
+    [activity, range]
   )
 
   const activeRequestsCount = filteredUnifiedRequests.filter(isActiveRequest).length
@@ -423,6 +419,7 @@ function CommandCentre() {
   const slaWithin = threeW.items.filter((i) => i.ageing_days <= 7).length
   const slaNear = threeW.items.filter((i) => i.ageing_days > 7 && i.ageing_days <= 15).length
   const slaBreached = threeW.items.filter((i) => i.ageing_days > 15).length
+  const highRiskPending = threeW.items.filter((i) => ['Critical', 'High'].includes(i.priority || '')).length
   const nearingRelease = requests.filter((r) => {
     if (!r.target_release_date) return false
     const days = (new Date(r.target_release_date).getTime() - Date.now()) / 86400000
@@ -442,54 +439,49 @@ function CommandCentre() {
     { key: 'pending_stage', header: 'Pending At' },
     { key: 'responsible_team', header: 'Pending With' },
     { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
-    { key: 'ageing_days', header: 'Since', render: (r) => `${r.ageing_days} day${r.ageing_days !== 1 ? 's' : ''} ago` },
-    { key: 'ageing_bucket', header: 'Ageing' },
-    { key: 'priority', header: 'Priority' },
+    { key: 'ageing_days', header: 'Since', render: (r) => <span className={`ageing-pill ${r.ageing_days > 15 ? 'breached' : r.ageing_days > 7 ? 'near' : 'within'}`}>{r.ageing_days}d</span> },
+    { key: 'ageing_bucket', header: 'Ageing bucket' },
+    { key: 'priority', header: 'Priority', render: (r) => r.priority ? <Badge status={r.priority} /> : '—' },
   ]
 
   return (
-    <div>
-      {m.pending_approvals > 0 && (
-        <div className="alert-banner">
-          <div className="icon-wrap"><IconWarning width={16} height={16} /></div>
-          <div className="body">
-            <div className="title">{m.pending_approvals} approval{m.pending_approvals > 1 ? 's' : ''} need your attention</div>
-            <div className="sub">{criticalPending} critical-priority decision{criticalPending !== 1 ? 's are' : ' is'} waiting.</div>
-          </div>
-          <a className="action" onClick={() => navigate('/approvals')} style={{ cursor: 'pointer' }}>
-            Review approvals <IconArrowRight width={14} height={14} />
-          </a>
+    <div className="dashboard-command-centre">
+      <div className="dashboard-brief">
+        <div>
+          <span className="dashboard-brief-kicker">Enterprise quality overview</span>
+          <h2>Release governance command centre</h2>
+          <p>Live visibility across testing, security, approvals, sign-offs, and audit readiness.</p>
         </div>
-      )}
-
-      <div className="section-title" style={{ marginTop: m.pending_approvals > 0 ? 18 : 0 }}>At a Glance</div>
-      <p className="muted small" style={{ marginTop: -8, marginBottom: 14 }}>
-        Each number below counts a different slice of the same underlying requests -- see the line under
-        each card for exactly what it includes. They're not meant to add up to each other.
-      </p>
-      <RaisedRangeFilter range={raisedRange} onChange={setRaisedRange} />
-      <div className="grid grid-4">
+        <div className="dashboard-brief-meta">
+          <span className="live-indicator"><i /> Live data</span>
+          <small>Updated {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
+        </div>
+      </div>
+      <div className="dashboard-section-head">
+        <div><span>Portfolio health</span><h3>Operational pulse</h3></div>
+      </div>
+      <div className="grid grid-4 dashboard-metric-grid">
         <StatCard icon={IconGrid} iconClass="blue" tag="Live" value={m.active_projects} label="Active projects"
-                  hint="Distinct applications with a Functional Testing request currently in progress (excludes Draft and Closed/Cancelled)."
+                  hint="Applications currently moving through functional QA."
                   footline={`${nearingRelease} nearing release`} spark={proj.charts.risk_distribution} />
         <StatCard icon={IconWarning} iconClass="red" tag="Live" value={m.sast_findings + m.dast_findings} label="Open security findings"
-                  hint="SAST + DAST findings still marked Open (not yet Fixed, Accepted, or suppressed)."
+                  hint="Unresolved SAST and DAST findings."
                   footline={`${m.sast_findings} SAST · ${m.dast_findings} DAST findings open`}
                   segments={[{ label: 'SAST', value: m.sast_findings, color: '#dc2626' }, { label: 'DAST', value: m.dast_findings, color: '#f97316' }]} />
-        <StatCard icon={IconApprove} iconClass="amber" tag="Action queue" value={m.pending_approvals} label="Pending approvals"
-                  hint="Requests sitting at an SM, Department Head, or Security decision point, plus every open Suppression request."
-                  footline={`${criticalPending} critical`} />
+        <StatCard icon={IconApprove} iconClass="amber" tag={criticalPending ? `${criticalPending} critical` : 'Needs attention'} value={m.pending_approvals} label="Waiting for a decision"
+                  hint="Requests paused until the responsible approver completes the current workflow step."
+                  footline="Open the relevant request module to approve, return, or reject." />
         <StatCard icon={IconWorkflow} iconClass="purple" tag="Live" value={activeRequestsCount} label="Active requests (org-wide)"
-                  hint={raisedRange.preset === 'all'
-                    ? 'Every request of any type (QA, Functional, SAST, DAST, Performance) not yet Closed or Cancelled.'
-                    : 'Every request of any type (QA, Functional, SAST, DAST, Performance) not yet Closed or Cancelled, raised within the selected range above.'}
-                  footline={`${filteredUnifiedRequests.length} raised in total${raisedRange.preset === 'all' ? ' across all departments' : ' in the selected range'}`} />
+                  hint={range.preset === 'all'
+                    ? 'Open QA, security, and performance requests.'
+                    : 'Open requests raised within the selected period.'}
+                  footline={`${filteredUnifiedRequests.length} raised in total${range.preset === 'all' ? ' across all departments' : ' in the selected range'}`} />
       </div>
 
       <Card
         style={{ marginTop: 18 }}
-        title="Project Visibility & Governance"
-        subtitle="Know what's pending, where, and since when -- across every open QA, SAST, DAST and Suppression request (excludes Drafts and anything already Closed/Cancelled)."
+        title="3W project governance"
+        subtitle="What is pending, where it is pending, and since when."
         right={(
           <div className="pill-tabs">
             {['Overview', 'Projects', 'Ageing'].map((t) => (
@@ -498,14 +490,17 @@ function CommandCentre() {
           </div>
         )}
       >
+        <div className="governance-kpis">
+          <div><small>Total pending</small><strong>{threeW.total_pending}</strong><span>Across all workflows</span></div>
+          <div><small>SLA breached</small><strong className={slaBreached ? 'danger' : ''}>{slaBreached}</strong><span>Pending over 15 days</span></div>
+          <div><small>Critical / high</small><strong className={highRiskPending ? 'warning' : ''}>{highRiskPending}</strong><span>Priority items requiring focus</span></div>
+          <div><small>Owning teams</small><strong>{teams.length}</strong><span>Teams with pending work</span></div>
+        </div>
         {govTab === 'Overview' && (
           <>
-            <div className="grid grid-2" style={{ marginTop: 12 }}>
+            <div className="grid grid-2 governance-chart-grid" style={{ marginTop: 12 }}>
               <div className="subpanel">
                 <div className="subpanel-title">Pending by Team</div>
-                <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>
-                  {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} awaiting action, grouped by which team currently owns them.
-                </p>
                 <BarChart data={threeW.team_wise_distribution} />
                 <div style={{ display: 'flex', gap: 16, marginTop: 14, fontSize: 13.5 }}>
                   <span><span className="dot" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#2563eb', marginRight: 5 }} />Within SLA {slaWithin}</span>
@@ -518,30 +513,36 @@ function CommandCentre() {
               </div>
               <div className="subpanel">
                 <div className="subpanel-title">Ageing Distribution</div>
-                <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>
-                  The same {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} above, grouped by days since they were last updated.
-                </p>
                 <Donut data={threeW.ageing_bucket_distribution} />
               </div>
             </div>
 
             <div className="subpanel" style={{ marginTop: 16 }}>
-              <div className="toolbar" style={{ marginBottom: 10 }}>
+              <div className="toolbar governance-toolbar" style={{ marginBottom: 10 }}>
                 <div>
                   <div className="subpanel-title" style={{ marginBottom: 2 }}>Projects Requiring Attention</div>
-                  <p className="muted small" style={{ margin: 0 }}>Sorted by highest ageing and risk</p>
+                  <p className="muted small" style={{ margin: 0 }}>{visibleItems.length} of {threeW.total_pending} items · oldest first</p>
                 </div>
                 <div className="spacer" />
+                <input className="governance-search" value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} placeholder="Search project, application, owner…" aria-label="Search pending items" />
                 <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
                   <option value="">All teams</option>
                   {teams.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}>
+                  <option value="">All priorities</option>
+                  {priorities.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+                <select value={ageingFilter} onChange={(e) => setAgeingFilter(e.target.value)}>
+                  <option value="">All ageing</option>
+                  {Object.keys(threeW.ageing_bucket_distribution).map((bucket) => <option key={bucket} value={bucket}>{bucket}</option>)}
                 </select>
                 <button className="btn btn-sm" onClick={() => downloadCsv('projects_requiring_attention.csv', visibleItems, [
                   { key: 'project_id', header: 'Project' }, { key: 'department', header: 'Department' },
                   { key: 'pending_stage', header: 'Pending At' },
                   { key: 'responsible_team', header: 'Pending With' },
                   { key: 'owner', header: 'Owner' }, { key: 'ageing_days', header: 'Ageing (days)' }, { key: 'priority', header: 'Priority' },
-                ])}>Download</button>
+                ])}>Export CSV</button>
               </div>
               {/* Used to cap at 8 rows with a "View all" link out to the
                   Projects tab -- the Table itself now paginates (5/page,
@@ -554,6 +555,12 @@ function CommandCentre() {
 
         {govTab === 'Projects' && (
           <div style={{ marginTop: 12 }}>
+            <div className="governance-filter-strip">
+              <input value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} placeholder="Search project, application, owner…" />
+              <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}><option value="">All teams</option>{teams.map((t) => <option key={t}>{t}</option>)}</select>
+              <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}><option value="">All priorities</option>{priorities.map((p) => <option key={p}>{p}</option>)}</select>
+              <span>{visibleItems.length} result{visibleItems.length !== 1 ? 's' : ''}</span>
+            </div>
             <Table rowKey="project_id" columns={[
               { key: 'project_id', header: 'Project' },
               { key: 'application_name', header: 'Application' },
@@ -561,9 +568,9 @@ function CommandCentre() {
               { key: 'pending_stage', header: 'Pending At' },
               { key: 'responsible_team', header: 'Team' },
               { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
-              { key: 'ageing_days', header: 'Ageing (days)' },
-              { key: 'priority', header: 'Priority' },
-            ]} rows={threeW.items} />
+              { key: 'ageing_days', header: 'Ageing', render: (r) => <span className={`ageing-pill ${r.ageing_days > 15 ? 'breached' : r.ageing_days > 7 ? 'near' : 'within'}`}>{r.ageing_days}d</span> },
+              { key: 'priority', header: 'Priority', render: (r) => r.priority ? <Badge status={r.priority} /> : '—' },
+            ]} rows={visibleItems} />
           </div>
         )}
 
@@ -578,7 +585,8 @@ function CommandCentre() {
         )}
       </Card>
 
-      <div className="grid grid-2" style={{ marginTop: 4 }}>
+      <div className="dashboard-section-head dashboard-lower-head"><div><span>Delivery flow</span><h3>Lifecycle and activity</h3></div></div>
+      <div className="grid grid-2 dashboard-lower-grid">
         <Card
           title="QA Lifecycle Health"
           subtitle="Projects by current workflow stage"
@@ -590,7 +598,7 @@ function CommandCentre() {
         >
           <LifecycleStepper requests={functionalRequests} />
         </Card>
-        <Card title="Recent Activity" subtitle={raisedRange.preset === 'all' ? 'Live updates from across the portal' : 'Live updates from across the portal, within the selected range above'}>
+        <Card title="Recent Activity" subtitle={range.preset === 'all' ? 'Live updates from across the portal' : 'Activity within the selected reporting period'}>
           <RecentActivity items={filteredActivity} />
         </Card>
       </div>
@@ -598,14 +606,15 @@ function CommandCentre() {
   )
 }
 
-function SecurityTab() {
+function SecurityTab({ range }: { range: RaisedRange }) {
   const [sast, setSast] = useState<SecuritySastDashboard | null>(null)
   const [dast, setDast] = useState<SecurityDastDashboard | null>(null)
   const [error, setError] = useState<unknown>(null)
   useEffect(() => {
-    Promise.all([api.get<SecuritySastDashboard>('/api/dashboard/security/sast'), api.get<SecurityDastDashboard>('/api/dashboard/security/dast')])
+    const query = rangeQuery(range)
+    Promise.all([api.get<SecuritySastDashboard>(`/api/dashboard/security/sast${query}`), api.get<SecurityDastDashboard>(`/api/dashboard/security/dast${query}`)])
       .then(([s, d]) => { setSast(s); setDast(d) }).catch(setError)
-  }, [])
+  }, [range])
   if (error) return <ErrorText error={error} />
   if (!sast || !dast) return <p className="muted">Loading...</p>
   return (
@@ -630,14 +639,18 @@ function SecurityTab() {
         <Card title="SAST Severity Distribution"><BarChart data={sast.severity_distribution} /></Card>
         <Card title="DAST Vulnerability Trends"><BarChart data={dast.vulnerability_trends} /></Card>
       </div>
+      <div className="grid grid-2" style={{ marginTop: 16 }}>
+        <Card title="SAST Remediation Status" subtitle="Current disposition of identified findings"><BarChart data={sast.remediation_status} /></Card>
+        <Card title="DAST Compliance Status" subtitle="Requests by workflow and compliance state"><BarChart data={dast.compliance_status} /></Card>
+      </div>
     </div>
   )
 }
 
-function SuppressionTab() {
+function SuppressionTab({ range }: { range: RaisedRange }) {
   const [data, setData] = useState<SuppressionDashboard | null>(null)
   const [error, setError] = useState<unknown>(null)
-  useEffect(() => { api.get<SuppressionDashboard>('/api/dashboard/suppression').then(setData).catch(setError) }, [])
+  useEffect(() => { api.get<SuppressionDashboard>(`/api/dashboard/suppression${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading...</p>
   return (
@@ -652,12 +665,12 @@ function SuppressionTab() {
   )
 }
 
-function ThreeWTab() {
+function ThreeWTab({ range }: { range: RaisedRange }) {
   const [data, setData] = useState<ThreeWOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [detail, setDetail] = useState<ThreeWDetailOut | null>(null)
 
-  useEffect(() => { api.get<ThreeWOut>('/api/dashboard/3w').then(setData).catch(setError) }, [])
+  useEffect(() => { api.get<ThreeWOut>(`/api/dashboard/3w${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
 
   async function openProject(projectId: string) {
     try { setDetail(await api.get<ThreeWDetailOut>(`/api/dashboard/3w/${projectId}`)) } catch (err) { setError(err) }
@@ -693,8 +706,8 @@ function ThreeWTab() {
             { key: 'pending_stage', header: 'Pending Stage' },
             { key: 'responsible_team', header: 'Responsible Team' },
             { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
-            { key: 'ageing_days', header: 'Ageing (days)' },
-            { key: 'priority', header: 'Priority' },
+            { key: 'ageing_days', header: 'Ageing', render: (r) => <span className={`ageing-pill ${r.ageing_days > 15 ? 'breached' : r.ageing_days > 7 ? 'near' : 'within'}`}>{r.ageing_days}d</span> },
+            { key: 'priority', header: 'Priority', render: (r) => r.priority ? <Badge status={r.priority} /> : '—' },
             { key: 'source', header: 'Source' },
           ]}
           rows={data.items}
@@ -733,7 +746,7 @@ function ThreeWTab() {
 // 6 request-type endpoints (same pattern as SecurityTab/SuppressionTab/
 // ThreeWTab each fetching independently) rather than sharing CommandCentre's
 // state, since only one of these tab components is ever mounted at a time.
-function MyRequestsTab() {
+function MyRequestsTab({ range }: { range: RaisedRange }) {
   const navigate = useNavigate()
   const { user } = useAuth()
   const [requests, setRequests] = useState<QARequestOut[]>([])
@@ -778,7 +791,9 @@ function MyRequestsTab() {
     () => unifiedRequests.filter((r) => !!user?.department && r.department === user.department),
     [unifiedRequests, user]
   )
-  const scopedRequests = reqScope === 'mine' ? myRequests : departmentRequests
+  const filteredMyRequests = myRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
+  const filteredDepartmentRequests = departmentRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
+  const scopedRequests = reqScope === 'mine' ? filteredMyRequests : filteredDepartmentRequests
   const scopedActiveCount = scopedRequests.filter(isActiveRequest).length
 
   if (error) return <ErrorText error={error} />
@@ -794,10 +809,10 @@ function MyRequestsTab() {
         right={(
           <div className="pill-tabs">
             <button className={reqScope === 'mine' ? 'active' : ''} onClick={() => setReqScope('mine')}>
-              My Requests ({myRequests.length})
+              My Requests ({filteredMyRequests.length})
             </button>
             <button className={reqScope === 'department' ? 'active' : ''} onClick={() => setReqScope('department')}>
-              {user?.department || 'My Department'} ({departmentRequests.length})
+              {user?.department || 'My Department'} ({filteredDepartmentRequests.length})
             </button>
           </div>
         )}
@@ -833,102 +848,71 @@ function MyRequestsTab() {
   )
 }
 
-interface TesterOverviewRow {
-  testerId: number
-  testerName: string
+interface TesterWorkloadRow {
+  tester_id: number
+  tester_name: string
   department: string
-  totalAssigned: number
-  completed: number
-  pending: number
-  signedOff: number
+  status_counts: Record<string, number>
+  total_pending: number
 }
 
-// Statuses at which a tester's own testing execution work is considered
-// done for that request -- QA_COMPLETED onwards, regardless of how much
-// further the request still has to go through sign-off/closure. Anything
-// still active but earlier than this (TESTER_ASSIGNED through
-// REGRESSION_TESTING) counts as still pending on the tester's plate.
-const TESTER_WORK_DONE_STATUSES = ['QA_COMPLETED', 'QA_SIGNOFF_PENDING', 'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION', 'CLOSED']
+interface TesterWorkloadOut {
+  statuses: string[]
+  rows: TesterWorkloadRow[]
+  total_pending: number
+  testers_with_pending: number
+}
 
-// Reported directly: a broad, per-tester overview -- how many requests each
-// tester has completed, how many are still pending, and how many have
-// reached an issued sign-off -- grouped by the tester's own department.
-// Visible only to Executive COE (CM/AGM) (see the role gate in Dashboard()
-// below, which is the only place this component is ever mounted).
-function TesterOverviewTab() {
-  const [functionalRequests, setFunctionalRequests] = useState<FunctionalOut[]>([])
-  const [signoffs, setSignoffs] = useState<SignOffOut[]>([])
-  const [users, setUsers] = useState<UserOut[]>([])
+// QA-team-only operational workload matrix. Aggregation and permission
+// enforcement both live on /api/dashboard/qa-tester-workload; the client
+// gate below is for navigation clarity, not the sole security boundary.
+function TesterOverviewTab({ range }: { range: RaisedRange }) {
+  const [workload, setWorkload] = useState<TesterWorkloadOut | null>(null)
   const [error, setError] = useState<unknown>(null)
-  const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
-    Promise.all([
-      api.get<FunctionalOut[]>('/api/functional-requests'),
-      api.get<SignOffOut[]>('/api/signoffs'),
-      api.get<UserOut[]>('/api/auth/users'),
-    ]).then(([f, s, u]) => {
-      setFunctionalRequests(f); setSignoffs(s); setUsers(u); setLoaded(true)
-    }).catch(setError)
-  }, [])
-
-  const signoffById = useMemo(() => {
-    const m = new Map<number, SignOffOut>()
-    signoffs.forEach((s) => m.set(s.id, s))
-    return m
-  }, [signoffs])
-
-  const rows = useMemo<TesterOverviewRow[]>(() => {
-    const byTester = new Map<number, TesterOverviewRow>()
-    for (const req of functionalRequests) {
-      if (!req.assigned_tester_ids) continue
-      const ids = req.assigned_tester_ids.split(',').map((s) => Number(s.trim())).filter((n) => !Number.isNaN(n))
-      for (const id of ids) {
-        if (!byTester.has(id)) {
-          const u = users.find((x) => x.id === id)
-          byTester.set(id, {
-            testerId: id, testerName: u?.full_name || `User #${id}`, department: u?.department || '—',
-            totalAssigned: 0, completed: 0, pending: 0, signedOff: 0,
-          })
-        }
-        const row = byTester.get(id)!
-        row.totalAssigned += 1
-        if (TESTER_WORK_DONE_STATUSES.includes(req.status)) row.completed += 1
-        else if (!QA_TERMINAL_STATUSES.includes(req.status)) row.pending += 1
-        const so = req.signoff_id ? signoffById.get(req.signoff_id) : undefined
-        if (so?.status === 'ISSUED') row.signedOff += 1
-      }
-    }
-    return Array.from(byTester.values()).sort(
-      (a, b) => a.department.localeCompare(b.department) || a.testerName.localeCompare(b.testerName)
-    )
-  }, [functionalRequests, users, signoffById])
+    setWorkload(null); setError(null)
+    api.get<TesterWorkloadOut>(`/api/dashboard/qa-tester-workload${rangeQuery(range)}`)
+      .then(setWorkload).catch(setError)
+  }, [range])
 
   if (error) return <ErrorText error={error} />
-  if (!loaded) return <p className="muted">Loading...</p>
+  if (!workload) return <p className="muted">Loading QA tester workload…</p>
+
+  const columns: TableColumn<TesterWorkloadRow>[] = [
+    { key: 'tester_name', header: 'Tester Name' },
+    { key: 'department', header: 'Department' },
+    ...workload.statuses.map((status): TableColumn<TesterWorkloadRow> => ({
+      key: status,
+      header: QA_STATUS_LABELS[status] || status,
+      render: (row) => <span className={`tester-workload-count ${row.status_counts[status] ? 'has-work' : ''}`}>{row.status_counts[status] || 0}</span>,
+      filterValue: (row) => String(row.status_counts[status] || 0),
+    })),
+    {
+      key: 'total_pending', header: 'Total Pending',
+      render: (row) => <strong className={row.total_pending ? 'tester-workload-total' : 'muted'}>{row.total_pending}</strong>,
+    },
+  ]
 
   return (
-    <div>
-      <p className="muted small">
-        Every tester ever assigned to a Functional QA request -- how many of those requests have finished
-        testing (QA Completed or later), how many are still active on their plate, and how many have
-        reached an Issued sign-off certificate. Grouped by the tester's own department.
-      </p>
+    <div className="tester-overview-tab">
+      <div className="dashboard-section-head">
+        <div><strong>QA tester pending workload</strong><span>Current assigned requests grouped by tester and exact workflow status.</span></div>
+        <Badge status="QA_LEAD_ASSIGNED" label="QA team only" />
+      </div>
+      <div className="tester-workload-summary">
+        <div><small>Total pending assignments</small><strong>{workload.total_pending}</strong></div>
+        <div><small>Testers with pending work</small><strong>{workload.testers_with_pending}</strong></div>
+        <div><small>QA testers listed</small><strong>{workload.rows.length}</strong></div>
+      </div>
       <Card>
         <Table
-          rowKey="testerId"
-          columns={[
-            { key: 'department', header: 'Department' },
-            { key: 'testerName', header: 'Tester' },
-            { key: 'totalAssigned', header: 'Total Assigned' },
-            { key: 'completed', header: 'Completed' },
-            { key: 'pending', header: 'Pending' },
-            { key: 'signedOff', header: 'Signed Off' },
-          ]}
-          rows={rows}
+          rowKey="tester_id"
+          columns={columns}
+          rows={workload.rows}
         />
-        {rows.length === 0 && (
-          <p className="muted small" style={{ marginTop: 8 }}>No testers have been assigned to any Functional QA request yet.</p>
+        {workload.rows.length === 0 && (
+          <p className="muted small" style={{ marginTop: 8 }}>No active QA testers are available.</p>
         )}
       </Card>
     </div>
@@ -950,16 +934,15 @@ const REQUESTS_TAB_HIDDEN_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST',
 export default function Dashboard() {
   const { user } = useAuth()
   const [tab, setTab] = useState('command')
+  const range = DEFAULT_RAISED_RANGE
   const hideRequestsTab = !!user?.roles?.some((r) => REQUESTS_TAB_HIDDEN_ROLES.includes(r))
     && !user?.roles?.includes('ADMIN')
-  // Reported directly: a broad, per-tester completed/pending/sign-off
-  // overview, visible only to Executive COE (CM/AGM). Uses the shared
-  // hasRole() helper here (not a direct user.roles check like
-  // hideRequestsTab above) since this is a "show to X" gate, not a "hide
-  // from X" one -- hasRole's ADMIN bypass is exactly the wanted behavior so
-  // an Admin can see it too, matching "Admin always sees everything" as used
-  // for the Administration nav group.
-  const showTesterOverviewTab = hasRole(user, 'DEPARTMENT_HEAD_COE')
+  // QA workload contains internal tester assignment information. This uses
+  // a direct role check (not hasRole's Admin bypass): Admin-only accounts are
+  // not QA team members and therefore must not see this restricted view.
+  const showTesterOverviewTab = !!user?.roles?.some((role) => (
+    ['QA_ENGINEER', 'QA_LEAD', 'DEPARTMENT_HEAD_COE'].includes(role)
+  ))
 
   const tabs = [
     { key: 'command', label: 'Command Centre' },
@@ -967,26 +950,30 @@ export default function Dashboard() {
     { key: 'security', label: 'Security (SAST/DAST)' },
     { key: 'suppression', label: 'Suppression' },
     { key: '3w', label: '3W Pending Items' },
-    ...(showTesterOverviewTab ? [{ key: 'tester-overview', label: 'Tester Overview' }] : []),
+    ...(showTesterOverviewTab ? [{ key: 'tester-overview', label: 'QA Tester Overview' }] : []),
   ]
 
   return (
-    <div>
-      <PageHeader
-        title="Dashboard"
-        subtitle="A single view of what's pending, where, and since when — across QA Requests, Security and Suppression."
-      />
-      <div className="tabs">
+    <div className="dashboard-page">
+      <div className="dashboard-page-header">
+        <div>
+          <p>Quality operations</p>
+          <h1>Dashboard</h1>
+          <span>Monitor delivery health, governance, security, and team performance.</span>
+        </div>
+        <div className="dashboard-header-status"><i /><span><strong>Systems operational</strong><small>Live portal data</small></span></div>
+      </div>
+      <div className="tabs dashboard-tabs">
         {tabs.map((t) => (
           <button key={t.key} className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}>{t.label}</button>
         ))}
       </div>
-      {tab === 'command' && <CommandCentre />}
-      {tab === 'my-requests' && !hideRequestsTab && <MyRequestsTab />}
-      {tab === 'security' && <SecurityTab />}
-      {tab === 'suppression' && <SuppressionTab />}
-      {tab === '3w' && <ThreeWTab />}
-      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab />}
+      {tab === 'command' && <CommandCentre range={range} />}
+      {tab === 'my-requests' && !hideRequestsTab && <MyRequestsTab range={range} />}
+      {tab === 'security' && <SecurityTab range={range} />}
+      {tab === 'suppression' && <SuppressionTab range={range} />}
+      {tab === '3w' && <ThreeWTab range={range} />}
+      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab range={range} />}
     </div>
   )
 }

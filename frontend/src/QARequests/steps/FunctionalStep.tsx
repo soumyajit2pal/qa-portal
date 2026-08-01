@@ -6,10 +6,14 @@ import {
   DEFAULT_CHECKLIST_ITEMS,
 } from "../../constants";
 import { QARequestForm, SetField } from "../types";
+import { ChecklistEvidencePicker, EvidenceKind } from "./ChecklistEvidencePicker";
 
 interface Props {
   form: QARequestForm;
   set: SetField;
+  draftRequestId?: number;
+  evidenceFiles: (kind: EvidenceKind, itemIndex: number) => File[];
+  setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void;
 }
 
 // Shown only while a Functional-bucket type (Functional/Sanity/Regression
@@ -19,7 +23,7 @@ interface Props {
 // checklist self-declaration -- folded into this same step (not a separate
 // one) to match how SAST/DAST already self-declare their own Security
 // Readiness checklist within their own step (see SastStep.tsx/DastStep.tsx).
-export function FunctionalStep({ form, set }: Props) {
+export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
   function toggleChecked(item: string) {
     set(
       "checked_items",
@@ -72,10 +76,10 @@ export function FunctionalStep({ form, set }: Props) {
         only — the QA Lead will independently verify every item during Readiness
         Verification (on the linked Functional Testing Request, once raised).
       </p>
-      {DEFAULT_CHECKLIST_ITEMS.map((ci) => {
+      {DEFAULT_CHECKLIST_ITEMS.map((ci, itemIndex) => {
         const checked = form.checked_items.includes(ci.item);
         return (
-          <label
+          <div
             key={ci.item}
             style={{
               display: "flex",
@@ -84,18 +88,16 @@ export function FunctionalStep({ form, set }: Props) {
               padding: "5px 0",
             }}
           >
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={() => toggleChecked(ci.item)}
-            />
-            <span>
-              {ci.item} <span className="muted small">({ci.owner})</span>
-              {ci.is_mandatory && (
-                <span className="badge badge-red">Mandatory</span>
-              )}
-            </span>
-          </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
+              <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
+              <span>
+                {ci.item} <span className="muted small">({ci.owner})</span>
+                {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
+              </span>
+            </label>
+            <ChecklistEvidencePicker kind="functional" itemIndex={itemIndex} draftRequestId={draftRequestId}
+              files={evidenceFiles('functional', itemIndex)} onFilesChange={(files) => setEvidenceFiles('functional', itemIndex, files)} />
+          </div>
         );
       })}
     </div>

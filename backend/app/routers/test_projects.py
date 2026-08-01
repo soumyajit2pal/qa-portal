@@ -1,5 +1,5 @@
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -17,8 +17,12 @@ _MANAGE_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD)
 
 
 @router.get("", response_model=List[schemas.TestProjectOut])
-def list_test_projects(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.TestProject).filter(models.TestProject.is_active == True).order_by(models.TestProject.name).all()  # noqa: E712
+def list_test_projects(include_inactive: bool = Query(False), db: Session = Depends(get_db),
+                       current_user: models.User = Depends(get_current_user)):
+    query = db.query(models.TestProject)
+    if not include_inactive:
+        query = query.filter(models.TestProject.is_active == True)  # noqa: E712
+    return query.order_by(models.TestProject.is_active.desc(), models.TestProject.name).all()
 
 
 @router.post("", response_model=schemas.TestProjectOut)
@@ -64,9 +68,21 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
     if not obj:
         raise HTTPException(404, "Test Project not found")
     data = payload.model_dump(exclude_unset=True)
+    if "name" in data and data["name"] is not None:
+        data["name"] = data["name"].strip()
+        if not data["name"]:
+            raise HTTPException(400, "Project name cannot be blank")
+    previous_active = obj.is_active
     for field in ("name", "department", "description", "is_active"):
         if field in data and data[field] is not None:
             setattr(obj, field, data[field])
+    if "is_active" in data and obj.is_active != previous_active:
+        db.add(models.ApprovalAction(
+            entity_type="TEST_PROJECT", entity_id=obj.id, step_name="Project lifecycle",
+            actor_id=current_user.id, actor_role=current_user.roles_csv,
+            decision="Reactivated" if obj.is_active else "Deactivated",
+            comments="Project reactivated for new test work" if obj.is_active else "Project deactivated; existing test assets retained",
+        ))
     db.commit()
     db.refresh(obj)
     return obj

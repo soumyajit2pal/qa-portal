@@ -3,6 +3,7 @@ import { Field } from '../../components/Common'
 import { IconCheckCircle } from '../../components/Icons'
 import { PRIORITIES, RISK_RATINGS, PERFORMANCE_REQUEST_TYPES, DEFAULT_PERFORMANCE_CHECKLIST_ITEMS } from '../../constants'
 import { QARequestForm, SetField } from '../types'
+import { ChecklistEvidencePicker, EvidenceKind } from './ChecklistEvidencePicker'
 
 interface Props {
   form: QARequestForm
@@ -10,12 +11,15 @@ interface Props {
   // Once the linked Performance request already exists (created on an
   // earlier save), further edits happen on that request's own page instead.
   existingPerformance: boolean
+  draftRequestId?: number
+  evidenceFiles: (kind: EvidenceKind, itemIndex: number) => File[]
+  setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void
 }
 
 // Shown only while "Performance Testing" is a selected request type --
 // collects the Annexure VIII request type(s) and the 19-item "L1:
 // Pre-Testing Readiness Checklist" self-declaration.
-export function PerformanceStep({ form, set, existingPerformance }: Props) {
+export function PerformanceStep({ form, set, existingPerformance, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
   function toggleType(t: string) {
     set(
       'performance_request_types',
@@ -80,13 +84,17 @@ export function PerformanceStep({ form, set, existingPerformance }: Props) {
             will independently verify every item during Readiness (on the linked Performance
             Testing Request, once raised).
           </p>
-          {DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.map((ci) => {
+          {DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.map((ci, itemIndex) => {
             const checked = form.performance_checked_items.includes(ci.item)
             return (
-              <label key={ci.item} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
-                <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
-                <span>{ci.item} <span className="muted small">({ci.data_required})</span></span>
-              </label>
+              <div key={ci.item} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
+                  <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
+                  <span>{ci.item} <span className="muted small">({ci.data_required})</span></span>
+                </label>
+                <ChecklistEvidencePicker kind="performance" itemIndex={itemIndex} draftRequestId={draftRequestId}
+                  files={evidenceFiles('performance', itemIndex)} onFilesChange={(files) => setEvidenceFiles('performance', itemIndex, files)} />
+              </div>
             )
           })}
         </>

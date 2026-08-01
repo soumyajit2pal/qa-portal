@@ -2,6 +2,7 @@ import React from 'react'
 import { Field, RepeatableRows } from '../../components/Common'
 import { PRIORITIES, RISK_RATINGS, ENVIRONMENTS, DEFAULT_DAST_CHECKLIST_ITEMS } from '../../constants'
 import { QARequestForm, SetField, blankDastComponent } from '../types'
+import { ChecklistEvidencePicker, EvidenceKind } from './ChecklistEvidencePicker'
 
 interface Props {
   form: QARequestForm
@@ -9,12 +10,15 @@ interface Props {
   // Once the linked DAST request already exists (created on an earlier
   // save), further edits happen on that request's own page instead.
   existingDast: boolean
+  draftRequestId?: number
+  evidenceFiles: (kind: EvidenceKind, itemIndex: number) => File[]
+  setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void
 }
 
 // Shown only while "DAST" is a selected request type -- fills in the
 // auto-created DAST request's target details and its own Security
 // Readiness checklist self-declaration, up front.
-export function DastStep({ form, set, existingDast }: Props) {
+export function DastStep({ form, set, existingDast, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
   function toggleChecked(item: string) {
     set(
       'dast_checked_items',
@@ -108,16 +112,20 @@ export function DastStep({ form, set, existingDast }: Props) {
             linked DAST request, once raised). Items marked "mandatory" must be ticked before the
             DAST request can be submitted for SM Approval.
           </p>
-          {DEFAULT_DAST_CHECKLIST_ITEMS.map((ci) => {
+          {DEFAULT_DAST_CHECKLIST_ITEMS.map((ci, itemIndex) => {
             const checked = form.dast_checked_items.includes(ci.item)
             return (
-              <label key={ci.item} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
-                <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
-                <span>
-                  {ci.item} <span className="muted small">({ci.owner})</span>{' '}
-                  {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
-                </span>
-              </label>
+              <div key={ci.item} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
+                <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
+                  <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
+                  <span>
+                    {ci.item} <span className="muted small">({ci.owner})</span>{' '}
+                    {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
+                  </span>
+                </label>
+                <ChecklistEvidencePicker kind="dast" itemIndex={itemIndex} draftRequestId={draftRequestId}
+                  files={evidenceFiles('dast', itemIndex)} onFilesChange={(files) => setEvidenceFiles('dast', itemIndex, files)} />
+              </div>
             )
           })}
         </>
