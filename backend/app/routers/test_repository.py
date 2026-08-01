@@ -1,6 +1,8 @@
 import io
+import os
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 import openpyxl
 
@@ -8,6 +10,15 @@ from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles
 from ..constants import Role, TEST_CASE_PRIORITIES
+
+# Canonical "Test Cases - CR-XX - Template" xlsx that import_test_cases()
+# below parses -- shipped as a static, git-tracked asset (NOT the runtime
+# uploads/ folder, which is excluded from deploy syncs) so the Test
+# Repository "Download Template" button always has something to serve.
+_IMPORT_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "assets", "templates", "Test_Case_Import_Template.xlsx",
+)
 
 router = APIRouter(prefix="/api/test-repository", tags=["test-management"])
 
@@ -327,6 +338,22 @@ def _clean(v) -> Optional[str]:
         return None
     s = str(v).strip()
     return s or None
+
+
+@router.get("/import-template")
+def download_import_template(current_user: models.User = Depends(get_current_user)):
+    """Serves the canonical "Test Cases - CR-XX - Template" xlsx that
+    import_test_cases() below expects, so users import test cases using
+    this template only instead of an arbitrary spreadsheet. Any
+    authenticated user may download it -- it carries no project data,
+    just the required header row and example rows."""
+    if not os.path.exists(_IMPORT_TEMPLATE_PATH):
+        raise HTTPException(404, "Import template file is missing on the server")
+    return FileResponse(
+        _IMPORT_TEMPLATE_PATH,
+        filename="Test Case Import Template.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @router.post("/projects/{project_id}/import-xlsx", response_model=schemas.TestCaseImportResult)

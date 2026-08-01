@@ -4632,3 +4632,33 @@ merged lookup.
 was purely a frontend label-lookup collision. **Verified:** `npx tsc --noEmit -p .` -- clean; Documents and
 outputs copies re-synced and confirmed identical via `diff -rq` (aside from the always-excluded
 `.env`/`uploads` runtime files).
+
+## 114. Test Repository: "Download Template" for test-case xlsx import (no schema change)
+
+**Request:** users need a single, canonical "Test Cases - CR-XX - Template" xlsx to download from inside
+Test Repository, so bulk import always uses that exact format rather than an arbitrary spreadsheet.
+
+**New static asset:** `backend/app/assets/templates/Test_Case_Import_Template.xlsx` -- the standard
+template (sheet "CR-XX Testcases", 17-column header row matching `test_repository.py`'s existing
+`_HEADER_MAP` exactly: Test Case ID, Epic ID, Feature ID, User Story ID, Test Type, Module Name (if any),
+Test Scenario, Pre-Condition (if any), Test Case Description, Step No., Steps, Expected Result, Priority,
+Actual Result, Status, Test Run Artifacts, Defect ID (if any)). Deliberately placed under
+`backend/app/assets/` (new directory), **not** `backend/app/uploads/` -- `uploads/` is runtime-only and
+excluded from the Documents↔deploy sync, so a static reference file placed there would silently 404 after
+a real deploy. `assets/` is a normal tracked path.
+
+**Backend (`routers/test_repository.py`):** new `GET /api/test-repository/import-template` (any
+authenticated user, no role restriction -- it carries no project data, just headers/example rows) serves
+the asset via `FileResponse(..., media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")`,
+the same xlsx MIME type `export.py` already uses. Returns 404 if the asset file is ever missing from the
+deployed image.
+
+**Frontend (`modules/test-management/TestRepository.tsx`):** a "Download Template" button added to the
+Test Repository toolbar (visible to everyone, not just authors, so any user can grab the format before
+asking someone with author rights to import), plus a second "Download the template" link inside the
+Import-from-Excel modal itself, both calling the existing `api.downloadFile()` helper against the new
+endpoint.
+
+**No schema or backend-model change.** **Verified:** `python3 -m py_compile routers/test_repository.py` --
+clean; `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files).

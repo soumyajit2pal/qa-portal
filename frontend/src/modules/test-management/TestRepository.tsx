@@ -75,7 +75,15 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
   const [targetFolder, setTargetFolder] = useState<number | ''>(folderId)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false)
   const [result, setResult] = useState<TestCaseImportResult | null>(null)
+
+  async function downloadTemplate() {
+    setDownloadingTemplate(true)
+    try {
+      await api.downloadFile('/api/test-repository/import-template', 'Test Case Import Template.xlsx')
+    } catch (err) { setError(err) } finally { setDownloadingTemplate(false) }
+  }
 
   const resultErrors = result?.errors || []
   const primaryFailureReason = result && result.created_test_cases === 0
@@ -110,6 +118,13 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
             test case's first row. Imported definitions enter QA Lead review; execution-result
             columns are not added to a cycle until the testcase is approved.
           </p>
+          <div className="info-banner">
+            Only this exact template is supported for import.{' '}
+            <button type="button" className="link-btn" style={{ display: 'inline', padding: 0 }} onClick={downloadTemplate} disabled={downloadingTemplate}>
+              {downloadingTemplate ? 'Downloading…' : 'Download the template'}
+            </button>
+            {' '}before filling it in.
+          </div>
           <Field label="Target Folder">
             <select value={targetFolder} onChange={(e) => setTargetFolder(e.target.value ? Number(e.target.value) : '')}>
               <option value="">-- Unfiled --</option>
@@ -685,6 +700,14 @@ export default function TestRepository() {
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [showBulkApprove, setShowBulkApprove] = useState(false)
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false)
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false)
+
+  async function downloadTemplate() {
+    setDownloadingTemplate(true)
+    try {
+      await api.downloadFile('/api/test-repository/import-template', 'Test Case Import Template.xlsx')
+    } catch (err) { setError(err) } finally { setDownloadingTemplate(false) }
+  }
 
   useEffect(() => {
     api.get<TestProjectOut[]>('/api/test-projects?include_inactive=true').then((p) => {
@@ -786,6 +809,9 @@ export default function TestRepository() {
               {projects.length === 0 && <option value="">No Test Projects yet</option>}
               {projects.map((p) => <option key={p.id} value={p.id}>{p.project_key} -- {p.name}{p.is_active ? '' : ' [Inactive]'}</option>)}
             </select>
+            <button className="btn" onClick={downloadTemplate} disabled={downloadingTemplate}>
+              {downloadingTemplate ? 'Downloading…' : 'Download Template'}
+            </button>
             {canAuthor && projectId && projectIsActive && (
               <>
                 <button className="btn" onClick={() => setShowNewFolder(true)}>+ Folder</button>
