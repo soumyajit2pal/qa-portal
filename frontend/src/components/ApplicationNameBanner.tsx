@@ -10,34 +10,49 @@ interface Props {
   applicationName?: string | null
   department?: string | null
   // Reloads the parent request after a decision so application_master_status
-  // flips away from PENDING and this banner disappears on its own.
+  // moves on (PENDING_APP_OWNER -> PENDING_SM -> APPROVED, or -> REJECTED)
+  // and this banner re-renders for the next tier or disappears on its own.
   onDecided: () => void
 }
 
 // Shown inline on a request's own SM Approval screen (Functional/SAST/DAST/
 // Performance) when its Application Name is still a brand-new,
-// not-yet-approved entry (see backend models.ApplicationMaster) -- lets the
-// SM approve/reject the name itself right here. Approving the name never
-// touches the request's own status. Rejecting it does: the backend
-// (routers/applications.py::decide_application_name) also force-rejects the
-// request itself if it's still sitting at SM Approval, since it can't be
-// allowed to proceed to Department Head under a name that was just
-// rejected -- onDecided() below reloads the parent request so its status/
-// badge picks that up immediately. Only rendered for an SM (or Admin);
-// require_same_department is enforced server-side regardless, so an SM from
-// a different department gets a 403 here rather than silently succeeding.
+// not-yet-approved entry (see backend models.ApplicationMaster) -- lets
+// whoever holds the checkpoint for the CURRENT tier approve/reject the name
+// itself right here. Two-tier chain (2026-08): PENDING_APP_OWNER -> an
+// Application Owner decides first; PENDING_SM -> then an SM makes the final
+// call. Approving at either tier never touches the request's own status
+// except to move the name on to the next tier (App Owner) or leave it
+// APPROVED (SM). Rejecting at EITHER tier is terminal: the backend
+// (routers/applications.py::decide_app_owner_name /
+// decide_application_name) also force-rejects the request itself if it's
+// still sitting at SM Approval, since it can't be allowed to proceed to
+// Department Head under a name that was just rejected -- onDecided() below
+// reloads the parent request so its status/badge picks that up immediately.
+// Only rendered for whichever role owns the CURRENT tier (or Admin);
+// require_same_department is enforced server-side regardless, so someone
+// from a different department gets a 403 here rather than silently
+// succeeding.
 export function ApplicationNameBanner({ applicationMasterId, applicationMasterStatus, applicationName, onDecided }: Props) {
   const { user } = useAuth()
   const [busy, setBusy] = useState<'Approved' | 'Rejected' | null>(null)
   const [error, setError] = useState<unknown>(null)
 
-  if (applicationMasterStatus !== 'PENDING' || !applicationMasterId || !hasRole(user, 'SM')) return null
+  const isAppOwnerTier = applicationMasterStatus === 'PENDING_APP_OWNER'
+  const isSmTier = applicationMasterStatus === 'PENDING_SM'
+  const canDecideHere = (isAppOwnerTier && hasRole(user, 'APPLICATION_OWNER'))
+    || (isSmTier && hasRole(user, 'SM'))
+
+  if (!applicationMasterId || !canDecideHere) return null
+
+  const endpoint = isAppOwnerTier ? 'app-owner-decision' : 'decision'
+  const tierLabel = isAppOwnerTier ? 'Application Owner' : 'SM'
 
   async function decide(decision: 'Approved' | 'Rejected') {
     setBusy(decision)
     setError(null)
     try {
-      await api.post(`/api/application-names/${applicationMasterId}/decision`, { decision })
+      await api.post(`/api/application-names/${applicationMasterId}/${endpoint}`, { decision })
       onDecided()
     } catch (err) {
       setError(err)
@@ -53,9 +68,10 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
       display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
     }}>
       <span>
-        <strong>New Application Name Pending Approval:</strong> {applicationName || '—'} -- this
-        was introduced as a new "Other" entry on the QA Request and needs your decision before it
-        becomes a selectable option for everyone else.
+        <strong>New Application Name Pending {tierLabel} Approval:</strong> {applicationName || '—'} -- this
+        was introduced as a new "Other" entry on the QA Request and needs your decision{isAppOwnerTier
+          ? ' before it moves on to SM for final approval.'
+          : ' before it becomes a selectable option for everyone else.'}
       </span>
       <div style={{ display: 'flex', gap: 8 }}>
         <button type="button" className="btn btn-sm btn-primary" disabled={!!busy} onClick={() => decide('Approved')}>

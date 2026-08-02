@@ -17,16 +17,21 @@ DEMO_PASSWORD = "Password@123"
 # order of the role list.
 DEMO_USERS = [
     ("requester1", "Requester 1", Role.REQUESTER, "IT - Software"),
+    ("requester2", "Requester 2", Role.REQUESTER, "IT - Software"),
     ("ba1", "BA 1", Role.BUSINESS_ANALYST, "IT - Software"),
     ("qa1", "QA 1", Role.QA_ENGINEER, "IT - QA"),
+    ("qa2", "QA 2", Role.QA_ENGINEER, "IT - QA"),
     ("qalead1", "QA Lead 1", Role.QA_LEAD, "IT - QA"),
-    ("exec1", "Dep head COE 1", Role.DEPARTMENT_HEAD_COE, "IT - QA"),
+    ("cm1", "Dep head CM 1", Role.DEPARTMENT_HEAD_COE_CM, "IT - QA"),
+    ("agm1", "Dep head COE 1", Role.DEPARTMENT_HEAD_COE_AGM, "IT - QA"),
     ("security1", "SA 1", Role.SECURITY_ANALYST, "IT - QA"),
     ("appowner1", "App Owner 1", Role.APPLICATION_OWNER, "IT - Software"),
-    ("depthead1", "Dep Head Of Req 1", Role.DEPARTMENT_HEAD, "IT - Software"),
+    ("depthead1", "Dep Head Of Req 1", Role.DEPARTMENT_HEAD_CM, "IT - Software"),
+    ("depthead2", "Dep Head Of Req 1", Role.DEPARTMENT_HEAD_AGM, "IT - Software"),
     # New SM checkpoint role (sits between Requester and Department Head on
     # QA Request / SAST-DAST / Suppression workflows).
-    ("sm1", "SM Of Req 1", Role.SM, "IT - Software"),
+    ("sm1", "SM 1 Of Req 1", Role.SM, "IT - Software"),
+    ("sm2", "SM 2 Of Req 1", Role.SM, "IT - Software"),
     ("admin", "Administrator", Role.ADMIN, "IT - QA"),
 ]
 

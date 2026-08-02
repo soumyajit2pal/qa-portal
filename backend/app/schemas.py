@@ -57,6 +57,19 @@ class PasswordReset(BaseModel):
     new_password: str
 
 
+class LocalAdminUserUpdate(BaseModel):
+    """Body for PATCH /api/auth/local-admin/users/{id} -- a Department Head's
+    (or Executive COE's, for the QA department) deliberately narrower
+    counterpart to the Admin-only UserUpdate above. Only `roles` (constrained
+    server-side to DEPARTMENT_ADMIN_ASSIGNABLE_ROLES or
+    QA_ADMIN_ASSIGNABLE_ROLES depending on which kind of local admin is
+    calling -- see routers/auth.py::_local_admin_assignable_roles) and
+    `is_active` may be touched this way -- no department, login type,
+    profile fields, or password. See routers/auth.py::update_local_admin_user."""
+    roles: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+
+
 class DepartmentSelection(BaseModel):
     """Body for PATCH /api/auth/me -- the one thing a logged-in user (not
     just an Admin) can set on their own profile, used by the first-LDAP-login
@@ -1047,6 +1060,11 @@ class ApplicationMasterOut(ORMModel):
     requested_by_id: Optional[int] = None
     qa_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
+    # Application Owner tier -- populated once an Application Owner has
+    # decided (see models.ApplicationMaster's two-tier docstring).
+    app_owner_decided_by_id: Optional[int] = None
+    app_owner_decided_at: Optional[datetime.datetime] = None
+    app_owner_comments: Optional[str] = None
     decided_by_id: Optional[int] = None
     decided_at: Optional[datetime.datetime] = None
     comments: Optional[str] = None

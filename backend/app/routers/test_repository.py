@@ -109,7 +109,7 @@ def list_test_cases(project_id: int, db: Session = Depends(get_db), current_user
 def create_test_case(project_id: int, payload: schemas.TestCaseCreate, db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
     _require_active_project(_get_project_or_404(db, project_id))
-    key = (payload.test_case_key or "").strip() or models.gen_id("TC")
+    key = (payload.test_case_key or "").strip() or models.gen_id("TC", db)
     if db.query(models.TestCase).filter_by(test_case_key=key).first():
         raise HTTPException(400, f"Test Case ID '{key}' already exists")
     data = payload.model_dump(exclude={"steps", "test_case_key", "status"})
@@ -399,7 +399,7 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
 
     def flush_group(case_row: dict, step_rows: List[dict], source_row: int):
         nonlocal created_test_cases, skipped_rows
-        key = case_row.get("test_case_key") or models.gen_id("TC")
+        key = case_row.get("test_case_key") or models.gen_id("TC", db)
         if db.query(models.TestCase).filter_by(test_case_key=key).first():
             group_rows = max(1, len(step_rows))
             end_row = source_row + group_rows - 1

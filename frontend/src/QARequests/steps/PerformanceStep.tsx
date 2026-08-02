@@ -93,7 +93,8 @@ export function PerformanceStep({ form, set, existingPerformance, draftRequestId
                   <span>{ci.item} <span className="muted small">({ci.data_required})</span></span>
                 </label>
                 <ChecklistEvidencePicker kind="performance" itemIndex={itemIndex} draftRequestId={draftRequestId}
-                  files={evidenceFiles('performance', itemIndex)} onFilesChange={(files) => setEvidenceFiles('performance', itemIndex, files)} />
+                  files={evidenceFiles('performance', itemIndex)} onFilesChange={(files) => setEvidenceFiles('performance', itemIndex, files)}
+                  required={checked} />
               </div>
             )
           })}

@@ -22,11 +22,12 @@ export function DetailsStep({ form, set }: Props) {
   const [crError, setCrError] = useState("");
   const [epicError, setEpicError] = useState("");
   // Approved names only -- a brand-new name typed via "Other" doesn't show up
-  // here until an SM from the requester's department approves it (see
-  // backend routers/applications.py::list_application_names and the new
-  // "New Application Name Pending Approval" banner on each linked module's
-  // own SM Approval screen). Always includes "Other" itself as a standing
-  // option regardless of what's been approved so far.
+  // here until an Application Owner, then an SM, both from the requester's
+  // department, approve it in turn (see backend
+  // routers/applications.py::list_application_names and the "New
+  // Application Name Pending ... Approval" banner on each linked module's
+  // own detail view). Always includes "Other" itself as a standing option
+  // regardless of what's been approved so far.
   const [approvedNames, setApprovedNames] = useState<ApplicationMasterOut[]>(
     []
   );
@@ -94,9 +95,10 @@ export function DetailsStep({ form, set }: Props) {
                 />
                 <p className="muted small" style={{ margin: "4px 0 0" }}>
                   Automatically capitalised. A new name needs approval from an
-                  SM in your department before it appears in this dropdown for
-                  everyone else -- your request isn't blocked on that, it just
-                  shows as "Pending Approval" until then.
+                  Application Owner, then an SM, both in your department,
+                  before it appears in this dropdown for everyone else --
+                  your request isn't blocked on that, it just shows as
+                  "Pending Approval" until then.
                 </p>
               </>
             )}

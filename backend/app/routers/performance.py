@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, is_readiness_evidence_editable
+from ..deps import get_current_user, require_roles, require_same_department, require_not_requester
+from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -199,13 +199,10 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
                  current_user: models.User = Depends(require_roles(Role.SM))):
     obj = _get_or_404(db, req_id)
     require_same_department(current_user, obj.department)
+    require_not_requester(current_user, obj.requester_id)
     _require(obj, "SM_APPROVAL_PENDING", "SM decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
-        raise HTTPException(
-            400,
-            "This request's Application Name is not yet Approved -- decide it first "
-            "(see the Application Name banner above) before approving the request itself.",
-        )
+        raise HTTPException(400, application_name_block_message(obj.application_master_status, "sm"))
     if payload.decision == "Approved":
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
     elif payload.decision == "Returned":
@@ -222,17 +219,14 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 
 @router.post("/{req_id}/department-head-decision", response_model=schemas.PerformanceOut)
 def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDecisionIn, db: Session = Depends(get_db),
-                              current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD))):
+                              current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
     """Approval requires assignment to an active IT-QA QA Lead."""
     obj = _get_or_404(db, req_id)
     require_same_department(current_user, obj.department)
+    require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
-        raise HTTPException(
-            400,
-            "This request's Application Name is not yet Approved by SM -- it must be decided "
-            "before this request can be approved.",
-        )
+        raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     if payload.decision == "Approved":
         qa_lead_id = payload.qa_lead_id or payload.engineer_id
         qa_lead = _it_qa_user(db, qa_lead_id, Role.QA_LEAD, "qa_lead_id")
@@ -639,7 +633,7 @@ def _can_upload_documents(obj: "models.PerformanceRequest", user: models.User) -
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
     if status in _ENGINEER_OWNED_STATUSES:
         if obj.engineer_id == user.id:
             return True
@@ -672,7 +666,7 @@ def _can_edit_details(obj: "models.PerformanceRequest", user: models.User) -> bo
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
     return False
 
 

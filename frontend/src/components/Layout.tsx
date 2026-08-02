@@ -86,11 +86,19 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
       ],
     },
   ]
+  // hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') is also true for an Admin account (see
+  // constants.ts::hasRole's own ADMIN short-circuit), so an Admin sees both
+  // items below merged into the one Administration group rather than two
+  // separately-labeled groups.
+  const adminItems: NavItem[] = []
   if (hasRole(user, 'ADMIN')) {
-    groups.push({
-      label: 'Administration',
-      items: [{ to: '/admin', label: 'Users & Access', icon: IconUsers, count: counts.pendingReview }],
-    })
+    adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers, count: counts.pendingReview })
+  }
+  if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')) {
+    adminItems.push({ to: '/department-admin', label: 'Department Admin', icon: IconUsers })
+  }
+  if (adminItems.length > 0) {
+    groups.push({ label: 'Administration', items: adminItems })
   }
   return groups
 }
@@ -105,13 +113,14 @@ function isOpenSecurityStatus(status: string): boolean {
 
 // Maps each request type's own ID prefix (see models.py's gen_id calls) to
 // the module that owns it, for the topbar search box (submitSearch below).
-// "TQA-FUNC" must be checked before any shorter/generic prefix since it also
-// starts with "TQA-" -- order matters here, most-specific first.
+// TQA-FUNC/TQA-SAST/TQA-DAST/TQA-PERF/TQA-REQ all share the "TQA-" namespace
+// but diverge right after it, so none is a prefix of another -- order doesn't
+// matter among them, only that each full prefix string is checked.
 const ID_PREFIX_ROUTES: { prefix: string; path: string }[] = [
   { prefix: 'TQA-FUNC', path: '/functional-requests' },
-  { prefix: 'SAST', path: '/sast' },
-  { prefix: 'DAST', path: '/dast' },
-  { prefix: 'PERF', path: '/performance' },
+  { prefix: 'TQA-SAST', path: '/sast' },
+  { prefix: 'TQA-DAST', path: '/dast' },
+  { prefix: 'TQA-PERF', path: '/performance' },
   { prefix: 'SUP', path: '/suppression' },
   { prefix: 'QA-CERT', path: '/signoff' },
 ]
@@ -136,6 +145,12 @@ export default function Layout({ children }: { children?: ReactNode }) {
     'Overview', 'Request Management', 'Test Management', 'Security', 'Specialized Testing', 'Governance', 'Administration',
   ]))
   const searchInputRef = useRef<HTMLInputElement>(null)
+  // Topbar user menu -- clicking the signed-in name reveals Department +
+  // Role(s) (mirrors the sidebar's own user-chip, but reachable from the
+  // topbar too, which stays visible even with the sidebar collapsed/closed
+  // on mobile).
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const userMenuRef = useRef<HTMLDivElement>(null)
 
   const groups = navGroups(counts, user)
   const activeGroup = groups.find((group) => group.items.some((item) => (
@@ -146,6 +161,22 @@ export default function Layout({ children }: { children?: ReactNode }) {
   ))
 
   useEffect(() => { setSidebarOpen(false) }, [location.pathname])
+  useEffect(() => { setUserMenuOpen(false) }, [location.pathname])
+  useEffect(() => {
+    if (!userMenuOpen) return
+    function onDocMouseDown(e: MouseEvent) {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) setUserMenuOpen(false)
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setUserMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [userMenuOpen])
   useEffect(() => {
     if (!activeGroup) return
     setExpandedGroups((previous) => {
@@ -320,6 +351,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
                 <div className="role">
                   {(user.roles || []).map((r) => ROLE_LABELS[r] || r).join(' · ') || 'No role assigned'}
                 </div>
+                <div className="dept">{user.department || 'No department set'}</div>
               </div>
               <button onClick={logout} title="Log out"><IconLogout width={16} height={16} /></button>
             </div>
@@ -340,7 +372,36 @@ export default function Layout({ children }: { children?: ReactNode }) {
             <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">
-            <span className="topbar-user-context"><span className="status-dot" />{user?.full_name || 'Signed in'}</span>
+            {user && (
+              <div className="topbar-user-menu" ref={userMenuRef}>
+                <button
+                  type="button"
+                  className="topbar-user-context"
+                  onClick={() => setUserMenuOpen((v) => !v)}
+                  aria-expanded={userMenuOpen}
+                >
+                  <span className="status-dot" />{user.full_name}
+                  <i className={`topbar-user-caret ${userMenuOpen ? 'open' : ''}`}>⌄</i>
+                </button>
+                {userMenuOpen && (
+                  <div className="topbar-user-popover">
+                    <div className="topbar-user-popover-name">{user.full_name}</div>
+                    <div className="topbar-user-popover-row">
+                      <span className="label">Department</span>
+                      <span>{user.department || 'No department set'}</span>
+                    </div>
+                    <div className="topbar-user-popover-row">
+                      <span className="label">Role(s)</span>
+                      <span>{(user.roles || []).map((r) => ROLE_LABELS[r] || r).join(', ') || 'No role assigned'}</span>
+                    </div>
+                    <button type="button" className="btn btn-sm topbar-user-popover-logout" onClick={logout}>
+                      <IconLogout width={14} height={14} /> Log out
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            {!user && <span className="topbar-user-context"><span className="status-dot" />Signed in</span>}
             {hasRole(user, 'REQUESTER', 'BUSINESS_ANALYST') && (
               <button className="btn btn-primary btn-sm" onClick={() => navigate('/qa-requests', { state: { openNew: true } })}>
                 <IconPlus width={14} height={14} /> New QA request

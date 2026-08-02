@@ -9,6 +9,7 @@ import {
   ErrorText,
   Modal,
   Table,
+  applicationNameAwareStatusLabel,
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
 import {
@@ -17,6 +18,7 @@ import {
   GATEWAY_STATUS_LABELS,
   DEFAULT_SAST_CHECKLIST_ITEMS,
   DEFAULT_DAST_CHECKLIST_ITEMS,
+  DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
   hasRole,
   DEFAULT_CHECKLIST_ITEMS,
 } from "../constants";
@@ -24,8 +26,10 @@ import {
   QARequestOut,
   UserOut,
   QARequestDocumentOut,
+  RequestDocumentOut,
   ApprovalActionOut,
 } from "../types";
+import { EvidenceKind } from "./steps/ChecklistEvidencePicker";
 import { GatewayPreview, gatewayStageIndex } from "./GatewayPreview";
 import { classificationSummary, linkedSections, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
@@ -57,6 +61,18 @@ export function RequestDetail({
   const [error, setError] = useState<unknown>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [editingReq, setEditingReq] = useState(false);
+  // Evidence-document count per draft checklist item, keyed "<kind>:<index>"
+  // -- used only to build a heads-up prompt at Submit/Raise time (see
+  // handleSubmitClick below). Evidence is no longer mandatory (Raise/Submit
+  // is never blocked on it), but it's still useful to nudge the requester
+  // upfront -- at request-creation time -- about which readiness checklist
+  // item(s) have no evidence attached yet, rather than a QA Lead discovering
+  // that gap much later at Readiness Verification.
+  const [draftEvidenceCounts, setDraftEvidenceCounts] = useState<Record<string, number>>({});
+  // Set when Submit/Raise is clicked and at least one checklist item still
+  // has no evidence attached -- shows the informational pop-up below instead
+  // of submitting immediately. Confirming from that pop-up proceeds anyway.
+  const [confirmSubmitNoEvidence, setConfirmSubmitNoEvidence] = useState(false);
   // Shown after saving edits to a request that's still sitting in Draft --
   // same "nothing has actually been submitted yet" reminder as the one shown
   // right after creating a brand-new request (see ./index.tsx).
@@ -88,6 +104,55 @@ export function RequestDetail({
   useEffect(() => {
     load();
   }, [load]);
+
+  // Pulled out as its own callback (rather than only living inline inside a
+  // useEffect) so it can also be re-run on demand -- specifically whenever
+  // the "Edit Request" wizard closes below, since ChecklistEvidencePicker
+  // uploads/deletes evidence immediately against the backend as soon as the
+  // requester clicks Attach/Remove, independent of whether they ever click
+  // the wizard's own Save. Without an explicit re-run there, this component
+  // has no way to know evidence changed -- its dependency array (req.id/
+  // status/request_types) doesn't change just because a file was attached,
+  // so the Submit/Raise heads-up prompt would stay stuck at whatever it read
+  // on first load until a full page reload remounted this component.
+  const loadDraftEvidenceCounts = useCallback(async () => {
+    if (req.status !== "DRAFT") {
+      setDraftEvidenceCounts({});
+      return;
+    }
+    const requestTypes = (req.request_types || "").split(",").map((t) => t.trim());
+    const kindsToLoad: { kind: EvidenceKind; count: number }[] = [];
+    if (requestTypes.includes("Functional Testing")) {
+      kindsToLoad.push({ kind: "functional", count: DEFAULT_CHECKLIST_ITEMS.length });
+    }
+    if (requestTypes.includes("SAST")) {
+      kindsToLoad.push({ kind: "sast", count: DEFAULT_SAST_CHECKLIST_ITEMS.length });
+    }
+    if (requestTypes.includes("DAST")) {
+      kindsToLoad.push({ kind: "dast", count: DEFAULT_DAST_CHECKLIST_ITEMS.length });
+    }
+    if (requestTypes.includes("Performance Testing")) {
+      kindsToLoad.push({ kind: "performance", count: DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.length });
+    }
+    const entries: [string, number][] = [];
+    for (const { kind, count } of kindsToLoad) {
+      for (let index = 0; index < count; index++) {
+        try {
+          const docs = await api.get<RequestDocumentOut[]>(
+            `/api/qa-requests/${req.id}/checklist-evidence/${kind}/${index}/documents`
+          );
+          entries.push([`${kind}:${index}`, docs.length]);
+        } catch {
+          entries.push([`${kind}:${index}`, 0]);
+        }
+      }
+    }
+    setDraftEvidenceCounts(Object.fromEntries(entries));
+  }, [req.id, req.status, req.request_types]);
+
+  useEffect(() => {
+    loadDraftEvidenceCounts();
+  }, [loadDraftEvidenceCounts]);
 
   async function act(action: string) {
     setError(null);
@@ -150,6 +215,74 @@ export function RequestDetail({
         (c) => c.is_mandatory && !checkedSet.has(c.item)
       ).map((c) => c.item)
     );
+  }
+
+  // Informational only -- evidence is no longer required to Submit/Raise
+  // (see handleSubmitClick below). Still worth flagging upfront which
+  // readiness checklist item(s) have nothing attached yet, since it's easier
+  // for the requester to add it now, while everything's fresh, than to be
+  // asked for it later during Readiness Verification. Applies to all 4
+  // request types (Functional and Performance have no "must be checked"
+  // gate, but a mandatory/checked item on either can still usefully carry
+  // evidence).
+  const itemsWithoutEvidence: string[] = [];
+
+  if (requestTypeList.includes("Functional Testing")) {
+    const checkedSet = new Set(req.draft_checked_items || []);
+    DEFAULT_CHECKLIST_ITEMS.forEach((c, index) => {
+      if (
+        (c.is_mandatory || checkedSet.has(c.item)) &&
+        (draftEvidenceCounts[`functional:${index}`] ?? 0) === 0
+      ) {
+        itemsWithoutEvidence.push(c.item);
+      }
+    });
+  }
+  if (requestTypeList.includes("SAST")) {
+    const checkedSet = new Set(req.draft_sast_checked_items || []);
+    DEFAULT_SAST_CHECKLIST_ITEMS.forEach((c, index) => {
+      if (
+        (c.is_mandatory || checkedSet.has(c.item)) &&
+        (draftEvidenceCounts[`sast:${index}`] ?? 0) === 0
+      ) {
+        itemsWithoutEvidence.push(c.item);
+      }
+    });
+  }
+  if (requestTypeList.includes("DAST")) {
+    const checkedSet = new Set(req.draft_dast_checked_items || []);
+    DEFAULT_DAST_CHECKLIST_ITEMS.forEach((c, index) => {
+      if (
+        (c.is_mandatory || checkedSet.has(c.item)) &&
+        (draftEvidenceCounts[`dast:${index}`] ?? 0) === 0
+      ) {
+        itemsWithoutEvidence.push(c.item);
+      }
+    });
+  }
+  if (requestTypeList.includes("Performance Testing")) {
+    const checkedSet = new Set(req.draft_performance_checked_items || []);
+    DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.forEach((c, index) => {
+      if (
+        checkedSet.has(c.item) &&
+        (draftEvidenceCounts[`performance:${index}`] ?? 0) === 0
+      ) {
+        itemsWithoutEvidence.push(c.item);
+      }
+    });
+  }
+
+  // Submit/Raise itself is never blocked on evidence -- if some checklist
+  // item(s) have nothing attached, show a one-time heads-up (ConfirmModal
+  // below) instead of submitting immediately; "Raise Anyway" proceeds,
+  // "Go Back" just closes the pop-up so the requester can attach evidence
+  // first if they want to.
+  function handleSubmitClick() {
+    if (itemsWithoutEvidence.length > 0) {
+      setConfirmSubmitNoEvidence(true);
+    } else {
+      act("submit");
+    }
   }
 
   const canSubmit = isRequester && status === "DRAFT";
@@ -261,9 +394,14 @@ export function RequestDetail({
           <DetailSection title="Application & Change">
             <DetailField label="Application Name">
               {req.application_name || "—"}
-              {req.application_master_status === "PENDING" && (
+              {req.application_master_status === "PENDING_APP_OWNER" && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                  Pending Approval
+                  Pending Application Owner Approval
+                </span>
+              )}
+              {req.application_master_status === "PENDING_SM" && (
+                <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
+                  Pending SM Approval
                 </span>
               )}
               {req.application_master_status === "REJECTED" && (
@@ -328,7 +466,12 @@ export function RequestDetail({
                   {
                     key: "status",
                     header: "Current Status",
-                    render: (r) => <Badge status={r.status} />,
+                    // Every row here is one of THIS gateway's own linked
+                    // children, so they all share this same gateway's
+                    // application_master_status (each delegates it from
+                    // `self.qa_request.application_master_status` on the
+                    // backend) -- no need for a per-row value.
+                    render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, req.application_master_status)} />,
                   },
                 ]}
                 rows={linkedRows}
@@ -410,7 +553,7 @@ export function RequestDetail({
                       ? "Complete the mandatory Security Readiness checklist item(s) below first"
                       : undefined
                   }
-                  onClick={() => act("submit")}
+                  onClick={handleSubmitClick}
                 >
                   Submit / Raise
                 </button>
@@ -541,11 +684,20 @@ export function RequestDetail({
       {editingReq && (
         <NewRequestModal
           editing={req}
-          onClose={() => setEditingReq(false)}
+          onClose={() => {
+            setEditingReq(false);
+            // Evidence attach/remove inside the wizard's checklist steps
+            // happens immediately against the backend (ChecklistEvidencePicker
+            // uploads/deletes on click, not on wizard Save) -- so evidence may
+            // have changed even if the requester closes without saving
+            // anything else. Re-check it here too, not just in onCreated below.
+            loadDraftEvidenceCounts();
+          }}
           onCreated={(updated) => {
             setEditingReq(false);
             onChanged(updated);
             load();
+            loadDraftEvidenceCounts();
             if (updated.status === "DRAFT") setDraftNotice(true);
           }}
         />
@@ -589,6 +741,35 @@ export function RequestDetail({
             setConfirmCancel(false);
             setError(null);
           }}
+        />
+      )}
+
+      {confirmSubmitNoEvidence && (
+        <ConfirmModal
+          title="Evidence not attached yet"
+          message={
+            <div style={{ fontSize: 13.5 }}>
+              <p style={{ margin: 0 }}>
+                The following readiness checklist item(s) don't have any
+                evidence document attached yet. It's easier to attach it now,
+                during request creation, than to be asked for it later --
+                but this won't stop you from raising the request:
+              </p>
+              <ul style={{ margin: "10px 0 0", paddingLeft: 20 }}>
+                {itemsWithoutEvidence.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          }
+          confirmLabel={busyAction === "submit" ? "Raising..." : "Raise Anyway"}
+          cancelLabel="Go Back"
+          busy={busyAction === "submit"}
+          onConfirm={() => {
+            setConfirmSubmitNoEvidence(false);
+            act("submit");
+          }}
+          onCancel={() => setConfirmSubmitNoEvidence(false)}
         />
       )}
 

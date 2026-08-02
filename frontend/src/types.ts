@@ -38,6 +38,11 @@ export interface ApplicationMasterOut {
   requested_by_id?: number | null
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  // Application Owner tier -- populated once an Application Owner has
+  // decided (see backend models.ApplicationMaster's two-tier docstring).
+  app_owner_decided_by_id?: number | null
+  app_owner_decided_at?: string | null
+  app_owner_comments?: string | null
   decided_by_id?: number | null
   decided_at?: string | null
   comments?: string | null

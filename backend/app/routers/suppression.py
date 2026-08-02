@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department
+from ..deps import get_current_user, require_roles, require_same_department, require_not_requester
 from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -204,6 +204,7 @@ def sm_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = De
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     require_same_department(current_user, obj.department)
+    require_not_requester(current_user, obj.created_by_id)
     _require(obj, "SM_APPROVAL_PENDING", "SM decision")
     obj.sm_decision = payload.decision
     obj.sm_id = current_user.id
@@ -224,11 +225,12 @@ def sm_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = De
 
 @router.post("/{sup_id}/dept-head-decision", response_model=schemas.SuppressionOut)
 def dept_head_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD))):
+                        current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
     obj = db.query(models.SuppressionRequest).get(sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     require_same_department(current_user, obj.department)
+    require_not_requester(current_user, obj.created_by_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
     obj.dept_head_decision = payload.decision
     obj.dept_head_id = current_user.id
@@ -373,7 +375,7 @@ def _can_upload_documents(obj: "models.SuppressionRequest", user: models.User) -
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
     if status == "SECURITY_TEAM_VERIFICATION":
         return user.has_role(Role.SECURITY_ANALYST)
     return False

@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, is_readiness_evidence_editable
+from ..deps import get_current_user, require_roles, require_same_department, require_not_requester
+from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -201,7 +201,7 @@ def _can_upload_documents(obj, user: models.User) -> bool:
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
     if status in _SECURITY_OWNED_STATUSES:
         if status in ("SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS", "PLANNING"):
             return obj.security_lead_id == user.id
@@ -233,7 +233,7 @@ def _can_edit_details(obj, user: models.User) -> bool:
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
     return False
 
 
@@ -320,13 +320,10 @@ def _resubmit(db: Session, obj, current_user):
 
 def _sm_decision(db: Session, obj, payload, current_user):
     require_same_department(current_user, obj.department)
+    require_not_requester(current_user, obj.requester_id)
     _require(obj, "SM_APPROVAL_PENDING", "SM decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
-        raise HTTPException(
-            400,
-            "This request's Application Name is not yet Approved -- decide it first "
-            "(see the Application Name banner above) before approving the request itself.",
-        )
+        raise HTTPException(400, application_name_block_message(obj.application_master_status, "sm"))
     if payload.decision == "Approved":
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
     elif payload.decision == "Returned":
@@ -344,13 +341,10 @@ def _sm_decision(db: Session, obj, payload, current_user):
 def _department_head_decision(db: Session, obj, payload, current_user):
     """Approval requires assignment to an active IT-QA QA Lead."""
     require_same_department(current_user, obj.department)
+    require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
-        raise HTTPException(
-            400,
-            "This request's Application Name is not yet Approved by SM -- it must be decided "
-            "before this request can be approved.",
-        )
+        raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     if payload.decision == "Approved":
         qa_lead_id = payload.qa_lead_id or payload.security_lead_id
         qa_lead = _it_qa_user(db, qa_lead_id, Role.QA_LEAD, "qa_lead_id")
@@ -711,7 +705,7 @@ def sast_sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session
 
 @router.post("/api/sast-requests/{req_id}/department-head-decision", response_model=schemas.SASTOut)
 def sast_department_head_decision(req_id: int, payload: schemas.SecurityDeptHeadDecisionIn, db: Session = Depends(get_db),
-                                   current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD))):
+                                   current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
     return _department_head_decision(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), payload, current_user)
 
 
@@ -1122,7 +1116,7 @@ def dast_sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session
 
 @router.post("/api/dast-requests/{req_id}/department-head-decision", response_model=schemas.DASTOut)
 def dast_department_head_decision(req_id: int, payload: schemas.SecurityDeptHeadDecisionIn, db: Session = Depends(get_db),
-                                   current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD))):
+                                   current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
     obj = _department_head_decision(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), payload, current_user)
     return _dast_out(obj, current_user)
 

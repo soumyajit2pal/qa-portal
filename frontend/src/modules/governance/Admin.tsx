@@ -22,7 +22,14 @@ const EMPTY_FORM = {
 }
 type CreateUserForm = typeof EMPTY_FORM
 
-function RoleChipSelect({ value, onChange, disabled }: { value: string[]; onChange: (roles: string[]) => void; disabled?: boolean }) {
+// `roles` defaults to every assignable role (ALL_ROLES) -- exported with that
+// default so DepartmentAdmin.tsx can reuse this same chip-select, just
+// restricted to whichever of DEPARTMENT_ADMIN_ASSIGNABLE_ROLES /
+// QA_ADMIN_ASSIGNABLE_ROLES applies to the logged-in local admin, instead of
+// duplicating the checkbox/styling logic for its own narrower role picker.
+export function RoleChipSelect({ value, onChange, disabled, roles = ALL_ROLES }: {
+  value: string[]; onChange: (roles: string[]) => void; disabled?: boolean; roles?: string[]
+}) {
   function toggle(role: string) {
     if (disabled) return
     const has = value.includes(role)
@@ -30,7 +37,7 @@ function RoleChipSelect({ value, onChange, disabled }: { value: string[]; onChan
   }
   return (
     <div className="chip-select">
-      {ALL_ROLES.map((r) => {
+      {roles.map((r) => {
         const active = value.includes(r)
         return (
           <label key={r} className={`chip-toggle ${active ? 'active' : ''} ${disabled ? 'disabled' : ''}`}>

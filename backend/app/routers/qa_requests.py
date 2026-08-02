@@ -137,38 +137,45 @@ def _resolve_application_name(db: Session, name: Optional[str], department: Opti
     """Called on every create/edit of a QA Request -- uppercases the given
     Application Name (minimises case-sensitivity duplicates, e.g. "sbi" vs
     "SBI") and resolves it against models.ApplicationMaster:
-      - an existing APPROVED or still-PENDING row for that exact name is
-        just reused as-is;
-      - a REJECTED row is flipped back to PENDING and re-attributed to this
-        requester/department/request, treating this as a fresh proposal
-        (whatever earlier issue got it rejected may no longer apply);
-      - otherwise a brand-new PENDING row is created.
+      - an existing APPROVED, still-PENDING_APP_OWNER, or still-PENDING_SM
+        row for that exact name is just reused as-is;
+      - a REJECTED row is flipped back to PENDING_APP_OWNER and re-attributed
+        to this requester/department/request, treating this as a fresh
+        proposal that re-enters the two-tier approval chain from the start
+        (whatever earlier issue got it rejected may no longer apply, and
+        either tier should get to look at it again);
+      - otherwise a brand-new PENDING_APP_OWNER row is created.
     This never blocks the caller -- see the class docstring on
     models.ApplicationMaster for why Draft save and Submit/Raise both
     proceed regardless of the name's current approval status (approving/
-    rejecting a name is handled independently by an SM, see
-    routers/applications.py). Returns (uppercased_name, application_master_id).
+    rejecting a name is handled independently by an Application Owner then
+    an SM, see routers/applications.py). Returns (uppercased_name,
+    application_master_id).
 
     Note: if a requester changes their mind mid-Draft and swaps one brand-new
-    (still-PENDING) name for a different brand-new name, the first name's
-    ApplicationMaster row is simply left behind, still PENDING and still
+    (still-pending) name for a different brand-new name, the first name's
+    ApplicationMaster row is simply left behind, still pending and still
     linked via qa_request_id to this same request even though the request no
-    longer uses that name -- a minor, rare bit of queue clutter for an SM to
-    reject/ignore, not worth extra bookkeeping to prevent."""
+    longer uses that name -- a minor, rare bit of queue clutter for an
+    Application Owner/SM to reject/ignore, not worth extra bookkeeping to
+    prevent."""
     name_upper = (name or "").strip().upper()
     existing = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.name == name_upper).first()
     if existing:
         if existing.status == "REJECTED":
-            existing.status = "PENDING"
+            existing.status = "PENDING_APP_OWNER"
             existing.requested_by_id = requester_id
             existing.department = department
             existing.qa_request_id = qa_request_id
+            existing.app_owner_decided_by_id = None
+            existing.app_owner_decided_at = None
+            existing.app_owner_comments = None
             existing.decided_by_id = None
             existing.decided_at = None
             existing.comments = None
         return name_upper, existing.id
     new_entry = models.ApplicationMaster(
-        name=name_upper, status="PENDING", department=department,
+        name=name_upper, status="PENDING_APP_OWNER", department=department,
         requested_by_id=requester_id, qa_request_id=qa_request_id,
     )
     db.add(new_entry)
@@ -708,18 +715,12 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # SAST/DAST only -- Functional/Performance have no such gate by design.
 
     pending_checklist_items = []
-    print(request_types)
     if "Functional Testing" in request_types:
-        print("here")
         functional_checked_set = set(checked_items)
-        print("fun", functional_checked_set)
         pending_checklist_items += [
             item for item, owner, is_mandatory in DEFAULT_CHECKLIST_ITEMS
             if is_mandatory and item not in functional_checked_set
         ]
-        print("Pend",pending_checklist_items)
-
-    pending_checklist_items = []
     if "SAST" in request_types:
         sast_checked_set = set(sast_checked_items)
         pending_checklist_items += [
@@ -739,6 +740,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
             "item(s) must be self-declared ready first (Edit Request): "
             + "; ".join(pending_checklist_items),
         )
+
     _sync_linked_child_requests(db, obj, request_types, current_user, checked_items, sast_components, dast_components,
                                  performance_details,
                                  performance_checked_items=performance_checked_items,

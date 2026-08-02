@@ -3,10 +3,22 @@ export const ROLE_LABELS: Record<string, string> = {
   BUSINESS_ANALYST: 'Business Analyst',
   QA_ENGINEER: 'QA Engineer (QA)',
   QA_LEAD: 'QA Lead',
-  DEPARTMENT_HEAD_COE: 'Executive COE (CM/AGM)',
+  // Split from a single DEPARTMENT_HEAD_COE role (2026-08) into two roles
+  // with IDENTICAL authority -- same rationale as the DEPARTMENT_HEAD_CM/
+  // DEPARTMENT_HEAD_AGM split below: every hasRole(user, 'DEPARTMENT_HEAD_COE')
+  // check now checks both, so either can approve the Executive COE / QA
+  // Sign-off checkpoint. Purely so approval logs show the exact position.
+  DEPARTMENT_HEAD_COE_CM: 'Chief Manager - COE',
+  DEPARTMENT_HEAD_COE_AGM: 'Assistant General Manager - COE',
   SECURITY_ANALYST: 'Security Analyst (QA)',
   APPLICATION_OWNER: 'Application Owner',
-  DEPARTMENT_HEAD: 'Requester Department Head - CM/AGM',
+  // Split from a single DEPARTMENT_HEAD role (2026-08) into two roles with
+  // IDENTICAL authority everywhere -- every hasRole(user, 'DEPARTMENT_HEAD')
+  // check now checks both, so either can approve at any existing Department
+  // Head checkpoint. Purely so approval logs can show the approver's exact
+  // position (CM vs AGM) instead of a generic "Department Head" label.
+  DEPARTMENT_HEAD_CM: 'Chief Manager - Department',
+  DEPARTMENT_HEAD_AGM: 'Assistant General Manager - Department',
   // New checkpoint between Requester and Department Head on QA Request/
   // SAST-DAST/Suppression workflows. Label deliberately left as literal
   // "SM" per how it was specified -- rename to a fuller name here any time.
@@ -16,9 +28,39 @@ export const ROLE_LABELS: Record<string, string> = {
 
 export const ALL_ROLES = Object.keys(ROLE_LABELS)
 
+// Mirror backend/app/constants.py's DEPARTMENT_ADMIN_ASSIGNABLE_ROLES /
+// QA_ADMIN_ASSIGNABLE_ROLES exactly -- the working-level roles a local admin
+// may assign to users in their own department via DepartmentAdmin.tsx,
+// without needing a System Admin. Split in two (2026-08, per request) since
+// a business Department Head and the QA department's own Executive COE
+// oversee different teams: DEPARTMENT_ADMIN_ASSIGNABLE_ROLES for the former,
+// QA_ADMIN_ASSIGNABLE_ROLES for the latter (which DepartmentAdmin.tsx picks
+// between based on which kind of local admin is logged in). Both exclude
+// ADMIN and DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/DEPARTMENT_HEAD_COE_CM/
+// DEPARTMENT_HEAD_COE_AGM -- neither kind of local admin may mint peer
+// department heads, Executive COE approvers, or other System Admins
+// themselves.
+export const DEPARTMENT_ADMIN_ASSIGNABLE_ROLES: string[] = [
+  'REQUESTER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER', 'SM',
+]
+export const QA_ADMIN_ASSIGNABLE_ROLES: string[] = [
+  'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST',
+]
+
 // QA Sign-off is an IT - QA-owned workflow even when its linked testing
 // request came from another business department.
 export const QA_DEPARTMENT = 'IT - QA'
+
+// Mirrors backend/app/constants.py's APPLICATION_MASTER_STATUS_LABELS
+// exactly -- a brand-new Application Name goes through two approval tiers
+// (PENDING_APP_OWNER, then PENDING_SM) before becoming APPROVED; either
+// tier can REJECT it, which is terminal. See ApplicationNameBanner.tsx.
+export const APPLICATION_MASTER_STATUS_LABELS: Record<string, string> = {
+  PENDING_APP_OWNER: 'Pending Application Owner Approval',
+  PENDING_SM: 'Pending SM Approval',
+  APPROVED: 'Approved',
+  REJECTED: 'Rejected',
+}
 
 // Minimal shape needed by hasRole -- deliberately looser than the full
 // UserOut so it works for both the logged-in user and any user row.

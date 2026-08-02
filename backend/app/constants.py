@@ -8,10 +8,28 @@ class Role:
     BUSINESS_ANALYST = "BUSINESS_ANALYST"       # Upload Finalised CR / User Stories
     QA_ENGINEER = "QA_ENGINEER"                 # Execute Testing
     QA_LEAD = "QA_LEAD"                         # Review & approve
-    DEPARTMENT_HEAD_COE = "DEPARTMENT_HEAD_COE"  # QA Sign-off (CM/AGM-QA) / Executive COE (AGM-QA) -- QA Sign-off only
+    # Split from a single DEPARTMENT_HEAD_COE role (2026-08) into two roles
+    # that carry IDENTICAL authority everywhere -- the same split rationale
+    # as DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM above: every former
+    # require_roles(Role.DEPARTMENT_HEAD_COE) / has_role(Role.DEPARTMENT_HEAD_COE)
+    # call site now checks both, OR'd together, so either can approve at the
+    # Executive COE / QA Sign-off checkpoint. Purely so approval logs can show
+    # the approver's exact position (CM vs AGM) -- see
+    # ORACLE_MIGRATION_2026-07.md for the migration section.
+    DEPARTMENT_HEAD_COE_CM = "DEPARTMENT_HEAD_COE_CM"    # QA Sign-off -- Executive COE, CM
+    DEPARTMENT_HEAD_COE_AGM = "DEPARTMENT_HEAD_COE_AGM"  # QA Sign-off -- Executive COE, AGM
     SECURITY_ANALYST = "SECURITY_ANALYST"       # SAST/DAST Management
     APPLICATION_OWNER = "APPLICATION_OWNER"     # Approval Authority
-    DEPARTMENT_HEAD = "DEPARTMENT_HEAD"         # QA Request + Suppression Approval (business dept head)
+    # Split from a single DEPARTMENT_HEAD role (2026-08) into two roles that
+    # carry IDENTICAL authority everywhere -- every former
+    # require_roles(Role.DEPARTMENT_HEAD) / has_role(Role.DEPARTMENT_HEAD)
+    # call site now checks both, OR'd together, so either can approve at any
+    # existing Department Head checkpoint. The only reason for the split is
+    # so approval logs/activity history can show the approver's exact
+    # position (CM vs AGM) instead of a generic "Department Head" label --
+    # see ORACLE_MIGRATION_2026-07.md for the migration section.
+    DEPARTMENT_HEAD_CM = "DEPARTMENT_HEAD_CM"   # QA Request + Suppression Approval (business dept head, CM)
+    DEPARTMENT_HEAD_AGM = "DEPARTMENT_HEAD_AGM"  # QA Request + Suppression Approval (business dept head, AGM)
     ADMIN = "ADMIN"                             # Configuration & Access
     # New checkpoint role sitting between the requester and Department Head on
     # every workflow (QA Request, SAST/DAST, Suppression) -- added per request.
@@ -22,8 +40,40 @@ class Role:
 
 ALL_ROLES = [
     Role.REQUESTER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD,
-    Role.DEPARTMENT_HEAD_COE, Role.SECURITY_ANALYST, Role.APPLICATION_OWNER,
-    Role.DEPARTMENT_HEAD, Role.SM, Role.ADMIN,
+    Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM, Role.SECURITY_ANALYST,
+    Role.APPLICATION_OWNER, Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM, Role.SM, Role.ADMIN,
+]
+
+# "Local admin" -- a Department Head or an Executive COE may assign
+# working-level roles to users within their own department (see
+# routers/auth.py's /local-admin/users endpoints), so role assignment for
+# day-to-day working roles no longer has to funnel through a System Admin
+# for every single department. Split into two disjoint sets (2026-08, per
+# request) rather than one shared list, because the two kinds of local admin
+# oversee different teams and shouldn't be able to hand out roles for the
+# other's team:
+#   - a business Department Head (DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM)
+#     manages everyone else on their team, so gets DEPARTMENT_ADMIN_ASSIGNABLE_ROLES;
+#   - an Executive COE (DEPARTMENT_HEAD_COE_CM/DEPARTMENT_HEAD_COE_AGM) is the
+#     QA department's own local admin, so gets QA_ADMIN_ASSIGNABLE_ROLES --
+#     scoped to the QA department the same way a business Department Head is
+#     scoped to their own department (see _require_own_department_target /
+#     _local_admin_assignable_roles in routers/auth.py), since QA staff are
+#     mapped to department QA_DEPARTMENT ("IT - QA") same as everyone else.
+# Both sets deliberately exclude ADMIN and every DEPARTMENT_HEAD_*/
+# DEPARTMENT_HEAD_COE_* role (neither kind of local admin may mint peer
+# department heads or Executive COE approvers themselves -- that stays an
+# Admin-only action via the regular PATCH /api/auth/users/{id}). Any role a
+# target user already holds outside whichever set applies to the acting
+# local admin (including the OTHER set -- e.g. a business Department Head
+# must not be able to strip someone's QA_LEAD role just because it wasn't in
+# their own submitted list) is left untouched -- see
+# update_local_admin_user's role-merge logic.
+DEPARTMENT_ADMIN_ASSIGNABLE_ROLES = [
+    Role.REQUESTER, Role.BUSINESS_ANALYST, Role.APPLICATION_OWNER, Role.SM,
+]
+QA_ADMIN_ASSIGNABLE_ROLES = [
+    Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
 ]
 
 # ---- Login / authentication type (Admin section: Module 9 - Configuration & Access) ----
@@ -50,10 +100,12 @@ ROLE_LABELS = {
     Role.BUSINESS_ANALYST: "Business Analyst",
     Role.QA_ENGINEER: "QA Engineer (QA)",
     Role.QA_LEAD: "QA Lead",
-    Role.DEPARTMENT_HEAD_COE: "Executive COE (CM/AGM-QA)",
+    Role.DEPARTMENT_HEAD_COE_CM: "Chief Manager - COE",
+    Role.DEPARTMENT_HEAD_COE_AGM: "Assistant General Manager - COE",
     Role.SECURITY_ANALYST: "Security Analyst (QA)",
     Role.APPLICATION_OWNER: "Application Owner",
-    Role.DEPARTMENT_HEAD: "Department Head - CM/AGM",
+    Role.DEPARTMENT_HEAD_CM: "Chief Manager - Department",
+    Role.DEPARTMENT_HEAD_AGM: "Assistant General Manager - Department",
     Role.SM: "SM",
     Role.ADMIN: "Administrator",
 }
@@ -620,12 +672,44 @@ SUPPRESSION_TERMINAL_STATUSES = ["Done", "Rejected"]
 # it a selectable option in the dropdown for everyone going forward) or
 # REJECTs it. Independent of the QA Request's own workflow -- this never
 # gates Submit/Raise (see routers/qa_requests.py::_resolve_application_name).
-APPLICATION_MASTER_STATUSES = ["PENDING", "APPROVED", "REJECTED"]
+# Two-tier approval for a brand-new Application Name (2026-08): a name typed
+# via "Other" on the wizard now needs an Application Owner from the same
+# department to approve it FIRST (PENDING_APP_OWNER), and only once they
+# approve does it move on to SM (PENDING_SM) -- SM's own approval is what
+# finally flips it to APPROVED, same as before. Either tier can Reject,
+# which is terminal (see routers/applications.py::_auto_reject_linked_requests
+# -- reused by both tiers). Replaces the old single "PENDING" state.
+APPLICATION_MASTER_STATUSES = ["PENDING_APP_OWNER", "PENDING_SM", "APPROVED", "REJECTED"]
 APPLICATION_MASTER_STATUS_LABELS = {
-    "PENDING": "Pending Approval",
+    "PENDING_APP_OWNER": "Pending Application Owner Approval",
+    "PENDING_SM": "Pending SM Approval",
     "APPROVED": "Approved",
     "REJECTED": "Rejected",
 }
+
+
+def application_name_block_message(app_status, stage: str) -> str:
+    """Shared wording for the 6 duplicated SM/Department-Head decision guard
+    clauses across functional.py/sast_dast.py/performance.py that block
+    Approve on the underlying request until its Application Name is
+    APPROVED. `stage` is 'sm' or 'department_head' -- which checkpoint is
+    being blocked; the message differs depending on whether the name is
+    still stuck one tier earlier (Application Owner hasn't looked at it yet)
+    or is genuinely this checkpoint's own turn to wait for SM."""
+    if app_status == "PENDING_APP_OWNER":
+        return (
+            "This request's Application Name is still awaiting Application Owner approval -- "
+            "it hasn't reached SM review yet, so there's nothing for you to decide here yet."
+        )
+    if stage == "sm":
+        return (
+            "This request's Application Name is not yet Approved -- decide it first "
+            "(see the Application Name banner above) before approving the request itself."
+        )
+    return (
+        "This request's Application Name is not yet Approved by SM -- it must be decided "
+        "before this request can be approved."
+    )
 
 # ---- Module 7: Approval workflow engine ----
 APPROVAL_DECISIONS = ["Approved", "Rejected", "Returned"]

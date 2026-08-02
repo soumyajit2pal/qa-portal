@@ -31,6 +31,7 @@ const SignOff = lazy(() => import('./modules/governance/SignOff'))
 const Approvals = lazy(() => import('./modules/governance/Approvals'))
 const Reports = lazy(() => import('./modules/governance/Reports'))
 const Admin = lazy(() => import('./modules/governance/Admin'))
+const DepartmentAdmin = lazy(() => import('./modules/governance/DepartmentAdmin'))
 
 // Test Management module (Project Management / Test Repository / Test
 // Execution) -- a Zephyr-style test case management layer, kept as its own
@@ -97,6 +98,7 @@ export default function App() {
         <Route path="/approvals" element={<Protected><ModuleBoundary moduleName="Governance"><Approvals /></ModuleBoundary></Protected>} />
         <Route path="/reports" element={<Protected><ModuleBoundary moduleName="Governance"><Reports /></ModuleBoundary></Protected>} />
         <Route path="/admin" element={<Protected><ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary></Protected>} />
+        <Route path="/department-admin" element={<Protected><ModuleBoundary moduleName="Governance"><DepartmentAdmin /></ModuleBoundary></Protected>} />
 
         {/* Test Management module */}
         <Route path="/test-projects" element={<Protected><ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary></Protected>} />

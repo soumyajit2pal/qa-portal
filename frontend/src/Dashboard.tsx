@@ -920,8 +920,10 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
 }
 
 // Reported directly: the "My Requests" tab (renamed to just "Requests" --
-// see below) should be hidden for these 4 roles -- QA Engineer, QA Lead,
-// Security Analyst, and Executive COE (AGM/QA, i.e. DEPARTMENT_HEAD_COE) --
+// see below) should be hidden for these roles -- QA Engineer, QA Lead,
+// Security Analyst, and Executive COE (DEPARTMENT_HEAD_COE_CM /
+// DEPARTMENT_HEAD_COE_AGM, split 2026-08 from the single old
+// DEPARTMENT_HEAD_COE role but with identical authority/visibility) --
 // they work across every team's requests as part of their job, so a
 // "requests I personally raised" view isn't relevant to them the way it is
 // for a Requester/Business Analyst/SM/Department Head. Checked directly
@@ -929,7 +931,9 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
 // as satisfying any role check) so an Admin who also happens to hold one of
 // these roles still sees the tab, matching "Admin always sees everything"
 // elsewhere in the app.
-const REQUESTS_TAB_HIDDEN_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'DEPARTMENT_HEAD_COE']
+const REQUESTS_TAB_HIDDEN_ROLES = [
+  'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM',
+]
 
 export default function Dashboard() {
   const { user } = useAuth()
@@ -941,7 +945,7 @@ export default function Dashboard() {
   // a direct role check (not hasRole's Admin bypass): Admin-only accounts are
   // not QA team members and therefore must not see this restricted view.
   const showTesterOverviewTab = !!user?.roles?.some((role) => (
-    ['QA_ENGINEER', 'QA_LEAD', 'DEPARTMENT_HEAD_COE'].includes(role)
+    ['QA_ENGINEER', 'QA_LEAD', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM'].includes(role)
   ))
 
   const tabs = [

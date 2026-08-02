@@ -26,9 +26,22 @@ const EMPTY = {
   change_request_ids: '', application_name: '', application_owner: '', department: '',
   technology_stack: '', risk_tier: 'Tier 3 (Medium)', release_version: '', build_number: '',
   environment_tested: 'UAT', target_promotion_environment: 'Production',
+  // Optional on the backend (schemas.SignOffCreate/SignOffUpdate) -- always
+  // existed as columns and were already shown on the certificate detail view
+  // ("Validity: — to —"), but no form anywhere actually let anyone set them,
+  // so every certificate showed blank. Kept as empty strings here (not null)
+  // since a <input type="date"> needs a string value; converted to null on
+  // submit if left blank -- see submit() below.
+  validity_from: '', validity_to: '',
   exit_criteria_notes: '', open_defect_summary: '', residual_risk_notes: '',
 }
 type SignOffForm = typeof EMPTY
+
+// Shared by both the create and edit forms below.
+function validityError(from: string, to: string): string | null {
+  if (from && to && to < from) return 'Validity To cannot be before Validity From.'
+  return null
+}
 
 // Searchable "Testing Request ID" autosuggest over Functional Testing
 // Requests -- same pattern as Suppression.tsx's SAST/DAST RequestIdSearch.
@@ -173,9 +186,15 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
       setError(`QA Sign-off is restricted to the ${QA_DEPARTMENT} department.`)
       return
     }
+    const validityErr = validityError(form.validity_from, form.validity_to)
+    if (validityErr) { setError(validityErr); return }
     setBusy(true)
     try {
-      const created = await api.post<SignOffOut>('/api/signoffs', form)
+      const created = await api.post<SignOffOut>('/api/signoffs', {
+        ...form,
+        validity_from: form.validity_from || null,
+        validity_to: form.validity_to || null,
+      })
       // Best-effort: the certificate itself is already created at this point,
       // so a failed upload shouldn't block onCreated -- surface the error but
       // still hand back the created certificate (its own Documents tab, via
@@ -236,6 +255,12 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
               {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
+          <Field label="Validity From">
+            <input type="date" value={form.validity_from} onChange={(e) => set('validity_from', e.target.value)} />
+          </Field>
+          <Field label="Validity To">
+            <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
+          </Field>
         </div>
         <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
         <Field label="Open Defect Review Summary *"><textarea required value={form.open_defect_summary} onChange={(e) => set('open_defect_summary', e.target.value)} /></Field>
@@ -273,6 +298,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
     vendor_si_partner: item.vendor_si_partner || '', technology_stack: item.technology_stack || '',
     risk_tier: item.risk_tier || '', release_version: item.release_version || '', build_number: item.build_number || '',
     environment_tested: item.environment_tested || '', target_promotion_environment: item.target_promotion_environment || '',
+    validity_from: item.validity_from || '', validity_to: item.validity_to || '',
     exit_criteria_notes: item.exit_criteria_notes || '', open_defect_summary: item.open_defect_summary || '',
     residual_risk_notes: item.residual_risk_notes || '',
   })
@@ -282,9 +308,17 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    const validityErr = validityError(form.validity_from, form.validity_to)
+    if (validityErr) { setError(validityErr); return }
     setBusy(true)
     setError(null)
-    try { onSaved(await api.put<SignOffOut>(`/api/signoffs/${item.id}`, form)) }
+    try {
+      onSaved(await api.put<SignOffOut>(`/api/signoffs/${item.id}`, {
+        ...form,
+        validity_from: form.validity_from || null,
+        validity_to: form.validity_to || null,
+      }))
+    }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
 
@@ -325,6 +359,12 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
             <select required value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
               {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
+          </Field>
+          <Field label="Validity From">
+            <input type="date" value={form.validity_from} onChange={(e) => set('validity_from', e.target.value)} />
+          </Field>
+          <Field label="Validity To">
+            <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
         <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
@@ -372,8 +412,14 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
 
   const canSubmit = isRequester && status === 'DRAFT'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status)
-  const canQALeadDecide = hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment
-  const canExecutiveCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && isQADepartment
+  // Reported directly: a person who raised this certificate but also
+  // separately holds QA Lead/Executive COE must not be able to approve
+  // their own certificate -- someone else holding that role must decide it
+  // instead. Admin still bypasses (matches the backend's
+  // require_not_requester, which enforces the same check server-side).
+  const isSelfApproval = item.requester_id === user?.id && !isAdmin
+  const canQALeadDecide = hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
+  const canExecutiveCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
   // Requester's own editable statuses, or a QA Lead editing during approval.
   // routers/signoff.py::update_signoff.
   const canEditDetails = (isRequester && SIGNOFF_EDITABLE_STATUSES.includes(status))

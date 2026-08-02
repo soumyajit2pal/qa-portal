@@ -80,7 +80,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     """QA-team-only pending workload matrix: one tester per row and one
     lifecycle status per column. The endpoint enforces the same role gate as
     the tab, so non-QA users cannot retrieve the underlying team view."""
-    qa_team_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.DEPARTMENT_HEAD_COE}
+    qa_team_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM}
     if not qa_team_roles.intersection(current_user.roles):
         raise HTTPException(403, "QA tester workload is restricted to the QA team")
     qa_testers = (db.query(models.User)

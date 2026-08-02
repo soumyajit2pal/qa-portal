@@ -9,7 +9,10 @@ from ..auth import (
     verify_password, create_access_token, ldap_authenticate, ldap_authenticate_with_profile, LDAPAuthError,
 )
 from ..deps import get_current_user, require_roles
-from ..constants import Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES, DEFAULT_LDAP_PROVISION_ROLE
+from ..constants import (
+    Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES, DEFAULT_LDAP_PROVISION_ROLE,
+    DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -235,6 +238,116 @@ def reset_password(user_id: int, payload: schemas.PasswordReset, db: Session = D
     if not payload.new_password:
         raise HTTPException(status_code=400, detail="new_password is required")
     user.hashed_password = hash_password(payload.new_password)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+# ---- Local admin: a Department Head (business departments) or an Executive
+# COE (the QA department) managing their own department's users -- see
+# constants.DEPARTMENT_ADMIN_ASSIGNABLE_ROLES/QA_ADMIN_ASSIGNABLE_ROLES --
+# reduces sole dependency on a System Admin for routine role assignment
+# within one department. Two deliberately narrow endpoints, not a widened
+# version of the Admin-only ones above: a local admin can only ever see/
+# touch users already mapped to their own department, can only assign
+# their own kind's working-level role subset (a business Department Head
+# gets DEPARTMENT_ADMIN_ASSIGNABLE_ROLES; an Executive COE -- who is mapped
+# to constants.QA_DEPARTMENT same as every other QA staffer, so the
+# department-scoping below already confines them to QA -- gets
+# QA_ADMIN_ASSIGNABLE_ROLES instead), can never touch ADMIN/
+# DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/DEPARTMENT_HEAD_COE_CM/
+# DEPARTMENT_HEAD_COE_AGM on anyone (including roles a target user already
+# holds outside their own assignable subset -- see the "preserved" logic
+# below, which protects the OTHER kind of local admin's roles too), and can
+# never edit their own account this way.
+def _require_own_department_target(current_user: models.User, target: models.User) -> None:
+    if target.id == current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot manage your own account here")
+    if "ADMIN" in target.roles:
+        raise HTTPException(status_code=403, detail="Administrator accounts cannot be managed from here")
+    if not current_user.department:
+        raise HTTPException(status_code=403, detail="Your own profile has no department set")
+    if target.department != current_user.department:
+        raise HTTPException(
+            status_code=403,
+            detail=f"You can only manage users mapped to your own department "
+                   f"('{current_user.department}').",
+        )
+
+
+def _local_admin_assignable_roles(current_user: models.User) -> list:
+    """Which role subset this particular local admin may assign -- the
+    Executive COE (QA department's own local admin) gets QA_ADMIN_ASSIGNABLE_ROLES,
+    every other local admin (a business Department Head) gets
+    DEPARTMENT_ADMIN_ASSIGNABLE_ROLES. Checked by role rather than by
+    department string so it stays correct even if QA_DEPARTMENT's exact
+    value ever changes. Deliberately checks `.roles` directly rather than
+    `has_role()` -- `has_role()` always returns True for an Administrator
+    account regardless of which role(s) it's asked about, which would
+    wrongly hand an Admin who somehow hits this endpoint the QA subset."""
+    if Role.DEPARTMENT_HEAD_COE_CM in current_user.roles or Role.DEPARTMENT_HEAD_COE_AGM in current_user.roles:
+        return QA_ADMIN_ASSIGNABLE_ROLES
+    return DEPARTMENT_ADMIN_ASSIGNABLE_ROLES
+
+
+@router.get("/local-admin/users", response_model=list[schemas.UserOut])
+def list_local_admin_users(db: Session = Depends(get_db),
+                            current_user: models.User = Depends(require_roles(
+                                Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
+                                Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
+    """Every user mapped to the local admin's own department (any status,
+    so a previously-disabled account can be re-activated too), excluding
+    their own account and any Administrator accounts -- mirrors the guard
+    rails in _require_own_department_target/update_local_admin_user below."""
+    if not current_user.department:
+        raise HTTPException(status_code=400, detail="Your own profile has no department set")
+    rows = (
+        db.query(models.User)
+        .filter(models.User.department == current_user.department, models.User.id != current_user.id)
+        .order_by(models.User.full_name)
+        .all()
+    )
+    return [u for u in rows if "ADMIN" not in u.roles]
+
+
+@router.patch("/local-admin/users/{user_id}", response_model=schemas.UserOut)
+def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate, db: Session = Depends(get_db),
+                             current_user: models.User = Depends(require_roles(
+                                 Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
+                                 Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
+    user = db.query(models.User).get(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    _require_own_department_target(current_user, user)
+
+    if payload.roles is not None:
+        assignable = _local_admin_assignable_roles(current_user)
+        invalid = [r for r in payload.roles if r not in assignable]
+        if invalid:
+            raise HTTPException(
+                status_code=403,
+                detail=f"You are not permitted to assign: {invalid}. Ask a System Admin for these.",
+            )
+        # Preserve anything the user already holds outside THIS local admin's
+        # own authority -- including roles that belong to the OTHER kind of
+        # local admin's subset (e.g. a business Department Head must not be
+        # able to strip someone's QA_LEAD role just because it wasn't in
+        # their own submitted list, and vice versa for an Executive COE and
+        # e.g. SM) -- otherwise this would silently strip them, since the
+        # assignable subset submitted here is only ever a partial view of
+        # ALL_ROLES.
+        preserved = [r for r in user.roles if r not in assignable]
+        new_roles = list(dict.fromkeys(preserved + payload.roles))
+        for ra in list(user.role_assignments):
+            db.delete(ra)
+        db.flush()
+        for r in new_roles:
+            db.add(models.UserRole(user_id=user.id, role=r))
+        user.needs_role_review = False
+
+    if payload.is_active is not None:
+        user.is_active = payload.is_active
+
     db.commit()
     db.refresh(user)
     return user

@@ -4739,3 +4739,1112 @@ to avoid touching its ~40 other call sites across the app.
 `python3 -m py_compile constants.py routers/qa_requests.py routers/functional.py` -- clean; `npx tsc
 --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical via `diff -rq`
 (aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 117. Confirmation before discarding the QA Request wizard's own Close/Cancel (no schema change)
+
+**Follow-up to section 97** (which added `preventBackdropClose` + a shake animation so an accidental click
+on the dimmed backdrop couldn't silently throw away a multi-step, not-yet-saved wizard). Reported directly:
+that guard never covered the wizard's own two explicit dismiss controls -- the header's "Close" button
+(rendered by the shared `Modal` component, wired straight to whatever `onClose` it's given) and the footer's
+own "Cancel" button both still called `onClose` directly, discarding every step's typed details with zero
+confirmation.
+
+**Fix (`QARequests/NewRequestModal.tsx` only):** added a `requestClose()` function that opens a
+`ConfirmModal` ("Discard this QA Request?" / "Discard these changes?" when editing) instead of closing
+immediately; `<Modal onClose={...}>` (which the header's Close button calls) and the footer's Cancel button
+now both call `requestClose` instead of the raw `onClose` prop. The actual `onClose` passed in by the parent
+(`QARequests/index.tsx`/`RequestDetail.tsx`) only fires once "Discard" is confirmed; "Keep Editing" just
+closes the pop-up and leaves the wizard exactly as it was. Scoped to this one wizard -- the shared `Modal`
+component's own header Close button was left alone (used by ~30 other, mostly single-step/non-destructive
+modals across the app where an unconditional confirm-to-close would be unwanted friction).
+
+**No schema or backend change.** **Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs
+copies re-synced and confirmed identical via `diff -rq` (aside from the always-excluded `.env`/`uploads`
+runtime files).
+
+## 118. QA Sign-off certificate: "Validity From"/"Validity To" was missing from both forms (no schema change)
+
+**Reported symptom:** every certificate's detail view shows "Validity: — to —" -- there was no way to ever
+set it.
+
+**Root cause:** `validity_from`/`validity_to` were already fully wired end-to-end on the backend --
+`models.QASignOff` columns, and present on `schemas.SignOffCreate`/`SignOffUpdate`/`SignOffOut` -- and
+already rendered (read-only) on `SignOff.tsx`'s certificate detail view. But neither `NewSignOffModal` nor
+`EditSignOffModal` ever had an input for them, so the value could never actually be set by anyone -- a pure
+missing-frontend-fields gap, not a backend one.
+
+**Fix (`modules/governance/SignOff.tsx` only):** added "Validity From"/"Validity To" `<input type="date">`
+fields to both forms (optional, matching the backend's `Optional[date]`), plus a shared `validityError(from,
+to)` helper blocking save if To is before From (Validity To's own `min` is also set to whatever Validity
+From currently holds, same UX as the Target Release Date/environment-pipeline date pickers elsewhere in the
+app). Blank strings are converted to `null` before the `POST`/`PUT` call, matching every other optional-date
+field in the app (e.g. QARequests' `target_release_date`) -- sending `""` to a `datetime.date` Pydantic field
+would otherwise 422.
+
+**No schema or backend change** -- both endpoints already accepted these fields; this only adds the
+frontend inputs. **Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and
+confirmed identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 119. "Local admin": Department Heads can now assign working-level roles within their own department (no schema change)
+
+**Request:** reduce sole dependency on a System Admin for role assignment -- let each Department Head
+manage role/status for users already mapped to their own department.
+
+**Design decisions (confirmed directly):** a Department Head may assign only the working-level roles --
+`REQUESTER, BUSINESS_ANALYST, QA_ENGINEER, QA_LEAD, SECURITY_ANALYST, APPLICATION_OWNER, SM` -- never
+`ADMIN`, `DEPARTMENT_HEAD`, or `DEPARTMENT_HEAD_COE` (so a local admin can never mint a peer department
+head, an Executive COE approver, or another System Admin). Beyond role assignment, they may also
+activate/deactivate accounts in their department. No user creation, no password resets, no department
+reassignment, no editing their own account -- those stay System-Admin-only via the existing `/admin` page.
+
+**Backend:**
+- `constants.py`: new `LOCAL_ADMIN_ASSIGNABLE_ROLES` list (the 7 roles above).
+- `schemas.py`: new `LocalAdminUserUpdate` (`roles: Optional[List[str]]`, `is_active: Optional[bool]` only
+  -- no department/login_type/profile fields, unlike the Admin-only `UserUpdate`).
+- `routers/auth.py`, two new endpoints, both gated `require_roles(Role.DEPARTMENT_HEAD)`:
+  - `GET /api/auth/local-admin/users` -- every user mapped to the caller's own `department` (any
+    active/disabled status, so a disabled account can be re-enabled too), excluding the caller's own
+    account and excluding anyone who holds `ADMIN`.
+  - `PATCH /api/auth/local-admin/users/{id}` -- `_require_own_department_target` re-checks all of the same
+    guards server-side (never trust the GET-time filtering alone): 403 if editing self, 403 if the target
+    holds `ADMIN`, 403 if the target's department doesn't match the caller's own. Submitting a role outside
+    `LOCAL_ADMIN_ASSIGNABLE_ROLES` is rejected outright (403) rather than silently dropped. Crucially, the
+    role write is a **merge, not a blind replace**: `preserved = [r for r in user.roles if r not in
+    LOCAL_ADMIN_ASSIGNABLE_ROLES]` is combined with the submitted assignable-role list before the
+    delete-then-reinsert `UserRole` write (same delete-flush-then-insert pattern `update_user` already
+    uses, to avoid tripping the `(user_id, role)` unique constraint) -- so a target user who separately
+    holds `DEPARTMENT_HEAD`/`DEPARTMENT_HEAD_COE` never has that silently stripped just because this
+    narrower endpoint's payload only ever describes the working-level subset.
+  - Deliberately did **not** reuse `deps.require_same_department` for the department check -- that helper
+    treats a blank `entity_department` as "skip the check", which is the right call for request-approval
+    entities but would be a hole here (any Department Head could then manage any user with no department
+    set). Wrote an explicit equality check instead.
+
+**Frontend:**
+- `constants.ts`: mirrors `LOCAL_ADMIN_ASSIGNABLE_ROLES` exactly.
+- `Admin.tsx`: its existing `RoleChipSelect` is now exported with a new optional `roles` prop (defaults to
+  `ALL_ROLES`, so Admin.tsx's own usage is unchanged) so the new page can reuse the same checkbox UI
+  restricted to the 7-role subset instead of duplicating it.
+- New `modules/governance/DepartmentAdmin.tsx` -- gated on `hasRole(user, 'DEPARTMENT_HEAD')` (same
+  in-component "Access Restricted" card pattern as Admin.tsx). Table of the department's users: name, a
+  restricted `RoleChipSelect`, and an Active/Disabled toggle button (same pattern as Admin.tsx's own status
+  button). Any role a user holds outside the assignable set is shown as a read-only "Also holds: ... (managed
+  by a System Admin)" line rather than hidden, so the page is honest about not being the full picture of
+  that person's access.
+- New route `/department-admin` (`App.tsx`) and a new "Department Admin" nav item (`Layout.tsx`), pushed
+  into the existing "Administration" group alongside "Users & Access" -- `hasRole(user, 'DEPARTMENT_HEAD')`
+  also returns true for an Admin account (its own ADMIN short-circuit), so an Admin sees both items merged
+  into that one group rather than a duplicate second group.
+
+**No schema or backend-model change** -- role assignment already used the existing `qap_user_roles` join
+table; this only adds new, narrower endpoints over it. **Verified:** `python3 -m py_compile constants.py
+schemas.py routers/auth.py` -- clean; `npx tsc --noEmit -p .` -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime
+files).
+
+## 120. Split `DEPARTMENT_HEAD` role into `DEPARTMENT_HEAD_CM` and `DEPARTMENT_HEAD_AGM` (data migration)
+
+**Request:** the single `DEPARTMENT_HEAD` role (label "Department Head - CM/AGM") is split into two roles
+-- **"Department Head (CM)"** and **"Department Head (AGM)"** -- carrying **identical authority**
+everywhere. This is not two separate approval steps: every existing Department Head checkpoint (QA
+Request, SAST, DAST, Suppression, Performance decision gates; the Local Admin panel) now accepts *either*
+role, OR'd together, so any one Department Head account -- CM or AGM -- can still approve on their own.
+The only reason for the split is so approval history/activity logs show the approver's exact position (CM
+vs AGM) instead of a generic "Department Head" label, since the log already records `actor_role` at the
+moment of each decision.
+
+**Not touched by this change (confirmed distinct during the audit):** the unrelated `DEPARTMENT_HEAD_COE`
+role (Executive COE / QA Sign-off), and the workflow **status codes** that happen to share the substring --
+`DEPARTMENT_HEAD_APPROVAL_PENDING`, `RETURNED_BY_DEPARTMENT_HEAD`, `DEPARTMENT_HEAD_REJECTED` -- which live
+on request entities, not on users, and keep their existing spelling everywhere (a decision by either new
+role still transitions a request through these same status codes; the log entry recording *who* made that
+decision is what now shows CM vs AGM).
+
+**Backend (`constants.py`):**
+- `Role.DEPARTMENT_HEAD` removed; replaced with `Role.DEPARTMENT_HEAD_CM = "DEPARTMENT_HEAD_CM"` and
+  `Role.DEPARTMENT_HEAD_AGM = "DEPARTMENT_HEAD_AGM"`.
+- `ALL_ROLES` and `ROLE_LABELS` updated -- `Role.DEPARTMENT_HEAD_CM: "Department Head (CM)"`,
+  `Role.DEPARTMENT_HEAD_AGM: "Department Head (AGM)"`.
+- `LOCAL_ADMIN_ASSIGNABLE_ROLES`'s exclusion comment updated to name both new roles (the list's actual
+  contents -- the 7 working-level roles -- are unchanged; Department Heads still cannot self-assign either
+  of these two roles, same as before the split).
+
+**Backend (every existing Department-Head checkpoint, updated to accept either role via the existing
+OR-based `require_roles(*roles)` / `user.has_role(*roles)` helpers -- no new helper needed):**
+- `routers/auth.py` -- both Local Admin endpoints' gates (`GET`/`PATCH /api/auth/local-admin/users...`).
+- `routers/suppression.py` -- the Department Head decision-endpoint gate, and the `has_role` edit-permission
+  check.
+- `routers/performance.py` -- the decision-endpoint gate, and both `has_role` edit-permission checks.
+- `routers/functional.py` -- the decision-endpoint gate, and both `has_role` edit-permission checks.
+- `routers/sast_dast.py` -- both `has_role` edit-permission checks, and both decision-endpoint gates (SAST's
+  and DAST's, separately).
+- `seed.py` -- demo user `depthead1` now seeded as `DEPARTMENT_HEAD_CM` (an arbitrary but explicit pick
+  between the two, since they're equivalent; relabel to `DEPARTMENT_HEAD_AGM` locally if a demo AGM account
+  is wanted instead).
+
+**Frontend (mirrors the backend one-for-one, using the same OR-based variadic `hasRole(user, ...roles)`):**
+- `constants.ts` -- `ROLE_LABELS` updated the same way as the backend; `LOCAL_ADMIN_ASSIGNABLE_ROLES`
+  comment updated.
+- Every `hasRole(user, 'DEPARTMENT_HEAD')` call site changed to `hasRole(user, 'DEPARTMENT_HEAD_CM',
+  'DEPARTMENT_HEAD_AGM')`: `modules/functional/Functional.tsx` (2 sites), `modules/security/DAST.tsx` (2),
+  `modules/security/SAST.tsx` (2), `modules/security/Suppression.tsx` (1),
+  `modules/specialised-testing/Performance.tsx` (2), `modules/governance/DepartmentAdmin.tsx` (the page's
+  own access gate), `components/Layout.tsx` (the "Department Admin" nav-item gate).
+
+**Data migration (DML -- not run from this sandbox, no live DB connection; apply against the real Oracle
+schema when this section is deployed):**
+```sql
+-- Every existing qap_user_roles row holding the old single role becomes CM by
+-- default. CM was picked arbitrarily as the landing spot (the two roles are
+-- authority-equivalent, so this changes nothing about what anyone can do) --
+-- an Admin, or the affected person's own Department Head peer via the Local
+-- Admin panel, should manually flip any row that should actually read AGM
+-- immediately after this runs, so the position shown in future approval logs
+-- is accurate from day one.
+UPDATE qap_user_roles
+   SET role = 'DEPARTMENT_HEAD_CM'
+ WHERE role = 'DEPARTMENT_HEAD';
+COMMIT;
+```
+No column-width change needed -- `qap_user_roles.role` is already `VARCHAR2(32)` (see section on
+`UserRole` in `models.py`), and both `DEPARTMENT_HEAD_CM` (19 chars) and `DEPARTMENT_HEAD_AGM` (20 chars)
+fit well within it, same as the existing `DEPARTMENT_HEAD_COE` (19 chars). No change to any workflow status
+column or value -- this is a `Role`/user-assignment change only, not a request-entity schema change.
+
+**Verified:** `python3 -m py_compile` across every changed backend file (`constants.py`, `routers/auth.py`,
+`routers/suppression.py`, `routers/performance.py`, `routers/functional.py`, `routers/sast_dast.py`,
+`seed.py`) -- clean; `npx tsc --noEmit -p .` -- clean; grepped the full codebase afterward for any
+remaining bare `Role.DEPARTMENT_HEAD`/`hasRole(user, 'DEPARTMENT_HEAD')` reference outside of explanatory
+comments -- none found; Documents and outputs copies re-synced and confirmed identical via `diff -rq`
+(aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 121. Split `DEPARTMENT_HEAD_COE` role into `DEPARTMENT_HEAD_COE_CM` and `DEPARTMENT_HEAD_COE_AGM` (data migration)
+
+**Request:** same split treatment as section 120, applied to the separate `DEPARTMENT_HEAD_COE` role (the
+Executive COE / QA Sign-off final-approval role, distinct from the business-side Department Head role split
+in section 120). Split into two roles with **identical authority** -- **"CM - COE"** and **"AGM - COE"**.
+Not two approval steps: the QA Sign-off Executive COE checkpoint, and the QA-team-visibility checks that
+key off this role, now accept *either* new role, OR'd together. Purely so approval logs show the exact
+position of whichever Executive COE approved.
+
+**Not touched by this change:** `DEPARTMENT_HEAD_CM`/`DEPARTMENT_HEAD_AGM` (section 120's unrelated
+business-side split), and the workflow status codes that share the substring --
+`DEPT_HEAD_COE_APPROVAL_PENDING`, `RETURNED_BY_DEPT_HEAD_COE`, `DEPT_HEAD_COE_REJECTED` -- which stay
+exactly as spelled on the `QASignOff` entity; only the log entry recording *who* made the decision now
+shows CM vs AGM.
+
+**Backend (`constants.py`):**
+- `Role.DEPARTMENT_HEAD_COE` removed; replaced with `Role.DEPARTMENT_HEAD_COE_CM =
+  "DEPARTMENT_HEAD_COE_CM"` and `Role.DEPARTMENT_HEAD_COE_AGM = "DEPARTMENT_HEAD_COE_AGM"`.
+- `ALL_ROLES` and `ROLE_LABELS` updated -- `Role.DEPARTMENT_HEAD_COE_CM: "CM - COE"`,
+  `Role.DEPARTMENT_HEAD_COE_AGM: "AGM - COE"`.
+- `LOCAL_ADMIN_ASSIGNABLE_ROLES`'s exclusion comment updated to name both new roles (the list's contents
+  are unchanged -- a Department Head still cannot self-assign either Executive COE role).
+
+**Backend (every existing checkpoint keyed off this role, updated to accept either via the same OR-based
+`require_roles(*roles)` / `user.has_role(*roles)` helpers):**
+- `routers/signoff.py` -- the Executive COE decision-endpoint gate (`executive_coe_decision`, still
+  reachable at both its current path and its legacy `department-head-coe-decision` alias), and the
+  `has_role` edit-permission check for the `DEPT_HEAD_COE_APPROVAL_PENDING` stage.
+- `routers/dashboard.py` -- the `qa_team_roles` set on `GET /api/dashboard/qa-tester-workload` (Executive
+  COE is QA-team-adjacent for this endpoint's purposes) now includes both new roles.
+- `seed.py` -- demo user `exec1` now seeded as `DEPARTMENT_HEAD_COE_CM` (arbitrary pick between the two,
+  same as section 120's `depthead1`).
+
+**Frontend (mirrors the backend, using the same OR-based variadic `hasRole(user, ...roles)`):**
+- `constants.ts` -- `ROLE_LABELS` updated the same way; `LOCAL_ADMIN_ASSIGNABLE_ROLES` comment updated.
+- `Dashboard.tsx` -- `REQUESTS_TAB_HIDDEN_ROLES` (hides the "Requests" tab for Executive COE, same as
+  before) and the `showTesterOverviewTab` role array both now list both new role codes instead of the old
+  single one.
+- `modules/governance/SignOff.tsx` -- `canExecutiveCoeDecide` changed to `hasRole(user,
+  'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')`.
+- `modules/governance/DepartmentAdmin.tsx` -- explanatory comments updated to name both new roles (this
+  page's own access/exclusion logic was already keyed off `LOCAL_ADMIN_ASSIGNABLE_ROLES`, not the COE role
+  directly, so no functional change here beyond the comment text).
+
+**Data migration (DML -- not run from this sandbox, no live DB connection; apply against the real Oracle
+schema when this section is deployed):**
+```sql
+-- Every existing qap_user_roles row holding the old single COE role becomes
+-- CM by default, same arbitrary-but-explicit convention as section 120.
+-- Manually correct any row that should actually read AGM immediately after
+-- this runs (via the regular Admin "Users & Access" page, since Executive
+-- COE roles are Admin-only to assign -- Department Heads' Local Admin panel
+-- cannot touch this role either before or after the split).
+UPDATE qap_user_roles
+   SET role = 'DEPARTMENT_HEAD_COE_CM'
+ WHERE role = 'DEPARTMENT_HEAD_COE';
+COMMIT;
+```
+No column-width change needed -- `qap_user_roles.role` is `VARCHAR2(32)`, and `DEPARTMENT_HEAD_COE_CM`
+(22 chars) / `DEPARTMENT_HEAD_COE_AGM` (23 chars) both fit comfortably. No change to any `QASignOff` status
+column or value -- this is a `Role`/user-assignment change only.
+
+**Verified:** `python3 -m py_compile` across every changed backend file (`constants.py`, `routers/signoff.py`,
+`routers/dashboard.py`, `seed.py`) -- clean; `npx tsc --noEmit -p .` -- clean; grepped the full codebase
+afterward for any remaining bare `Role.DEPARTMENT_HEAD_COE`/`'DEPARTMENT_HEAD_COE'` reference outside of
+explanatory comments -- none found; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 122. A requester who also holds an approving role can no longer approve their own request (no schema change)
+
+**Reported directly, with a concrete example:** a person who is a Requester in IT-Software and *also*
+separately holds the SM role could approve their own request -- wearing two hats let them self-approve at
+a checkpoint that's supposed to be an independent check. Wanted: block this everywhere it can happen, so a
+*different* person holding the same approving role for that department has to decide it instead. Same
+principle applies to every two-tier approval chain in the app, not just SM: Department Head, and the
+analogous QA Lead / Executive COE chain on QA Sign-off.
+
+**Root cause:** every SM/Department Head/QA Lead/Executive COE decision endpoint already checked the
+*role* (`require_roles`) and, for the business-side ones, the *department* (`require_same_department`) --
+but nothing checked whether the approver **is the same person who raised the request**. Those are
+orthogonal checks: `require_same_department` only compares departments, so a Requester who also holds SM
+for their own department sailed straight through it.
+
+**Backend -- new shared helper, `deps.py`:**
+```python
+def require_not_requester(current_user: models.User, requester_id) -> None:
+    if current_user.has_role(Role.ADMIN):
+        return
+    if not requester_id:
+        return
+    if current_user.id == requester_id:
+        raise HTTPException(status_code=403, detail="You raised this request yourself, so you cannot "
+            "also be the one to approve it at this checkpoint -- ask another person who holds this "
+            "approval role to decide it.")
+```
+Mirrors `require_same_department`'s existing conventions exactly: ADMIN always bypasses (consistent with
+every other permission check in the app), and a missing/`None` id skips the check rather than blocking
+everyone (nothing meaningful to compare against on a standalone request with no linked requester).
+
+**Wired into every SM/Department Head/QA Lead/Executive COE decision endpoint, right alongside the
+existing `require_same_department` call (called with each entity's own requester-identifying column):**
+- `routers/functional.py` -- `sm_decision`, `department_head_decision` (`obj.requester_id`).
+- `routers/sast_dast.py` -- the shared `_sm_decision`/`_department_head_decision` helpers, which back both
+  SAST's and DAST's endpoints (`obj.requester_id`) -- 2 edits cover all 4 live endpoints.
+- `routers/performance.py` -- `sm_decision`, `department_head_decision` (`obj.requester_id`).
+- `routers/suppression.py` -- `sm_decision`, `dept_head_decision` (`obj.created_by_id` -- this module
+  tracks who raised the request under a differently-named column than the other five).
+- `routers/signoff.py` -- `qa_lead_decision`, `executive_coe_decision` (`obj.requester_id`); this router
+  didn't previously import `require_same_department` at all (QA Sign-off's QA Lead/Executive COE
+  checkpoints are QA-department-scoped via its own `_require_qa_department`, not the business-side
+  helper), so only `require_not_requester` was added here, not `require_same_department`.
+
+**Deliberately NOT touched:** the "Requester Decision" step (Accepted/Changes Required) on a completed
+Functional request -- that one is *supposed* to be the requester acting on their own request, it's not an
+independent-approval checkpoint. Also not touched: Security Team Verification on Suppression and the
+QA-side readiness/execution steps (QA Lead/QA Engineer/Security Analyst work) -- those are QA-team task
+execution on someone else's request, not a second independent sign-off on the same person's own request in
+the sense reported here.
+
+**Frontend (defensive UX -- hides the Approve/Return/Reject panel instead of letting someone click it and
+just get a 403; the backend check above is what actually enforces this):**
+- `modules/functional/Functional.tsx`, `modules/security/SAST.tsx`, `modules/security/DAST.tsx`,
+  `modules/specialised-testing/Performance.tsx` -- new `isSelfApproval = req.requester_id === user?.id &&
+  !isAdmin` (or the local admin-check equivalent), ANDed into both `canSMDecide` and
+  `canDeptHeadDecide`/`canDepartmentHeadDecide`.
+- `modules/security/Suppression.tsx` -- same pattern, using `sup.created_by_id` to match the backend's
+  column choice for this module.
+- `modules/governance/SignOff.tsx` -- same pattern (`item.requester_id`), ANDed into `canQALeadDecide` and
+  `canExecutiveCoeDecide`.
+- Admin still sees and can use every decision panel even when they happen to be the request's own
+  requester, matching the backend's ADMIN bypass -- deliberately not blocking Admin, consistent with every
+  other permission check in the app.
+
+**No schema change** -- this reads existing `requester_id`/`created_by_id` columns that were already
+present; no new column, no migration DML needed. **Verified:** `python3 -m py_compile` across every changed
+backend file (`deps.py`, `routers/functional.py`, `routers/sast_dast.py`, `routers/performance.py`,
+`routers/suppression.py`, `routers/signoff.py`) -- clean; `npx tsc --noEmit -p .` -- clean; Documents and
+outputs copies re-synced and confirmed identical via `diff -rq` (aside from the always-excluded
+`.env`/`uploads` runtime files).
+
+## 123. Application Name approval becomes two-tier: Application Owner, then SM (schema change)
+
+**Request:** when a brand-new Application Name is introduced (typed via "Other" on the QA Request wizard),
+route its approval to an Application Owner from the same department FIRST; only once they approve should
+it move on to SM for the existing (and still final) approval step. Both tiers carry the same authority to
+Reject outright. Confirmed directly: an Application Owner is scoped by department exactly like SM already
+is (no separate "who owns this specific application" concept exists anywhere in the schema, so this reuses
+the same `department` field/`require_same_department` mechanism SM approval already uses), and a Reject at
+either tier is final/terminal, identical to how SM's reject already works.
+
+**Backend (`constants.py`):**
+- `APPLICATION_MASTER_STATUSES` changed from `["PENDING", "APPROVED", "REJECTED"]` to
+  `["PENDING_APP_OWNER", "PENDING_SM", "APPROVED", "REJECTED"]`; `APPLICATION_MASTER_STATUS_LABELS` updated
+  to match ("Pending Application Owner Approval" / "Pending SM Approval" / "Approved" / "Rejected").
+- New `application_name_block_message(app_status, stage)` helper -- shared, tier-aware wording for the 6
+  duplicated SM/Department-Head decision guard clauses (see below) that block a request's own Approve until
+  its Application Name reaches APPROVED; now correctly distinguishes "still waiting on Application Owner"
+  from "waiting on SM" instead of always assuming SM is the one blocking it.
+
+**Backend (`models.py` -- `ApplicationMaster`):**
+- `status` default changed from `"PENDING"` to `"PENDING_APP_OWNER"`.
+- New columns: `app_owner_decided_by_id` (FK `qap_users.id`), `app_owner_decided_at`, `app_owner_comments`
+  -- the Application Owner tier's own decision record, parallel to the existing `decided_by_id`/
+  `decided_at`/`comments` (kept as the SM/final-decision tier). If an Application Owner **rejects**, that
+  IS the final decision on the name, so BOTH sets of fields get populated (app_owner_* for this tier's own
+  record, and decided_by_id/decided_at/comments so anything reading those as "the decision that made this
+  terminal" keeps working regardless of which tier actually rejected it). If an Application Owner
+  **approves**, only the app_owner_* fields are set -- decided_by_id/decided_at/comments stay null until
+  SM makes their own call.
+- Docstring corrected: it previously (inaccurately) said the request's own SM Approval decision "is not
+  gated on" the Application Name's status -- that stopped being true back in section covering "Disable
+  Sign/Approve until Application Name is approved"; the docstring now describes the real (blocking)
+  behavior and the two-tier chain.
+
+**Backend (`schemas.py`):** `ApplicationMasterOut` gains `app_owner_decided_by_id`/`app_owner_decided_at`/
+`app_owner_comments`.
+
+**Backend (`routers/qa_requests.py` -- `_resolve_application_name`):** both places that used to set
+`status="PENDING"` (a brand-new name, and a REJECTED name reopened by a fresh proposal) now set
+`"PENDING_APP_OWNER"` instead -- a reopened REJECTED name re-enters the chain from the START (Application
+Owner gets to look at it again too, not just SM), and also now resets the new `app_owner_decided_by_id`/
+`app_owner_decided_at`/`app_owner_comments` fields to `None` alongside the existing SM-tier reset.
+
+**Backend (`routers/applications.py`):**
+- New `GET /api/application-names/pending-app-owner` -- `require_roles(Role.APPLICATION_OWNER, Role.ADMIN)`,
+  lists `PENDING_APP_OWNER` rows, department-filtered for a non-Admin caller. Mirrors the existing
+  `GET /pending` (now describes itself as the *second*-tier listing, `PENDING_SM` instead of the old bare
+  `PENDING`) exactly one tier earlier.
+- New `POST /api/application-names/{app_id}/app-owner-decision` -- `require_roles(Role.APPLICATION_OWNER)`,
+  `require_same_department`, requires current status `PENDING_APP_OWNER`. Approve moves it to `PENDING_SM`
+  (does NOT approve the name outright -- SM still has the final say). Reject is terminal: sets `REJECTED`,
+  populates both tiers' decision fields (see models.py above), and reuses the existing
+  `_auto_reject_linked_requests` helper with an Application-Owner-specific reason string, exactly like the
+  SM endpoint already does.
+- Existing `POST /{app_id}/decision` (SM, unchanged role gate): now requires current status `PENDING_SM`
+  instead of the old bare `PENDING`; returns a clearer 400 ("still awaiting Application Owner approval")
+  if someone tries to decide it while it's still at the first tier, instead of the old generic "already
+  been '...'" message.
+
+**Backend (6 guard-clause call sites, wording only -- the blocking *condition* itself,
+`application_master_status not in (None, "APPROVED")`, needed no logic change since it already covers both
+new intermediate statuses automatically):** `routers/functional.py` (`sm_decision`,
+`department_head_decision`), `routers/sast_dast.py` (shared `_sm_decision`/`_department_head_decision`,
+backing both SAST's and DAST's endpoints), `routers/performance.py` (`sm_decision`,
+`department_head_decision`) -- all 6 now call `application_name_block_message(...)` instead of a hardcoded
+string, so the message accurately says "still awaiting Application Owner" when that's the actual reason,
+rather than always implying SM is the one who needs to act.
+
+**Frontend:**
+- `types.ts` -- `ApplicationMasterOut` gains the 3 new `app_owner_*` fields.
+- `constants.ts` -- new `APPLICATION_MASTER_STATUS_LABELS` map (didn't exist before; the frontend had been
+  hardcoding "Pending Approval" inline instead of a shared label constant).
+- `components/ApplicationNameBanner.tsx` -- now tier-aware: renders for an Application Owner when status is
+  `PENDING_APP_OWNER` (posting to the new `app-owner-decision` endpoint) or for an SM when status is
+  `PENDING_SM` (posting to the existing `decision` endpoint), instead of unconditionally requiring the `SM`
+  role. Banner copy adjusts per tier ("...before it moves on to SM for final approval" vs "...before it
+  becomes a selectable option for everyone else"). The 5 module detail views' own wrapping condition
+  (`{(sameDept || isAdmin) && <ApplicationNameBanner .../>}`) needed no change -- department scoping is
+  identical for both tiers, so the banner component itself deciding which role/tier applies is sufficient.
+- `QARequests/RequestDetail.tsx` -- the gateway Overview's Application Name badge now distinguishes
+  "Pending Application Owner Approval" (yellow) from "Pending SM Approval" (yellow) instead of one generic
+  "Pending Approval".
+- `QARequests/steps/DetailsStep.tsx` -- wizard copy updated ("needs approval from an Application Owner,
+  then an SM, both in your department" instead of just "an SM").
+
+**Data migration (DDL + DML -- not run from this sandbox, no live DB connection; apply against the real
+Oracle schema when this section is deployed):**
+```sql
+ALTER TABLE qap_application_master ADD app_owner_decided_by_id NUMBER(19);
+ALTER TABLE qap_application_master ADD app_owner_decided_at    TIMESTAMP;
+ALTER TABLE qap_application_master ADD app_owner_comments      CLOB;
+ALTER TABLE qap_application_master ADD CONSTRAINT fk_appmaster_app_owner_decided_by
+  FOREIGN KEY (app_owner_decided_by_id) REFERENCES qap_users(id);
+
+-- Every existing row still holding the old single "PENDING" status becomes
+-- PENDING_SM, NOT PENDING_APP_OWNER -- these are names that were already
+-- submitted and are already in the queue under the old single-tier flow;
+-- retroactively inserting an Application Owner step in front of something
+-- already awaiting a decision would be disruptive and wasn't asked for.
+-- Only brand-new names raised AFTER this section deploys go through the
+-- full two-tier chain from the start (enforced by _resolve_application_name
+-- creating new rows at PENDING_APP_OWNER going forward).
+UPDATE qap_application_master
+   SET status = 'PENDING_SM'
+ WHERE status = 'PENDING';
+COMMIT;
+```
+No width change needed on the existing `status` column (`VARCHAR2(20)`) -- `PENDING_APP_OWNER` (18 chars)
+and `PENDING_SM` (10 chars) both fit comfortably.
+
+**Verified:** `python3 -m py_compile` across every changed backend file (`constants.py`, `models.py`,
+`schemas.py`, `routers/qa_requests.py`, `routers/applications.py`, `routers/functional.py`,
+`routers/sast_dast.py`, `routers/performance.py`) -- clean; `npx tsc --noEmit -p .` -- clean; grepped the
+full codebase afterward for any remaining bare `"PENDING"` (the old 3-state value) tied to
+ApplicationMaster -- none found outside explanatory comments; Documents and outputs copies re-synced and
+confirmed identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 124. Evidence upload becomes mandatory for every readiness-checklist item that's mandatory OR self-declared checked (no schema change)
+
+**Request:** "for mandatory checklist and whatever checklist is checked for that uploading of evidence is
+mandatory" -- across Functional, SAST, DAST, and Performance's own readiness checklists, a checklist item
+now needs at least one attached evidence document whenever EITHER `is_mandatory` is `True` OR the requester
+has self-declared it checked (`requester_checked` is `True`). Previously the mandatory flag and the
+self-declare tick were both purely informational -- an item could sail through Submit and QA-Lead
+verification with zero evidence attached. Per-item evidence storage already existed (every checklist item
+already has its own upload/list/download/delete endpoints keyed by the existing polymorphic convention
+`RequestDocument(module="{X}_ITEM", request_id=<checklist_item.id>)` -- see section covering "Add document
+upload to Sign-off raise flow" and the earlier per-module upload-gate work), so this is enforcement added on
+top of storage that already existed -- no new column or table.
+
+**Backend (`documents.py`):** new shared `require_checklist_evidence(db, checklist_items, item_module)` --
+for every item where `is_mandatory or requester_checked` is true, checks `list_documents(db, item_module,
+item.id)` is non-empty; raises 400 naming every item still missing evidence if any are found. Single shared
+helper so the same rule and the same wording apply identically across all 4 modules.
+
+**Backend (wired at two points per module -- Submit/Resubmit, and QA Lead verify-time):**
+- `routers/functional.py` -- `submit_request` (right after the existing `_require(obj, DRAFT, "Submit")`
+  check) and `resubmit_request`'s `RETURNED_BY_SM` branch both call
+  `doc_store.require_checklist_evidence(db, obj.checklist_items, "FUNCTIONAL_ITEM")`. `update_checklist_item`
+  (the QA Lead verify endpoint) blocks `is_complete=True` with a 400 if
+  `not doc_store.list_documents(db, "FUNCTIONAL_ITEM", item.id)`, right next to the existing "requester
+  hasn't self-declared it" check.
+- `routers/sast_dast.py` -- new small `_require_checklist_evidence(db, obj)` wrapper (mirrors the existing
+  `_require_checklist_ready` right above it) picks `"SAST_ITEM"` or `"DAST_ITEM"` based on
+  `isinstance(obj, models.SASTRequest)`; called from the shared `_submit` and from `_resubmit`'s
+  `RETURNED_BY_SM` branch, covering both SAST and DAST. Both `update_sast_checklist_item` and
+  `update_dast_checklist_item` (the two separate QA Lead verify endpoints) each gained the same
+  no-evidence-yet 400 check as functional.py, using their own module key.
+- `routers/performance.py` -- identical pattern: `submit_performance` and `resubmit_performance`'s
+  `RETURNED_BY_SM` branch call `doc_store.require_checklist_evidence(db, obj.checklist_items,
+  "PERFORMANCE_ITEM")`; `update_checklist_item` gained the matching verify-time evidence check.
+- Deliberately NOT wired into the self-declare/`checked_items` write path (too many disparate call sites --
+  pre-raise draft staging, `edit_request`, each module's own Update endpoint, the wizard's draft flow --
+  higher risk of an inconsistent gap than the two chosen, already-consistent checkpoints). A mandatory item
+  that was never self-declared checked still gets caught by the `is_mandatory` half of the rule regardless,
+  so nothing slips through Submit either way.
+
+**Frontend (`components/Common.tsx` -- `ChecklistEvidence`):** two new optional props --
+`required?: boolean` (renders a red "Evidence required" badge next to the uploader whenever `required` is
+true and zero documents are attached) and `onCountChange?: (count: number) => void` (fires whenever the
+loaded document count changes, so a parent view can react to it).
+
+**Frontend (all 8 call sites across `Functional.tsx`, `SAST.tsx`, `DAST.tsx`, `Performance.tsx` -- both the
+Edit Details self-declare modal and the read-only Checklist tab, one of each per module):**
+- Every call site now passes `required={c.is_mandatory || c.requester_checked}`.
+- The 4 Checklist-tab call sites (the QA Lead verify view) additionally track a new
+  `evidenceCounts: Record<number, number>` state map (populated via each row's `onCountChange`) and extend
+  the existing "Verified"/"QA verified" checkbox's `disabled`/`title` logic: on top of the pre-existing
+  "requester hasn't self-declared it" block, the checkbox is now also disabled -- with an explanatory
+  tooltip -- when the item needs evidence, isn't complete yet, and its reported evidence count is exactly
+  `0`. This mirrors the backend's verify-time gate in the UI instead of only surfacing it as a 400 after the
+  fact.
+
+**Verified:** `python3 -m py_compile` on `documents.py`, `routers/functional.py`, `routers/sast_dast.py`,
+`routers/performance.py` -- clean; `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced
+and confirmed identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 125. Evidence-mandatory rule (previous section) now also blocks the requester at Raise time, not just at each module's own Submit (no schema change)
+
+**Request:** "while requester raising the request, at that time if evidence not submitted, Block the
+request raise" -- the previous section's rule (mandatory items, and any item self-declared checked, both
+need at least one evidence document) was enforced at each linked module's own Submit/Resubmit and at QA Lead
+verify-time, but NOT at the point where the requester first raises the gateway QA Request itself. Since
+every linked child (Functional/SAST/DAST/Performance) now lands straight at `SM_APPROVAL_PENDING` the moment
+the gateway is raised (see section covering "Change child-request creation to land directly at
+SM_APPROVAL_PENDING") with no separate per-module Submit click of its own, the evidence gate has to be
+enforced at raise time too -- otherwise a requester could raise the gateway with evidence still missing and
+the linked child would be born already sitting at SM Approval despite that, identical in spirit to the
+pre-existing mandatory-checklist gate this sits right next to.
+
+**Backend (`routers/qa_requests.py`):**
+- New `_pending_draft_checklist_evidence(db, req_id, kind, checked_set)` -- the raise-time counterpart to
+  `documents.py::require_checklist_evidence`. At raise time the real per-item checklist rows don't exist yet
+  (they're only created a few lines later by `_sync_linked_child_requests`), so this checks evidence against
+  the staged draft-evidence keys instead (`_draft_evidence_module(kind, index)`, the same keys
+  `ChecklistEvidencePicker`'s own upload/list/delete endpoints already use while the gateway is still a
+  Draft). Same rule as everywhere else: an item needs evidence whenever it's mandatory OR the requester has
+  self-declared it checked. Returns the item names still missing evidence.
+- `raise_request` now calls this once per active request type (`"functional"`/`"sast"`/`"dast"`/
+  `"performance"`, using each type's own `checked_items` set) right after the existing mandatory-checklist
+  gate, and raises a 400 naming every item still missing evidence if any are found -- before
+  `_sync_linked_child_requests` ever runs, so a request with missing evidence never gets its linked child(ren)
+  created at all.
+- Fixed an adjacent pre-existing bug while in this code: `pending_checklist_items` was being reset to `[]`
+  right after the Functional Testing block populated it, silently discarding Functional's own mandatory-item
+  results before the SAST/DAST blocks ran -- meaning the "mandatory item must be checked" gate for Functional
+  Testing was dead code at raise time (Functional has no mandatory items by default so this was latent, but
+  incorrect regardless). Removed the duplicate reset so all three types' pending items now correctly
+  accumulate into one list.
+
+**Frontend:**
+- `QARequests/steps/ChecklistEvidencePicker.tsx` (used by the wizard's Functional/SAST/DAST/Performance
+  steps while the gateway is still being drafted) gains the same `required?: boolean` prop and "Evidence
+  required" badge as `components/Common.tsx`'s `ChecklistEvidence` from the previous section -- wired at all
+  4 step call sites (`FunctionalStep.tsx`, `SastStep.tsx`, `DastStep.tsx`, `PerformanceStep.tsx`) as
+  `required={ci.is_mandatory || checked}` (Performance has no mandatory items by definition, so its call site
+  passes `required={checked}` only).
+- `QARequests/RequestDetail.tsx` (the gateway's own Overview, where "Submit / Raise" lives) gains a new
+  `draftEvidenceCounts: Record<string, number>` state, populated by a `useEffect` that -- only while the
+  gateway is still in Draft -- fetches the evidence-document list for every checklist-definition index of
+  every active request type via the existing `GET .../checklist-evidence/{kind}/{item_index}/documents`
+  endpoint, keyed `"<kind>:<index>"`. A new `pendingEvidence` array (built the same way as the existing
+  `pendingMandatory` array right above it, but checking `is_mandatory || requester_checked` against
+  `draftEvidenceCounts` instead of just `is_mandatory` against the checked set, and covering all 4 request
+  types instead of just SAST/DAST) drives a second warning banner ("Cannot Submit / Raise yet -- the
+  following checklist item(s) need at least one evidence document attached first...") and extends the
+  "Submit / Raise" button's existing `disabled`/`title` logic to also block on `pendingEvidence.length > 0`.
+  This mirrors the backend's raise-time gate in the UI instead of only surfacing it as a 400 after the
+  requester already clicked the button.
+
+**Verified:** `python3 -m py_compile routers/qa_requests.py` -- clean; `npx tsc --noEmit -p .` -- clean;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (aside from the
+always-excluded `.env`/`uploads` runtime files).
+
+## 126. Fixed: "Submit / Raise" didn't re-enable/disable after attaching or removing evidence, without a full page reload (no schema change)
+
+**Request:** "without reloading raise button not enabling ever after all documents upload, same vice versa"
+-- after attaching evidence via the "Edit Request" wizard, the "Submit / Raise" button on the gateway's own
+Overview stayed disabled; removing evidence that had previously satisfied the requirement didn't re-disable
+it either -- either way, only a full page reload made the button reflect reality.
+
+**Root cause:** the previous section's `draftEvidenceCounts` state in `QARequests/RequestDetail.tsx` was
+fetched by a `useEffect` keyed on `[req.id, req.status, req.request_types]`. `ChecklistEvidencePicker`
+(inside the "Edit Request" wizard's checklist steps) uploads/deletes evidence immediately against the
+backend the moment the requester clicks Attach/Remove -- it does not wait for the wizard's own Save, and
+doesn't touch `req.id`/`status`/`request_types` either way. So neither closing the wizard after Save nor
+just clicking away from it ever caused that effect's dependencies to change, meaning `draftEvidenceCounts`
+(and therefore the `pendingEvidence` gate and the Submit/Raise button's `disabled` state) stayed frozen at
+whatever it read on first mount until the whole component remounted via a page reload.
+
+**Fix (`QARequests/RequestDetail.tsx`):** the inline fetch logic was pulled out into its own
+`loadDraftEvidenceCounts` `useCallback` (still run once via `useEffect` on mount/status/type change, same as
+before), and is now ALSO explicitly re-run from both of the "Edit Request" wizard's exit paths: its
+`onClose` (closing without saving -- evidence may still have changed since attach/remove doesn't wait for
+Save) and its `onCreated` (closing after Save). Re-running the same fetch/recompute on every exit covers
+both directions the report described: attaching evidence now re-enables the button as soon as the wizard
+closes, and removing previously-attached evidence now re-disables it the same way -- no reload needed
+either way.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed
+identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files). Also checked
+whether the equivalent QA-Lead "verify" checkbox gating added in the previous-previous section (Functional/
+SAST/DAST/Performance's own Checklist tabs) has the same class of bug: it doesn't -- each of those 4
+modules' Checklist tab is only ever mounted via `{tab === "checklist" && (...)}` conditional rendering, so
+switching to that tab always remounts it and refetches live evidence counts fresh; there's no separate
+top-level state living outside a remountable component the way `draftEvidenceCounts` did on the gateway.
+
+## 127. Department Admin role-assignment split: business Department Heads vs. Executive COE assign different role subsets (no schema change)
+
+**Request:** "Rest of the Team, other than QA team below roles will be there under department admin to assign
+role: 1. Requester/Other 2. Business Analyst 3. Application Owner 4. SM. For QA team Executive CM AGM COE
+can assign below role: 1. QA Engineer 2. QA Lead 3. Security Analyst." The existing "Local Admin" feature
+(Department Admin page) let any business Department Head (CM/AGM) assign a single shared list of 7
+working-level roles -- REQUESTER, BUSINESS_ANALYST, QA_ENGINEER, QA_LEAD, SECURITY_ANALYST,
+APPLICATION_OWNER, SM -- to users in their own department, and the Executive COE (DEPARTMENT_HEAD_COE_CM/
+DEPARTMENT_HEAD_COE_AGM) couldn't access the page at all. This splits that one shared list into two
+disjoint sets, one per kind of local admin, and lets the Executive COE in as the QA department's own local
+admin.
+
+**Backend (`constants.py`):** `LOCAL_ADMIN_ASSIGNABLE_ROLES` replaced by two lists:
+```python
+DEPARTMENT_ADMIN_ASSIGNABLE_ROLES = [
+    Role.REQUESTER, Role.BUSINESS_ANALYST, Role.APPLICATION_OWNER, Role.SM,
+]
+QA_ADMIN_ASSIGNABLE_ROLES = [
+    Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
+]
+```
+`DEPARTMENT_ADMIN_ASSIGNABLE_ROLES` is what a business Department Head (DEPARTMENT_HEAD_CM/
+DEPARTMENT_HEAD_AGM) may assign; `QA_ADMIN_ASSIGNABLE_ROLES` is what an Executive COE
+(DEPARTMENT_HEAD_COE_CM/DEPARTMENT_HEAD_COE_AGM) may assign. No separate "which department is the QA
+one" check was needed to scope the Executive COE to QA staff specifically -- the existing
+`_require_own_department_target` department-equality check already does that for free, since Executive COE
+accounts are mapped to `QA_DEPARTMENT` ("IT - QA") exactly like every other QA staffer (confirmed via
+`seed.py`'s demo data).
+
+**Backend (`routers/auth.py`):**
+- Both `/local-admin/users` endpoints' `require_roles(...)` gate widened to also accept
+  `Role.DEPARTMENT_HEAD_COE_CM`/`Role.DEPARTMENT_HEAD_COE_AGM`, alongside the existing
+  `Role.DEPARTMENT_HEAD_CM`/`Role.DEPARTMENT_HEAD_AGM`.
+- New `_local_admin_assignable_roles(current_user)` -- returns `QA_ADMIN_ASSIGNABLE_ROLES` if the caller
+  holds either COE role, else `DEPARTMENT_ADMIN_ASSIGNABLE_ROLES`. Deliberately checks `current_user.roles`
+  directly rather than `has_role()` -- `has_role()` always returns `True` for an Administrator account
+  regardless of which role(s) it's asked about (see `models.User.has_role`), which would otherwise wrongly
+  hand an Admin who somehow calls this endpoint the QA-only subset.
+- `update_local_admin_user` now calls this helper once and uses its result everywhere
+  `LOCAL_ADMIN_ASSIGNABLE_ROLES` used to be referenced directly -- both the "am I even allowed to assign
+  these roles" validation, and the "preserve everything the target already holds outside my own authority"
+  merge logic. The preserve step is what stops a business Department Head from silently stripping someone's
+  QA_LEAD role (or an Executive COE from stripping someone's SM role) just because it wasn't in their own
+  submitted list -- it was already there defending against ADMIN/DEPARTMENT_HEAD_* roles, and now also
+  defends the OTHER kind of local admin's own subset the same way.
+
+**Backend (`seed.py`):** fixed an adjacent pre-existing typo found while testing this feature --
+`agm1` was seeded with `Role.DEPARTMENT_HEAD_COE_CM` (same as `cm1`) instead of
+`Role.DEPARTMENT_HEAD_COE_AGM`, so there was previously no demo account to exercise the AGM side of the
+Executive COE role at all.
+
+**Backend (`schemas.py`):** `LocalAdminUserUpdate`'s docstring updated to describe the split instead of the
+single old list name.
+
+**Frontend:**
+- `constants.ts` -- `LOCAL_ADMIN_ASSIGNABLE_ROLES` replaced by `DEPARTMENT_ADMIN_ASSIGNABLE_ROLES` and
+  `QA_ADMIN_ASSIGNABLE_ROLES`, mirroring the backend exactly.
+- `modules/governance/DepartmentAdmin.tsx` -- access gate widened to
+  `hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'DEPARTMENT_HEAD_COE_CM',
+  'DEPARTMENT_HEAD_COE_AGM')`; a new `assignableRoles` (picked between the two lists based on whether the
+  logged-in local admin holds a COE role) replaces every direct reference to the old single list -- the
+  `RoleChipSelect`'s own `roles`/`value` props, and the "Also holds: ..." read-only summary of roles outside
+  the acting admin's own authority. Page subtitle now reads "Assign QA team roles..." for an Executive COE
+  vs. "Assign working-level roles..." for a business Department Head.
+- `components/Layout.tsx` -- the "Department Admin" nav item now also renders for
+  `DEPARTMENT_HEAD_COE_CM`/`DEPARTMENT_HEAD_COE_AGM`, not just `DEPARTMENT_HEAD_CM`/`DEPARTMENT_HEAD_AGM`.
+- `modules/governance/Admin.tsx` -- comment on the shared `RoleChipSelect` component updated to reference
+  both new lists instead of the old single one (no functional change -- `RoleChipSelect` already just takes
+  whatever `roles` list is passed in).
+
+**Verified:** `python3 -m py_compile constants.py schemas.py routers/auth.py seed.py` -- clean;
+`npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 128. Renamed 4 role labels to their full titles (display text only, no schema/role-code change)
+
+**Request:** rename "CM - COE" -> "Chief Manager - COE", "AGM - COE" -> "Assistant General Manager - COE",
+"Department Head (CM)" -> "Chief Manager - Department", "Department Head (AGM)" -> "Assistant General
+Manager - Department".
+
+**Scope:** display-label-only change. The underlying role codes (`DEPARTMENT_HEAD_COE_CM`,
+`DEPARTMENT_HEAD_COE_AGM`, `DEPARTMENT_HEAD_CM`, `DEPARTMENT_HEAD_AGM`) are unchanged, so every
+`has_role`/`hasRole`/`require_roles` check, DB-stored role value, and API contract is unaffected -- this
+only touches the human-readable string shown wherever `ROLE_LABELS[role]` is looked up (role chips, badges,
+the Department Admin page, PDF exports, etc.).
+
+**Backend (`constants.py` -- `ROLE_LABELS`):**
+```python
+Role.DEPARTMENT_HEAD_COE_CM: "Chief Manager - COE",       # was "CM - COE"
+Role.DEPARTMENT_HEAD_COE_AGM: "Assistant General Manager - COE",  # was "AGM - COE"
+Role.DEPARTMENT_HEAD_CM: "Chief Manager - Department",     # was "Department Head (CM)"
+Role.DEPARTMENT_HEAD_AGM: "Assistant General Manager - Department",  # was "Department Head (AGM)"
+```
+
+**Frontend (`constants.ts` -- `ROLE_LABELS`):** same 4 values updated to match, byte-for-byte identical to
+the backend strings.
+
+Grepped the full codebase afterward for any other hardcoded occurrence of the 4 old label strings outside
+this migration doc's own historical log entries (sections 120/121/266-269 above, describing what the labels
+used to be at the time) -- none found; every other call site already goes through `ROLE_LABELS`.
+
+**Verified:** `python3 -m py_compile constants.py` -- clean; `npx tsc --noEmit -p .` -- clean; Documents and
+outputs copies re-synced and confirmed identical via `diff -rq` (aside from the always-excluded
+`.env`/`uploads` runtime files).
+
+## 129. Surfaced Department + Role(s) for the logged-in user in two places (frontend only, no schema change)
+
+**Request:** "add one useful thing either add Department Name, and role assigned under the name or click of
+the logged in user name." The sidebar's existing user-chip already showed Role(s) under the name but not
+Department; the topbar's signed-in name (top-right) showed neither and wasn't clickable at all. Added both.
+
+**`components/Layout.tsx` -- sidebar user-chip:** a new `.dept` line added under the existing `.role` line,
+reading `user.department || 'No department set'` -- same fallback-copy convention already used for the role
+line's `'No role assigned'`.
+
+**`components/Layout.tsx` -- topbar user menu (new):** the topbar's signed-in name (`topbar-user-context`)
+changed from a plain `<span>` into a clickable `<button>` that toggles a `userMenuOpen` state; when open, a
+small popover renders below it (`topbar-user-popover`) showing the full name, Department, and Role(s) (all
+roles joined, via the same `ROLE_LABELS` lookup used everywhere else), plus a "Log out" button -- useful
+since the topbar stays visible even when the sidebar is collapsed or closed (mobile), unlike the sidebar's
+own user-chip. Follows the same click-outside/Escape-to-close pattern already used by the table column
+filter popovers in `components/Common.tsx` (`mousedown`/`keydown` document listeners, cleaned up on close),
+via a new `userMenuRef` and two `useEffect`s; also closes automatically on route change (`useEffect` keyed
+on `location.pathname`), same as the mobile sidebar-open state right above it.
+
+**`index.css`:** new `.user-chip .dept` rule (sidebar), sized/coloured slightly smaller and dimmer than the
+existing `.role` rule so Name > Role > Department reads as a clear hierarchy, plus matching size overrides
+under the `.redesigned-shell` skin scope (mirroring how `.role` is already overridden there). New
+`.topbar-user-menu`/`.topbar-user-caret`/`.topbar-user-popover*` rules for the topbar dropdown -- button
+chrome reset on the now-clickable `.navigation-v2 .topbar-user-context` (background/border removed, hover
+background added, cursor pointer) since it used to be a non-interactive `<span>`, plus a rotating caret icon
+and a right-aligned absolutely-positioned popover card matching the app's existing card/shadow language
+(`var(--shadow-lg)`, `var(--border)`).
+
+**Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed
+identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime files).
+
+## 130. Simplified every app-generated business ID from "{PREFIX}-{YYYYMMDD}-{6 random hex chars}" to "{PREFIX}-{n}" (schema change)
+
+**Request:** "request id, testcase id basically every id is too complex, hard to remember. so make simple
+id." Every human-facing ID this app generates itself (as opposed to the internal numeric `id` primary key)
+went through one shared helper, `models.gen_id(prefix)`, producing IDs like `TQA-FUNC-20260802-9C3D0E` --
+an 8-digit date plus 6 random hex characters bolted onto the prefix. Replaced with a short sequential
+number instead: `TQA-FUNC-42`. Covers all 10 places this app assigns its own business ID: QA Request
+(`request_id`, prefix `TQA-REQ`), Functional Testing Request (`request_id`, `TQA-FUNC`), SAST Request
+(`request_id`, `SAST`), DAST Request (`request_id`, `DAST`), Performance Request (`request_id`, `PERF`),
+Suppression (`suppression_id`, `SUP`), QA Sign-off Certificate (`certificate_id`, `QA-CERT`), Test Project
+(`project_key`, `TPROJ`), Test Cycle (`cycle_key`, `CYCLE`), and Test Case (`test_case_key`, `TC`, only
+when the user leaves the field blank -- they may still type their own arbitrary ID instead).
+
+**Design:** each prefix gets its own dedicated Oracle `SEQUENCE`. A sequence's `NEXTVAL` is atomic and
+monotonically increasing even under concurrent inserts from multiple app instances -- the same uniqueness
+guarantee the old random-hex suffix provided, just short and rememberable instead. Deliberately NOT reusing
+each table's own numeric `id` PK for this (e.g. `f"{prefix}-{row.id}"`) -- that would need a second
+UPDATE statement after every insert (the Identity column's value isn't known until the row is actually
+inserted), whereas a sequence's NEXTVAL can be fetched in a single extra `SELECT ... FROM dual` immediately
+before the INSERT, keeping the existing one-line-per-model `Column(..., default=...)` shape intact. Existing
+legacy-format IDs already in the database are left as-is (no backfill/rename) -- old values have TWO
+hyphens after the prefix (`TQA-FUNC-20260802-...`), new ones have ONE (`TQA-FUNC-42`), so they're always
+distinguishable and can never collide as strings; old and new formats simply coexist going forward.
+
+**Backend (`models.py`):**
+- New `ID_SEQUENCES` dict mapping each of the 10 prefixes to its own Oracle sequence name (e.g.
+  `"TQA-REQ": "seq_tqa_req_id"`).
+- New `_next_seq(prefix, executable)` -- runs `SELECT {seq_name}.NEXTVAL FROM dual` against whatever
+  connection-like object is passed (works with both a raw `Connection` and an ORM `Session`, since both
+  expose a compatible `.execute(text(...))`).
+- `gen_id(prefix)` replaced by two functions: `gen_id(prefix, db)` (call directly with the active `Session`
+  -- used by `routers/test_repository.py`'s two call sites, where a Test Case key is generated outside any
+  Column default) and `gen_id_default(prefix)` (returns a context-sensitive Column default -- SQLAlchemy
+  detects the returned closure's 1-argument signature and automatically supplies the `ExecutionContext` at
+  flush/insert time, whose `.connection` is used to fetch `NEXTVAL`; a plain 0-arg default lambda, which is
+  what every Column definition used before, has no access to a live connection).
+- All 9 `Column(..., default=lambda: gen_id("X"))` definitions changed to
+  `Column(..., default=gen_id_default("X"))`.
+- `routers/test_repository.py`'s two direct calls changed from `models.gen_id("TC")` to
+  `models.gen_id("TC", db)` (both call sites already have `db: Session` in scope).
+- Removed the now-unused `import uuid` from `models.py` (nothing else in the file used it).
+
+**Frontend:** no changes needed -- confirmed via research that every frontend dependency on these IDs
+(topbar search's prefix router in `Layout.tsx`, exact-string-match lookups on `?open=<id>` deep links,
+search placeholders) either does prefix `startsWith()` matching or full-string equality, neither of which
+cares about the suffix's exact format.
+
+**Data migration (DDL -- not run from this sandbox, no live DB connection; apply against the real Oracle
+schema when this section is deployed):**
+```sql
+CREATE SEQUENCE seq_tqa_req_id   START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_tqa_func_id  START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_sast_id      START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_dast_id      START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_perf_id      START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_sup_id       START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_qa_cert_id   START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_tproj_id     START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_cycle_id     START WITH 1 INCREMENT BY 1 NOCACHE;
+CREATE SEQUENCE seq_tc_id        START WITH 1 INCREMENT BY 1 NOCACHE;
+```
+`NOCACHE` chosen over Oracle's default sequence cache (20) deliberately -- these IDs are user-facing and
+low-frequency (one per request/test case raised, not a hot-path bulk-insert column), so the small extra
+cost of skipping the cache is worth guaranteeing no gaps ever appear from an instance restart discarding a
+partially-used cache block; gaps wouldn't break anything (uniqueness is all that's required) but a smaller,
+denser-looking number set is a better fit for "make it simple to remember." No column width change needed
+on any of the 9 `String(40)` / 1 `String(60)` (`test_case_key`) target columns -- even a 10-digit sequence
+value comfortably fits under the longest prefix (`"TQA-FUNC-" + 10 digits` is 19 characters).
+
+**Verified:** `python3 -m py_compile` across the entire `backend/app` tree (every `.py` file, not just the
+ones touched by this section) -- clean; `npx tsc --noEmit -p .` -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (aside from the always-excluded `.env`/`uploads` runtime
+files).
+
+## 131. Corrected the previous section's ID format to "{PREFIX}-{YYYYMMDD}-{n}", n resetting daily (schema change, supersedes 130's numbering scheme)
+
+**Request:** Section 130's bare `"{PREFIX}-{n}"` format (e.g. `TQA-FUNC-42`) was rejected outright ("nope"),
+with the actually-wanted format spelled out explicitly:
+```
+Functional QA   TQA-FUNC-20260801-1
+SAST            TQA-SAST-20260801-1
+DAST            TQA-DAST-20260801-1
+Performance     TQA-PERF-20260801-1
+```
+i.e. keep the 8-digit date (dropped in section 130), and rename the SAST/DAST/Performance prefixes to sit
+under the same `TQA-` namespace as `TQA-REQ`/`TQA-FUNC` (`SAST` -> `TQA-SAST`, `DAST` -> `TQA-DAST`, `PERF`
+-> `TQA-PERF`). All four examples end in `-1`, read as the first request of that type raised that day --
+i.e. `n` is a small counter that resets to 1 each day per prefix, not a number that grows forever (which is
+also a better fit for "make it simple to remember" than an ever-growing count). The remaining 6 prefixes
+the correction didn't call out by name (`TQA-REQ`, `SUP`, `QA-CERT`, `TPROJ`, `CYCLE`, `TC`) keep their
+existing text but now follow the same date+daily-counter shape for consistency, e.g. `SUP-20260801-1`.
+
+**Design:** an Oracle `SEQUENCE` (section 130's mechanism) has no built-in daily reset, so it's replaced by a
+small counter table, `qap_id_counters` (`prefix`, `counter_date`, `next_value`; composite PK on
+`prefix, counter_date`) -- one row per prefix per calendar day (IST), holding how many of that prefix have
+been issued so far that day. Claiming the next number is a single atomic `MERGE` statement per ID: it inserts
+the row with `next_value = 1` if today is this prefix's first ID, or increments the existing row's
+`next_value` if not, and either way the row ends up holding the number just assigned. Oracle takes a row lock
+during the `MERGE`, so a second concurrent request for the *same* prefix on the *same* day blocks until the
+first transaction commits, then sees the already-incremented value -- no read-then-write race window, and
+no risk of two requests handing out the same number. A trailing `SELECT next_value ... WHERE prefix=:p AND
+counter_date=:d` (same transaction, same connection) reads back the value the `MERGE` just committed.
+
+**Backend (`models.py`):**
+- Removed the `ID_SEQUENCES` dict and `_next_seq()` (section 130's Oracle-`SEQUENCE`-based mechanism).
+- New `IdCounter` model / `qap_id_counters` table (`prefix: String(20)`, `counter_date: Date`,
+  `next_value: Integer`, composite primary key on the first two).
+- New `_ist_today()` -- returns today's date in Asia/Kolkata (reuses the existing `now()` helper).
+- New `_claim_daily_seq(prefix, executable, ist_date)` -- runs the `MERGE` then the follow-up `SELECT`
+  described above, against whatever connection-like object is passed (a raw `Connection`, from a Column
+  default's `ExecutionContext`, or an ORM `Session`, when called directly from router code).
+- `gen_id(prefix, db)` and `gen_id_default(prefix)` (same two-function split as section 130, same reason: a
+  Column default needs the 1-arg `ExecutionContext` form to reach a live connection) now build
+  `f"{prefix}-{ist_date:%Y%m%d}-{n}"` instead of `f"{prefix}-{n}"`.
+- Renamed 3 of the 9 `gen_id_default(...)` call sites: `gen_id_default("SAST")` ->
+  `gen_id_default("TQA-SAST")` (SASTRequest), `gen_id_default("DAST")` -> `gen_id_default("TQA-DAST")`
+  (DASTRequest), `gen_id_default("PERF")` -> `gen_id_default("TQA-PERF")` (PerformanceRequest). The other 7
+  prefix strings (`TQA-REQ`, `TQA-FUNC`, `SUP`, `QA-CERT`, `TPROJ`, `CYCLE`, and `TC` in
+  `routers/test_repository.py`'s two `gen_id("TC", db)` calls) are unchanged -- only the SAST/DAST/Performance
+  prefixes were called out in the correction.
+- Existing legacy-format IDs (both the original random-hex format from before section 130, and section 130's
+  own short-lived bare `"{PREFIX}-{n}"` format) are left as-is, no backfill/rename -- all three formats have a
+  different hyphen count/shape after the prefix and stay distinguishable as strings, so they coexist
+  indefinitely with no collision risk.
+
+**Frontend (`Layout.tsx`):** the topbar search box's `ID_PREFIX_ROUTES` table (routes a pasted/typed ID to
+the right module by matching its prefix) hardcoded the old bare `SAST`/`DAST`/`PERF` prefixes -- updated to
+`TQA-SAST`/`TQA-DAST`/`TQA-PERF` so search-by-ID keeps working for those 3 request types. Confirmed none of
+the 5 `TQA-`-namespaced prefixes (`TQA-REQ`, `TQA-FUNC`, `TQA-SAST`, `TQA-DAST`, `TQA-PERF`) is a prefix of
+another, so list order doesn't matter among them (each diverges right after `TQA-`). No other frontend code
+depends on the ID suffix's exact shape (confirmed in section 130's research and unaffected by this change).
+
+**Data migration (DDL -- not run from this sandbox, no live DB connection; apply against the real Oracle
+schema when this section is deployed):**
+```sql
+DROP SEQUENCE seq_tqa_req_id;
+DROP SEQUENCE seq_tqa_func_id;
+DROP SEQUENCE seq_sast_id;
+DROP SEQUENCE seq_dast_id;
+DROP SEQUENCE seq_perf_id;
+DROP SEQUENCE seq_sup_id;
+DROP SEQUENCE seq_qa_cert_id;
+DROP SEQUENCE seq_tproj_id;
+DROP SEQUENCE seq_cycle_id;
+DROP SEQUENCE seq_tc_id;
+
+CREATE TABLE qap_id_counters (
+    prefix        VARCHAR2(20)  NOT NULL,
+    counter_date  DATE          NOT NULL,
+    next_value    NUMBER(10)    NOT NULL,
+    CONSTRAINT pk_qap_id_counters PRIMARY KEY (prefix, counter_date)
+);
+```
+The 10 section-130 sequences are no longer read anywhere in the codebase (confirmed via a full-tree grep) --
+safe to drop; if preferred, they can instead be left in place unused rather than dropped, since an idle
+sequence costs nothing. `qap_id_counters` doesn't strictly need to be created by hand -- `Base.metadata.
+create_all(bind=engine)` in `main.py` runs on every app startup and will create it automatically the first
+time this code runs against a given schema -- the `CREATE TABLE` above is included for the schema record and
+for anyone provisioning the table ahead of a deploy. No column width change needed on any target `request_id`/
+`suppression_id`/`certificate_id`/`project_key`/`cycle_key`/`test_case_key` column -- the longest realistic
+value, `"TQA-FUNC-" + 8-digit date + "-" + n`, stays well under every column's `String(40)`/`String(60)` limit
+even with a multi-digit daily count.
+
+**Verified:** `python3 -m py_compile` across the entire `backend/app` tree -- clean; `npx tsc --noEmit -p .`
+across the entire frontend -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq`.
+
+## 132. Removed the mandatory evidence-attachment gate; replaced with a non-blocking heads-up pop-up at Raise time (no schema change)
+
+**Request:** "remove the logic of mandatory upload/attach of evidence" -- followed shortly after by a
+mid-task refinement: rather than dropping the reminder entirely, "just during submit/raise give Information
+message as pop-up requestee may ask to attach evidence for some of readiness checklist item, it's good to
+provide upfront during request creation like this." So evidence is no longer required to Submit/Raise or to
+QA-Lead-verify a checklist item, but the requester still gets a one-time, dismissible heads-up at Raise time
+if some item(s) have nothing attached.
+
+**Backend:**
+- `documents.py`: removed `require_checklist_evidence()` entirely (no longer called from anywhere).
+- `routers/functional.py`, `routers/performance.py`: removed the `doc_store.require_checklist_evidence(...)`
+  call from both `submit`/`resubmit` (blocks Submit/Resubmit) and the checklist-item verify endpoint (blocked
+  the QA Lead from marking an item complete with no evidence attached).
+- `routers/sast_dast.py`: removed the `_require_checklist_evidence()` helper and its call sites in `_submit`/
+  `_resubmit`, plus the equivalent evidence check in both SAST's and DAST's own verify endpoints.
+  `_require_checklist_ready()` (the separate "mandatory items must be self-declared checked" gate) is
+  untouched -- only the evidence-attachment requirement is removed.
+- `routers/qa_requests.py`: removed the Raise-time `pending_evidence_items` block in `submit_request` (the
+  gateway-level counterpart that blocked Raise before any linked child request was even created), and its
+  now-unused `_pending_draft_checklist_evidence()` helper. The separate mandatory-checked-items gate
+  (`pending_checklist_items`, scoped to SAST/DAST) is untouched.
+
+**Frontend (`RequestDetail.tsx`):**
+- Removed the red "Cannot Submit / Raise yet -- ... needs at least one evidence document" blocking banner
+  and the corresponding `disabled`/`title` conditions on the "Submit / Raise" button.
+- `draftEvidenceCounts` (per-checklist-item evidence-document count, loaded from the checklist-evidence
+  endpoints) is kept, repurposed for the new non-blocking prompt below; the list of items with nothing
+  attached is now named `itemsWithoutEvidence` rather than `pendingEvidence` to reflect that it's advisory,
+  not a submit blocker.
+- New `handleSubmitClick()`: if `itemsWithoutEvidence` is non-empty, opens a `ConfirmModal` ("Evidence not
+  attached yet") listing those items, with "Raise Anyway" (proceeds to actually submit) and "Go Back" (just
+  closes the pop-up, so the requester can attach evidence first if they choose) -- otherwise submits
+  immediately, same as before this section. Wired to the "Submit / Raise" button's `onClick` in place of the
+  previous direct `() => act("submit")`.
+- `Functional.tsx`/`Performance.tsx`/`SAST.tsx`/`DAST.tsx`: removed each module's `evidenceCounts` state and
+  the matching `((c.is_mandatory || c.requester_checked) && !c.is_complete && evidenceCounts[c.id] === 0)`
+  clause that disabled the QA Lead's "Verified" checkbox until evidence existed (and the matching "No
+  evidence document attached yet" title text) -- an item can now be verified as soon as the requester has
+  self-declared it ready, evidence or not. The `ChecklistEvidence` component's `onCountChange` prop (now
+  unused by these 4 call sites) and its `required` prop (still passed through, purely a visual "this item
+  could use evidence" hint with no enforcement behind it) are otherwise untouched.
+
+**Verified:** `python3 -m py_compile` across the entire `backend/app` tree -- clean; `npx tsc --noEmit -p .`
+across the entire frontend -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq`.
+
+## 133. Restored the missing "Application Name pending approval" status badge on the module detail views; made the SM block message tier-aware (frontend only, no schema change)
+
+**Request:** the requester noticed the Application Name approval status used to be visible somewhere and is
+now missing -- "Pending with SM is visible, but there was no such message ... after login with SM," while
+logging in as an Application Owner did show a related block message ("Application Name is still pending
+your decision above -- decide it before approving this request.").
+
+**Root cause, part 1 (the actually-missing badge):** `constants.ts` already defines
+`APPLICATION_MASTER_STATUS_LABELS` (`PENDING_APP_OWNER` -> "Pending Application Owner Approval",
+`PENDING_SM` -> "Pending SM Approval"), and `QARequests/RequestDetail.tsx` (the QA Request gateway's own
+detail view) already renders 3 badges next to its "Application Name" field for
+`PENDING_APP_OWNER`/`PENDING_SM`/`REJECTED` -- but this was never carried over to the 4 module detail views
+(`Functional.tsx`, `SAST.tsx`, `DAST.tsx`, `Performance.tsx`) where an SM or Department Head actually makes
+their approve/reject decision. Those views showed nothing beyond the (separate) block message on the
+Approve button itself -- no persistent status indicator, so someone landing on the Overview tab with the
+Approve button not yet in view had no visible explanation. Fixed by adding the same 3 badges:
+`Functional.tsx`/`Performance.tsx` already have their own "Application Name" `DetailField` (mirrors
+`RequestDetail.tsx` exactly); `SAST.tsx`/`DAST.tsx` show the application name only in the modal title with
+no separate field, so their badges were added to the "Status" `DetailField` instead, next to the existing
+`needs_dept_head_reapproval` yellow badge, prefixed "Application Name ..." to stay unambiguous next to the
+request's own Status badge.
+
+**Root cause, part 2 (the misleading message):** the SM's own `signBlockedMessage` on `ApprovalDecisionButtons`
+was a single hardcoded string -- "Application Name is still pending your decision above -- decide it before
+approving this request." -- shown any time `application_master_status !== 'APPROVED'`, regardless of which
+tier actually owns the pending decision. When the name is still sitting with the Application Owner (tier
+`PENDING_APP_OWNER`), there is no "decision above" for the SM to make at all -- `ApplicationNameBanner` only
+renders for whoever holds the CURRENT tier's role (`hasRole(user,'APPLICATION_OWNER')` at that tier, not
+`SM`), so the message was actively wrong for an SM viewing the request at that point. New
+`smApplicationNameBlockedMessage` (one per module, computed next to each file's own `applicationNameBlocking`)
+picks the right wording: `PENDING_APP_OWNER` -> explains it's still with the Application Owner and where that
+happens; `REJECTED` -> tells the SM the requester needs to pick a different name; anything else (i.e.
+`PENDING_SM`, when it genuinely is the SM's own turn) -> the original "your decision above" wording, which is
+accurate there. Wired into all 4 modules' `canSMDecide` `ApprovalDecisionButtons` in place of the static
+string. The Department Head's own block message ("This request's Application Name is not yet approved by
+SM.") was left as-is -- it's already tier-accurate as written, since Department Head is never a decider in
+the Application Name chain at all.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean (no backend changes this section);
+Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 134. Filled in Overview-tab gaps on SAST/DAST/Performance/Functional (Application Name field, Application Owner field) (frontend only, no schema change)
+
+**Request:** "For SAST, DAST, and Performance overview tab lots of information missing like application
+name," raised alongside a reminder that both an Application Owner and an SM get a turn at approving a
+request's Application Name (the two-tier chain from section 133) -- i.e. both need enough information on
+this same Overview tab to actually make that call.
+
+**Audit:** compared each of the 4 request types' Overview tab against its own already-fetched `req` object
+(every field below was already coming back from the API and typed in `types.ts` -- none of this needed a
+backend change) and found two real gaps:
+- `SAST.tsx`: `application_name` was never rendered as a field at all -- only visible in the modal's own
+  title bar (`${req.request_id} — ${req.application_name}`), easy to miss, and with nowhere for section
+  133's pending/rejected badges to attach to (they'd been bolted onto the unrelated "Status" field as a
+  stand-in instead).
+- `DAST.tsx`: had a field for it, but labeled "Application" rather than "Application Name" (inconsistent
+  with the other 3 types), and section 133's badges were likewise bolted onto "Status" instead of this field.
+- `Performance.tsx` and `Functional.tsx`: both have an `application_owner` field from the API
+  (`req.application_owner`, delegated from the linked Application Master record same as `department`) that
+  was fetched but never displayed anywhere on the Overview tab -- SAST/DAST already showed it, these two
+  didn't.
+
+**Fix:**
+- `SAST.tsx`: added a proper "Application Name" `DetailField` to the "Application & Change" section (right
+  where `RequestDetail.tsx`/`Functional.tsx`/`Performance.tsx` already put theirs), moved the 3
+  pending/rejected badges from section 133 onto it from the "Status" field.
+- `DAST.tsx`: relabeled "Application" -> "Application Name" for consistency, same badge move from "Status".
+- `Performance.tsx`: added "Application Owner" to "Application & Change", next to Department.
+- `Functional.tsx`: added "Application Owner" to "Application & Change", next to Department.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq`.
+
+## 135. Application Name Approve/Reject decisions now show up on every relevant request's Activity tab (schema change: none, uses the existing ApprovalAction table)
+
+**Request:** "Approval Name approval is never logging in activity, but this should be" -- an Application
+Owner's or SM's Approve/Reject decision on an Application Name (see `routers/applications.py::
+decide_app_owner_name` / `decide_application_name`, sections 133/134's banner and badges) left no visible
+trace on any request's own Activity tab.
+
+**Root cause:** neither decision endpoint ever wrote an `ApprovalAction` row for the decision itself.
+Rejecting happened to leave an indirect trace -- `_auto_reject_linked_requests` force-rejects whatever
+linked child request was still sitting at its own SM Approval checkpoint, logging a "SM Approval / Rejected"
+entry for that -- but that reads as the *request* being rejected, not as the *name* being rejected, and only
+fires for whichever child requests happened to be at that exact checkpoint at that exact moment. Approving a
+name left no entry anywhere, ever, on any screen.
+
+**Fix:** new `_log_application_name_decision(db, obj, tier_label, decision, current_user, comments)` in
+`routers/applications.py`, called from both `decide_app_owner_name` (tier_label `"Application Owner"`) and
+`decide_application_name` (tier_label `"SM"`), for both Approve and Reject. Since a single ApplicationMaster
+row can be shared by more than one separately-raised QA Request (reusing the same "Other" name), and the
+App Owner/SM banner plus the pending/rejected badge (sections 133/134) are shown on every request's own
+detail screen that resolves to this name, the log entry is written against every one of them: every
+`QARequest` gateway whose `application_master_id` matches this name (`entity_type="QA_REQUEST"`), plus each
+of that gateway's own linked Functional/SAST/DAST/Performance requests (`entity_type` `"FUNCTIONAL_REQUEST"`/
+`"SAST"`/`"DAST"`/`"PERFORMANCE"`) -- the same set of requests `_auto_reject_linked_requests` already walks
+for the reject-cascade case, reused here for the new logging (unlike that function, this one runs
+unconditionally, for both Approve and Reject). `step_name` is `"Application Name (Application Owner)"` or
+`"Application Name (SM)"` so the two tiers read distinctly in the Activity feed; `decision`/`comments`/
+`actor_id`/`actor_role` are the same fields every other `ApprovalAction` uses, so no frontend change was
+needed -- `JiraActivity.tsx` already renders any `step_name`/`decision` pair generically
+(`` `${item.decision} · ${item.step_name}` ``), e.g. "Approved · Application Name (SM)".
+
+**Verified:** `python3 -m py_compile` across the entire `backend/app` tree -- clean; `npx tsc --noEmit -p .`
+across the entire frontend -- clean (frontend unaffected, listed for completeness since JiraActivity's
+generic rendering was double-checked); Documents and outputs copies re-synced and confirmed identical via
+`diff -rq`.
+
+## 136. "SM Approval Pending" no longer shown while the Application Name is still with the Application Owner (frontend only, no schema/status-lifecycle change)
+
+**Request:** "while application name approval pending with Application Owner, status should not be SM
+Approval Pending, this is misleading to user."
+
+**Why this happens:** every linked Functional/SAST/DAST/Performance request is born straight at
+`SM_APPROVAL_PENDING` the moment its gateway is raised (see section 130-era comments in
+`routers/qa_requests.py::submit_request` -- there's no separate per-module Submit click anymore), regardless
+of which tier the Application Name's own two-tier chain (section 133) happens to be sitting at. So a
+brand-new "Other" name reads `PENDING_APP_OWNER` on the exact same request that already shows
+`SM_APPROVAL_PENDING` as its status -- correct under the hood (confirmed backend-enforced, not just a UI
+gate: `sm_decision` in `routers/functional.py`/`sast_dast.py`/`performance.py` already refuses an Approve
+with `application_master_status not in (None, "APPROVED")`, so an SM genuinely cannot act while it's still
+with the Application Owner), but misleading to *display* as "SM Approval Pending" when there's nothing for
+the SM to actually do yet.
+
+**Deliberately not a status-lifecycle change:** considered introducing a new status value the request sits
+at while the name is still with the Application Owner, transitioning to `SM_APPROVAL_PENDING` once it clears
+that tier -- rejected as unnecessarily invasive. `status === 'SM_APPROVAL_PENDING'` is read all over
+(`canSMDecide`, `canEditDetails`, editable-status lists, the backend's own gating above, etc.); changing the
+actual value would mean re-deriving all of that plus adding a new auto-transition trigger for something that
+even the earlier `ApplicationNameBanner.tsx` docstring says by design "never touches the request's own
+status." Fixed as a **display-only** override instead.
+
+**Fix:** new `applicationNameAwareStatusLabel(status, applicationMasterStatus)` in `components/Common.tsx`
+(next to `Badge`) -- returns `"Pending Application Owner Approval"` when `status === 'SM_APPROVAL_PENDING'`
+and `applicationMasterStatus === 'PENDING_APP_OWNER'`, `undefined` otherwise (so `Badge` falls back to its
+normal label lookup for every other case). Passed as `Badge`'s existing `label` prop -- doesn't touch
+`status` itself, so every permission/gating check keeps reading the real value untouched, only what's
+*shown* changes. Wired into every `<Badge status=... />` for a request that carries
+`application_master_status`: the Status field and the list-table "Status" column on `Functional.tsx`/
+`SAST.tsx`/`DAST.tsx`/`Performance.tsx` (8 call sites), plus the QA Request gateway's own "Linked Requests"
+table in `RequestDetail.tsx` (every row there is one of that same gateway's own children, so they all share
+its `application_master_status` -- no per-row value needed, `req.application_master_status` covers all of
+them). Also fixed each module's "Pending With" list column the same way (`QA_PENDING_WITH`/
+`SAST_DAST_PENDING_WITH`/`PERFORMANCE_PENDING_WITH[status]` all said `"SM"` for this exact case) --renders
+`"Application Owner"` instead whenever `applicationNameAwareStatusLabel` fires.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean (no backend changes this section);
+Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 137. Functional Testing Request's lifecycle stepper now shows an "Application Owner" step while the name is pending with them (frontend only, no schema change)
+
+**Request:** a screenshot of `Functional.tsx`'s Overview tab stepper (Draft -> SM Approval -> Dept. Head
+Approval -> QA Activity -> Sign-off -> Closed, with "SM Approval" highlighted as current) with the request:
+"dynamic add Application Owner lifecycle here while application owner pending" -- the same underlying issue
+as section 136 (the request's own `status` is already `SM_APPROVAL_PENDING` while the Application Name is
+still genuinely sitting with the Application Owner), this time on the stepper rather than the Status badge.
+
+**Fix:** `LifecyclePreview` (the stepper component, `Functional.tsx` only -- this is the only one of the 4
+module types with this kind of stepper; SAST/DAST/Performance have no equivalent, and the QA Request
+gateway's own `GatewayPreview` only covers Draft/Submitted/Raised, no SM Approval stage to conflict with)
+now takes an optional `applicationOwnerPending` prop. When true AND the computed stage index is 1 (the "SM
+Approval" stage -- covers `SUBMITTED`/`SM_APPROVAL_PENDING`/`RETURNED_BY_SM`), it inserts an extra
+"Application Owner" step immediately ahead of "SM Approval" (`[Draft, Application Owner, SM Approval, Dept.
+Head Approval, QA Activity, Sign-off, Closed]`, 7 steps instead of the usual 6) and highlights that new step
+as the current one instead of "SM Approval". Every other case -- name already resolved, rejected, or no
+`ApplicationMaster` row at all (older requests) -- renders the original 6-stage list untouched, so this only
+ever appears for the exact sub-step it describes and collapses back on its own the moment the name clears
+Application Owner tier. Wired at the call site: `applicationOwnerPending={req.application_master_status ===
+"PENDING_APP_OWNER"}`.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean (no backend changes this section);
+Documents and outputs copies re-synced and confirmed identical via `diff -rq`.

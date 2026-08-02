@@ -15,12 +15,19 @@ export function ChecklistEvidencePicker({
   draftRequestId,
   files,
   onFilesChange,
+  required = false,
 }: {
   kind: EvidenceKind
   itemIndex: number
   draftRequestId?: number
   files: File[]
   onFilesChange: (files: File[]) => void
+  // Whether this item is mandatory or self-declared checked -- purely a
+  // visual hint suggesting evidence would be useful here; nothing enforces
+  // it, raising the request works either way (see RequestDetail.tsx's
+  // non-blocking heads-up pop-up at Raise time for the one place this is
+  // actually surfaced as a prompt, not a requirement).
+  required?: boolean
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [savedFiles, setSavedFiles] = useState<RequestDocumentOut[]>([])
@@ -79,6 +86,14 @@ export function ChecklistEvidencePicker({
           Attach evidence
         </button>
         {totalFiles > 0 && <span className="badge badge-blue">{totalFiles} file{totalFiles !== 1 ? 's' : ''}</span>}
+        {required && totalFiles === 0 && (
+          <span
+            className="badge badge-gray"
+            title="This item is mandatory or checked off -- attaching evidence isn't required to raise this request, but it's recommended."
+          >
+            Evidence recommended
+          </span>
+        )}
       </div>
       {(savedFiles.length > 0 || files.length > 0) && (
         <div style={{ display: 'grid', gap: 4, marginTop: 6 }}>

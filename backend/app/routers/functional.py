@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date
+from ..deps import get_current_user, require_roles, require_same_department, require_not_requester
+from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -267,13 +267,10 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
     closes the request out (SM_REJECTED, terminal)."""
     obj = _get_or_404(db, req_id)
     require_same_department(current_user, obj.department)
+    require_not_requester(current_user, obj.requester_id)
     _require(obj, QAStatus.SM_APPROVAL_PENDING, "SM decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
-        raise HTTPException(
-            400,
-            "This request's Application Name is not yet Approved -- decide it first "
-            "(see the Application Name banner above) before approving the request itself.",
-        )
+        raise HTTPException(400, application_name_block_message(obj.application_master_status, "sm"))
     if payload.decision == "Approved":
         obj.status = QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING
     elif payload.decision == "Returned":
@@ -291,17 +288,14 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 # ---- Department Head Approval: Approve / Return / Reject ----
 @router.post("/{req_id}/department-head-decision", response_model=schemas.FunctionalOut)
 def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisionIn, db: Session = Depends(get_db),
-                              current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD))):
+                              current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
     """Department Head reviews the request and assigns an IT-QA QA Lead."""
     obj = _get_or_404(db, req_id)
     require_same_department(current_user, obj.department)
+    require_not_requester(current_user, obj.requester_id)
     _require(obj, QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, "Department Head decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
-        raise HTTPException(
-            400,
-            "This request's Application Name is not yet Approved by SM -- it must be decided "
-            "before this request can be approved.",
-        )
+        raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     obj.department_head_id = current_user.id
 
     if payload.decision == "Approved":
@@ -780,7 +774,7 @@ def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) ->
     if status == QAStatus.SM_APPROVAL_PENDING:
         return user.has_role(Role.SM) and user.department == obj.department
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
-        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
     if status in (QAStatus.QA_LEAD_ASSIGNED, QAStatus.READINESS_VERIFICATION,
                    QAStatus.QA_ACTIVITY_INITIATED, QAStatus.PLANNING):
         return obj.qa_lead_id == user.id
@@ -820,7 +814,7 @@ def _can_edit_details(obj: "models.FunctionalRequest", user: models.User) -> boo
     if status == QAStatus.SM_APPROVAL_PENDING:
         return user.has_role(Role.SM) and user.department == obj.department
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
-        return user.has_role(Role.DEPARTMENT_HEAD) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
     return False
 
 

@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, applicationNameAwareStatusLabel } from '../../components/Common'
 import { ApplicationNameBanner } from '../../components/ApplicationNameBanner'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -175,7 +175,8 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
                 </label>
                 {c.is_complete && <span className="badge badge-green">Verified</span>}
                 <ChecklistEvidence apiBase="/api/sast-requests" reqId={editing.id} itemId={c.id}
-                  canManage={canManageReadinessEvidence(editing.status)} />
+                  canManage={canManageReadinessEvidence(editing.status)}
+                  required={c.is_mandatory || c.requester_checked} />
               </div>
             ))}
           </div>
@@ -327,15 +328,31 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const canEditDetails = hasRole(user, 'ADMIN')
     || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status))
     || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
-    || (hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
+    || (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   // Blocks Sign/Approve on both the SM and Department Head decision panels
   // below while this request's Application Name is still PENDING/REJECTED
   // (not yet APPROVED) -- see ApplicationNameBanner.
   const applicationNameBlocking = !!req.application_master_status && req.application_master_status !== 'APPROVED'
+  // Tier-aware -- names the actual holdup instead of always claiming "your
+  // decision above" even while the name is still sitting with the
+  // Application Owner (not the SM's turn, and no "decision above" for them
+  // since the banner only renders for whoever owns the CURRENT tier).
+  const smApplicationNameBlockedMessage =
+    req.application_master_status === 'PENDING_APP_OWNER'
+      ? "This request's Application Name is still pending Application Owner approval -- it needs to be decided there before you can approve this request."
+      : req.application_master_status === 'REJECTED'
+      ? "This request's Application Name was rejected -- the requester needs to pick a different name before this request can be approved."
+      : 'Application Name is still pending your decision above -- decide it before approving this request.'
   const canSubmit = isRequester && status === 'DRAFT'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
-  const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN'))
-  const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN'))
+  // Reported directly: a person who raised this request but also separately
+  // holds SM/Department Head for the same department must not be able to
+  // approve their own request -- someone else holding that role must decide
+  // it instead. Admin still bypasses (matches the backend's
+  // require_not_requester, which enforces the same check server-side).
+  const isSelfApproval = req.requester_id === user?.id && !hasRole(user, 'ADMIN')
+  const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
+  const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
   const canStartReadiness = isAssignedQALead && status === 'SECURITY_LEAD_ASSIGNED'
   const canReadinessDecide = isAssignedQALead && status === 'SECURITY_READINESS'
   const canVerifyChecklist = isAssignedQALead && status === 'SECURITY_READINESS'
@@ -393,7 +410,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
           <DetailSection title="Status">
             <DetailField label="Status">
-              <Badge status={status} />
+              <Badge status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status)} />
               {req.needs_dept_head_reapproval && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
                   Department Head re-approval required after changes
@@ -414,6 +431,28 @@ function SASTDetail({ req, onClose, onChanged, users }: {
           </DetailSection>
 
           <DetailSection title="Application & Change">
+            {/* Reported directly: this was previously only visible in the modal's
+                own title bar, with no field for it in the body -- easy to miss,
+                especially for the App Owner/SM who need to actually review it
+                before deciding the name itself (see ApplicationNameBanner above). */}
+            <DetailField label="Application Name">
+              {req.application_name || '—'}
+              {req.application_master_status === 'PENDING_APP_OWNER' && (
+                <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
+                  Pending Application Owner Approval
+                </span>
+              )}
+              {req.application_master_status === 'PENDING_SM' && (
+                <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
+                  Pending SM Approval
+                </span>
+              )}
+              {req.application_master_status === 'REJECTED' && (
+                <span className="badge badge-red" style={{ marginLeft: 8 }}>
+                  Rejected — pick a different name
+                </span>
+              )}
+            </DetailField>
             <DetailField label="Epic Number">{req.epic_number || '—'}</DetailField>
             <DetailField label="CR Number">{req.cr_number || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
@@ -478,7 +517,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                   comments={comments}
                   busy={busy}
                   signBlocked={applicationNameBlocking}
-                  signBlockedMessage="Application Name is still pending your decision above -- decide it before approving this request."
+                  signBlockedMessage={smApplicationNameBlockedMessage}
                   onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
                   onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
                   onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
@@ -630,7 +669,10 @@ function SASTDetail({ req, onClose, onChanged, users }: {
               <span style={{ width: 130, textAlign: 'center' }}>
                 <input
                   type="checkbox" checked={c.is_complete}
-                  disabled={!canVerifyChecklist || (!c.requester_checked && !c.is_complete)}
+                  disabled={
+                    !canVerifyChecklist ||
+                    (!c.requester_checked && !c.is_complete)
+                  }
                   title={
                     !canVerifyChecklist
                       ? 'Only verifiable by QA Lead / Security Analyst / Business Analyst during Security Readiness'
@@ -642,7 +684,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                 />
               </span>
               <ChecklistEvidence apiBase="/api/sast-requests" reqId={req.id} itemId={c.id}
-                canManage={canManageReadinessEvidence(req.status)} />
+                canManage={canManageReadinessEvidence(req.status)}
+                required={c.is_mandatory || c.requester_checked} />
             </div>
           ))}
         </div>
@@ -780,8 +823,8 @@ export default function SAST() {
           { key: 'security_lead_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.security_lead_id) || 'Not assigned', filterValue: (r) => userName(users, r.security_lead_id) || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
-          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} /> },
-          { key: 'pending_with', header: 'Pending With', render: (r) => SAST_DAST_PENDING_WITH[r.status] || '—', filterValue: (r) => SAST_DAST_PENDING_WITH[r.status] || '' },
+          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
+          { key: 'pending_with', header: 'Pending With', render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '—'), filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '') },
           { key: 'findings', header: 'Findings', render: (r) => r.findings.length, filterValue: (r) => String(r.findings.length) },
           { key: 'source', header: 'Source', render: (r) => (
             r.qa_request ? (

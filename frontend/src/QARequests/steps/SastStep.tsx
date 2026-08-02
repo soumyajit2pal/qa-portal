@@ -121,7 +121,8 @@ export function SastStep({ form, set, existingSast, draftRequestId, evidenceFile
                   </span>
                 </label>
                 <ChecklistEvidencePicker kind="sast" itemIndex={itemIndex} draftRequestId={draftRequestId}
-                  files={evidenceFiles('sast', itemIndex)} onFilesChange={(files) => setEvidenceFiles('sast', itemIndex, files)} />
+                  files={evidenceFiles('sast', itemIndex)} onFilesChange={(files) => setEvidenceFiles('sast', itemIndex, files)}
+                  required={ci.is_mandatory || checked} />
               </div>
             );
           })}

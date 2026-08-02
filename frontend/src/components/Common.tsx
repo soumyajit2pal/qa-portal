@@ -150,6 +150,32 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
   );
 }
 
+// Reported directly: while an Application Name is still sitting with the
+// Application Owner -- the FIRST of the two approval tiers, see
+// ApplicationNameBanner -- a Functional/SAST/DAST/Performance request's own
+// `status` is already SM_APPROVAL_PENDING under the hood (every linked child
+// is born straight at that status the moment its gateway is raised;
+// approving/rejecting the name only ever moves the NAME along a tier, never
+// the request's own status -- see ApplicationNameBanner.tsx's docstring).
+// Showing "SM Approval Pending" at that point is misleading: there is
+// nothing for the SM to do yet, and the backend's own sm_decision endpoint
+// (routers/functional.py/sast_dast.py/performance.py) actively refuses an
+// Approve while application_master_status isn't APPROVED yet, so the SM
+// really can't act until the Application Owner clears their own tier first.
+// This only overrides what's DISPLAYED, via Badge's `label` prop -- nothing
+// that gates SM/Department Head actions reads this, they all still key off
+// the real `status` value untouched. Pass to every <Badge status={...} />
+// for a request that carries `application_master_status`.
+export function applicationNameAwareStatusLabel(
+  status?: string | null,
+  applicationMasterStatus?: string | null
+): string | undefined {
+  if (status === "SM_APPROVAL_PENDING" && applicationMasterStatus === "PENDING_APP_OWNER") {
+    return "Pending Application Owner Approval";
+  }
+  return undefined;
+}
+
 interface PageHeaderProps {
   title: ReactNode;
   subtitle?: ReactNode;
@@ -433,7 +459,8 @@ interface ApprovalDecisionButtonsProps {
   extraControlLabel?: string;
   extraReady?: boolean;
   // Set while this request's Application Name is still not APPROVED (i.e.
-  // PENDING or REJECTED -- see ApplicationNameBanner/application_master_status)
+  // PENDING_APP_OWNER, PENDING_SM, or REJECTED -- see
+  // ApplicationNameBanner/application_master_status)
   // -- disables both Sign and Approve (Return/Reject stay usable, since an
   // approver should still be able to bounce a request back over an
   // unapproved name rather than being stuck unable to act on it at all).
@@ -1342,11 +1369,23 @@ export function ChecklistEvidence({
   reqId,
   itemId,
   canManage = true,
+  required = false,
+  onCountChange,
 }: {
   apiBase: string;
   reqId: number;
   itemId: number;
   canManage?: boolean;
+  // Whether this item is one that needs at least one evidence document --
+  // i.e. it's mandatory, or the requester has self-declared it checked (see
+  // backend documents.py::require_checklist_evidence for the matching
+  // server-side rule). Purely a front-end hint here; the backend is the
+  // actual enforcement point at Submit/Resubmit and QA Lead verify-time.
+  required?: boolean;
+  // Reports the current evidence-document count back up to the parent so it
+  // can (for example) disable a "verify" checkbox until evidence exists,
+  // mirroring the backend's verify-time gate.
+  onCountChange?: (count: number) => void;
 }) {
   const { user } = useAuth();
   const isAdmin = !!user?.roles?.includes("ADMIN");
@@ -1369,6 +1408,11 @@ export function ChecklistEvidence({
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    onCountChange?.(documents.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents.length]);
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -1431,6 +1475,14 @@ export function ChecklistEvidence({
           >
             {documents.length} file{documents.length !== 1 ? "s" : ""}
           </button>
+        )}
+        {required && documents.length === 0 && (
+          <span
+            className="badge badge-gray"
+            title="This item is mandatory or has been self-declared checked -- attaching evidence isn't required to submit or verify it, but it's recommended."
+          >
+            Evidence recommended
+          </span>
         )}
       </div>
       {expanded && documents.length > 0 && (

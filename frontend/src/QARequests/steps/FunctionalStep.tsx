@@ -96,7 +96,8 @@ export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEv
               </span>
             </label>
             <ChecklistEvidencePicker kind="functional" itemIndex={itemIndex} draftRequestId={draftRequestId}
-              files={evidenceFiles('functional', itemIndex)} onFilesChange={(files) => setEvidenceFiles('functional', itemIndex, files)} />
+              files={evidenceFiles('functional', itemIndex)} onFilesChange={(files) => setEvidenceFiles('functional', itemIndex, files)}
+              required={ci.is_mandatory || checked} />
           </div>
         );
       })}

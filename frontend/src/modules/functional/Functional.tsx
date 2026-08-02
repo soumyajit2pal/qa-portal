@@ -15,6 +15,7 @@ import {
   DetailField,
   RequestDocuments,
   ChecklistEvidence,
+  applicationNameAwareStatusLabel,
 } from "../../components/Common";
 import { ApplicationNameBanner } from "../../components/ApplicationNameBanner";
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
@@ -340,7 +341,8 @@ function FunctionalFormModal({
                   </span>
                 )}
                 <ChecklistEvidence apiBase="/api/functional-requests" reqId={editing.id} itemId={c.id}
-                  canManage={canManageReadinessEvidence(editing.status)} />
+                  canManage={canManageReadinessEvidence(editing.status)}
+                  required={c.is_mandatory || c.requester_checked} />
               </div>
             ))}
           </div>
@@ -372,17 +374,41 @@ const LIFECYCLE_STAGES = [
   "Closed",
 ];
 
-function LifecyclePreview({ activeIndex }: { activeIndex: number }) {
+// Reported directly: while an Application Name is still with the
+// Application Owner -- the first of the two approval tiers a name goes
+// through, see ApplicationNameBanner -- this request's own `status` is
+// already SM_APPROVAL_PENDING under the hood (same reason
+// applicationNameAwareStatusLabel in components/Common.tsx overrides the
+// Status badge), so this stepper would otherwise highlight "SM Approval" as
+// the current stage even though there's nothing for the SM to do yet.
+// `applicationOwnerPending` inserts an extra "Application Owner" step ahead
+// of "SM Approval" and highlights THAT one as current instead -- only while
+// genuinely at that exact sub-step (SM Approval stage AND
+// application_master_status is still PENDING_APP_OWNER); collapses back to
+// the normal stage list the moment the name clears that tier (or was never
+// gated by one at all, e.g. an older request with no ApplicationMaster row).
+function LifecyclePreview({
+  activeIndex,
+  applicationOwnerPending,
+}: {
+  activeIndex: number;
+  applicationOwnerPending?: boolean;
+}) {
+  const showAppOwnerStage = !!applicationOwnerPending && activeIndex === 1;
+  const stages = showAppOwnerStage
+    ? [LIFECYCLE_STAGES[0], "Application Owner", ...LIFECYCLE_STAGES.slice(1)]
+    : LIFECYCLE_STAGES;
+  const effectiveActiveIndex = showAppOwnerStage ? 1 : activeIndex;
   return (
     <div className="stepper" style={{ margin: "4px 0 18px" }}>
-      {LIFECYCLE_STAGES.map((label, i) => (
+      {stages.map((label, i) => (
         <React.Fragment key={label}>
-          <div className={`step ${i <= activeIndex ? "filled" : ""}`}>
+          <div className={`step ${i <= effectiveActiveIndex ? "filled" : ""}`}>
             <div className="circle">{i + 1}</div>
             <div className="step-label">{label}</div>
           </div>
-          {i < LIFECYCLE_STAGES.length - 1 && (
-            <div className={`connector ${i < activeIndex ? "filled" : ""}`} />
+          {i < stages.length - 1 && (
+            <div className={`connector ${i < effectiveActiveIndex ? "filled" : ""}`} />
           )}
         </React.Fragment>
       ))}
@@ -595,14 +621,35 @@ function FunctionalDetail({
   const applicationNameBlocking =
     !!req.application_master_status &&
     req.application_master_status !== "APPROVED";
+  // Reported directly: the SM's own block message used to always say "your
+  // decision above" even while the name was still sitting with the
+  // Application Owner (i.e. not the SM's turn at all yet, and no "decision
+  // above" for them to make since the banner only renders for whoever owns
+  // the CURRENT tier) -- misleading. Tier-aware instead: names the actual
+  // holdup and who owns it.
+  const smApplicationNameBlockedMessage =
+    req.application_master_status === "PENDING_APP_OWNER"
+      ? "This request's Application Name is still pending Application Owner approval -- it needs to be decided there before you can approve this request."
+      : req.application_master_status === "REJECTED"
+      ? "This request's Application Name was rejected -- the requester needs to pick a different name before this request can be approved."
+      : "Application Name is still pending your decision above -- decide it before approving this request.";
+  // Reported directly: a person who raised this request but also separately
+  // holds SM/Department Head for the same department must not be able to
+  // approve their own request just because they wear both hats -- someone
+  // else holding that role has to decide it instead. Admin still bypasses
+  // (matches the backend's require_not_requester, which does the same
+  // check server-side regardless of what this button shows).
+  const isSelfApproval = req.requester_id === user?.id && !isAdmin;
   const canSMDecide =
     hasRole(user, "SM") &&
     status === "SM_APPROVAL_PENDING" &&
-    (sameDept || isAdmin);
+    (sameDept || isAdmin) &&
+    !isSelfApproval;
   const canDepartmentHeadDecide =
-    hasRole(user, "DEPARTMENT_HEAD") &&
+    hasRole(user, "DEPARTMENT_HEAD_CM", "DEPARTMENT_HEAD_AGM") &&
     status === "DEPARTMENT_HEAD_APPROVAL_PENDING" &&
-    (sameDept || isAdmin);
+    (sameDept || isAdmin) &&
+    !isSelfApproval;
   const canStartReadiness =
     isAssignedQALead && status === "QA_LEAD_ASSIGNED";
   const canReadinessDecide =
@@ -668,7 +715,7 @@ function FunctionalDetail({
         "RETURNED_BY_QA_LEAD",
       ].includes(status)) ||
     (hasRole(user, "SM") && status === "SM_APPROVAL_PENDING" && sameDept) ||
-    (hasRole(user, "DEPARTMENT_HEAD") &&
+    (hasRole(user, "DEPARTMENT_HEAD_CM", "DEPARTMENT_HEAD_AGM") &&
       status === "DEPARTMENT_HEAD_APPROVAL_PENDING" &&
       sameDept);
 
@@ -695,7 +742,10 @@ function FunctionalDetail({
 
       {tab === "overview" && (
         <div>
-          <LifecyclePreview activeIndex={lifecycleStageIndex(req.status)} />
+          <LifecyclePreview
+            activeIndex={lifecycleStageIndex(req.status)}
+            applicationOwnerPending={req.application_master_status === "PENDING_APP_OWNER"}
+          />
 
           {(sameDept || isAdmin) && (
             <ApplicationNameBanner
@@ -708,7 +758,7 @@ function FunctionalDetail({
 
           <DetailSection title="Status">
             <DetailField label="Status">
-              <Badge status={req.status} />
+              <Badge status={req.status} label={applicationNameAwareStatusLabel(req.status, req.application_master_status)} />
               {req.needs_dept_head_reapproval && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
                   Department Head re-approval required after changes
@@ -732,6 +782,21 @@ function FunctionalDetail({
           <DetailSection title="Application & Change">
             <DetailField label="Application Name">
               {req.application_name || "—"}
+              {req.application_master_status === "PENDING_APP_OWNER" && (
+                <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
+                  Pending Application Owner Approval
+                </span>
+              )}
+              {req.application_master_status === "PENDING_SM" && (
+                <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
+                  Pending SM Approval
+                </span>
+              )}
+              {req.application_master_status === "REJECTED" && (
+                <span className="badge badge-red" style={{ marginLeft: 8 }}>
+                  Rejected — pick a different name
+                </span>
+              )}
             </DetailField>
             <DetailField label="Epic Number">
               {req.epic_number || "—"}
@@ -744,6 +809,9 @@ function FunctionalDetail({
             </DetailField>
             <DetailField label="Department">
               {req.department || "—"}
+            </DetailField>
+            <DetailField label="Application Owner">
+              {req.application_owner || "—"}
             </DetailField>
           </DetailSection>
 
@@ -849,7 +917,7 @@ function FunctionalDetail({
                   comments={comments}
                   busy={!!busyAction}
                   signBlocked={applicationNameBlocking}
-                  signBlockedMessage="Application Name is still pending your decision above -- decide it before approving this request."
+                  signBlockedMessage={smApplicationNameBlockedMessage}
                   onApprove={(signed) =>
                     act("sm-decision", {
                       decision: "Approved",
@@ -1253,7 +1321,8 @@ function FunctionalDetail({
                 />
               </span>
               <ChecklistEvidence apiBase="/api/functional-requests" reqId={req.id} itemId={c.id}
-                canManage={canManageReadinessEvidence(req.status)} />
+                canManage={canManageReadinessEvidence(req.status)}
+                required={c.is_mandatory || c.requester_checked} />
             </div>
           ))}
         </div>
@@ -1465,13 +1534,13 @@ export default function Functional() {
             {
               key: "status",
               header: "Status",
-              render: (r) => <Badge status={r.status} />,
+              render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} />,
             },
             {
               key: "pending_with",
               header: "Pending With",
-              render: (r) => QA_PENDING_WITH[r.status] || "—",
-              filterValue: (r) => QA_PENDING_WITH[r.status] || "",
+              render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? "Application Owner" : (QA_PENDING_WITH[r.status] || "—"),
+              filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? "Application Owner" : (QA_PENDING_WITH[r.status] || ""),
             },
             {
               key: "qa_request",

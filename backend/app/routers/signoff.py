@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles
+from ..deps import get_current_user, require_roles, require_not_requester
 from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, QA_DEPARTMENT
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -195,6 +195,7 @@ def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Ses
     """QA Lead approval checkpoint before Executive COE final approval."""
     obj = _get_or_404(db, signoff_id)
     _require_qa_department(current_user)
+    require_not_requester(current_user, obj.requester_id)
     _require(obj, "SM_APPROVAL_PENDING", "QA Lead decision")
     if payload.decision == "Approved":
         obj.status = "DEPT_HEAD_COE_APPROVAL_PENDING"
@@ -214,10 +215,11 @@ def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Ses
 @router.post("/{signoff_id}/department-head-coe-decision", response_model=schemas.SignOffOut, include_in_schema=False)
 @router.post("/{signoff_id}/executive-coe-decision", response_model=schemas.SignOffOut)
 def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
-                           current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_COE))):
+                           current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
     """Final IT - QA approval by Executive COE; approval issues the certificate."""
     obj = _get_or_404(db, signoff_id)
     _require_qa_department(current_user)
+    require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPT_HEAD_COE_APPROVAL_PENDING", "Executive COE decision")
     if payload.decision == "Approved":
         obj.status = "ISSUED"
@@ -330,7 +332,7 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.QA_LEAD) and user.department == QA_DEPARTMENT
     if status == "DEPT_HEAD_COE_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_COE) and user.department == QA_DEPARTMENT
+        return user.has_role(Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM) and user.department == QA_DEPARTMENT
     return False
 
 

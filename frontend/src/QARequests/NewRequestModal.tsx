@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { Modal, ErrorText } from '../components/Common'
+import ConfirmModal from '../components/ConfirmModal'
 import { IconCheckCircle } from '../components/Icons'
 import { QARequestOut } from '../types'
 import { EMPTY_FORM, QARequestForm, blankSastComponent, blankDastComponent } from './types'
@@ -116,6 +117,15 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
+  // This form can hold several steps' worth of typed-but-not-yet-saved
+  // details -- preventBackdropClose already stops an accidental backdrop
+  // click from silently throwing all of that away, but the header's own
+  // "Close" button (rendered by Modal itself, wired straight to whatever
+  // onClose it's given) and this wizard's own footer "Cancel" button both
+  // still called onClose directly, with no such guard -- reported directly
+  // as still losing the form with no confirmation. Both now route through
+  // requestClose() below instead.
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
 
   const steps = buildSteps(form.request_types)
   useEffect(() => {
@@ -229,6 +239,12 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
   const isLastStep = stepIndex === steps.length - 1
   const isFirstStep = stepIndex === 0
 
+  // Header "Close" and footer "Cancel" both call this instead of onClose
+  // directly now -- see the confirmDiscard state comment above.
+  function requestClose() {
+    setConfirmDiscard(true)
+  }
+
   function goNext() {
     // Every *StepError() below returns a plain string, and validation.ts's
     // messages are fixed literals -- so hitting the same unmet requirement
@@ -265,7 +281,7 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
   return (
     <Modal
       title={editing ? `Edit ${editing.request_id}` : 'Raise QA Request'}
-      onClose={onClose}
+      onClose={requestClose}
       wide
       variant="dialog"
       // This form can hold several steps' worth of typed-but-not-yet-saved
@@ -345,11 +361,28 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
                   {busy ? 'Saving...' : (editing ? 'Save Changes' : 'Save Draft')}
                 </button>
               )}
-              <button type="button" className="btn" onClick={onClose}>Cancel</button>
+              <button type="button" className="btn" onClick={requestClose}>Cancel</button>
             </div>
           </div>
         </form>
       </div>
+      {confirmDiscard && (
+        <ConfirmModal
+          title={editing ? 'Discard these changes?' : 'Discard this QA Request?'}
+          message={
+            <div style={{ fontSize: 13.5 }}>
+              {editing
+                ? 'Any changes made in this form will be lost.'
+                : 'Any details you’ve entered on this form -- across every step -- will be lost.'}
+            </div>
+          }
+          confirmLabel="Discard"
+          cancelLabel="Keep Editing"
+          destructive
+          onConfirm={() => { setConfirmDiscard(false); onClose() }}
+          onCancel={() => setConfirmDiscard(false)}
+        />
+      )}
     </Modal>
   )
 }

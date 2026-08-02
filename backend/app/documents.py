@@ -97,3 +97,5 @@ def delete_document(db: Session, doc: models.RequestDocument) -> None:
         os.remove(path)
     db.delete(doc)
     db.commit()
+
+

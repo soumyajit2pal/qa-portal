@@ -1,11 +1,10 @@
 import datetime
 import json
-import uuid
 from typing import List
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, UniqueConstraint
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, UniqueConstraint, text
 )
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -24,14 +23,83 @@ def now():
     return datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
 
 
-def gen_id(prefix):
-    ist_time = (
-        datetime.datetime.utcnow()
-        .replace(tzinfo=ZoneInfo('UTC'))
-        .astimezone(ZoneInfo('Asia/Kolkata'))
-    )
+# Reported directly: IDs must read "{PREFIX}-{YYYYMMDD}-{n}", e.g.
+# "TQA-FUNC-20260801-1", with n a small sequential counter that starts back
+# at 1 each day for that prefix (so it stays a short, rememberable number
+# instead of growing forever). Oracle's native SEQUENCE object has no daily
+# reset, so a small counter table (IdCounter, one row per prefix+date) plus a
+# single atomic MERGE statement (_claim_daily_seq below) does the counting
+# instead -- the MERGE takes a row lock on that prefix+date's counter row, so
+# two concurrent requests for the same prefix on the same day serialize
+# correctly and never hand out the same number twice. Every app-generated
+# business ID (the human-facing string field -- request_id/suppression_id/
+# certificate_id/project_key/cycle_key/test_case_key -- as opposed to the
+# internal numeric `id` PK) uses this scheme. Existing legacy-format IDs
+# already in the database are left as-is (no backfill/rename) -- old formats
+# (a random-hex suffix, or a bare "{PREFIX}-{n}" from an earlier revision of
+# this scheme) remain distinguishable from the current format by hyphen
+# count/shape, so old and new formats coexist indefinitely.
+class IdCounter(Base):
+    __tablename__ = "qap_id_counters"
+    prefix = Column(String(20), primary_key=True)
+    counter_date = Column(Date, primary_key=True)
+    next_value = Column(Integer, nullable=False)
 
-    return f"{prefix}-{ist_time:%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+
+def _ist_today() -> datetime.date:
+    return now().date()
+
+
+def _claim_daily_seq(prefix, executable, ist_date) -> int:
+    """`executable` is anything exposing .execute(text(...)) -- a raw
+    Connection (from a Column default's ExecutionContext, see
+    gen_id_default below) or an ORM Session (when called directly from
+    router code, e.g. routers/test_repository.py's manual gen_id("TC", db)
+    calls). The MERGE is a single atomic statement: Oracle locks the target
+    row (inserting it first if this is the first ID of the day for this
+    prefix) so a concurrent MERGE against the same prefix+date blocks until
+    this transaction commits, then sees the updated value -- no separate
+    read-then-write race window."""
+    executable.execute(
+        text(
+            "MERGE INTO qap_id_counters t "
+            "USING (SELECT :prefix AS prefix, :cdate AS counter_date FROM dual) s "
+            "ON (t.prefix = s.prefix AND t.counter_date = s.counter_date) "
+            "WHEN MATCHED THEN UPDATE SET next_value = next_value + 1 "
+            "WHEN NOT MATCHED THEN INSERT (prefix, counter_date, next_value) "
+            "VALUES (s.prefix, s.counter_date, 1)"
+        ),
+        {"prefix": prefix, "cdate": ist_date},
+    )
+    return executable.execute(
+        text("SELECT next_value FROM qap_id_counters WHERE prefix = :prefix AND counter_date = :cdate"),
+        {"prefix": prefix, "cdate": ist_date},
+    ).scalar()
+
+
+def gen_id(prefix, db):
+    """Call directly with the active Session when a business ID is needed
+    outside of a Column default (e.g. routers/test_repository.py, where a
+    Test Case's key is only generated if the user left it blank). For
+    Column-level defaults, use gen_id_default below instead -- a plain 0-arg
+    callable has no access to the live connection Oracle needs for the
+    MERGE, only the ExecutionContext SQLAlchemy hands a 1-arg default at
+    flush time."""
+    ist_date = _ist_today()
+    n = _claim_daily_seq(prefix, db, ist_date)
+    return f"{prefix}-{ist_date:%Y%m%d}-{n}"
+
+
+def gen_id_default(prefix):
+    """Returns a context-sensitive SQLAlchemy Column default -- pass to
+    Column(..., default=gen_id_default("TQA-REQ")). SQLAlchemy detects the
+    1-argument signature and supplies the ExecutionContext automatically at
+    flush/insert time, whose .connection is used to run the MERGE."""
+    def _default(context):
+        ist_date = _ist_today()
+        n = _claim_daily_seq(prefix, context.connection, ist_date)
+        return f"{prefix}-{ist_date:%Y%m%d}-{n}"
+    return _default
 
 
 class User(Base):
@@ -116,23 +184,35 @@ class ApplicationMaster(Base):
     Name dropdown (see routers/qa_requests.py::_resolve_application_name).
     The dropdown itself only ever offers names with status == APPROVED (see
     routers/applications.py::list_application_names); picking "Other" and
-    typing a name not already on this list creates a new PENDING row here
-    (name always upper-cased at the point of entry, see the same resolver,
-    to minimise case-sensitivity duplicates), which then needs an SM from the
-    same department to explicitly approve it (see routers/applications.py::
-    decide_application_name) before it: (a) shows up as a pickable option for
-    everyone else going forward, and (b) stops showing as "pending" on this
-    particular request. Approving/rejecting the name is independent of
-    approving the request itself -- the request's own SM Approval decision
-    is not gated on this (see the QA Request submit flow, which never blocks
-    on application_master.status)."""
+    typing a name not already on this list creates a new row here (name
+    always upper-cased at the point of entry, see the same resolver, to
+    minimise case-sensitivity duplicates).
+
+    Two-tier approval (2026-08): a brand-new name starts at
+    PENDING_APP_OWNER -- an Application Owner from the same department must
+    approve it first (see routers/applications.py::decide_app_owner) --
+    before it moves to PENDING_SM for the existing SM approval step (see
+    decide_application_name). Only once SM approves does it become APPROVED
+    and: (a) show up as a pickable option for everyone else going forward,
+    and (b) stop showing as "pending" on this particular request. Either
+    tier can Reject, which is terminal. Approving/rejecting the name is
+    independent of approving the request itself in the sense that raising/
+    saving a request is never blocked on it (_resolve_application_name never
+    blocks the caller) -- but the request's own SM/Department Head Approval
+    decisions ARE blocked from reaching "Approved" while this is anything
+    other than APPROVED (see application_name_block_message in constants.py
+    and its 6 call sites across functional.py/sast_dast.py/performance.py)."""
     __tablename__ = "qap_application_master"
     id = pk_column()
     name = Column(String(150), unique=True, nullable=False)
-    status = Column(String(20), default="PENDING", index=True)   # PENDING / APPROVED / REJECTED
+    # PENDING_APP_OWNER / PENDING_SM / APPROVED / REJECTED -- see the class
+    # docstring above and constants.APPLICATION_MASTER_STATUSES.
+    status = Column(String(20), default="PENDING_APP_OWNER", index=True)
     # The department context the name was proposed under -- who gets to
-    # decide (see require_same_department in routers/applications.py), same
-    # scoping rule as every other SM approval checkpoint in the app.
+    # decide at EITHER tier (see require_same_department in
+    # routers/applications.py), same scoping rule as every other SM/
+    # Department Head approval checkpoint in the app -- an Application Owner
+    # from this same department decides first, then an SM from it.
     department = Column(String(150))
     requested_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     # The QA Request that first introduced this name -- purely for
@@ -140,12 +220,25 @@ class ApplicationMaster(Base):
     # a REJECTED name that gets proposed again later re-links to whichever
     # QA Request triggered that.
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
+    # Application Owner's own tier -- populated only when an Application
+    # Owner decides (Approved moves the row on to PENDING_SM without
+    # touching decided_by_id/decided_at/comments below; Rejected is terminal
+    # and populates BOTH this tier's fields and the SM-tier fields below, so
+    # anything reading decided_by_id/decided_at/comments as "the decision
+    # that made this terminal" keeps working regardless of which tier made
+    # the call).
+    app_owner_decided_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    app_owner_decided_at = Column(DateTime, nullable=True)
+    app_owner_comments = Column(Text, nullable=True)
+    # SM's own tier -- populated when SM makes the final Approved/Rejected
+    # call, or when an Application Owner rejects (see above).
     decided_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     decided_at = Column(DateTime, nullable=True)
     comments = Column(Text, nullable=True)
     created_at = Column(DateTime, default=now)
 
     requested_by = relationship("User", foreign_keys=[requested_by_id])
+    app_owner_decided_by = relationship("User", foreign_keys=[app_owner_decided_by_id])
     decided_by = relationship("User", foreign_keys=[decided_by_id])
     qa_request = relationship("QARequest", foreign_keys=[qa_request_id])
 
@@ -167,7 +260,7 @@ class QARequest(Base):
     """
     __tablename__ = "qap_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=lambda: gen_id("TQA-REQ"))
+    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-REQ"))
     request_date = Column(Date, default=lambda: datetime.date.today())
     department = Column(String(150))
     application_name = Column(String(150), nullable=False)
@@ -329,7 +422,7 @@ class FunctionalRequest(Base):
     underlying change."""
     __tablename__ = "qap_functional_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=lambda: gen_id("TQA-FUNC"))
+    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-FUNC"))
     status = Column(String(32), default=QAStatus.DRAFT, index=True)
     # Set (independently of `status`) when the QA Lead fails Readiness
     # Verification with "require re-approval" ticked. `status` is always set
@@ -506,7 +599,7 @@ class WalkthroughSession(Base):
 class SASTRequest(Base):
     __tablename__ = "qap_sast_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=lambda: gen_id("SAST"))
+    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-SAST"))
     application_name = Column(String(150), nullable=False)
     epic_number = Column(String(150))
     cr_number = Column(String(64))
@@ -700,7 +793,7 @@ class SASTWalkthrough(Base):
 class DASTRequest(Base):
     __tablename__ = "qap_dast_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=lambda: gen_id("DAST"))
+    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-DAST"))
     risk_category = Column(String(16))
     # See SASTRequest.priority for the full reasoning.
     priority = Column(String(16))
@@ -897,7 +990,7 @@ class PerformanceRequest(Base):
     pre-testing readiness checklist."""
     __tablename__ = "qap_performance_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=lambda: gen_id("PERF"))
+    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-PERF"))
     application_name = Column(String(150), nullable=False)
     epic_number = Column(String(150))
     cr_number = Column(String(64))
@@ -1015,7 +1108,7 @@ class PerformanceWalkthrough(Base):
 class SuppressionRequest(Base):
     __tablename__ = "qap_suppression_requests"
     id = pk_column()
-    suppression_id = Column(String(40), unique=True, default=lambda: gen_id("SUP"))
+    suppression_id = Column(String(40), unique=True, default=gen_id_default("SUP"))
     application_name = Column(String(150), nullable=False)
     scan_type = Column(String(16))     # SAST / DAST
     # Auto-populated (at creation time, from whichever SAST/DAST request the
@@ -1173,7 +1266,7 @@ class RequestDocument(Base):
 class QASignOff(Base):
     __tablename__ = "qap_signoffs"
     id = pk_column()
-    certificate_id = Column(String(40), unique=True, default=lambda: gen_id("QA-CERT"))
+    certificate_id = Column(String(40), unique=True, default=gen_id_default("QA-CERT"))
     certificate_date = Column(Date, default=lambda: datetime.date.today())
     certificate_type = Column(String(32))
     testing_type = Column(String(16))
@@ -1241,7 +1334,7 @@ class QASignOff(Base):
 class TestProject(Base):
     __tablename__ = "qap_test_projects"
     id = pk_column()
-    project_key = Column(String(40), unique=True, default=lambda: gen_id("TPROJ"))
+    project_key = Column(String(40), unique=True, default=gen_id_default("TPROJ"))
     name = Column(String(150), nullable=False)
     application_master_id = Column(Integer, ForeignKey("qap_application_master.id"), nullable=True)
     department = Column(String(150))
@@ -1340,7 +1433,7 @@ class TestCycle(Base):
     over time, each getting its own independent execution history."""
     __tablename__ = "qap_test_cycles"
     id = pk_column()
-    cycle_key = Column(String(40), unique=True, default=lambda: gen_id("CYCLE"))
+    cycle_key = Column(String(40), unique=True, default=gen_id_default("CYCLE"))
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
     name = Column(String(150), nullable=False)
     description = Column(Text)

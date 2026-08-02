@@ -318,8 +318,15 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
 
   const canSubmit = isRequester && status === 'Draft'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status)
-  const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN'))
-  const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN'))
+  // Reported directly: a person who raised this request but also separately
+  // holds SM/Department Head for the same department must not be able to
+  // approve their own request -- someone else holding that role must decide
+  // it instead. Admin still bypasses (matches the backend's
+  // require_not_requester, which enforces the same check server-side using
+  // created_by_id, the field this module raises requests under).
+  const isSelfApproval = sup.created_by_id === user?.id && !hasRole(user, 'ADMIN')
+  const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
+  const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
   const canSecurityDecide = hasRole(user, 'SECURITY_ANALYST') && status === 'SECURITY_TEAM_VERIFICATION'
 
   return (

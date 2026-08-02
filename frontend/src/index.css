@@ -126,7 +126,8 @@ a { color: inherit; }
 }
 .user-chip .who { flex: 1; min-width: 0; }
 .user-chip .name { font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.user-chip .role { font-size: 11px; color: #8b98b3; }
+.user-chip .role { font-size: 11px; color: #8b98b3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-chip .dept { font-size: 10.5px; color: #6b7594; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .user-chip button {
   background: none; border: none; color: #8b98b3; cursor: pointer; padding: 4px; border-radius: 6px; display: flex;
   transition: background .15s var(--ease), color .15s var(--ease);
@@ -902,6 +903,7 @@ body { background: var(--bg); }
 .redesigned-shell .user-chip .avatar { width: 30px; height: 30px; background: #343b5d; box-shadow: none; font-size: 10px; }
 .redesigned-shell .user-chip .name { font-size: 10.5px; }
 .redesigned-shell .user-chip .role { margin-top: 1px; font-size: 8.5px; }
+.redesigned-shell .user-chip .dept { margin-top: 1px; font-size: 8px; }
 .redesigned-shell .topbar { min-height: 61px; padding: 10px 22px; border-color: #e5e8ef; background: rgba(255,255,255,.96); box-shadow: none; }
 .topbar-context { min-width: 145px; display: flex; flex-direction: column; gap: 1px; }
 .topbar-context span { color: #9aa1b1; font-size: 8.5px; text-transform: uppercase; letter-spacing: .09em; }
@@ -1473,6 +1475,26 @@ tbody tr:hover { background: #f8f9fc; }
 .navigation-v2 .topbar .search-box { max-width: 560px; height: 38px; margin-left: clamp(4px, 2.5vw, 32px); border-radius: 9px; background: #f5f6f9; }
 .navigation-v2 .topbar-user-context { display: flex; align-items: center; gap: 7px; color: #737b8d; font-size: 10px; white-space: nowrap; }
 .navigation-v2 .topbar-user-context .status-dot { width: 6px; height: 6px; }
+/* topbar-user-context is now a <button> (was a plain <span>) so clicking the
+   signed-in name can open the Department/Role(s) popover below -- reset the
+   native button chrome so it keeps looking like the same inline label. */
+.topbar-user-menu { position: relative; }
+.navigation-v2 .topbar-user-context {
+  background: none; border: none; padding: 4px 6px; border-radius: 7px; cursor: pointer; font-family: inherit;
+  transition: background .12s var(--ease);
+}
+.navigation-v2 .topbar-user-context:hover { background: var(--bg); }
+.topbar-user-caret { font-style: normal; font-size: 9px; color: #9aa1b1; transition: transform .15s var(--ease); }
+.topbar-user-caret.open { transform: rotate(180deg); }
+.topbar-user-popover {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; min-width: 230px;
+  background: #fff; border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg);
+  padding: 12px 14px;
+}
+.topbar-user-popover-name { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.topbar-user-popover-row { display: flex; flex-direction: column; gap: 1px; font-size: 12px; color: var(--text); margin-bottom: 7px; }
+.topbar-user-popover-row .label { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #9aa1b1; }
+.topbar-user-popover-logout { width: 100%; justify-content: center; margin-top: 4px; }
 
 @media (max-width: 980px) {
   .navigation-v2 .sidebar,

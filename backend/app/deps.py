@@ -75,3 +75,32 @@ def require_same_department(current_user: models.User, entity_department) -> Non
                 f"'{entity_department}', but your profile is mapped to '{current_user.department or 'no department'}'."
             ),
         )
+
+
+def require_not_requester(current_user: models.User, requester_id) -> None:
+    """A person must never be able to approve their own request at an
+    SM/Department Head/QA Lead/Executive COE decision checkpoint, even if
+    they separately hold that approving role for the request's own
+    department -- e.g. someone who is both a Requester in IT-Software AND
+    that department's SM must have a DIFFERENT SM decide their own request;
+    wearing two hats does not let one person self-approve. Reported directly:
+    without this check, `require_same_department` alone was not enough,
+    since it only verifies the approver's department matches the request's
+    department -- it says nothing about whether the approver IS the
+    requester. ADMIN always bypasses this check, same convention as
+    require_same_department.
+
+    requester_id may be None (e.g. a standalone SAST/DAST request or
+    Suppression request with nothing meaningful to compare against) -- in
+    that case the check is skipped rather than blocking everyone.
+    """
+    if current_user.has_role(Role.ADMIN):
+        return
+    if not requester_id:
+        return
+    if current_user.id == requester_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You raised this request yourself, so you cannot also be the one to approve it "
+                   "at this checkpoint -- ask another person who holds this approval role to decide it.",
+        )

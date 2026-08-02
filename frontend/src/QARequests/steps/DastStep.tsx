@@ -124,7 +124,8 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
                   </span>
                 </label>
                 <ChecklistEvidencePicker kind="dast" itemIndex={itemIndex} draftRequestId={draftRequestId}
-                  files={evidenceFiles('dast', itemIndex)} onFilesChange={(files) => setEvidenceFiles('dast', itemIndex, files)} />
+                  files={evidenceFiles('dast', itemIndex)} onFilesChange={(files) => setEvidenceFiles('dast', itemIndex, files)}
+                  required={ci.is_mandatory || checked} />
               </div>
             )
           })}
