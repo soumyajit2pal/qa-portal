@@ -664,6 +664,7 @@ export interface TestCaseOut {
   description?: string | null
   priority?: string | null
   status: string
+  version?: string
   created_by_id?: number | null
   created_by_name?: string | null
   created_at: string

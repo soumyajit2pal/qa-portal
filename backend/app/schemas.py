@@ -1261,6 +1261,7 @@ class TestCaseOut(ORMModel):
     description: Optional[str] = None
     priority: Optional[str] = None
     status: str
+    version: str = "1.0"
     created_by_id: Optional[int] = None
     created_by_name: Optional[str] = None
     created_at: datetime.datetime

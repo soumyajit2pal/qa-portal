@@ -1437,6 +1437,13 @@ class TestCase(Base):
     # for Test Cycles, Deprecated = retained for history but unavailable for
     # new execution. The API, not a client edit form, controls transitions.
     status = Column(String(20), default="Active")
+    # Version: starts at 1.0 on first creation. The major stays fixed at 1
+    # (reserved for future breaking-change semantics); the minor increments
+    # by 1 each time a case is modified after having been Active at least
+    # once and is then re-approved by a QA Lead (see review_test_case /
+    # bulk_approve_test_cases in routers/test_repository.py).
+    version_major = Column(Integer, nullable=False, default=1)
+    version_minor = Column(Integer, nullable=False, default=0)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
@@ -1455,6 +1462,10 @@ class TestCase(Base):
     @property
     def created_by_name(self):
         return self.created_by.full_name if self.created_by else None
+
+    @property
+    def version(self):
+        return f"{self.version_major}.{self.version_minor}"
 
 
 class TestStep(Base):

@@ -37,6 +37,23 @@ def _case_workflow_action(case_id: int, current_user: models.User, decision: str
     )
 
 
+def _apply_approval_version(db: Session, obj: models.TestCase) -> None:
+    """Test case versioning: a newly created case starts at 1.0 (column
+    defaults). The first time it is approved it stays at 1.0. Every
+    approval after that is a re-approval of a case that was edited since it
+    was last Active (update_test_case / bulk_update_test_cases revert an
+    Active case to Draft on substantive edits) -- those bump the minor
+    version by one, e.g. 1.0 -> 1.1 -> 1.2. Detected by checking whether a
+    prior 'Approved' audit row already exists for this case, rather than a
+    counter, so it stays correct even if versioning is added after cases
+    already have history."""
+    was_approved_before = db.query(models.ApprovalAction).filter_by(
+        entity_type="TEST_CASE", entity_id=obj.id, decision="Approved",
+    ).first() is not None
+    if was_approved_before:
+        obj.version_minor += 1
+
+
 def _get_project_or_404(db: Session, project_id: int) -> models.TestProject:
     obj = db.query(models.TestProject).get(project_id)
     if not obj:
@@ -189,6 +206,7 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
     if decision == "APPROVE":
         if obj.status == "Active":
             raise HTTPException(400, "This test case is already approved")
+        _apply_approval_version(db, obj)
         obj.status = "Active"
         action = "Approved"
         comments = comments or "Verified by QA Lead and approved for use in Test Cycles."
@@ -286,6 +304,7 @@ def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprov
             f"Bulk approval stopped because {len(not_pending)} selected test case(s) are not pending QA Lead review: {preview}{suffix}",
         )
     for row in rows:
+        _apply_approval_version(db, row)
         row.status = "Active"
         db.add(_case_workflow_action(row.id, current_user, "Approved", comments))
     db.commit()

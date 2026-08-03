@@ -461,6 +461,14 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
               <small>{existing?.status === 'Active' ? 'Available for Test Cycles' : 'Unavailable until QA Lead approval'}</small>
             </div>
           </Field>
+          {existing && (
+            <Field label="Version">
+              <div className="tm-workflow-status-field">
+                <span className="badge badge-gray">{`v${existing.version || '1.0'}`}</span>
+                <small>Bumps automatically on each QA Lead re-approval after an edit</small>
+              </div>
+            </Field>
+          )}
         </div>
         <Field label="Test Scenario">
           <input value={scenario} onChange={(e) => setScenario(e.target.value)} disabled={readOnly} />
@@ -918,6 +926,7 @@ export default function TestRepository() {
                 { key: 'test_type', header: 'Type', render: (c) => c.test_type || '—' },
                 { key: 'priority', header: 'Priority', render: (c) => c.priority ? <Badge status={c.priority} /> : '—' },
                 { key: 'status', header: 'Workflow Status', render: (c) => <Badge status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />, filterValue: (c) => TEST_CASE_STATUS_LABELS[c.status] || c.status },
+                { key: 'version', header: 'Version', render: (c) => <span className="badge badge-gray">{`v${c.version || '1.0'}`}</span>, filterValue: (c) => `v${c.version || '1.0'}` },
                 { key: 'pending_with', header: 'Pending With', render: (c) => TEST_CASE_PENDING_WITH[c.status] || '—', filterValue: (c) => TEST_CASE_PENDING_WITH[c.status] || '' },
                 { key: 'steps', header: 'Steps', render: (c) => c.steps.length, filterable: false },
               ]}

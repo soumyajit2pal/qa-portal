@@ -245,10 +245,14 @@ function RecordResultModal({ execution, readOnly, onClose, onSaved, onRemoved }:
       {tc && (
         <div className="tm-execution-case-summary">
           <div className="tm-execution-case-heading">
-            <div><small>Test case definition</small><h4>{tc.test_case_key}</h4></div>
+            <div><small>Test case definition</small><h4>{tc.test_case_key} <span className="badge badge-gray">{`v${tc.version || '1.0'}`}</span></h4></div>
             <Badge status={tc.status} />
           </div>
           <div className="tm-case-detail-grid">
+            <TestCaseDetail label="Version">
+              <span className="badge badge-gray">{`v${tc.version || '1.0'}`}</span>
+              <small style={{ display: 'block', marginTop: 4 }}>Always reflects the current approved definition -- this cycle uses it live, not a copy.</small>
+            </TestCaseDetail>
             <TestCaseDetail label="Epic ID" value={tc.epic_id} />
             <TestCaseDetail label="CR Number" value={tc.cr_number} />
             <TestCaseDetail label="Feature ID" value={tc.feature_id} />
@@ -461,6 +465,7 @@ export default function TestExecution() {
                 onRowClick={setEditingExecution}
                 columns={[
                   { key: 'test_case', header: 'Test Case ID', render: (e) => e.test_case?.test_case_key || `#${e.test_case_id}`, filterValue: (e) => e.test_case?.test_case_key || String(e.test_case_id) },
+                  { key: 'version', header: 'Version', render: (e) => <span className="badge badge-gray">{`v${e.test_case?.version || '1.0'}`}</span>, filterValue: (e) => `v${e.test_case?.version || '1.0'}` },
                   { key: 'mapping', header: 'Epic / CR / Story', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.test_case?.epic_id || '—'}</strong><small>{[e.test_case?.cr_number, e.test_case?.user_story_id].filter(Boolean).join(' · ') || 'No CR / story'}</small></span>, filterValue: (e) => `${e.test_case?.epic_id || ''} ${e.test_case?.cr_number || ''} ${e.test_case?.user_story_id || ''}` },
                   { key: 'scenario', header: 'Scenario', render: (e) => e.test_case?.test_scenario || '—', filterValue: (e) => e.test_case?.test_scenario || '' },
                   { key: 'status', header: 'Result', render: (e) => <Badge status={e.status} /> },

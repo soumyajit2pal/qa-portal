@@ -5970,3 +5970,109 @@ paste screenshots from the clipboard or select up to eight PNG/JPEG/GIF/WebP ima
 Images are stored as authenticated `qap_module_documents` rows under module `TEST_EXEC_IMAGE`, linked to
 the exact `qap_test_executions.id`; list/download/delete endpoints never expose the upload folder publicly.
 Existing plain-text Actual Result values remain compatible and render normally. No Oracle DDL is required.
+
+
+## 139. Extracted shared rich-text editor mechanics out of JiraActivity.tsx/JiraRichTextField.tsx into a new RichTextEditor.tsx (frontend only, no backend/schema change)
+
+**Request:** "JiraActivity.tsx and JiraRichField.tsx mostly have the same common functionality then why
+separate files and duplicate code?" -- confirmed on inspection: the two files are genuinely different
+features (`JiraActivity.tsx` is a full comment/activity-feed composer that fetches history and posts to
+`/api/approvals/{entityType}/{entityId}/rich-comments`; `JiraRichTextField.tsx` is a plain controlled
+rich-text form input used only by Test Execution's "Actual Result" field, with no feed/posting concept at
+all) -- but roughly half of each file was the low-level contentEditable-editor mechanics, copy-pasted
+almost verbatim between them: the markdown<->HTML codec (`textOf`/`listToMarkdown`/`styledMarkdown`/
+`nodeToMarkdown`/`editorMarkdown`/`safeLink`, character-for-character identical), the formatting toolbar
+JSX, pasted/attached-image validation (type/size/count limits), and the inline link-insertion flow.
+
+**Fix:** new `frontend/src/components/RichTextEditor.tsx` holding all of that shared mechanics, consumed by
+both files instead of duplicated:
+- Pure codec functions: `editorContentToMarkdown` (was each file's own `editorMarkdown`),
+  `markdownToEditorHtml` (was only in `JiraRichTextField.tsx` -- kept alongside its inverse rather than left
+  on its own, even though only one current caller needs this direction), `safeRichTextLink` (was `safeLink`).
+- `useRichTextImages(opts)` -- a hook owning pending-image state, validation (type/size/count, using the
+  caller-supplied `tooLarge`/`tooMany` message text so each field's exact wording is preserved -- Activity's
+  says "A comment can contain..."/"...10 MB image limit", Actual Result's says "Actual Result can contain...
+  per save"/"...10 MB limit", no wording changed), clipboard-paste handling, and object-URL cleanup on
+  unmount (previously duplicated per-file).
+- `useRichTextLink(editorRef, onError)` -- the Add-Link toolbar flow (save/restore selection range, apply
+  as a `createLink` command, validate the URL via `safeRichTextLink`).
+- `RichTextToolbar`, `RichTextImageInput`, `RichTextLinkEditor`, `RichTextPastedImages` -- the shared JSX
+  (formatting buttons, hidden file input, URL entry row, pasted-image preview strip), parameterized where
+  the two callers' visible text genuinely differs (`ariaLabel`, `codeButtonTitle` -- Activity keeps "Inline
+  code", Actual Result keeps "Code" -- `imageButtonTitle` -- Activity keeps "Attach images", Actual Result
+  keeps "Upload images").
+
+**One deliberate, additive behavior change:** `nodeToMarkdown` had two slightly different versions --
+`JiraActivity.tsx`'s handled `H1`-`H6` (bolds the heading text); `JiraRichTextField.tsx`'s didn't (fell
+through to the generic inline-style handler instead). Neither toolbar has a heading button, so this only
+ever mattered for pasted external HTML containing headings -- an edge case, but there's no reason the two
+editors should disagree on it. Used the more complete (Activity's) version as the single shared
+implementation, so `JiraRichTextField`'s "Actual Result" field now also handles pasted headings correctly.
+Everything else is behavior-for-behavior identical to before this section.
+
+**`JiraActivity.tsx`** keeps everything genuinely specific to it: `MarkdownComment`/`inlineMarkdown` (posted
+markdown -> displayed React, only ever needed for rendering the activity feed, not part of the duplication),
+`CommentAttachments`, `actorLabel`/`relativeTime`/`initials`, the filter tabs, and the comment-posting flow.
+
+**`JiraRichTextField.tsx`** keeps everything specific to being a controlled form field: seeding the editor
+from an initial markdown `value` (via the now-shared `markdownToEditorHtml`), reporting pending images back
+up via `onImagesChange`, and the character-count footer. Its previously-exported `PendingRichImage` type
+(unused by anything outside the file) now lives in `RichTextEditor.tsx` instead.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; grepped `components/` to confirm
+the markdown<->HTML codec functions (`textOf`/`listToMarkdown`/`styledMarkdown`/`nodeToMarkdown`) now exist
+in exactly one place; Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 140. Test Case versioning (1.0 -> 1.1 on re-approval)
+
+**Request:** "Test Project we are not following testcase versioning, first time upload version 1.0,
+then any modification and after approval version 1.1 like this. and TestCycle automatically will
+updated the linked testcased to updated one."
+
+**Root cause:** `TestCase` had a Draft/Active/Deprecated `status` but no version number at all, so a QA
+Lead re-approving an edited case had no way to tell reviewers or execution teams that the definition had
+changed since the last time it was Active. Separately, the "TestCycle should automatically use the
+updated test case" half of the request was already true structurally -- `TestExecution` stores a live
+`test_case_id` foreign key with no snapshot/copy of any field, so a cycle always reads the current
+definition -- but this was invisible in the UI, since nothing displayed a version to prove it.
+
+**Backend changes:**
+- `models.py` `TestCase`: added `version_major` (`Integer`, default `1`) and `version_minor` (`Integer`,
+  default `0`) columns, plus a computed `version` property (`f"{version_major}.{version_minor}"`),
+  following the same `@property` convention already used there for `folder_name`/`created_by_name`.
+- `routers/test_repository.py`: new `_apply_approval_version(db, obj)` helper. Called from both
+  `review_test_case`'s APPROVE branch and `bulk_approve_test_cases`, immediately before setting
+  `status = "Active"`. It checks whether a prior `ApprovalAction` row already exists for this case with
+  `entity_type="TEST_CASE"` and `decision="Approved"`; if so this is a re-approval (the case was edited
+  and reverted to Draft by `update_test_case`/`bulk_update_test_cases`'s existing "Resubmitted for
+  review" logic), so `version_minor` is incremented by 1. The very first approval leaves the case at its
+  starting 1.0. `create_test_case` and `import_test_cases` need no changes -- new cases simply take the
+  column defaults (1.0).
+- `schemas.py` `TestCaseOut`: added `version: str = "1.0"`, read from the model's `version` property (same
+  mechanism as the existing `folder_name`/`created_by_name` fields). This flows through automatically to
+  `TestExecutionOut`'s nested `test_case` field with no execution-schema changes needed.
+
+**Frontend changes:**
+- `types.ts`: added `version?: string` to `TestCaseOut`.
+- `TestRepository.tsx`: added a "Version" `Field` next to "Workflow Status" in the create/edit/view form
+  (`v{existing.version}`, gray badge, with a note that it bumps on QA Lead re-approval after an edit), and
+  a "Version" column in the test case list table.
+- `TestExecution.tsx`: added the version badge next to the test case key in the "Record Result" modal's
+  heading, a dedicated "Version" detail field there noting the cycle always uses the live current
+  definition (not a copy), and a "Version" column in the cycle's execution list table -- making the
+  already-correct live-FK behavior visible, not just structurally true.
+
+**Data notes:** no live DB connection from this sandbox; apply directly to Oracle before/with this
+deploy:
+```sql
+ALTER TABLE qap_test_cases ADD (
+  version_major NUMBER(10) DEFAULT 1 NOT NULL,
+  version_minor NUMBER(10) DEFAULT 0 NOT NULL
+);
+```
+Existing rows all default to 1.0 on migration -- correct, since none of them have a recorded re-approval
+event to bump from.
+
+**Verified:** `python3 -m py_compile` on `models.py`, `schemas.py`, `routers/test_repository.py` -- clean;
+`npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies re-synced and
+confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
