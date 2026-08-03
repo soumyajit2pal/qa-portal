@@ -55,6 +55,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const logout = () => {
+    // request() reads the bearer token synchronously before returning its
+    // Promise, so the audit call is authenticated even though local UI state
+    // is cleared immediately. A slow/unavailable server cannot trap the user
+    // in a signed-in UI.
+    void api.post('/api/auth/logout').catch(() => undefined)
     setToken(null)
     setUser(null)
   }

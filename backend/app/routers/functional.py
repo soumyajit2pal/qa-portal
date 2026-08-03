@@ -479,25 +479,11 @@ def start_retesting(req_id: int, payload: schemas.CommentIn, db: Session = Depen
     return obj
 
 
-@router.post("/{req_id}/start-regression", response_model=schemas.FunctionalOut)
-def start_regression(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
-    """Optional broader-impact regression pass after retesting, before QA completion."""
-    obj = _get_or_404(db, req_id)
-    _require(obj, QAStatus.RETESTING, "Start regression testing")
-    _require_assigned_tester(obj, current_user)
-    obj.status = QAStatus.REGRESSION_TESTING
-    _log(db, obj.id, "Retesting", current_user, "Regression Testing Started", payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
 @router.post("/{req_id}/complete-qa", response_model=schemas.FunctionalOut)
 def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     """Marks QA activity complete -- reachable directly from execution (no issues found)
-    or after the defect/retest/regression cycle.
+    or after the defect/retest cycle.
 
     Not gated on any SAST/DAST/Performance sibling raised alongside it on the
     same gateway QA Request -- every request type runs its own fully
@@ -506,7 +492,7 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     never depended on -- and now explicitly does not wait for -- a sibling
     request's own status."""
     obj = _get_or_404(db, req_id)
-    _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING, QAStatus.REGRESSION_TESTING], "Complete QA")
+    _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING], "Complete QA")
     _require_assigned_tester(obj, current_user)
 
     obj.status = QAStatus.QA_COMPLETED
@@ -780,7 +766,7 @@ def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) ->
         return obj.qa_lead_id == user.id
     if status in (QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN, QAStatus.EXECUTION_IN_PROGRESS,
                    QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
-                   QAStatus.REGRESSION_TESTING, QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING):
+                   QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING):
         if obj.qa_lead_id == user.id:
             return True
         assigned = {int(i) for i in (obj.assigned_tester_ids or "").split(",") if i}

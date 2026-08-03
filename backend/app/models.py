@@ -1232,6 +1232,39 @@ class ApprovalAction(Base):
         return self.actor.full_name if self.actor else None
 
 
+class AuditLog(Base):
+    """Immutable, security-focused application audit trail.
+
+    ApprovalAction records business workflow decisions.  This table is wider:
+    it records authentication, API access, data mutations and access-control
+    changes.  No update/delete API is intentionally provided for these rows.
+    Request/response bodies are never stored, preventing passwords, tokens and
+    uploaded content from leaking into the audit trail.
+    """
+    __tablename__ = "qap_audit_logs"
+    id = pk_column()
+    event_type = Column(String(40), nullable=False, index=True)
+    action = Column(String(80), nullable=False, index=True)
+    outcome = Column(String(20), nullable=False, index=True)
+    actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    actor_username = Column(String(150), nullable=True, index=True)
+    actor_name = Column(String(150), nullable=True)
+    actor_roles = Column(String(500), nullable=True)
+    method = Column(String(10), nullable=True)
+    path = Column(String(500), nullable=True, index=True)
+    status_code = Column(Integer, nullable=True)
+    target_type = Column(String(64), nullable=True)
+    target_id = Column(String(100), nullable=True)
+    target_name = Column(String(255), nullable=True)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String(64), nullable=True)
+    user_agent = Column(String(500), nullable=True)
+    request_id = Column(String(64), nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=now, index=True)
+
+    actor = relationship("User", foreign_keys=[actor_id])
+
+
 class RequestDocument(Base):
     """Supporting documents uploaded after a request has been raised, for
     every request type EXCEPT the Gateway QA Request (which has its own
@@ -1245,7 +1278,8 @@ class RequestDocument(Base):
     sequence -- see the collision note on _sast_dast_history() in
     routers/sast_dast.py), every module here is assigned its own distinct
     `module` string (FUNCTIONAL / SAST / DAST / PERFORMANCE /
-    SUPPRESSION / SIGNOFF), so (module, request_id) is always unambiguous.
+    SUPPRESSION / SIGNOFF / COMMENT_IMAGE / TEST_EXEC_IMAGE), so
+    (module, request_id) is always unambiguous.
     Files are stored on disk under backend/app/uploads/<module>/<request's
     own request_id string>/<filename> -- see UPLOAD_ROOT in documents.py."""
     __tablename__ = "qap_module_documents"
@@ -1376,7 +1410,7 @@ class TestFolder(Base):
 
 class TestCase(Base):
     """A single reusable test case in the Test Repository. Columns mirror the
-    fixed xlsx upload template exactly (Test Case ID, Epic ID, Feature ID,
+    fixed xlsx upload template plus CR traceability (Test Case ID, Epic ID, CR Number, Feature ID,
     User Story ID, Test Type, Module Name, Test Scenario, Pre-Condition,
     Test Case Description, Priority) -- see routers/test_repository.py's
     import_test_cases for the parser. Steps (with their own Expected Result)
@@ -1390,6 +1424,7 @@ class TestCase(Base):
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
     folder_id = Column(Integer, ForeignKey("qap_test_folders.id"), nullable=True)
     epic_id = Column(String(60))
+    cr_number = Column(String(64))
     feature_id = Column(String(60))
     user_story_id = Column(String(60))
     test_type = Column(String(60))
@@ -1412,6 +1447,14 @@ class TestCase(Base):
     steps = relationship("TestStep", back_populates="test_case", cascade="all,delete-orphan",
                           order_by="TestStep.step_no")
     executions = relationship("TestExecution", back_populates="test_case", cascade="all,delete-orphan")
+
+    @property
+    def folder_name(self):
+        return self.folder.name if self.folder else None
+
+    @property
+    def created_by_name(self):
+        return self.created_by.full_name if self.created_by else None
 
 
 class TestStep(Base):

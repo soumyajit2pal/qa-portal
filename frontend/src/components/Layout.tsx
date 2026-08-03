@@ -52,7 +52,12 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
       label: 'Request Management',
       items: [
         { to: '/qa-requests', label: 'QA Requests', icon: IconEdit, count: counts.qaRequests },
-        { to: '/functional-requests', label: 'Functional QA', icon: IconFolder, count: counts.functional },
+      ],
+    },
+    {
+      label: 'Functional',
+      items: [
+        { to: '/functional-requests', label: 'Functional Requests', icon: IconFolder, count: counts.functional },
       ],
     },
     {
@@ -83,6 +88,9 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
         { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate, count: counts.signoff },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
+        ...(hasRole(user, 'ADMIN', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')
+          ? [{ to: '/audit-log', label: 'Audit Log', icon: IconSearch }]
+          : []),
       ],
     },
   ]
@@ -142,7 +150,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('qa_nav_collapsed') === 'true')
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set([
-    'Overview', 'Request Management', 'Test Management', 'Security', 'Specialized Testing', 'Governance', 'Administration',
+    'Overview', 'Request Management', 'Functional', 'Test Management', 'Security', 'Specialized Testing', 'Governance', 'Administration',
   ]))
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Topbar user menu -- clicking the signed-in name reveals Department +
@@ -394,9 +402,9 @@ export default function Layout({ children }: { children?: ReactNode }) {
                       <span className="label">Role(s)</span>
                       <span>{(user.roles || []).map((r) => ROLE_LABELS[r] || r).join(', ') || 'No role assigned'}</span>
                     </div>
-                    <button type="button" className="btn btn-sm topbar-user-popover-logout" onClick={logout}>
+                    {/* <button type="button" className="btn btn-sm topbar-user-popover-logout" onClick={logout}>
                       <IconLogout width={14} height={14} /> Log out
-                    </button>
+                    </button> */}
                   </div>
                 )}
               </div>

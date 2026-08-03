@@ -440,7 +440,6 @@ function lifecycleStageIndex(status?: string): number {
       "DEFECT_RAISED",
       "WAITING_FOR_FIX",
       "RETESTING",
-      "REGRESSION_TESTING",
       "QA_COMPLETED",
     ].includes(status)
   )
@@ -668,11 +667,9 @@ function FunctionalDetail({
     isAssignedTester && status === "DEFECT_RAISED";
   const canStartRetest =
     isAssignedTester && status === "WAITING_FOR_FIX";
-  const canStartRegression =
-    isAssignedTester && status === "RETESTING";
   const canCompleteQA =
     isAssignedTester &&
-    ["EXECUTION_IN_PROGRESS", "RETESTING", "REGRESSION_TESTING"].includes(
+    ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(
       status
     );
   // Matches the backend's own role gate on POST /{id}/request-signoff and
@@ -1110,15 +1107,6 @@ function FunctionalDetail({
                   Start Retesting
                 </button>
               )}
-              {canStartRegression && (
-                <button
-                  className="btn btn-sm"
-                  disabled={!!busyAction}
-                  onClick={() => act("start-regression", { comments })}
-                >
-                  Start Regression Testing
-                </button>
-              )}
               {canCompleteQA && (
                 <button
                   className="btn btn-success btn-sm"
@@ -1182,7 +1170,6 @@ function FunctionalDetail({
                 !canRaiseDefect &&
                 !canMarkWaitingForFix &&
                 !canStartRetest &&
-                !canStartRegression &&
                 !canCompleteQA &&
                 !canRequestSignoff &&
                 !canRequesterDecide && (
@@ -1197,7 +1184,6 @@ function FunctionalDetail({
               canRaiseDefect ||
               canMarkWaitingForFix ||
               canStartRetest ||
-              canStartRegression ||
               canCompleteQA ||
               canRequesterDecide) && (
               <input

@@ -208,8 +208,8 @@ class QAStatus:
     Request gateway -- see models.FunctionalRequest): Requester -> Draft ->
     Submit to SM -> SM approval -> Department Head approval (also assigns
     the QA Lead) -> QA Lead readiness verification -> QA activity (planning/
-    tester assignment/test design/execution, with a defect-fix-retest-
-    regression cycle) -> QA sign-off -> Requester verification -> Closed.
+    tester assignment/test design/execution, with a defect-fix-retest
+    cycle) -> QA sign-off -> Requester verification -> Closed.
 
     Can only be marked QA_COMPLETED once every SAST/DAST/Performance request
     linked to the *same gateway QA Request* (see
@@ -237,7 +237,6 @@ class QAStatus:
     DEFECT_RAISED = "DEFECT_RAISED"
     WAITING_FOR_FIX = "WAITING_FOR_FIX"
     RETESTING = "RETESTING"
-    REGRESSION_TESTING = "REGRESSION_TESTING"
     QA_COMPLETED = "QA_COMPLETED"
     QA_SIGNOFF_PENDING = "QA_SIGNOFF_PENDING"
     QA_SIGNED_OFF = "QA_SIGNED_OFF"
@@ -253,7 +252,7 @@ QA_REQUEST_STATUSES = [
     QAStatus.QA_LEAD_ASSIGNED,
     QAStatus.READINESS_VERIFICATION, QAStatus.RETURNED_BY_QA_LEAD, QAStatus.QA_ACTIVITY_INITIATED,
     QAStatus.PLANNING, QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN, QAStatus.EXECUTION_IN_PROGRESS,
-    QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING, QAStatus.REGRESSION_TESTING,
+    QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
     QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING, QAStatus.QA_SIGNED_OFF,
     QAStatus.REQUESTER_VERIFICATION, QAStatus.CLOSED, QAStatus.CANCELLED,
 ]
@@ -326,7 +325,6 @@ QA_REQUEST_STATUS_LABELS = {
     QAStatus.DEFECT_RAISED: "Defect Raised",
     QAStatus.WAITING_FOR_FIX: "Waiting For Fix",
     QAStatus.RETESTING: "Retesting",
-    QAStatus.REGRESSION_TESTING: "Regression Testing",
     QAStatus.QA_COMPLETED: "QA Completed",
     QAStatus.QA_SIGNOFF_PENDING: "QA Sign-off Pending",
     QAStatus.QA_SIGNED_OFF: "QA Signed Off",

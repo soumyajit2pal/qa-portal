@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from .. import models, schemas
 from ..database import get_db
+from ..audit_service import snapshot_changes, user_snapshot, write_audit
 from ..auth import (
     verify_password, create_access_token, ldap_authenticate, ldap_authenticate_with_profile, LDAPAuthError,
 )
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=schemas.Token)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
     just_provisioned = False
 
@@ -33,6 +34,9 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         except LDAPAuthError:
             profile = None
         if not profile:
+            write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
+                        actor_username=form_data.username, request=request, status_code=401,
+                        details={"reason": "Invalid username or password"})
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
         user = models.User(
@@ -63,6 +67,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             user = db.query(models.User).filter(models.User.username == form_data.username).first()
 
     if not user.is_active:
+        write_audit(db, event_type="AUTHENTICATION", action="LOGIN_BLOCKED", outcome="FAILED",
+                    actor=user, request=request, status_code=403, details={"reason": "User is disabled"})
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is disabled")
 
     if not just_provisioned:
@@ -72,16 +78,41 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             try:
                 authenticated = ldap_authenticate(form_data.username, form_data.password)
             except LDAPAuthError as e:
+                write_audit(db, event_type="AUTHENTICATION", action="LOGIN_ERROR", outcome="FAILED",
+                            actor=user, request=request, status_code=503,
+                            details={"reason": "LDAP authentication unavailable"})
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                                      detail=f"LDAP authentication unavailable: {e}")
             if not authenticated:
+                write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
+                            actor=user, request=request, status_code=401,
+                            details={"reason": "Invalid username or password"})
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
         else:
             if not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
+                write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
+                            actor=user, request=request, status_code=401,
+                            details={"reason": "Invalid username or password"})
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     token = create_access_token({"sub": user.username, "roles": user.roles}, )
+    if just_provisioned:
+        write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_AUTO_PROVISIONED",
+                    actor=user, request=request, status_code=201, target_type="USER",
+                    target_id=user.id, target_name=user.full_name,
+                    details={"after": user_snapshot(user), "source": "LDAP first login"})
+    write_audit(db, event_type="AUTHENTICATION", action="LOGIN_SUCCESS", actor=user,
+                request=request, status_code=200,
+                details={"login_type": user.login_type, "just_provisioned": just_provisioned})
     return schemas.Token(access_token=token, roles=user.roles, full_name=user.full_name, username=user.username)
+
+
+@router.post("/logout")
+def logout(request: Request, db: Session = Depends(get_db),
+           current_user: models.User = Depends(get_current_user)):
+    write_audit(db, event_type="AUTHENTICATION", action="LOGOUT", actor=current_user,
+                request=request, status_code=200)
+    return {"status": "ok"}
 
 
 @router.get("/me", response_model=schemas.UserOut)
@@ -90,7 +121,7 @@ def me(current_user: models.User = Depends(get_current_user)):
 
 
 @router.patch("/me", response_model=schemas.UserOut)
-def update_me(payload: schemas.DepartmentSelection, db: Session = Depends(get_db),
+def update_me(payload: schemas.DepartmentSelection, request: Request, db: Session = Depends(get_db),
               current_user: models.User = Depends(get_current_user)):
     """Self-service -- the one field any logged-in user (not just an Admin)
     can set on their own profile. Currently only used by the first-LDAP-login
@@ -101,10 +132,15 @@ def update_me(payload: schemas.DepartmentSelection, db: Session = Depends(get_db
     if not payload.department or not payload.department.strip():
         raise HTTPException(status_code=400, detail="Department is required")
     _validate_department(db, payload.department)
+    before = user_snapshot(current_user)
     current_user.department = payload.department
     current_user.needs_department_selection = False
     db.commit()
     db.refresh(current_user)
+    write_audit(db, event_type="ACCESS_MANAGEMENT", action="SELF_PROFILE_UPDATED",
+                actor=current_user, request=request, status_code=200, target_type="USER",
+                target_id=current_user.id, target_name=current_user.full_name,
+                details={"changes": snapshot_changes(before, user_snapshot(current_user))})
     return current_user
 
 
@@ -150,7 +186,7 @@ def _validate_department(db: Session, department):
 
 
 @router.post("/users", response_model=schemas.UserOut)
-def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db),
+def create_user(payload: schemas.UserCreate, request: Request, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.ADMIN))):
     """Admin section (Module 9): user mapping = department + one or more roles
     (access types). A user can hold several roles at once (e.g. QA Lead +
@@ -176,16 +212,20 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db),
     db.add(user)
     db.commit()
     db.refresh(user)
+    write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_CREATED", actor=current_user,
+                request=request, status_code=201, target_type="USER", target_id=user.id,
+                target_name=user.full_name, details={"after": user_snapshot(user)})
     return user
 
 
 @router.patch("/users/{user_id}", response_model=schemas.UserOut)
-def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends(get_db),
+def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.ADMIN))):
     """Admin section (Module 9): reassign role(s), change login type, activate/deactivate, edit profile fields."""
     user = db.query(models.User).get(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    before = user_snapshot(user)
 
     data = payload.model_dump(exclude_unset=True)
     new_roles = data.pop("roles", None)
@@ -221,11 +261,15 @@ def update_user(user_id: int, payload: schemas.UserUpdate, db: Session = Depends
         user.needs_role_review = False
     db.commit()
     db.refresh(user)
+    write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_ACCESS_UPDATED", actor=current_user,
+                request=request, status_code=200, target_type="USER", target_id=user.id,
+                target_name=user.full_name,
+                details={"changes": snapshot_changes(before, user_snapshot(user))})
     return user
 
 
 @router.post("/users/{user_id}/reset-password", response_model=schemas.UserOut)
-def reset_password(user_id: int, payload: schemas.PasswordReset, db: Session = Depends(get_db),
+def reset_password(user_id: int, payload: schemas.PasswordReset, request: Request, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(Role.ADMIN))):
     """Admin section (Module 9): set/reset a Standard account's local password."""
     from ..auth import hash_password
@@ -240,6 +284,10 @@ def reset_password(user_id: int, payload: schemas.PasswordReset, db: Session = D
     user.hashed_password = hash_password(payload.new_password)
     db.commit()
     db.refresh(user)
+    write_audit(db, event_type="ACCESS_MANAGEMENT", action="PASSWORD_RESET", actor=current_user,
+                request=request, status_code=200, target_type="USER", target_id=user.id,
+                target_name=user.full_name,
+                details={"changed": "local password", "password_value_stored_in_audit": False})
     return user
 
 
@@ -311,7 +359,8 @@ def list_local_admin_users(db: Session = Depends(get_db),
 
 
 @router.patch("/local-admin/users/{user_id}", response_model=schemas.UserOut)
-def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate, db: Session = Depends(get_db),
+def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate, request: Request,
+                             db: Session = Depends(get_db),
                              current_user: models.User = Depends(require_roles(
                                  Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
                                  Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
@@ -319,6 +368,7 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     _require_own_department_target(current_user, user)
+    before = user_snapshot(user)
 
     if payload.roles is not None:
         assignable = _local_admin_assignable_roles(current_user)
@@ -350,4 +400,9 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
 
     db.commit()
     db.refresh(user)
+    write_audit(db, event_type="ACCESS_MANAGEMENT", action="DEPARTMENT_USER_ACCESS_UPDATED",
+                actor=current_user, request=request, status_code=200, target_type="USER",
+                target_id=user.id, target_name=user.full_name,
+                details={"changes": snapshot_changes(before, user_snapshot(user)),
+                         "scope": current_user.department})
     return user

@@ -2,7 +2,7 @@
 EXCEPT the Gateway QA Request (which keeps its own dedicated
 QARequestDocument table/endpoints in routers/qa_requests.py -- Module 1,
 field 4.1.2, predates this file). Used by Functional/SAST/DAST/
-Performance/Suppression/Sign-off so each one supports uploading multiple
+Performance/Suppression/Sign-off and rich comment images so each supports uploading multiple
 documents after the request has been raised, without repeating the same
 storage/table plumbing 6 times -- see models.RequestDocument for the shared
 table and why its (module, request_id) keying is collision-safe."""
@@ -97,5 +97,3 @@ def delete_document(db: Session, doc: models.RequestDocument) -> None:
         os.remove(path)
     db.delete(doc)
     db.commit()
-
-

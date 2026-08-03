@@ -8,7 +8,7 @@ import {
 } from './components/Icons'
 import {
   GATEWAY_TERMINAL_STATUSES, QA_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES,
-  PERFORMANCE_TERMINAL_STATUSES, QA_STATUS_LABELS,
+  PERFORMANCE_TERMINAL_STATUSES,
 } from './constants'
 import {
   QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut,
@@ -270,7 +270,7 @@ const STATUS_STAGE_INDEX: Record<string, number> = {
   DEPARTMENT_HEAD_APPROVAL_PENDING: 1, RETURNED_BY_DEPARTMENT_HEAD: 1, DEPARTMENT_HEAD_REJECTED: 1,
   QA_LEAD_ASSIGNED: 2, READINESS_VERIFICATION: 2, RETURNED_BY_QA_LEAD: 2,
   QA_ACTIVITY_INITIATED: 3, PLANNING: 3, TESTER_ASSIGNED: 3, TEST_DESIGN: 3, EXECUTION_IN_PROGRESS: 3,
-  DEFECT_RAISED: 3, WAITING_FOR_FIX: 3, RETESTING: 3, REGRESSION_TESTING: 3, QA_COMPLETED: 3,
+  DEFECT_RAISED: 3, WAITING_FOR_FIX: 3, RETESTING: 3, QA_COMPLETED: 3,
   QA_SIGNOFF_PENDING: 4, QA_SIGNED_OFF: 4, REQUESTER_VERIFICATION: 4, CLOSED: 4,
 }
 
@@ -852,8 +852,18 @@ interface TesterWorkloadRow {
   tester_id: number
   tester_name: string
   department: string
+  role_label: string
   status_counts: Record<string, number>
+  source_counts: Record<'Functional' | 'Performance' | 'SAST' | 'DAST', number>
   total_pending: number
+  occupied_points: number
+  occupancy_percent: number
+  available_percent: number
+  occupancy_band: 'Available' | 'Light' | 'Balanced' | 'High' | 'Full' | 'Overloaded'
+  queued_count: number
+  active_count: number
+  waiting_count: number
+  near_complete_count: number
 }
 
 interface TesterWorkloadOut {
@@ -861,9 +871,14 @@ interface TesterWorkloadOut {
   rows: TesterWorkloadRow[]
   total_pending: number
   testers_with_pending: number
+  capacity_points: number
+  average_occupancy: number
+  available_testers: number
+  highly_occupied_testers: number
+  overloaded_testers: number
 }
 
-// QA-team-only operational workload matrix. Aggregation and permission
+// QA-team-only capacity view. Aggregation and permission
 // enforcement both live on /api/dashboard/qa-tester-workload; the client
 // gate below is for navigation clarity, not the sole security boundary.
 function TesterOverviewTab({ range }: { range: RaisedRange }) {
@@ -880,30 +895,62 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
   if (!workload) return <p className="muted">Loading QA tester workload…</p>
 
   const columns: TableColumn<TesterWorkloadRow>[] = [
-    { key: 'tester_name', header: 'Tester Name' },
-    { key: 'department', header: 'Department' },
-    ...workload.statuses.map((status): TableColumn<TesterWorkloadRow> => ({
-      key: status,
-      header: QA_STATUS_LABELS[status] || status,
-      render: (row) => <span className={`tester-workload-count ${row.status_counts[status] ? 'has-work' : ''}`}>{row.status_counts[status] || 0}</span>,
-      filterValue: (row) => String(row.status_counts[status] || 0),
-    })),
     {
-      key: 'total_pending', header: 'Total Pending',
+      key: 'tester_name', header: 'QA Tester',
+      render: (row) => <div className="tester-capacity-person"><strong>{row.tester_name}</strong><span>{row.role_label} · {row.department}</span></div>,
+    },
+    {
+      key: 'occupancy_percent', header: 'Occupancy',
+      render: (row) => (
+        <div className={`tester-occupancy tester-occupancy-${row.occupancy_band.toLowerCase()}`}>
+          <div><strong>{row.occupancy_percent}%</strong><span>{row.occupancy_band}</span></div>
+          <div className="tester-occupancy-track"><i style={{ width: `${Math.min(100, row.occupancy_percent)}%` }} /></div>
+          <small>{row.occupied_points} of {workload.capacity_points} capacity points</small>
+        </div>
+      ),
+      filterValue: (row) => `${row.occupancy_percent} ${row.occupancy_band}`,
+    },
+    {
+      key: 'total_pending', header: 'Assigned',
       render: (row) => <strong className={row.total_pending ? 'tester-workload-total' : 'muted'}>{row.total_pending}</strong>,
+    },
+    { key: 'active_count', header: 'Active Work', render: (row) => <span className={`tester-workload-count ${row.active_count ? 'has-work' : ''}`}>{row.active_count}</span> },
+    { key: 'queued_count', header: 'Queued', render: (row) => <span className={`tester-workload-count ${row.queued_count ? 'has-work' : ''}`}>{row.queued_count}</span> },
+    { key: 'waiting_count', header: 'Waiting / Blocked', render: (row) => <span className={`tester-workload-count ${row.waiting_count ? 'is-waiting' : ''}`}>{row.waiting_count}</span> },
+    { key: 'near_complete_count', header: 'Near Complete', render: (row) => <span className={`tester-workload-count ${row.near_complete_count ? 'is-complete' : ''}`}>{row.near_complete_count}</span> },
+    {
+      key: 'work_mix', header: 'Work Mix',
+      render: (row) => (
+        <div className="tester-work-mix">
+          <span>Functional <strong>{row.source_counts.Functional || 0}</strong></span>
+          <span>Performance <strong>{row.source_counts.Performance || 0}</strong></span>
+          <span>SAST <strong>{row.source_counts.SAST || 0}</strong></span>
+          <span>DAST <strong>{row.source_counts.DAST || 0}</strong></span>
+        </div>
+      ),
+      filterValue: (row) => `Functional ${row.source_counts.Functional || 0} Performance ${row.source_counts.Performance || 0} SAST ${row.source_counts.SAST || 0} DAST ${row.source_counts.DAST || 0}`,
+    },
+    {
+      key: 'available_percent', header: 'Available Capacity',
+      render: (row) => <strong className={row.available_percent > 0 ? 'tester-available-capacity' : 'tester-no-capacity'}>{row.available_percent}%</strong>,
     },
   ]
 
   return (
     <div className="tester-overview-tab">
       <div className="dashboard-section-head">
-        <div><strong>QA tester pending workload</strong><span>Current assigned requests grouped by tester and exact workflow status.</span></div>
+        <div><strong>QA team capacity and occupancy</strong><span>Current Functional, Performance, SAST, and DAST assignments for QA Testers and Security Analysts.</span></div>
         <Badge status="QA_LEAD_ASSIGNED" label="QA team only" />
       </div>
       <div className="tester-workload-summary">
-        <div><small>Total pending assignments</small><strong>{workload.total_pending}</strong></div>
-        <div><small>Testers with pending work</small><strong>{workload.testers_with_pending}</strong></div>
-        <div><small>QA testers listed</small><strong>{workload.rows.length}</strong></div>
+        <div><small>Average team occupancy</small><strong>{workload.average_occupancy}%</strong><span>Across {workload.rows.length} active QA team members</span></div>
+        <div><small>Available team members</small><strong>{workload.available_testers}</strong><span>Below 50% occupied</span></div>
+        <div><small>Highly occupied</small><strong>{workload.highly_occupied_testers}</strong><span>80% occupied or higher</span></div>
+        <div><small>Overloaded team members</small><strong className={workload.overloaded_testers ? 'danger' : ''}>{workload.overloaded_testers}</strong><span>Above planned capacity</span></div>
+      </div>
+      <div className="tester-capacity-note">
+        <strong>How occupancy is calculated</strong>
+        <span>{workload.capacity_points} fully-active concurrent assignments equal 100%. Active execution/scanning = 1 point, configuration/retest/regression = 0.75, queued/defect/remediation = 0.5, waiting/result analysis = 0.25, and near-complete work = 0.05–0.15. Shared Functional or Performance requests are divided between assigned testers.</span>
       </div>
       <Card>
         <Table
@@ -945,7 +992,7 @@ export default function Dashboard() {
   // a direct role check (not hasRole's Admin bypass): Admin-only accounts are
   // not QA team members and therefore must not see this restricted view.
   const showTesterOverviewTab = !!user?.roles?.some((role) => (
-    ['QA_ENGINEER', 'QA_LEAD', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM'].includes(role)
+    ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM'].includes(role)
   ))
 
   const tabs = [

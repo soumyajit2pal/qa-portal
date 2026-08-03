@@ -365,6 +365,7 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
   const [testCaseKey, setTestCaseKey] = useState(existing?.test_case_key || '')
   const [folder, setFolder] = useState<number | ''>(existing?.folder_id ?? folderId)
   const [epicId, setEpicId] = useState(existing?.epic_id || '')
+  const [crNumber, setCrNumber] = useState(existing?.cr_number || '')
   const [featureId, setFeatureId] = useState(existing?.feature_id || '')
   const [userStoryId, setUserStoryId] = useState(existing?.user_story_id || '')
   const [testType, setTestType] = useState(existing?.test_type || TEST_CASE_TYPES[0])
@@ -393,7 +394,7 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
     const body = {
       test_case_key: testCaseKey.trim() || null,
       folder_id: folder || null,
-      epic_id: epicId || null, feature_id: featureId || null, user_story_id: userStoryId || null,
+      epic_id: epicId || null, cr_number: crNumber || null, feature_id: featureId || null, user_story_id: userStoryId || null,
       test_type: testType || null, module_name: moduleName || null, test_scenario: scenario || null,
       pre_condition: preCondition || null, description: description || null,
       priority: priority || null,
@@ -431,6 +432,9 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
           </Field>
           <Field label="Epic ID">
             <input value={epicId} onChange={(e) => setEpicId(e.target.value)} disabled={readOnly} />
+          </Field>
+          <Field label="CR Number">
+            <input value={crNumber} onChange={(e) => setCrNumber(e.target.value)} disabled={readOnly} placeholder="e.g. CR-2026-001" />
           </Field>
           <Field label="Feature ID">
             <input value={featureId} onChange={(e) => setFeatureId(e.target.value)} disabled={readOnly} />
@@ -737,7 +741,7 @@ export default function TestRepository() {
       ? cases.filter((c) => !c.folder_id)
       : cases.filter((c) => c.folder_id === selectedFolder)
     const q = search.trim().toLowerCase()
-    if (q) rows = rows.filter((c) => [c.test_case_key, c.test_scenario, c.epic_id, c.feature_id, c.user_story_id, c.module_name].some((v) => String(v || '').toLowerCase().includes(q)))
+    if (q) rows = rows.filter((c) => [c.test_case_key, c.test_scenario, c.epic_id, c.cr_number, c.feature_id, c.user_story_id, c.module_name].some((v) => String(v || '').toLowerCase().includes(q)))
     if (priorityFilter) rows = rows.filter((c) => c.priority === priorityFilter)
     if (statusFilter) rows = rows.filter((c) => c.status === statusFilter)
     return rows
@@ -909,7 +913,7 @@ export default function TestRepository() {
                   filterable: false,
                 },
                 { key: 'test_case_key', header: 'Test Case ID' },
-                { key: 'epic_id', header: 'Epic / Story', render: (c) => <span className="tm-hierarchy-cell"><strong>{c.epic_id || '—'}</strong><small>{[c.feature_id, c.user_story_id].filter(Boolean).join(' · ') || 'No mapping'}</small></span> },
+                { key: 'epic_id', header: 'Epic / CR / Story', render: (c) => <span className="tm-hierarchy-cell"><strong>{c.epic_id || '—'}</strong><small>{[c.cr_number, c.feature_id, c.user_story_id].filter(Boolean).join(' · ') || 'No mapping'}</small></span>, filterValue: (c) => `${c.epic_id || ''} ${c.cr_number || ''} ${c.feature_id || ''} ${c.user_story_id || ''}` },
                 { key: 'test_scenario', header: 'Scenario', render: (c) => c.test_scenario || '—' },
                 { key: 'test_type', header: 'Type', render: (c) => c.test_type || '—' },
                 { key: 'priority', header: 'Priority', render: (c) => c.priority ? <Badge status={c.priority} /> : '—' },

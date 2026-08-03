@@ -302,6 +302,9 @@ def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprov
 _HEADER_MAP = {
     "test case id": "test_case_key",
     "epic id": "epic_id",
+    "cr number": "cr_number",
+    "cr id": "cr_number",
+    "change request": "cr_number",
     "feature id": "feature_id",
     "user story id": "user_story_id",
     "test type": "test_type",
@@ -323,7 +326,7 @@ _HEADER_MAP = {
 # template leaves these blank on every subsequent step row -- see the
 # template's own merged-cell-style layout).
 _CASE_LEVEL_FIELDS = [
-    "epic_id", "feature_id", "user_story_id", "test_type", "module_name",
+    "epic_id", "cr_number", "feature_id", "user_story_id", "test_type", "module_name",
     "test_scenario", "pre_condition", "description", "priority",
 ]
 _EXECUTION_LEVEL_FIELDS = ["actual_result", "status", "test_run_artifacts", "defect_id"]
@@ -409,7 +412,8 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
             return
         tc = models.TestCase(
             project_id=project_id, folder_id=folder_id, test_case_key=key,
-            epic_id=case_row.get("epic_id"), feature_id=case_row.get("feature_id"),
+            epic_id=case_row.get("epic_id"), cr_number=case_row.get("cr_number"),
+            feature_id=case_row.get("feature_id"),
             user_story_id=case_row.get("user_story_id"), test_type=case_row.get("test_type"),
             module_name=case_row.get("module_name"), test_scenario=case_row.get("test_scenario"),
             pre_condition=case_row.get("pre_condition"), description=case_row.get("description"),

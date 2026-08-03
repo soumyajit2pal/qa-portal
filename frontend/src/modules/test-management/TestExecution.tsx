@@ -4,9 +4,10 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import { hasRole, TEST_CYCLE_STATUSES, TEST_EXECUTION_STATUSES } from '../../constants'
-import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, ApprovalActionOut } from '../../types'
+import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, ApprovalActionOut, RequestDocumentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
-import JiraActivity from '../../components/JiraActivity'
+import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
+import JiraRichTextField from '../../components/JiraRichTextField'
 
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
@@ -131,8 +132,79 @@ function AddCasesModal({ cycleId, allCases, existingCaseIds, onClose, onAdded }:
   )
 }
 
-function RecordResultModal({ execution, onClose, onSaved, onRemoved }: {
+function TestCaseDetail({ label, value, wide = false, children }: {
+  label: string
+  value?: React.ReactNode
+  wide?: boolean
+  children?: React.ReactNode
+}) {
+  return (
+    <div className={`tm-case-detail ${wide ? 'tm-case-detail-wide' : ''}`}>
+      <small>{label}</small>
+      <div>{children ?? value ?? '—'}</div>
+    </div>
+  )
+}
+
+function ExecutionResultImages({ executionId, readOnly }: { executionId: number; readOnly: boolean }) {
+  const { user } = useAuth()
+  const [documents, setDocuments] = useState<RequestDocumentOut[]>([])
+  const [urls, setUrls] = useState<Record<number, string>>({})
+  const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    let active = true
+    const createdUrls: string[] = []
+    async function load() {
+      try {
+        const docs = await api.get<RequestDocumentOut[]>(`/api/test-execution/executions/${executionId}/result-images`)
+        if (!active) return
+        setDocuments(docs)
+        const loaded = await Promise.all(docs.map(async (document) => {
+          const blob = await api.getBlob(`/api/test-execution/executions/${executionId}/result-images/${document.id}/download`)
+          const url = URL.createObjectURL(blob)
+          createdUrls.push(url)
+          return [document.id, url] as const
+        }))
+        if (active) setUrls(Object.fromEntries(loaded))
+      } catch (err) { if (active) setError(err) }
+    }
+    load()
+    return () => { active = false; createdUrls.forEach((url) => URL.revokeObjectURL(url)) }
+  }, [executionId])
+
+  async function remove(document: RequestDocumentOut) {
+    try {
+      setError(null)
+      await api.del(`/api/test-execution/executions/${executionId}/result-images/${document.id}`)
+      if (urls[document.id]) URL.revokeObjectURL(urls[document.id])
+      setDocuments((current) => current.filter((item) => item.id !== document.id))
+      setUrls((current) => { const next = { ...current }; delete next[document.id]; return next })
+    } catch (err) { setError(err) }
+  }
+
+  if (documents.length === 0 && !error) return null
+  return (
+    <div className="execution-result-images">
+      <div className="execution-result-images-title">Saved screenshots <span>{documents.length}</span></div>
+      <div className="jira-comment-attachments">
+        {documents.map((document) => urls[document.id] && (
+          <div className="execution-result-image" key={document.id}>
+            <button type="button" className="jira-comment-image" title={`Open ${document.file_name}`} onClick={() => window.open(urls[document.id], '_blank', 'noopener,noreferrer')}>
+              <img src={urls[document.id]} alt={document.file_name} /><span>{document.file_name}</span>
+            </button>
+            {!readOnly && (user?.roles.includes('ADMIN') || document.uploaded_by_id === user?.id) && <button type="button" className="execution-result-image-remove" title="Delete screenshot" onClick={() => remove(document)}>×</button>}
+          </div>
+        ))}
+      </div>
+      <ErrorText error={error} title="Screenshot action failed" />
+    </div>
+  )
+}
+
+function RecordResultModal({ execution, readOnly, onClose, onSaved, onRemoved }: {
   execution: TestExecutionOut
+  readOnly: boolean
   onClose: () => void
   onSaved: (e: TestExecutionOut) => void
   onRemoved: (id: number) => void
@@ -141,6 +213,7 @@ function RecordResultModal({ execution, onClose, onSaved, onRemoved }: {
   const [actualResult, setActualResult] = useState(execution.actual_result || '')
   const [artifacts, setArtifacts] = useState(execution.test_run_artifacts || '')
   const [defectId, setDefectId] = useState(execution.defect_id || '')
+  const [resultImages, setResultImages] = useState<File[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState(false)
@@ -149,10 +222,11 @@ function RecordResultModal({ execution, onClose, onSaved, onRemoved }: {
     e.preventDefault()
     setBusy(true); setError(null)
     try {
-      const saved = await api.patch<TestExecutionOut>(`/api/test-execution/executions/${execution.id}`, {
-        status, actual_result: actualResult || null,
-        test_run_artifacts: artifacts || null, defect_id: defectId || null,
-      })
+      const saved = await api.uploadFormFiles<TestExecutionOut>(
+        `/api/test-execution/executions/${execution.id}/rich-result`,
+        { status, actual_result: actualResult, test_run_artifacts: artifacts, defect_id: defectId },
+        resultImages,
+      )
       onSaved(saved)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -169,36 +243,67 @@ function RecordResultModal({ execution, onClose, onSaved, onRemoved }: {
   return (
     <Modal title={`Record Result -- ${tc?.test_case_key || `Test Case #${execution.test_case_id}`}`} onClose={onClose} wide>
       {tc && (
-        <div style={{ marginBottom: 14 }}>
-          <p><strong>Scenario:</strong> {tc.test_scenario || '—'}</p>
-          {tc.steps.length > 0 && (
+        <div className="tm-execution-case-summary">
+          <div className="tm-execution-case-heading">
+            <div><small>Test case definition</small><h4>{tc.test_case_key}</h4></div>
+            <Badge status={tc.status} />
+          </div>
+          <div className="tm-case-detail-grid">
+            <TestCaseDetail label="Epic ID" value={tc.epic_id} />
+            <TestCaseDetail label="CR Number" value={tc.cr_number} />
+            <TestCaseDetail label="Feature ID" value={tc.feature_id} />
+            <TestCaseDetail label="User Story ID" value={tc.user_story_id} />
+            <TestCaseDetail label="Test Type" value={tc.test_type} />
+            <TestCaseDetail label="Module" value={tc.module_name} />
+            <TestCaseDetail label="Repository Folder" value={tc.folder_name || 'Unfiled'} />
+            <TestCaseDetail label="Priority">
+              {tc.priority ? <Badge status={tc.priority} /> : '—'}
+            </TestCaseDetail>
+            <TestCaseDetail label="Repository Status" value={tc.status} />
+            <TestCaseDetail label="Test Scenario" value={tc.test_scenario} wide />
+            <TestCaseDetail label="Pre-Condition" value={tc.pre_condition} wide />
+            <TestCaseDetail label="Description" value={tc.description} wide />
+            <TestCaseDetail label="Created By" value={tc.created_by_name} />
+            <TestCaseDetail label="Created At" value={tc.created_at ? new Date(tc.created_at).toLocaleString() : '—'} />
+            <TestCaseDetail label="Last Updated" value={tc.updated_at ? new Date(tc.updated_at).toLocaleString() : '—'} />
+          </div>
+          <div className="tm-execution-steps">
+            <h4>Test Steps <span>{tc.steps.length}</span></h4>
+          {tc.steps.length > 0 ? (
             <table className="simple-table">
               <thead><tr><th>#</th><th>Step</th><th>Expected Result</th></tr></thead>
-              <tbody>{tc.steps.map((s, i) => <tr key={s.id}><td>{i + 1}</td><td>{s.step_text}</td><td>{s.expected_result}</td></tr>)}</tbody>
+              <tbody>{tc.steps.map((s, i) => <tr key={s.id}><td>{s.step_no || i + 1}</td><td>{s.step_text || '—'}</td><td>{s.expected_result || '—'}</td></tr>)}</tbody>
             </table>
-          )}
+          ) : <p className="muted small">No steps are defined for this test case.</p>}
+          </div>
         </div>
       )}
       <form onSubmit={submit}>
+        <div className="tm-execution-result-heading"><h4>Execution Result</h4>{readOnly && <span>Read only</span>}</div>
         <Field label="Status">
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <select value={status} onChange={(e) => setStatus(e.target.value)} disabled={readOnly}>
             {TEST_EXECUTION_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </Field>
         <Field label="Actual Result">
-          <textarea value={actualResult} onChange={(e) => setActualResult(e.target.value)} />
+          {readOnly ? (
+            actualResult ? <MarkdownComment value={actualResult} /> : <span className="muted small">No actual result recorded.</span>
+          ) : (
+            <JiraRichTextField value={actualResult} onChange={setActualResult} onImagesChange={setResultImages} />
+          )}
         </Field>
+        <ExecutionResultImages executionId={execution.id} readOnly={readOnly} />
         <Field label="Test Run Artifacts">
-          <input value={artifacts} onChange={(e) => setArtifacts(e.target.value)} placeholder="Link, filename, or reference" />
+          <input value={artifacts} onChange={(e) => setArtifacts(e.target.value)} placeholder="Link, filename, or reference" disabled={readOnly} />
         </Field>
         <Field label="Defect ID (if any)">
-          <input value={defectId} onChange={(e) => setDefectId(e.target.value)} />
+          <input value={defectId} onChange={(e) => setDefectId(e.target.value)} disabled={readOnly} />
         </Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Result'}</button>
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn btn-danger" onClick={() => setConfirmRemove(true)} disabled={busy}>Remove from Cycle</button>
+          {!readOnly && <button className="btn btn-primary" disabled={busy || actualResult.length > 10000}>{busy ? 'Saving...' : 'Save Result'}</button>}
+          <button type="button" className="btn" onClick={onClose}>{readOnly ? 'Close' : 'Cancel'}</button>
+          {!readOnly && <button type="button" className="btn btn-danger" onClick={() => setConfirmRemove(true)} disabled={busy}>Remove from Cycle</button>}
         </div>
       </form>
       {confirmRemove && (
@@ -351,12 +456,12 @@ export default function TestExecution() {
                 <button className={!resultFilter ? 'active' : ''} onClick={() => setResultFilter('')}>All <span>{executions.length}</span></button>
                 {TEST_EXECUTION_STATUSES.map((s) => <button key={s} className={resultFilter === s ? 'active' : ''} onClick={() => setResultFilter(s)}>{s} <span>{summary[s] || 0}</span></button>)}
               </div>
-              <Table
+              <Table<TestExecutionOut>
                 rowKey="id"
-                onRowClick={(e) => canExec && projectIsActive && setEditingExecution(e)}
+                onRowClick={setEditingExecution}
                 columns={[
                   { key: 'test_case', header: 'Test Case ID', render: (e) => e.test_case?.test_case_key || `#${e.test_case_id}`, filterValue: (e) => e.test_case?.test_case_key || String(e.test_case_id) },
-                  { key: 'mapping', header: 'Epic / Story', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.test_case?.epic_id || '—'}</strong><small>{e.test_case?.user_story_id || 'No story'}</small></span>, filterValue: (e) => `${e.test_case?.epic_id || ''} ${e.test_case?.user_story_id || ''}` },
+                  { key: 'mapping', header: 'Epic / CR / Story', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.test_case?.epic_id || '—'}</strong><small>{[e.test_case?.cr_number, e.test_case?.user_story_id].filter(Boolean).join(' · ') || 'No CR / story'}</small></span>, filterValue: (e) => `${e.test_case?.epic_id || ''} ${e.test_case?.cr_number || ''} ${e.test_case?.user_story_id || ''}` },
                   { key: 'scenario', header: 'Scenario', render: (e) => e.test_case?.test_scenario || '—', filterValue: (e) => e.test_case?.test_scenario || '' },
                   { key: 'status', header: 'Result', render: (e) => <Badge status={e.status} /> },
                   { key: 'defect_id', header: 'Defect ID', render: (e) => e.defect_id || '—' },
@@ -391,6 +496,7 @@ export default function TestExecution() {
       {editingExecution && (
         <RecordResultModal
           execution={editingExecution}
+          readOnly={!canExec || !projectIsActive}
           onClose={() => setEditingExecution(null)}
           onSaved={(e) => { setExecutions((prev) => prev.map((x) => (x.id === e.id ? e : x))); setEditingExecution(null) }}
           onRemoved={(id) => { setExecutions((prev) => prev.filter((x) => x.id !== id)); setEditingExecution(null) }}

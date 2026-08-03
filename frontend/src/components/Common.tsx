@@ -99,7 +99,6 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     DEFECT_RAISED: "badge-red",
     WAITING_FOR_FIX: "badge-red",
     RETESTING: "badge-purple",
-    REGRESSION_TESTING: "badge-purple",
     QA_COMPLETED: "badge-green",
     QA_SIGNOFF_PENDING: "badge-teal",
     QA_SIGNED_OFF: "badge-green",

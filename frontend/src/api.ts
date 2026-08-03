@@ -122,6 +122,12 @@ export const api = {
     triggerDownload(blob, filename)
   },
 
+  // Authenticated Blob fetch used when a protected file must be displayed
+  // inline (for example, images pasted into a Jira-style comment). Native
+  // <img src> requests cannot attach the portal's Bearer token, so callers
+  // fetch through this helper and render a short-lived object URL instead.
+  getBlob: (path: string): Promise<Blob> => request<Blob>(path, { isBlob: true }),
+
   // Uploads a single named file plus optional extra form fields -- unlike
   // uploadFiles above (always field name 'files', no other data), this is
   // for endpoints that take one specific file field alongside other form
@@ -133,6 +139,23 @@ export const api = {
     Object.entries(fields).forEach(([k, v]) => {
       if (v !== undefined && v !== null) form.append(k, v)
     })
+    return request<T>(path, { method: 'POST', body: form, formEncoded: true })
+  },
+
+  // Multipart form with repeatable file fields. Used by rich comments,
+  // where formatted body text and several pasted images are submitted as
+  // one atomic user action.
+  uploadFormFiles: <T = any>(
+    path: string,
+    fields: Record<string, string | undefined | null>,
+    files: File[],
+    fileField: string = 'files',
+  ): Promise<T> => {
+    const form = new FormData()
+    Object.entries(fields).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) form.append(key, value)
+    })
+    files.forEach((file) => form.append(fileField, file))
     return request<T>(path, { method: 'POST', body: form, formEncoded: true })
   },
 }

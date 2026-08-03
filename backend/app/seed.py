@@ -26,14 +26,21 @@ DEMO_USERS = [
     ("agm1", "Dep head COE 1", Role.DEPARTMENT_HEAD_COE_AGM, "IT - QA"),
     ("security1", "SA 1", Role.SECURITY_ANALYST, "IT - QA"),
     ("appowner1", "App Owner 1", Role.APPLICATION_OWNER, "IT - Software"),
-    ("depthead1", "Dep Head Of Req 1", Role.DEPARTMENT_HEAD_CM, "IT - Software"),
-    ("depthead2", "Dep Head Of Req 1", Role.DEPARTMENT_HEAD_AGM, "IT - Software"),
+    ("depthead1", "Department Head 1", Role.DEPARTMENT_HEAD_CM, "IT - Software"),
+    ("depthead2", "Department Head 2", Role.DEPARTMENT_HEAD_AGM, "IT - Software"),
     # New SM checkpoint role (sits between Requester and Department Head on
     # QA Request / SAST-DAST / Suppression workflows).
-    ("sm1", "SM 1 Of Req 1", Role.SM, "IT - Software"),
-    ("sm2", "SM 2 Of Req 1", Role.SM, "IT - Software"),
+    ("sm1", "SM 1", Role.SM, "IT - Software"),
+    ("sm2", "SM 2", Role.SM, "IT - Software"),
     ("admin", "Administrator", Role.ADMIN, "IT - QA"),
 ]
+
+LEGACY_DEMO_NAMES = {
+    "depthead1": ("Dep Head Of Req 1", "Department Head 1"),
+    "depthead2": ("Dep Head Of Req 1", "Department Head 2"),
+    "sm1": ("SM 1 Of Req 1", "SM 1"),
+    "sm2": ("SM 2 Of Req 1", "SM 2"),
+}
 
 
 def _seed_departments(db):
@@ -45,6 +52,20 @@ def _seed_departments(db):
     print(f"Seeded {len(SEED_DEPARTMENTS)} departments.")
 
 
+def _normalize_legacy_demo_names(db):
+    """Removes the old request-specific suffix from seeded display names
+    without overwriting any name an administrator has already customized."""
+    changed = 0
+    for username, (legacy_name, display_name) in LEGACY_DEMO_NAMES.items():
+        user = db.query(models.User).filter_by(username=username, full_name=legacy_name).first()
+        if user:
+            user.full_name = display_name
+            changed += 1
+    if changed:
+        db.commit()
+        print(f"Updated {changed} legacy demo display name(s).")
+
+
 def run():
     db = SessionLocal()
     try:
@@ -52,9 +73,10 @@ def run():
         # that re-running against a DB that already has users (but predates
         # the Department table) still backfills the department list.
         _seed_departments(db)
+        _normalize_legacy_demo_names(db)
 
         if db.query(models.User).count() > 0:
-            print("Users already seeded — skipping. Delete qa_portal.db to reseed.")
+            print("Users already seeded — skipping new-user creation.")
             return
 
         for username, full_name, role, dept in DEMO_USERS:

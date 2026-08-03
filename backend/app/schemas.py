@@ -1,6 +1,15 @@
 import datetime
+import re
 from typing import Optional, List
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+
+
+def _plain_person_name(value):
+    """Legacy demo accounts embedded request context in full_name (for
+    example, 'SM 1 Of Req 1'). Display only the person's name everywhere."""
+    if not isinstance(value, str):
+        return value
+    return re.sub(r"\s+of\s+req\s+\d+\s*$", "", value, flags=re.IGNORECASE).strip()
 
 
 class ORMModel(BaseModel):
@@ -14,6 +23,8 @@ class Token(ORMModel):
     roles: List[str]
     full_name: str
     username: str
+
+    _normalize_full_name = field_validator("full_name", mode="before")(_plain_person_name)
 
 
 class UserOut(ORMModel):
@@ -29,6 +40,8 @@ class UserOut(ORMModel):
     # True right after first-ever LDAP login until the person picks their own
     # department via PATCH /api/auth/me -- see models.User.needs_department_selection.
     needs_department_selection: bool = False
+
+    _normalize_full_name = field_validator("full_name", mode="before")(_plain_person_name)
 
 
 class UserCreate(BaseModel):
@@ -75,6 +88,43 @@ class DepartmentSelection(BaseModel):
     just an Admin) can set on their own profile, used by the first-LDAP-login
     department-selection popup."""
     department: str
+
+
+class AuditLogOut(ORMModel):
+    id: int
+    event_type: str
+    action: str
+    outcome: str
+    actor_id: Optional[int] = None
+    actor_username: Optional[str] = None
+    actor_name: Optional[str] = None
+    actor_roles: Optional[str] = None
+    method: Optional[str] = None
+    path: Optional[str] = None
+    status_code: Optional[int] = None
+    target_type: Optional[str] = None
+    target_id: Optional[str] = None
+    target_name: Optional[str] = None
+    details: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    request_id: Optional[str] = None
+    created_at: datetime.datetime
+
+
+class AuditSummary(BaseModel):
+    total: int
+    failed: int
+    authentication: int
+    access_management: int
+
+
+class AuditLogPage(BaseModel):
+    rows: List[AuditLogOut]
+    total: int
+    page: int
+    page_size: int
+    summary: AuditSummary
 
 
 # ---------------- Module 1: QA Request ----------------
@@ -943,6 +993,8 @@ class ApprovalActionOut(ORMModel):
     comments: Optional[str] = None
     created_at: datetime.datetime
 
+    _normalize_actor_name = field_validator("actor_name", mode="before")(_plain_person_name)
+
 
 class CommentCreate(BaseModel):
     body: str
@@ -1137,6 +1189,7 @@ class TestCaseCreate(BaseModel):
     test_case_key: Optional[str] = None
     folder_id: Optional[int] = None
     epic_id: Optional[str] = None
+    cr_number: Optional[str] = None
     feature_id: Optional[str] = None
     user_story_id: Optional[str] = None
     test_type: Optional[str] = None
@@ -1155,6 +1208,7 @@ class TestCaseCreate(BaseModel):
 class TestCaseUpdate(BaseModel):
     folder_id: Optional[int] = None
     epic_id: Optional[str] = None
+    cr_number: Optional[str] = None
     feature_id: Optional[str] = None
     user_story_id: Optional[str] = None
     test_type: Optional[str] = None
@@ -1195,7 +1249,9 @@ class TestCaseOut(ORMModel):
     test_case_key: str
     project_id: int
     folder_id: Optional[int] = None
+    folder_name: Optional[str] = None
     epic_id: Optional[str] = None
+    cr_number: Optional[str] = None
     feature_id: Optional[str] = None
     user_story_id: Optional[str] = None
     test_type: Optional[str] = None
@@ -1206,6 +1262,7 @@ class TestCaseOut(ORMModel):
     priority: Optional[str] = None
     status: str
     created_by_id: Optional[int] = None
+    created_by_name: Optional[str] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     steps: List[TestStepOut] = []

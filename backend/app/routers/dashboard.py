@@ -9,6 +9,7 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..constants import (
     Role, QAStatus, QA_REQUEST_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
+    QA_DEPARTMENT,
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
@@ -42,7 +43,7 @@ ACTIVE_QA_STATUSES = {
     QAStatus.QA_LEAD_ASSIGNED, QAStatus.READINESS_VERIFICATION, QAStatus.RETURNED_BY_QA_LEAD,
     QAStatus.QA_ACTIVITY_INITIATED, QAStatus.PLANNING, QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN,
     QAStatus.EXECUTION_IN_PROGRESS, QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX,
-    QAStatus.RETESTING, QAStatus.REGRESSION_TESTING, QAStatus.QA_COMPLETED,
+    QAStatus.RETESTING, QAStatus.QA_COMPLETED,
     QAStatus.QA_SIGNOFF_PENDING, QAStatus.QA_SIGNED_OFF, QAStatus.REQUESTER_VERIFICATION,
 }
 
@@ -68,66 +69,202 @@ SAST_DAST_PENDING_APPROVAL_STATUSES = {
 TESTER_WORKLOAD_STATUSES = [
     QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN, QAStatus.EXECUTION_IN_PROGRESS,
     QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
-    QAStatus.REGRESSION_TESTING, QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING,
+    QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING,
     QAStatus.QA_SIGNED_OFF, QAStatus.REQUESTER_VERIFICATION,
 ]
+
+# One tester carrying three fully-active concurrent assignments is considered
+# 100% occupied. Lighter lifecycle stages consume a fraction of a slot. This
+# makes the dashboard an explainable capacity aid for QA Leads instead of a
+# relative "busiest person = 100%" chart whose meaning changes every day.
+TESTER_CAPACITY_POINTS = 3.0
+FUNCTIONAL_TESTER_LOAD = {
+    QAStatus.TESTER_ASSIGNED: 0.50,
+    QAStatus.TEST_DESIGN: 1.00,
+    QAStatus.EXECUTION_IN_PROGRESS: 1.00,
+    QAStatus.DEFECT_RAISED: 0.50,
+    QAStatus.WAITING_FOR_FIX: 0.25,
+    QAStatus.RETESTING: 0.75,
+    QAStatus.QA_COMPLETED: 0.15,
+    QAStatus.QA_SIGNOFF_PENDING: 0.10,
+    QAStatus.QA_SIGNED_OFF: 0.10,
+    QAStatus.REQUESTER_VERIFICATION: 0.05,
+}
+PERFORMANCE_TESTER_LOAD = {
+    "ENVIRONMENT_SETUP": 1.00,
+    "SCRIPT_DEVELOPMENT": 1.00,
+    "BASELINE": 0.75,
+    "LOAD_TEST_EXECUTION": 1.00,
+    "RESULT_ANALYSIS": 0.25,
+    "DEFECT_FIX_RETEST": 0.75,
+    "REPORT": 0.15,
+    "SIGNOFF_PENDING": 0.10,
+}
+PERFORMANCE_TESTER_WORKLOAD_STATUSES = list(PERFORMANCE_TESTER_LOAD)
+SECURITY_ANALYST_LOAD = {
+    "CONFIGURATION": 0.75,
+    "SCANNING": 1.00,
+    "FINDING_VALIDATION": 0.75,
+    "REMEDIATION": 0.50,
+    "ASSIGNED_TO_REQUESTER": 0.25,
+    "WAITING_FOR_FIX": 0.25,
+    "ASSIGNED_TO_LEAD": 0.50,
+    "RESCAN": 0.75,
+    "SECURITY_COMPLETE": 0.15,
+    "REPORT_READY": 0.10,
+}
+SECURITY_ANALYST_WORKLOAD_STATUSES = list(SECURITY_ANALYST_LOAD)
+
+_QUEUED_TESTER_STATUSES = {QAStatus.TESTER_ASSIGNED}
+_WAITING_TESTER_STATUSES = {
+    QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, "ASSIGNED_TO_REQUESTER",
+}
+_NEAR_COMPLETE_TESTER_STATUSES = {
+    QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING, QAStatus.QA_SIGNED_OFF,
+    QAStatus.REQUESTER_VERIFICATION, "REPORT", "SIGNOFF_PENDING", "SECURITY_COMPLETE", "REPORT_READY",
+}
+
+
+def _assigned_user_ids(value: str | None) -> list[int]:
+    ids = []
+    for raw_id in (value or "").split(","):
+        try:
+            ids.append(int(raw_id.strip()))
+        except (TypeError, ValueError):
+            continue
+    return list(dict.fromkeys(ids))
+
+
+def _occupancy_band(percent: int) -> str:
+    if percent == 0:
+        return "Available"
+    if percent < 50:
+        return "Light"
+    if percent < 80:
+        return "Balanced"
+    if percent < 100:
+        return "High"
+    if percent == 100:
+        return "Full"
+    return "Overloaded"
 
 
 @router.get("/qa-tester-workload")
 def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None = Query(None),
                        db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
-    """QA-team-only pending workload matrix: one tester per row and one
-    lifecycle status per column. The endpoint enforces the same role gate as
-    the tab, so non-QA users cannot retrieve the underlying team view."""
-    qa_team_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM}
+    """QA-team-only capacity view. Work is converted to weighted concurrent
+    assignment points so a QA Lead can see who is available, balanced, full,
+    or overloaded. Shared requests divide their load across assigned testers."""
+    qa_team_roles = {
+        Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
+        Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM,
+    }
     if not qa_team_roles.intersection(current_user.roles):
         raise HTTPException(403, "QA tester workload is restricted to the QA team")
     qa_testers = (db.query(models.User)
                   .join(models.UserRole, models.UserRole.user_id == models.User.id)
                   .filter(models.User.is_active == True,  # noqa: E712
-                          models.UserRole.role == Role.QA_ENGINEER)
-                  .order_by(models.User.full_name).all())
-    requests = (_in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at,
-                           date_from, date_to)
-                .filter(models.FunctionalRequest.status.in_(TESTER_WORKLOAD_STATUSES)).all())
+                          models.UserRole.role.in_([Role.QA_ENGINEER, Role.SECURITY_ANALYST]),
+                          models.User.department == QA_DEPARTMENT)
+                  .distinct().order_by(models.User.full_name).all())
+    functional_requests = (_in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at,
+                                      date_from, date_to)
+                           .filter(models.FunctionalRequest.status.in_(TESTER_WORKLOAD_STATUSES)).all())
+    performance_requests = (_in_period(db.query(models.PerformanceRequest), models.PerformanceRequest.created_at,
+                                       date_from, date_to)
+                            .filter(models.PerformanceRequest.status.in_(PERFORMANCE_TESTER_WORKLOAD_STATUSES)).all())
+    sast_requests = (_in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to)
+                     .filter(models.SASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all())
+    dast_requests = (_in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to)
+                     .filter(models.DASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all())
+
+    def role_label(user) -> str:
+        roles = []
+        if user and user.has_role(Role.QA_ENGINEER):
+            roles.append("QA Tester")
+        if user and user.has_role(Role.SECURITY_ANALYST):
+            roles.append("Security Analyst")
+        return " & ".join(roles) or "QA Team Member"
+
+    def empty_row(user_id: int, user=None):
+        return {
+            "tester_id": user_id,
+            "tester_name": user.full_name if user else f"User #{user_id}",
+            "department": (user.department if user else None) or "—",
+            "role_label": role_label(user),
+            "status_counts": {status: 0 for status in TESTER_WORKLOAD_STATUSES},
+            "source_counts": {"Functional": 0, "Performance": 0, "SAST": 0, "DAST": 0},
+            "total_pending": 0,
+            "occupied_points": 0.0,
+            "queued_count": 0,
+            "active_count": 0,
+            "waiting_count": 0,
+            "near_complete_count": 0,
+        }
 
     rows = {
-        user.id: {
-            "tester_id": user.id,
-            "tester_name": user.full_name,
-            "department": user.department or "—",
-            "status_counts": {status: 0 for status in TESTER_WORKLOAD_STATUSES},
-            "total_pending": 0,
-        }
+        user.id: empty_row(user.id, user)
         for user in qa_testers
     }
-    for request in requests:
-        assigned_ids = []
-        for raw_id in (request.assigned_tester_ids or "").split(","):
-            try:
-                assigned_ids.append(int(raw_id.strip()))
-            except (TypeError, ValueError):
-                continue
-        for tester_id in set(assigned_ids):
-            if tester_id not in rows:
-                user = db.query(models.User).get(tester_id)
-                rows[tester_id] = {
-                    "tester_id": tester_id,
-                    "tester_name": user.full_name if user else f"User #{tester_id}",
-                    "department": (user.department if user else None) or "—",
-                    "status_counts": {status: 0 for status in TESTER_WORKLOAD_STATUSES},
-                    "total_pending": 0,
-                }
-            rows[tester_id]["status_counts"][request.status] += 1
-            rows[tester_id]["total_pending"] += 1
 
-    result_rows = sorted(rows.values(), key=lambda row: (-row["total_pending"], row["tester_name"].lower()))
+    def add_assignment(tester_id: int, request, source: str, load: float, shared_by: int = 1):
+        if tester_id not in rows:
+            user = db.query(models.User).get(tester_id)
+            rows[tester_id] = empty_row(tester_id, user)
+        row = rows[tester_id]
+        row["status_counts"][request.status] = row["status_counts"].get(request.status, 0) + 1
+        row["source_counts"][source] += 1
+        row["total_pending"] += 1
+        row["occupied_points"] += float(load) / max(1, shared_by)
+        if request.status in _QUEUED_TESTER_STATUSES:
+            row["queued_count"] += 1
+        elif request.status in _WAITING_TESTER_STATUSES:
+            row["waiting_count"] += 1
+        elif request.status in _NEAR_COMPLETE_TESTER_STATUSES:
+            row["near_complete_count"] += 1
+        else:
+            row["active_count"] += 1
+
+    def add_requests(requests, source: str, load_map: dict):
+        for request in requests:
+            assigned_ids = _assigned_user_ids(request.assigned_tester_ids)
+            if not assigned_ids:
+                continue
+            for tester_id in assigned_ids:
+                add_assignment(tester_id, request, source, load_map.get(request.status, 0), len(assigned_ids))
+
+    def add_security_requests(requests, source: str):
+        for request in requests:
+            if request.security_analyst_id:
+                add_assignment(
+                    request.security_analyst_id, request, source,
+                    SECURITY_ANALYST_LOAD.get(request.status, 0),
+                )
+
+    add_requests(functional_requests, "Functional", FUNCTIONAL_TESTER_LOAD)
+    add_requests(performance_requests, "Performance", PERFORMANCE_TESTER_LOAD)
+    add_security_requests(sast_requests, "SAST")
+    add_security_requests(dast_requests, "DAST")
+
+    for row in rows.values():
+        row["occupied_points"] = round(row["occupied_points"], 2)
+        row["occupancy_percent"] = round(row["occupied_points"] / TESTER_CAPACITY_POINTS * 100)
+        row["available_percent"] = max(0, 100 - row["occupancy_percent"])
+        row["occupancy_band"] = _occupancy_band(row["occupancy_percent"])
+
+    result_rows = sorted(rows.values(), key=lambda row: (-row["occupancy_percent"], row["tester_name"].lower()))
+    average_occupancy = round(sum(row["occupancy_percent"] for row in result_rows) / len(result_rows)) if result_rows else 0
     return {
         "statuses": TESTER_WORKLOAD_STATUSES,
         "rows": result_rows,
+        "capacity_points": TESTER_CAPACITY_POINTS,
         "total_pending": sum(row["total_pending"] for row in result_rows),
         "testers_with_pending": sum(1 for row in result_rows if row["total_pending"] > 0),
+        "average_occupancy": average_occupancy,
+        "available_testers": sum(1 for row in result_rows if row["occupancy_percent"] < 50),
+        "highly_occupied_testers": sum(1 for row in result_rows if row["occupancy_percent"] >= 80),
+        "overloaded_testers": sum(1 for row in result_rows if row["occupancy_percent"] > 100),
     }
 
 
@@ -291,7 +428,6 @@ STAGE_LABELS = {
     QAStatus.DEFECT_RAISED: "Fix Pending",
     QAStatus.WAITING_FOR_FIX: "Fix Pending",
     QAStatus.RETESTING: "Retesting In Progress",
-    QAStatus.REGRESSION_TESTING: "Regression Testing In Progress",
     QAStatus.QA_COMPLETED: "Sign-off Request Pending",
     QAStatus.QA_SIGNOFF_PENDING: "QA Sign-off Pending",
     QAStatus.QA_SIGNED_OFF: "Requester Verification Pending",
@@ -317,7 +453,6 @@ STAGE_TEAM = {
     QAStatus.DEFECT_RAISED: "Requester",
     QAStatus.WAITING_FOR_FIX: "Requester",
     QAStatus.RETESTING: "QA",
-    QAStatus.REGRESSION_TESTING: "QA",
     QAStatus.QA_COMPLETED: "QA Lead",
     QAStatus.QA_SIGNOFF_PENDING: "QA Lead",
     QAStatus.QA_SIGNED_OFF: "Requester",

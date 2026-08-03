@@ -29,7 +29,8 @@ that renders each one.
 | `suppression.py` | **Security** (`src/modules/security/`) | False-positive/suppression requests: app-owner and dept-head decisions, security-team decision, walkthroughs, documents, history |
 | `automation.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Automation request lifecycle: feasibility, engineer assignment, script development, review, CI/CD integration, sign-off |
 | `performance.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Performance testing lifecycle: readiness, baseline, load test, result analysis, defect fix/retest, report, sign-off |
-| `approvals.py` | **Governance** (`src/modules/governance/`) | Cross-module approval/audit feed (`/approvals`, `/approvals/pending-mine`) |
+| `approvals.py` | **Governance** (`src/modules/governance/`) | Cross-module workflow-decision feed (`/approvals`, `/approvals/pending-mine`) |
+| `audit.py` | **Governance** (`src/modules/governance/AuditLog.tsx`) | Immutable authentication, API-access, data-change and access-management audit trail |
 | `signoff.py` | **Governance** (`src/modules/governance/`) | Formal QA sign-off issuance, history, documents |
 | `dashboard.py` | `src/Dashboard.tsx` | Project-wise, QA-wise, security, suppression, and 3W ("what's pending, where, since when") dashboards |
 | `reports.py` | **Governance** (`src/modules/governance/Reports.tsx`) | Operational/security/management report data (QA summary, SAST/DAST scan, vulnerability trend, severity distribution, suppression register, monthly KPI, quality scorecard, audit evidence) |
@@ -37,7 +38,8 @@ that renders each one.
 | `departments.py` | Used across request forms + Admin | Department master data |
 
 Every write endpoint is RBAC-checked via `app/deps.require_roles`, and every state change is
-written to the `approval_actions` audit table. JWT auth stands in for AD/LDAP integration —
+written to the `approval_actions` workflow-history table. Security and operational activity is
+captured separately in the immutable `qap_audit_logs` table. JWT auth stands in for AD/LDAP integration —
 real LDAP bind support is already implemented (see
 [Authentication & the Admin section](#authentication--the-admin-section)), not just a stub.
 
@@ -350,6 +352,7 @@ Key endpoint groups:
   `/checklist`, `/walkthroughs`, `/history`, `/export`, `/documents`
 - `/api/signoffs` — CRUD + `/issue`, `/history`, `/export`, `/documents`
 - `/api/approvals`, `/api/approvals/pending-mine` — cross-module audit/decision feed
+- `/api/audit`, `/api/audit/export` — protected application/access audit log and CSV evidence export
 - `/api/dashboard/*` — project-wise, security (SAST/DAST), suppression, and the `/3w`
   ("what's pending, where, since when") dashboards
 - `/api/reports/*` and `/api/export/{report_key}?format=xlsx|pdf|csv` — operational, security,

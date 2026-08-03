@@ -4584,6 +4584,49 @@ request beyond its current assignment checkpoint, verify that its legacy `engine
 `security_lead_id` references an active IT-QA QA Lead and populate the new analyst/tester assignment at
 the Planning step. No existing rows are deleted or automatically reassigned.
 
+## 113. Jira-style rich comments with pasted images (no schema change)
+
+The shared Activity component now provides formatted paste, bold/italic/underline/strikethrough, bullet
+and numbered lists, quotes, inline code, links, image selection, and direct clipboard image paste.
+Formatted text is stored as safe Markdown in the existing `qap_approval_actions.comments` CLOB. Comment
+images reuse the existing `qap_module_documents` table with `module = 'COMMENT_IMAGE'` and the comment's
+`qap_approval_actions.id` as `request_id`; authenticated list/download endpoints restore the images after
+reload. Supported image types are PNG, JPEG, GIF, and WebP, with a maximum of 8 images per comment and
+10 MB per image. No Oracle DDL is required.
+
+## 114. QA Tester Overview capacity and occupancy (no schema change)
+
+The QA-team-only dashboard view now combines each active IT-QA QA Tester's Functional/Performance work
+and each Security Analyst's SAST/DAST work into one explainable occupancy percentage. Three fully-active
+concurrent assignments equal 100% planned capacity. Design/execution/scanning uses up to 1 point,
+configuration/retest/regression 0.75, queued/defect/remediation 0.5, waiting/result analysis 0.25, and
+near-complete work 0.05–0.15; shared Functional/Performance requests divide their point value between
+assigned testers. The view reports available, light, balanced, high, full, and overloaded bands, plus
+active/queued/waiting/near-complete counts and Functional/Performance/SAST/DAST work mix. Existing
+assignment and status columns provide all required data, so no Oracle DDL is required.
+
+## 115. Remove request context from legacy demo user names (data cleanup only)
+
+Legacy seeded users used values such as `SM 1 Of Req 1` and `Dep Head Of Req 1` as `full_name`. User
+selectors and audit views should show only the person's name. New seed runs now use `SM 1`, `SM 2`,
+`Department Head 1`, and `Department Head 2`; rerunning `python -m app.seed` safely updates only rows that
+still have the exact legacy values. API response schemas also remove the suffix for immediate display
+compatibility. Apply the following optional cleanup to persist the corrected values directly:
+
+```sql
+UPDATE qap_users SET full_name = 'SM 1'
+ WHERE username = 'sm1' AND full_name = 'SM 1 Of Req 1';
+UPDATE qap_users SET full_name = 'SM 2'
+ WHERE username = 'sm2' AND full_name = 'SM 2 Of Req 1';
+UPDATE qap_users SET full_name = 'Department Head 1'
+ WHERE username = 'depthead1' AND full_name = 'Dep Head Of Req 1';
+UPDATE qap_users SET full_name = 'Department Head 2'
+ WHERE username = 'depthead2' AND full_name = 'Dep Head Of Req 1';
+COMMIT;
+```
+
+No schema change is required.
+
 ## 113. Bug fix: freshly-raised requests showed "QA Lead Approval Pending" instead of "SM Approval Pending" everywhere (no schema change)
 
 **Reported directly:** after raising a QA Request, its linked Functional Testing Request (and, it turns
@@ -5848,3 +5891,82 @@ Application Owner tier. Wired at the call site: `applicationOwnerPending={req.ap
 
 **Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean (no backend changes this section);
 Documents and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+
+## 138. Removed the `REGRESSION_TESTING` status from the Functional Testing Request lifecycle (schema-relevant: no column change, but see data note below)
+
+**Request:** "remove REGRESSION_TESTING status."
+
+**State-machine analysis before removing anything:** `REGRESSION_TESTING` was a single, fully optional side
+spur off `RETESTING` -- `RETESTING -> REGRESSION_TESTING` via `POST /{req_id}/start-regression` (the ONLY
+way in), and `REGRESSION_TESTING -> QA_COMPLETED` via `POST /{req_id}/complete-qa`, which already also
+accepted `RETESTING` directly as one of its source statuses (the only way out). Nothing else transitioned
+into or out of it. That means `RETESTING -> QA_COMPLETED` already existed and fully covers what
+`REGRESSION_TESTING` added -- removing it needed no new transition, no state-machine surgery, just deleting
+the one spur and every list/map that referenced it.
+
+**Backend:**
+- `constants.py`: removed `QAStatus.REGRESSION_TESTING`, dropped it from `QA_REQUEST_STATUSES` and
+  `QA_REQUEST_STATUS_LABELS`, reworded the `QAStatus` class docstring ("defect-fix-retest-regression cycle"
+  -> "defect-fix-retest cycle").
+- `routers/functional.py`: deleted the `start_regression` endpoint (`POST /{req_id}/start-regression`)
+  entirely -- its only purpose was creating this status. `complete_qa`'s accepted-source-status list dropped
+  `REGRESSION_TESTING` (already had `RETESTING`, so the direct path survives untouched); `_can_upload_documents`'s
+  allowed-status tuple dropped it too.
+- `routers/dashboard.py`: dropped from `ACTIVE_QA_STATUSES`, `TESTER_WORKLOAD_STATUSES`, and the two
+  per-status label dicts feeding the 3W dashboard ("Regression Testing In Progress" stage label, "QA" stage-team
+  mapping).
+
+**Frontend:**
+- `constants.ts`: dropped from `QA_STATUSES`, `QA_STATUS_LABELS`, `QA_PENDING_WITH`.
+- `components/Common.tsx`: dropped the `REGRESSION_TESTING: "badge-purple"` Badge color-map entry.
+- `Dashboard.tsx`: dropped from `STATUS_STAGE_INDEX` (the lifecycle-funnel chart's stage-3 grouping).
+- `modules/functional/Functional.tsx`: dropped from `lifecycleStageIndex`'s stage-3 status list and
+  `canCompleteQA`'s allowed-status list; removed `canStartRegression` entirely along with its "Start
+  Regression Testing" button and its two other references (the "no actions available at this stage" fallback
+  condition, and the "show the action-note input" condition) -- a tester at `RETESTING` now goes straight to
+  "Mark QA Completed", the same direct path that already existed.
+
+**Data note (not run from this sandbox, no live DB connection):** the `status` column itself is a plain
+string (no DB-level CHECK constraint/enum), so this removal is purely an application-level validation
+change -- no `ALTER TABLE` needed. However, if any live row currently holds `status = 'REGRESSION_TESTING'`
+at deploy time, its next workflow action would be rejected (that value no longer appears in any `_require()`
+allow-list). Recommended one-time cleanup immediately before deploying this section, if applicable:
+```sql
+UPDATE qap_functional_requests SET status = 'RETESTING' WHERE status = 'REGRESSION_TESTING';
+```
+(table name per `models.FunctionalRequest.__tablename__` -- confirm the actual table name against the live
+schema before running). Existing `qap_approval_actions` history rows that mention "Regression Testing
+Started" are left as-is -- they're an accurate historical record of what happened at the time and aren't
+read by any status-list validation.
+
+**Verified:** `python3 -m py_compile` across the entire `backend/app` tree -- clean; `npx tsc --noEmit -p .`
+across the entire frontend -- clean; grepped both trees post-change to confirm zero remaining
+`REGRESSION_TESTING`/`start-regression`/`canStartRegression` references; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq`.
+
+## 139. Full test-case definition in Test Execution + CR Number traceability
+
+Selecting a test case in a Test Cycle now displays the complete reusable definition: Test Case ID,
+Epic ID, CR Number, Feature ID, User Story ID, Test Type, Module, Priority, repository approval status,
+scenario, pre-condition, description, last-updated time, all steps and expected results. The detail is
+also available read-only when the project is inactive or the viewer cannot record results.
+
+`cr_number` is a new optional Test Case field because the repository previously had no place to retain
+that value. Run this once against an existing Oracle schema before deploying the updated backend:
+
+```sql
+ALTER TABLE qap_test_cases ADD (cr_number VARCHAR2(64));
+```
+
+Fresh schemas receive the column through `Base.metadata.create_all()`. The Excel parser accepts optional
+`CR Number`, `CR ID`, or `Change Request` headers; older templates without one remain fully compatible.
+
+## 140. Jira-style rich Actual Result with protected screenshots (no schema change)
+
+Test Execution's Actual Result now uses the same safe Markdown formatting model as Jira-style Activity
+comments: bold, italic, underline, strikethrough, bulleted/numbered lists, quotes and code. QA users may
+paste screenshots from the clipboard or select up to eight PNG/JPEG/GIF/WebP images per save (10 MB each).
+Images are stored as authenticated `qap_module_documents` rows under module `TEST_EXEC_IMAGE`, linked to
+the exact `qap_test_executions.id`; list/download/delete endpoints never expose the upload folder publicly.
+Existing plain-text Actual Result values remain compatible and render normally. No Oracle DDL is required.

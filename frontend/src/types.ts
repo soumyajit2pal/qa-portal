@@ -20,6 +20,41 @@ export interface UserOut {
   needs_department_selection: boolean
 }
 
+export interface AuditLogOut {
+  id: number
+  event_type: string
+  action: string
+  outcome: string
+  actor_id?: number | null
+  actor_username?: string | null
+  actor_name?: string | null
+  actor_roles?: string | null
+  method?: string | null
+  path?: string | null
+  status_code?: number | null
+  target_type?: string | null
+  target_id?: string | null
+  target_name?: string | null
+  details?: string | null
+  ip_address?: string | null
+  user_agent?: string | null
+  request_id?: string | null
+  created_at: string
+}
+
+export interface AuditLogPage {
+  rows: AuditLogOut[]
+  total: number
+  page: number
+  page_size: number
+  summary: {
+    total: number
+    failed: number
+    authentication: number
+    access_management: number
+  }
+}
+
 // Departments are DB-backed (see backend app/models.py Department, managed
 // via /api/departments) -- fetched at render time everywhere a department
 // picker is shown, instead of importing a hardcoded list.
@@ -617,7 +652,9 @@ export interface TestCaseOut {
   test_case_key: string
   project_id: number
   folder_id?: number | null
+  folder_name?: string | null
   epic_id?: string | null
+  cr_number?: string | null
   feature_id?: string | null
   user_story_id?: string | null
   test_type?: string | null
@@ -628,6 +665,7 @@ export interface TestCaseOut {
   priority?: string | null
   status: string
   created_by_id?: number | null
+  created_by_name?: string | null
   created_at: string
   updated_at: string
   steps: TestStepOut[]
