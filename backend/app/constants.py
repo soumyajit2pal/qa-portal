@@ -270,6 +270,12 @@ QA_REQUEST_STATUSES = [
 FUNCTIONAL_EDITABLE_STATUSES = [
     QAStatus.DRAFT,
     QAStatus.SM_APPROVAL_PENDING, QAStatus.RETURNED_BY_SM,
+    # SM_REJECTED: reported directly -- a Rejected-by-SM request used to be a
+    # dead end. It's now reopenable the same way a Return is: the requester
+    # may edit details, then call resubmit_request to send it straight back
+    # to SM_APPROVAL_PENDING for a fresh decision. See resubmit_request's own
+    # docstring in routers/functional.py.
+    QAStatus.SM_REJECTED,
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.RETURNED_BY_DEPARTMENT_HEAD,
     QAStatus.RETURNED_BY_QA_LEAD,
 ]
@@ -277,9 +283,11 @@ FUNCTIONAL_EDITABLE_STATUSES = [
 # Readiness evidence is normally locked after Department Head approval. A
 # RETURNED_BY_* status is the explicit exception: the request is back with
 # the requester, who must be able to attach whatever evidence the returning
-# QA/Security/Engineering stage asked them to provide.
+# QA/Security/Engineering stage asked them to provide. SM_REJECTED is the
+# same exception now that it's reopenable (see FUNCTIONAL_EDITABLE_STATUSES
+# above) -- the requester may need to fix up evidence before reopening too.
 READINESS_EVIDENCE_EDITABLE_STATUSES = [
-    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
     "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD",
 ]
 
@@ -289,9 +297,13 @@ def is_readiness_evidence_editable(status) -> bool:
     return (value in READINESS_EVIDENCE_EDITABLE_STATUSES
             or value.startswith("RETURNED_BY_"))
 
-# Terminal statuses -- no further transitions possible.
+# Terminal statuses -- no further transitions possible. SM_REJECTED is
+# deliberately NOT here -- reported directly, it's reopenable by the
+# requester (edit details + resubmit, same path as RETURNED_BY_SM) rather
+# than a dead end. DEPARTMENT_HEAD_REJECTED is untouched/still terminal --
+# only SM rejection was asked to become reopenable.
 QA_REQUEST_TERMINAL_STATUSES = [
-    QAStatus.CLOSED, QAStatus.CANCELLED, QAStatus.SM_REJECTED, QAStatus.DEPARTMENT_HEAD_REJECTED,
+    QAStatus.CLOSED, QAStatus.CANCELLED, QAStatus.DEPARTMENT_HEAD_REJECTED,
 ]
 
 # Statuses from which the requester (or admin) may still cancel the request --
@@ -333,7 +345,14 @@ QA_REQUEST_STATUS_LABELS = {
     QAStatus.CANCELLED: "Cancelled",
 }
 
-# Default items seeded onto every new QA Request's "Ready for Testing" readiness checklist.
+# Shipped defaults for the "Ready for Testing" readiness checklist -- no
+# longer read directly anywhere in the app. This whole checklist is
+# Admin-configurable now (Admin > Readiness Checklist Configuration, see
+# checklist_config.py and models.ChecklistTemplateItem); this list is only
+# ever consulted by checklist_config.py itself, to bootstrap that table the
+# first time it's read with zero rows for this module, and again if an
+# Admin ever chooses "Restore Defaults". Edit the live configuration instead
+# of this list to actually change what gets seeded onto a new request.
 #
 # Used to also include "SAST readiness"/"DAST readiness" as two conditionally-
 # mandatory items (see the removed CONDITIONAL_CHECKLIST_ITEMS/
@@ -342,9 +361,8 @@ QA_REQUEST_STATUS_LABELS = {
 # dedicated "Security Readiness" checklist (DEFAULT_SAST_CHECKLIST_ITEMS/
 # DEFAULT_DAST_CHECKLIST_ITEMS below), which is the correct place for that
 # concern to live rather than a single unqualified checkbox sitting on
-# Functional's own checklist. None of these items are mandatory (self-
-# declared/QA-verified for visibility only, same convention as every other
-# checklist in this app).
+# Functional's own checklist. The first three items below ship mandatory;
+# the rest are self-declared/QA-verified for visibility only.
 DEFAULT_CHECKLIST_ITEMS = [
     ("BRD / FRS / User Stories approved", "Business / BA",  True),
     ("Scope finalized & change freeze", "Business / IT", True),
@@ -369,6 +387,16 @@ ENVIRONMENTS = ["Dev", "SIT", "UAT", "Pre-Production", "Production"]
 # (neither field's own dropdown ever offers it -- both already filter it out
 # client-side), so it's not part of this ordering at all.
 ENVIRONMENT_PIPELINE_ORDER = ["SIT", "UAT", "Pre-Production", "Production"]
+
+# Reported directly: DAST scans and Performance tests are never run against
+# Dev or SIT -- both are restricted to UAT and later. Simply
+# ENVIRONMENT_PIPELINE_ORDER without its first entry (SIT); Dev was never in
+# that list to begin with. Used by DastStep.tsx/PerformanceStep.tsx's own
+# Environment pickers (each restricted to exactly this list, no blank/"Dev"/
+# "SIT" option) and enforced again server-side in
+# routers/qa_requests.py::submit_request as a defense-in-depth check before
+# either child request is ever created.
+POST_SIT_ENVIRONMENTS = ENVIRONMENT_PIPELINE_ORDER[1:]
 
 
 def validate_environment_promotion(environment: str, target_promotion_environment: str) -> None:
@@ -472,18 +500,23 @@ SAST_DAST_PRE_SCANNING_STATUSES = [
 # and Closed are both strictly later than Security Complete in
 # SAST_DAST_STATUSES, so they're included here too.
 SAST_DAST_COMPLETED_STATUSES = ["SECURITY_COMPLETE", "REPORT_READY", "CLOSED"]
-# Terminal states -- a linked SAST/DAST request must be in one of these before
-# its parent QA Request can be marked QA_COMPLETED (see QAStatus docstring
-# above and routers/qa_requests.py::complete_qa). Rejections at either
-# approval checkpoint count as "resolved" for this purpose too.
-SAST_DAST_TERMINAL_STATUSES = ["REPORT_READY", "CLOSED", "SM_REJECTED", "DEPARTMENT_HEAD_REJECTED"]
+# Terminal states -- used to decide whether a SAST/DAST request still counts
+# as "outstanding" for dashboard/ageing purposes (see routers/dashboard.py's
+# 3W view). SM_REJECTED is deliberately NOT here -- reported directly, it's
+# reopenable by the requester (edit details + resubmit, same path as
+# RETURNED_BY_SM) rather than a dead end, so it should keep showing up as
+# pending-with-Requester the same way RETURNED_BY_SM already does.
+# DEPARTMENT_HEAD_REJECTED is untouched/still terminal -- only SM rejection
+# was asked to become reopenable.
+SAST_DAST_TERMINAL_STATUSES = ["REPORT_READY", "CLOSED", "DEPARTMENT_HEAD_REJECTED"]
 # Statuses from which mandatory details (repo URL/branch/commit/tech stack
 # for SAST; target URL/env/credentials for DAST) can still be edited by
 # *someone* -- see routers/sast_dast.py::_can_edit_details for exactly who,
 # at each of these (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are
-# that stage's own reviewer only, not the requester).
+# that stage's own reviewer only, not the requester). SM_REJECTED included
+# alongside RETURNED_BY_SM -- see SAST_DAST_TERMINAL_STATUSES above.
 SAST_DAST_EDITABLE_STATUSES = [
-    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
     "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD",
 ]
 
@@ -516,19 +549,23 @@ SAST_DAST_STATUS_LABELS = {
 # SAST's own "Security Readiness" pre-scan checklist -- distinct from
 # DEFAULT_CHECKLIST_ITEMS (Functional Testing's), DAST's own
 # DEFAULT_DAST_CHECKLIST_ITEMS below, and DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.
-# Seeded onto every auto-created SASTRequest (see models.SASTChecklistItem
-# and routers/qa_requests.py::_sync_linked_child_requests). Same tuple shape
-# as DEFAULT_PERFORMANCE_CHECKLIST_ITEMS (item, owner, is_mandatory).
+# Shipped default only -- see checklist_config.py; this whole checklist is
+# Admin-configurable now (Admin > Readiness Checklist Configuration). Seeded
+# onto every auto-created SASTRequest (see models.SASTChecklistItem and
+# routers/qa_requests.py::_sync_linked_child_requests).
 #
-# Unlike every other checklist in this app, a mandatory item here is a hard
-# gate at SUBMISSION time, not just at the readiness-verification step: the
-# requester cannot even Submit for SM Approval while a mandatory item's own
-# requester_checked is still false (see routers/sast_dast.py::
-# _require_checklist_ready, called from _submit/_resubmit) -- these are
+# A mandatory item here is a hard gate at SUBMISSION time, not just at the
+# readiness-verification step: the requester cannot even raise the QA Request
+# (see routers/qa_requests.py::submit_request) or later re-Submit this SAST
+# request for SM Approval (routers/sast_dast.py::_require_checklist_ready)
+# while a mandatory item's own requester_checked is still false -- these are
 # prerequisites (repo access, etc.) the requester needs lined up themselves
 # before a scan is worth scheduling at all, so it's checked at submission
 # rather than waiting until Security Readiness. Non-mandatory items are still
-# self-declared/QA-or-Security-verified for visibility only, same as elsewhere.
+# self-declared/QA-or-Security-verified for visibility only, same as
+# elsewhere. Functional and Performance now enforce their own mandatory items
+# the same way at raise-time (see submit_request's pending_checklist_items
+# gate) -- this used to be the one exception, it no longer is.
 DEFAULT_SAST_CHECKLIST_ITEMS = [
     ("Application/source code repository access provided to the scan team", "Dev team", True),
     ("Change freeze / business hours confirmed for the scan window", "Business / User dept", False),
@@ -566,12 +603,17 @@ PERFORMANCE_STATUSES = [
     "BASELINE", "LOAD_TEST_EXECUTION", "RESULT_ANALYSIS", "DEFECT_FIX_RETEST", "REPORT",
     "SIGNOFF_PENDING", "SIGNED_OFF", "REQUESTER_VERIFICATION", "CLOSED", "CANCELLED",
 ]
-PERFORMANCE_TERMINAL_STATUSES = ["CLOSED", "CANCELLED", "SM_REJECTED", "DEPARTMENT_HEAD_REJECTED"]
+# SM_REJECTED deliberately NOT here -- reported directly, it's reopenable by
+# the requester (edit details + resubmit, same path as RETURNED_BY_SM)
+# rather than a dead end. DEPARTMENT_HEAD_REJECTED is untouched/still
+# terminal -- only SM rejection was asked to become reopenable.
+PERFORMANCE_TERMINAL_STATUSES = ["CLOSED", "CANCELLED", "DEPARTMENT_HEAD_REJECTED"]
 # See routers/performance.py::_can_edit_details for exactly who may edit at
 # each of these (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are
-# that stage's own reviewer only, not the requester).
+# that stage's own reviewer only, not the requester). SM_REJECTED included
+# alongside RETURNED_BY_SM -- see PERFORMANCE_TERMINAL_STATUSES above.
 PERFORMANCE_EDITABLE_STATUSES = [
-    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+    "DRAFT", "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
     "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER",
 ]
 PERFORMANCE_STATUS_LABELS = {
@@ -606,34 +648,34 @@ CHANGE_TYPES = ["New", "Enhancement", "Bug Fix"]
 
 # Annexure VIII ("QA Request Form & Checklist (Performance Testing)"), table 2:
 # "L1: Pre-Testing Readiness Checklist" -- 19 items, each with a description of
-# what data is required from the requesting department. Seeded onto every new
-# PerformanceRequest (see models.PerformanceChecklistItem and
-# routers/qa_requests.py::_sync_linked_child_requests). None of these items
-# are mandatory (self-declared/QA-verified for visibility only, like
-# Functional's checklist) -- an unticked item no longer
-# blocks Readiness -> Feasibility (see routers/performance.py::
-# readiness_decision).
+# what data is required from the requesting department ("detail" on
+# models.ChecklistTemplateItem, "data_required" on PerformanceChecklistItem).
+# Shipped default only -- see checklist_config.py; this whole checklist is
+# Admin-configurable now (Admin > Readiness Checklist Configuration), items
+# below carry the initial shipped Mandatory value, editable from there
+# afterward the same as every other module (see
+# routers/qa_requests.py::submit_request's pending_checklist_items gate).
 DEFAULT_PERFORMANCE_CHECKLIST_ITEMS = [
-    ("Application Architecture Diagram", "Architecture Diagram"),
-    ("Transaction Flow", "Transaction Flow / Business Process Flow Document for Critical Transactions"),
-    ("Dependency Matrix", "List of Dependent Applications, APIs, Databases & External Systems"),
-    ("API / Interface Inventory (If Applicable)", "API List, API Specifications, Swagger/OpenAPI Document"),
-    ("Expected Average TPS", "Average Transactions Per Second expected in Production"),
-    ("Peak TPS", "Peak Transactions Per Second expected during Business Peak Hours"),
-    ("Concurrent Users / Sessions", "Expected Peak Concurrent Users / Sessions"),
-    ("Average & Max Message Size", "Average and Maximum Request/Response Payload Size (KB/MB)"),
-    ("Server Configuration", "Application, Middleware and Database Server Details"),
-    ("JVM/Application Parameters (If Applicable)", "Heap Size, Thread Pool, JVM & GC Parameters"),
-    ("Database Configuration", "Database Version, Sizing, Connection Pool Details"),
-    ("API Timeout & Retry Settings", "Timeout Values and Retry Logic Configuration"),
-    ("Performance SLA", "Response Time SLA, Throughput Targets, Availability Targets"),
+    ("Application Architecture Diagram", "Application Architecture Diagram (UML / Visio / PDF)", True),
+    ("Transaction Flow", "Transaction Flow / Business Process Flow Document for Critical Transactions", True),
+    ("Dependency Matrix", "List of Dependent Applications, APIs, Databases & External Systems", True),
+    ("API / Interface Inventory (If Applicable)", "API List, API Specifications, Swagger/OpenAPI Document", False),
+    ("Expected Average TPS", "Average Transactions Per Second expected in Production", True),
+    ("Peak TPS", "Peak Transactions Per Second expected during Business Peak Hours", True),
+    ("Concurrent Users / Sessions", "Expected Peak Concurrent Users / Sessions", True),
+    ("Average & Max Message Size", "Average and Maximum Request/Response Payload Size (KB/MB)", False),
+    ("Server Configuration", "Application, Middleware and Database Server Details", True),
+    ("JVM/Application Parameters (If Applicable)", "Heap Size, Thread Pool, JVM & GC Parameters", False),
+    ("Database Configuration", "Database Version, Sizing, Connection Pool Details", False),
+    ("API Timeout & Retry Settings", "Timeout Values and Retry Logic Configuration", False),
+    ("Performance SLA", "Response Time SLA, Throughput Targets, Availability Targets", True),
     ("Maximum Acceptable System Load Defined (Threshold Values)",
-     "Maximum TPS, Concurrent Users, Transaction Volume, System Capacity Limits"),
-    ("Monitoring Dashboard Access", "Monitoring Tool URLs and Required Access Details"),
-    ("Batch/Scheduler Details (If Applicable)", "Batch Jobs, Schedule Details, Expected Volumes"),
-    ("Test Data Availability", "Test Users, Test Accounts, Test Data Sets"),
-    ("Rollback Procedure", "Rollback Document and Recovery Steps"),
-    ("Teardown Procedure", "Environment Cleanup / Reset Procedure"),
+     "Maximum TPS, Concurrent Users, Transaction Volume, System Capacity Limits", True),
+    ("Monitoring Dashboard Access", "Monitoring Tool URLs and Required Access Details", False),
+    ("Batch/Scheduler Details (If Applicable)", "Batch Jobs, Schedule Details, Expected Volumes", False),
+    ("Test Data Availability", "Test Users, Test Accounts, Test Data Sets", True),
+    ("Rollback Procedure", "Rollback Document and Recovery Steps", False),
+    ("Teardown Procedure", "Environment Cleanup / Reset Procedure", True),
 ]
 
 # ---- Module 6: Suppression ----
@@ -751,13 +793,19 @@ SIGNOFF_STATUSES = [
     "DEPT_HEAD_COE_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "DEPT_HEAD_COE_REJECTED",
     "ISSUED",
 ]
-SIGNOFF_TERMINAL_STATUSES = ["ISSUED", "SM_REJECTED", "DEPT_HEAD_COE_REJECTED"]
-# QA requester's own editable statuses (Draft, or returned back to them for
-# changes). QA Lead additionally gets an edit window while a certificate is
-# freshly SM_APPROVAL_PENDING (legacy internal code; QA Lead review) -- see
-# routers/signoff.py::update_signoff, not folded into this list since it's a
-# different actor/condition, not a third "requester-editable" status.
-SIGNOFF_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "RETURNED_BY_DEPT_HEAD_COE"]
+# SM_REJECTED ("Rejected by QA Lead" here -- see SIGNOFF_STATUS_LABELS)
+# deliberately NOT here -- reported directly, it's reopenable by the
+# requester (edit details + resubmit, same path as RETURNED_BY_SM) rather
+# than a dead end. DEPT_HEAD_COE_REJECTED is untouched/still terminal --
+# only SM/QA-Lead-tier rejection was asked to become reopenable.
+SIGNOFF_TERMINAL_STATUSES = ["ISSUED", "DEPT_HEAD_COE_REJECTED"]
+# QA requester's own editable statuses (Draft, or returned/rejected back to
+# them for changes). QA Lead additionally gets an edit window while a
+# certificate is freshly SM_APPROVAL_PENDING (legacy internal code; QA Lead
+# review) -- see routers/signoff.py::update_signoff, not folded into this
+# list since it's a different actor/condition, not a third
+# "requester-editable" status.
+SIGNOFF_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"]
 SIGNOFF_STATUS_LABELS = {
     "DRAFT": "Draft",
     "SUBMITTED": "Submitted",

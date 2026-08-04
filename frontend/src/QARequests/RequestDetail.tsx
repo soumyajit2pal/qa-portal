@@ -16,12 +16,9 @@ import {
   GATEWAY_CANCELLABLE_STATUSES,
   GATEWAY_EDITABLE_STATUSES,
   GATEWAY_STATUS_LABELS,
-  DEFAULT_SAST_CHECKLIST_ITEMS,
-  DEFAULT_DAST_CHECKLIST_ITEMS,
-  DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
   hasRole,
-  DEFAULT_CHECKLIST_ITEMS,
 } from "../constants";
+import { useChecklistTemplate } from "./steps/useChecklistTemplate";
 import {
   QARequestOut,
   UserOut,
@@ -88,6 +85,15 @@ export function RequestDetail({
   // pop-up instead of firing straight off the button click.
   const [confirmCancel, setConfirmCancel] = useState(false);
 
+  // Every readiness checklist is Admin-configurable now (see
+  // backend checklist_config.py) -- fetched live instead of the old
+  // hardcoded constants.ts lists, same as the wizard steps themselves (see
+  // steps/useChecklistTemplate.ts).
+  const { items: functionalChecklist } = useChecklistTemplate("FUNCTIONAL");
+  const { items: sastChecklist } = useChecklistTemplate("SAST");
+  const { items: dastChecklist } = useChecklistTemplate("DAST");
+  const { items: performanceChecklist } = useChecklistTemplate("PERFORMANCE");
+
   const load = useCallback(async () => {
     try {
       const [docs, hist] = await Promise.all([
@@ -123,16 +129,16 @@ export function RequestDetail({
     const requestTypes = (req.request_types || "").split(",").map((t) => t.trim());
     const kindsToLoad: { kind: EvidenceKind; count: number }[] = [];
     if (requestTypes.includes("Functional Testing")) {
-      kindsToLoad.push({ kind: "functional", count: DEFAULT_CHECKLIST_ITEMS.length });
+      kindsToLoad.push({ kind: "functional", count: functionalChecklist.length });
     }
     if (requestTypes.includes("SAST")) {
-      kindsToLoad.push({ kind: "sast", count: DEFAULT_SAST_CHECKLIST_ITEMS.length });
+      kindsToLoad.push({ kind: "sast", count: sastChecklist.length });
     }
     if (requestTypes.includes("DAST")) {
-      kindsToLoad.push({ kind: "dast", count: DEFAULT_DAST_CHECKLIST_ITEMS.length });
+      kindsToLoad.push({ kind: "dast", count: dastChecklist.length });
     }
     if (requestTypes.includes("Performance Testing")) {
-      kindsToLoad.push({ kind: "performance", count: DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.length });
+      kindsToLoad.push({ kind: "performance", count: performanceChecklist.length });
     }
     const entries: [string, number][] = [];
     for (const { kind, count } of kindsToLoad) {
@@ -148,7 +154,7 @@ export function RequestDetail({
       }
     }
     setDraftEvidenceCounts(Object.fromEntries(entries));
-  }, [req.id, req.status, req.request_types]);
+  }, [req.id, req.status, req.request_types, functionalChecklist, sastChecklist, dastChecklist, performanceChecklist]);
 
   useEffect(() => {
     loadDraftEvidenceCounts();
@@ -179,22 +185,19 @@ export function RequestDetail({
   // Mirrors the backend's own gate on POST .../submit (see routers/
   // qa_requests.py::submit_request) -- surfaced here too so the requester
   // sees exactly what's missing before even clicking the button, instead of
-  // only finding out from the error after the fact. Scoped to SAST/DAST
-  // only, same as the backend -- Functional/Performance have no
-  // submission-time mandatory-checklist gate.
+  // only finding out from the error after the fact. Covers all four request
+  // types now -- each checklist's own mandatory items (Admin-configurable,
+  // see checklist_config.py) block Raise the same way.
   const requestTypeList = (req.request_types || "")
     .split(",")
     .map((t) => t.trim());
 
-  requestTypeList.forEach((item, index) => {
-    console.log(`request Index: ${index}, Value: ${item}`);
-  });
   const pendingMandatory: string[] = [];
 
   if (requestTypeList.includes("Functional Testing")) {
     const checkedSet = new Set(req.draft_checked_items || []);
     pendingMandatory.push(
-      ...DEFAULT_CHECKLIST_ITEMS.filter(
+      ...functionalChecklist.filter(
         (c) => c.is_mandatory && !checkedSet.has(c.item)
       ).map((c) => c.item)
     );
@@ -203,7 +206,7 @@ export function RequestDetail({
   if (requestTypeList.includes("SAST")) {
     const checkedSet = new Set(req.draft_sast_checked_items || []);
     pendingMandatory.push(
-      ...DEFAULT_SAST_CHECKLIST_ITEMS.filter(
+      ...sastChecklist.filter(
         (c) => c.is_mandatory && !checkedSet.has(c.item)
       ).map((c) => c.item)
     );
@@ -211,25 +214,32 @@ export function RequestDetail({
   if (requestTypeList.includes("DAST")) {
     const checkedSet = new Set(req.draft_dast_checked_items || []);
     pendingMandatory.push(
-      ...DEFAULT_DAST_CHECKLIST_ITEMS.filter(
+      ...dastChecklist.filter(
+        (c) => c.is_mandatory && !checkedSet.has(c.item)
+      ).map((c) => c.item)
+    );
+  }
+  if (requestTypeList.includes("Performance Testing")) {
+    const checkedSet = new Set(req.draft_performance_checked_items || []);
+    pendingMandatory.push(
+      ...performanceChecklist.filter(
         (c) => c.is_mandatory && !checkedSet.has(c.item)
       ).map((c) => c.item)
     );
   }
 
-  // Informational only -- evidence is no longer required to Submit/Raise
-  // (see handleSubmitClick below). Still worth flagging upfront which
-  // readiness checklist item(s) have nothing attached yet, since it's easier
-  // for the requester to add it now, while everything's fresh, than to be
-  // asked for it later during Readiness Verification. Applies to all 4
-  // request types (Functional and Performance have no "must be checked"
-  // gate, but a mandatory/checked item on either can still usefully carry
-  // evidence).
+  // Informational only -- evidence is never itself required to Submit/Raise
+  // (see handleSubmitClick below; being self-declared ready IS required for
+  // a mandatory item, on any of the four modules -- see pendingMandatory
+  // above). Still worth flagging upfront which readiness checklist item(s)
+  // have nothing attached yet, since it's easier for the requester to add it
+  // now, while everything's fresh, than to be asked for it later during
+  // Readiness Verification. Applies to all 4 request types.
   const itemsWithoutEvidence: string[] = [];
 
   if (requestTypeList.includes("Functional Testing")) {
     const checkedSet = new Set(req.draft_checked_items || []);
-    DEFAULT_CHECKLIST_ITEMS.forEach((c, index) => {
+    functionalChecklist.forEach((c, index) => {
       if (
         (c.is_mandatory || checkedSet.has(c.item)) &&
         (draftEvidenceCounts[`functional:${index}`] ?? 0) === 0
@@ -240,7 +250,7 @@ export function RequestDetail({
   }
   if (requestTypeList.includes("SAST")) {
     const checkedSet = new Set(req.draft_sast_checked_items || []);
-    DEFAULT_SAST_CHECKLIST_ITEMS.forEach((c, index) => {
+    sastChecklist.forEach((c, index) => {
       if (
         (c.is_mandatory || checkedSet.has(c.item)) &&
         (draftEvidenceCounts[`sast:${index}`] ?? 0) === 0
@@ -251,7 +261,7 @@ export function RequestDetail({
   }
   if (requestTypeList.includes("DAST")) {
     const checkedSet = new Set(req.draft_dast_checked_items || []);
-    DEFAULT_DAST_CHECKLIST_ITEMS.forEach((c, index) => {
+    dastChecklist.forEach((c, index) => {
       if (
         (c.is_mandatory || checkedSet.has(c.item)) &&
         (draftEvidenceCounts[`dast:${index}`] ?? 0) === 0
@@ -262,9 +272,9 @@ export function RequestDetail({
   }
   if (requestTypeList.includes("Performance Testing")) {
     const checkedSet = new Set(req.draft_performance_checked_items || []);
-    DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.forEach((c, index) => {
+    performanceChecklist.forEach((c, index) => {
       if (
-        checkedSet.has(c.item) &&
+        (c.is_mandatory || checkedSet.has(c.item)) &&
         (draftEvidenceCounts[`performance:${index}`] ?? 0) === 0
       ) {
         itemsWithoutEvidence.push(c.item);
@@ -349,9 +359,14 @@ export function RequestDetail({
     navigate(`${row.path}?open=${encodeURIComponent(row.request_id)}`);
   }
 
+  // request_id is only assigned once this gateway is actually raised (a
+  // still-Draft request has none yet -- see the backend's matching column
+  // comment on models.QARequest.request_id).
+  const displayId = req.request_id || `Draft #${req.id}`;
+
   return (
     <Modal
-      title={`${req.request_id} — ${req.application_name}`}
+      title={`${displayId} — ${req.application_name}`}
       onClose={onClose}
       wide
     >
@@ -529,7 +544,7 @@ export function RequestDetail({
                 onClick={() =>
                   api.downloadFile(
                     `/api/qa-requests/${req.id}/export`,
-                    `${req.request_id}.pdf`
+                    `${displayId}.pdf`
                   )
                 }
               >
@@ -550,7 +565,7 @@ export function RequestDetail({
                   disabled={!!busyAction || pendingMandatory.length > 0}
                   title={
                     pendingMandatory.length > 0
-                      ? "Complete the mandatory Security Readiness checklist item(s) below first"
+                      ? "Complete the mandatory checklist item(s) below first"
                       : undefined
                   }
                   onClick={handleSubmitClick}
@@ -628,7 +643,13 @@ export function RequestDetail({
             ]}
             rows={documents}
           />
-          <AddDocuments reqId={req.id} onAdded={load} />
+          {status === "CANCELLED" ? (
+            <p className="muted small" style={{ marginTop: 14 }}>
+              Documents cannot be added — this request has been cancelled.
+            </p>
+          ) : (
+            <AddDocuments reqId={req.id} onAdded={load} />
+          )}
         </div>
       )}
 
@@ -709,9 +730,9 @@ export function RequestDetail({
           message={
             <div style={{ fontSize: 13.5 }}>
               <p style={{ margin: 0 }}>
-                Cancel <strong>{req.request_id}</strong>? This cannot be
-                undone — a cancelled request cannot be resubmitted or
-                reopened.
+                Cancel <strong>{displayId}</strong> ({req.application_name})?
+                This cannot be undone — a cancelled request cannot be
+                resubmitted or reopened.
               </p>
               <ErrorText error={error} />
             </div>

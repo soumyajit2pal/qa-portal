@@ -2,18 +2,43 @@ import React, { useEffect, useRef, useState } from 'react'
 import { IconSearch } from './Icons'
 import { computePanelPos, PanelPos } from './panelPosition'
 
+export interface SearchableSelectOption {
+  value: string
+  label: string
+}
+
 interface SearchableSelectProps {
   value: string
   onChange: (value: string) => void
-  options: string[]
+  // Either a flat list of strings (value and label are the same -- e.g.
+  // Department) or {value, label} pairs for anything id-keyed (e.g. a
+  // Test Project/Folder picker, where the option's real value is a numeric
+  // id but the label shown/searched is its name) or that needs a sentinel
+  // entry alongside real rows (e.g. "-- Top level --" / "No change" at
+  // value ''/'unchanged', same as a plain <option value="..."> would be).
+  options: string[] | SearchableSelectOption[]
   placeholder?: string
   disabled?: boolean
+  // Passed through to the root wrapper -- e.g. a toolbar dropdown that
+  // isn't already inside a width-constraining Field wrapper (native
+  // <select>s in the same spot would otherwise just size to content too,
+  // but this component's trigger is `width: 100%` of its own wrapper, which
+  // has no intrinsic width of its own in a plain flex row).
+  style?: React.CSSProperties
+}
+
+function normalize(options: string[] | SearchableSelectOption[]): SearchableSelectOption[] {
+  return options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o))
 }
 
 // Single-select dropdown with an inline search box for filtering long,
-// fixed option lists (e.g. Department). Reusable anywhere a plain
-// <select> would otherwise need dozens of <option>s.
-export default function SearchableSelect({ value, onChange, options, placeholder, disabled }: SearchableSelectProps) {
+// growing option lists (Application Name, Department, Test Project/Folder
+// pickers, etc.) -- reusable anywhere a plain <select> would otherwise need
+// dozens of <option>s that only get harder to scan as more get added.
+// Deliberately NOT used for short, fixed-size enums (Priority, Risk,
+// Status, Environment and the like) -- a search box adds a click with no
+// payoff on a 3-6 option list; those stay plain <select>s.
+export default function SearchableSelect({ value, onChange, options, placeholder, disabled, style }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [panelPos, setPanelPos] = useState<PanelPos>({ top: 0, bottom: 'auto', left: 0, width: 0 })
@@ -59,10 +84,12 @@ export default function SearchableSelect({ value, onChange, options, placeholder
     }
   }, [open])
 
-  const filtered = options.filter((o) => o.toLowerCase().includes(query.toLowerCase()))
+  const opts = normalize(options)
+  const current = opts.find((o) => o.value === value)
+  const filtered = opts.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()))
 
-  function select(opt: string) {
-    onChange(opt)
+  function select(opt: SearchableSelectOption) {
+    onChange(opt.value)
     setOpen(false)
     setQuery('')
   }
@@ -87,7 +114,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
   }
 
   return (
-    <div className="searchable-select" ref={rootRef}>
+    <div className="searchable-select" ref={rootRef} style={style}>
       <button
         ref={triggerRef}
         type="button"
@@ -95,7 +122,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
         disabled={disabled}
         onClick={toggleOpen}
       >
-        <span className={value ? '' : 'muted'}>{value || placeholder || 'Select...'}</span>
+        <span className={current ? '' : 'muted'}>{current ? current.label : (placeholder || 'Select...')}</span>
         <span className="caret">&#9662;</span>
       </button>
       {open && (
@@ -116,11 +143,11 @@ export default function SearchableSelect({ value, onChange, options, placeholder
             {filtered.length === 0 && <div className="searchable-select-empty">No matches</div>}
             {filtered.map((opt) => (
               <div
-                key={opt}
-                className={`searchable-select-option ${opt === value ? 'active' : ''}`}
+                key={opt.value}
+                className={`searchable-select-option ${opt.value === value ? 'active' : ''}`}
                 onClick={() => select(opt)}
               >
-                {opt}
+                {opt.label}
               </div>
             ))}
           </div>

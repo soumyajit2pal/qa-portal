@@ -1,9 +1,10 @@
 import React from 'react'
 import { Field } from '../../components/Common'
 import { IconCheckCircle } from '../../components/Icons'
-import { PRIORITIES, RISK_RATINGS, PERFORMANCE_REQUEST_TYPES, DEFAULT_PERFORMANCE_CHECKLIST_ITEMS } from '../../constants'
+import { PRIORITIES, RISK_RATINGS, PERFORMANCE_REQUEST_TYPES, POST_SIT_ENVIRONMENTS } from '../../constants'
 import { QARequestForm, SetField } from '../types'
 import { ChecklistEvidencePicker, EvidenceKind } from './ChecklistEvidencePicker'
+import { useChecklistTemplate } from './useChecklistTemplate'
 
 interface Props {
   form: QARequestForm
@@ -20,6 +21,8 @@ interface Props {
 // collects the Annexure VIII request type(s) and the 19-item "L1:
 // Pre-Testing Readiness Checklist" self-declaration.
 export function PerformanceStep({ form, set, existingPerformance, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
+  const { items: checklistItems, loading: checklistLoading } = useChecklistTemplate('PERFORMANCE')
+
   function toggleType(t: string) {
     set(
       'performance_request_types',
@@ -45,6 +48,8 @@ export function PerformanceStep({ form, set, existingPerformance, draftRequestId
         Vendor / SI Partner, Technology Stack, Release Version, Build Number and Target
         Promotion Environment aren't collected again here — they're already captured once on
         "Application &amp; Change Details" and carry straight over to the Performance request.
+        Environment is the one exception — Performance testing is never run against Dev or SIT,
+        so it's asked for separately below rather than reusing Deployment Environment.
       </p>
       {existingPerformance ? (
         <p className="muted small">
@@ -62,6 +67,15 @@ export function PerformanceStep({ form, set, existingPerformance, draftRequestId
             <Field label="Risk Category">
               <select value={form.performance_risk_category} onChange={(e) => set('performance_risk_category', e.target.value)}>
                 {RISK_RATINGS.map((o) => <option key={o} value={o}>{o}</option>)}
+              </select>
+            </Field>
+            {/* Performance testing is never run against Dev or SIT --
+                restricted to POST_SIT_ENVIRONMENTS with no blank option, so
+                this always carries a real, valid value (defaults to 'UAT',
+                see EMPTY_FORM). */}
+            <Field label="Environment *">
+              <select value={form.performance_environment} onChange={(e) => set('performance_environment', e.target.value)}>
+                {POST_SIT_ENVIRONMENTS.map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
             </Field>
           </div>
@@ -84,17 +98,21 @@ export function PerformanceStep({ form, set, existingPerformance, draftRequestId
             will independently verify every item during Readiness (on the linked Performance
             Testing Request, once raised).
           </p>
-          {DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.map((ci, itemIndex) => {
+          {checklistLoading && <p className="muted small">Loading checklist...</p>}
+          {checklistItems.map((ci, itemIndex) => {
             const checked = form.performance_checked_items.includes(ci.item)
             return (
               <div key={ci.item} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
                 <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
                   <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
-                  <span>{ci.item} <span className="muted small">({ci.data_required})</span></span>
+                  <span>
+                    {ci.item} <span className="muted small">({ci.detail})</span>{' '}
+                    {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
+                  </span>
                 </label>
                 <ChecklistEvidencePicker kind="performance" itemIndex={itemIndex} draftRequestId={draftRequestId}
                   files={evidenceFiles('performance', itemIndex)} onFilesChange={(files) => setEvidenceFiles('performance', itemIndex, files)}
-                  required={checked} />
+                  required={ci.is_mandatory || checked} />
               </div>
             )
           })}

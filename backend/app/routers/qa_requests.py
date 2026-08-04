@@ -16,17 +16,21 @@ from .. import documents as doc_store
 from ..database import get_db
 from ..deps import get_current_user, require_roles
 from ..constants import (
-    Role, DEFAULT_CHECKLIST_ITEMS, DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
-    DEFAULT_SAST_CHECKLIST_ITEMS, DEFAULT_DAST_CHECKLIST_ITEMS,
+    Role,
     FUNCTIONAL_BUCKET_TYPES, GatewayStatus, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
+    POST_SIT_ENVIRONMENTS,
     validate_environment_promotion, validate_target_release_date,
 )
+# Every Functional/SAST/DAST/Performance checklist is Admin-configurable now
+# (see checklist_config.py) -- nothing in this file reads the old hardcoded
+# constants.DEFAULT_*_CHECKLIST_ITEMS lists directly any more.
+from ..checklist_config import get_template_items
 from ..pdf_export import build_request_detail_pdf
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
 
 # All uploaded documents live under backend/app/uploads/<request_id>/<filename>,
-# e.g. app/uploads/TQA-REQ-20260721-A1B2C3/BRD_v2.pdf
+# e.g. app/uploads/TQA-REQ-01/BRD_v2.pdf
 UPLOAD_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
 os.makedirs(UPLOAD_ROOT, exist_ok=True)
 
@@ -36,6 +40,40 @@ def _log(db: Session, entity_id: int, step: str, user: models.User, decision: st
         entity_type="QA_REQUEST", entity_id=entity_id, step_name=step,
         actor_id=user.id, actor_role=user.roles_csv, decision=decision, comments=comments,
     ))
+
+
+def _storage_key(req: "models.QARequest") -> str:
+    """Folder-name prefix used under UPLOAD_ROOT/ for this gateway's
+    uploads. request_id isn't assigned until the gateway is actually raised
+    (see its column comment on models.QARequest), but documents -- both
+    checklist evidence and general supporting documents -- can be attached
+    while still Draft, so this can't simply wait for it. Falls back to a
+    stable DRAFT-<id> key (the numeric PK is always present) in that case.
+    Files uploaded before raising just keep living under that folder
+    afterward -- there is no rename/migration once request_id shows up,
+    since each document's exact path is already recorded in its own
+    stored_path column and never re-derived from this key again."""
+    return req.request_id or f"DRAFT-{req.id}"
+
+
+_GATEWAY_PRIVATE_STATUSES = (GatewayStatus.DRAFT, GatewayStatus.CANCELLED)
+
+
+def _can_view_gateway(obj: "models.QARequest", user: models.User) -> bool:
+    """Reported bug (follow-up to the Draft-only version of this check):
+    Cancelled was still treated as department-wide visible, but
+    GATEWAY_CANCELLABLE_STATUSES only ever allows cancelling FROM Draft --
+    there is no path from Raised to Cancelled -- so a Cancelled gateway is,
+    by construction, always a Draft that was abandoned before ever being
+    raised. It never got a request_id, never spun off any linked child
+    request, and nobody else was ever supposed to see it; reaching Cancelled
+    doesn't change that. Treat Draft and Cancelled identically: visible only
+    to the requester (or an Admin, for support). Only once a gateway is
+    genuinely Raised does it follow the same department-wide visibility as
+    every other request type in this app."""
+    if obj.status not in _GATEWAY_PRIVATE_STATUSES:
+        return True
+    return obj.requester_id == user.id or user.has_role(Role.ADMIN)
 
 
 def _raise_child_to_sm(db: Session, child, entity_type: str, qa_request: "models.QARequest", current_user: models.User):
@@ -72,11 +110,12 @@ def _raise_child_to_sm(db: Session, child, entity_type: str, qa_request: "models
         ))
 
 
-_DRAFT_EVIDENCE_DEFINITIONS = {
-    "functional": DEFAULT_CHECKLIST_ITEMS,
-    "sast": DEFAULT_SAST_CHECKLIST_ITEMS,
-    "dast": DEFAULT_DAST_CHECKLIST_ITEMS,
-    "performance": DEFAULT_PERFORMANCE_CHECKLIST_ITEMS,
+
+# Maps the lowercase "kind" used throughout the Draft-evidence endpoints
+# (chosen back when this was written to match the wizard step names) onto
+# checklist_config.py's own uppercase module keys.
+_DRAFT_EVIDENCE_MODULE_KEY = {
+    "functional": "FUNCTIONAL", "sast": "SAST", "dast": "DAST", "performance": "PERFORMANCE",
 }
 _DRAFT_EVIDENCE_PREFIXES = {
     "functional": "DRAFT_FUNCTIONAL",
@@ -86,13 +125,16 @@ _DRAFT_EVIDENCE_PREFIXES = {
 }
 
 
-def _draft_evidence_module(kind: str, item_index: int) -> str:
+def _draft_evidence_module(db: Session, kind: str, item_index: int) -> str:
     """Stable storage key for evidence selected before child checklist rows
-    exist. The index refers to the corresponding fixed checklist definition;
-    the document is re-keyed to the real child item during submit."""
-    definitions = _DRAFT_EVIDENCE_DEFINITIONS.get(kind)
-    if definitions is None:
+    exist. The index refers to the position of that module's currently
+    configured checklist (see checklist_config.get_template_items) at the
+    moment the wizard rendered it; the document is re-keyed to the real
+    child item during submit (see _promote_draft_checklist_evidence)."""
+    module = _DRAFT_EVIDENCE_MODULE_KEY.get(kind)
+    if module is None:
         raise HTTPException(404, "Unknown readiness checklist")
+    definitions = get_template_items(db, module, only_active=True)
     if item_index < 0 or item_index >= len(definitions):
         raise HTTPException(404, "Checklist item not found")
     return f"{_DRAFT_EVIDENCE_PREFIXES[kind]}_{item_index:02d}"
@@ -121,12 +163,13 @@ def _promote_draft_checklist_evidence(db: Session, qa_request: "models.QARequest
             row.item: row for row in db.query(item_model).filter(
                 getattr(item_model, parent_fk) == parent.id).all()
         }
-        for index, definition in enumerate(_DRAFT_EVIDENCE_DEFINITIONS[kind]):
-            item = checklist_by_name.get(definition[0])
+        definitions = get_template_items(db, _DRAFT_EVIDENCE_MODULE_KEY[kind], only_active=True)
+        for index, definition in enumerate(definitions):
+            item = checklist_by_name.get(definition.item)
             if not item:
                 continue
             staged = db.query(models.RequestDocument).filter_by(
-                module=_draft_evidence_module(kind, index), request_id=qa_request.id).all()
+                module=_draft_evidence_module(db, kind, index), request_id=qa_request.id).all()
             for document in staged:
                 document.module = destination_module
                 document.request_id = item.id
@@ -199,8 +242,8 @@ def _stash_draft_details(checked_items: Optional[set], sast_components: list, da
     child request is actually created. performance_checked_items/
     sast_checked_items/dast_checked_items all mirror checked_items
     (Functional's readiness checklist self-declaration) but for Performance's/
-    SAST's/DAST's own DEFAULT_PERFORMANCE_CHECKLIST_ITEMS/
-    DEFAULT_SAST_CHECKLIST_ITEMS/DEFAULT_DAST_CHECKLIST_ITEMS.
+    SAST's/DAST's own checklist (see checklist_config.py -- all four
+    modules' checklists are Admin-configurable now).
     classification_details is a single merged dict carrying every
     per-request-type Priority/Risk field (functional_priority,
     sast_risk_category, etc. -- see schemas.QARequestCreate) -- one dict
@@ -255,6 +298,16 @@ def list_requests(status_filter: Optional[str] = None, department: Optional[str]
             models.QARequest.application_name.ilike(like),
             models.QARequest.epic_number.ilike(like),
         ))
+    if not current_user.has_role(Role.ADMIN):
+        # Draft and Cancelled gateways are both scratch work that was never
+        # actually raised (Cancelled is only ever reached FROM Draft -- see
+        # _can_view_gateway) -- only their own requester sees them in the
+        # list; everyone else's are filtered out entirely (not just blanked/
+        # masked).
+        q = q.filter(or_(
+            models.QARequest.status.notin_(_GATEWAY_PRIVATE_STATUSES),
+            models.QARequest.requester_id == current_user.id,
+        ))
     return q.order_by(models.QARequest.created_at.desc()).all()
 
 
@@ -263,6 +316,8 @@ def get_request(req_id: int, db: Session = Depends(get_db), current_user: models
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    if not _can_view_gateway(obj, current_user):
+        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
     return obj
 
 
@@ -278,7 +333,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
     """Auto-creates a linked Functional/SAST/DAST/Performance request when
     the QA Request's request_types include the matching type(s), so each
     still gets its own trackable unique ID (via the normal
-    TQA-FUNC-.../SAST-.../DAST-.../PERF-... generator) while staying linked
+    TQA-FUNC-.../TQA-SAST-.../TQA-DAST-.../TQA-PERF-... generator) while staying linked
     back to the originating gateway QA Request. Only creates what's missing
     -- calling this again after request_types changes won't duplicate an
     existing link. Standalone requests raised directly via their own modules
@@ -319,16 +374,20 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         db.add(functional)
         db.flush()  # need functional.id before the checklist items below can reference it
         checked_set = checked_items or set()
-        for item, owner, is_mandatory in DEFAULT_CHECKLIST_ITEMS:
-            # `requester_checked` is the requester's own self-declaration made
-            # at raise-time -- it is reference/pre-fill only. It does NOT set
-            # `is_complete`; the QA Lead must still independently verify every
-            # item during Readiness Verification. None of these items are
-            # mandatory (see constants.DEFAULT_CHECKLIST_ITEMS).
+        # Seeded from the Admin-configurable "FUNCTIONAL" checklist template
+        # (see checklist_config.py) rather than a hardcoded list -- whatever
+        # is currently configured as mandatory there is copied onto
+        # is_mandatory below, and enforced at raise-time (see submit_request's
+        # pending_checklist_items gate further down this file).
+        # `requester_checked` is the requester's own self-declaration made
+        # at raise-time -- it is reference/pre-fill only. It does NOT set
+        # `is_complete`; the QA Lead must still independently verify every
+        # item during Readiness Verification.
+        for template in get_template_items(db, "FUNCTIONAL"):
             db.add(models.ReadinessChecklistItem(
-                functional_request_id=functional.id, item=item, owner=owner,
-                is_mandatory=is_mandatory,
-                requester_checked=item in checked_set,
+                functional_request_id=functional.id, item=template.item, owner=template.detail,
+                is_mandatory=template.is_mandatory,
+                requester_checked=template.item in checked_set,
             ))
         _raise_child_to_sm(db, functional, "FUNCTIONAL_REQUEST", qa_request, current_user)
 
@@ -363,19 +422,21 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
                 technology_stack=c.get("technology_stack"),
                 build_number=c.get("build_number"),
             ))
-        # "Security Readiness" pre-scan checklist (see
-        # constants.DEFAULT_SAST_CHECKLIST_ITEMS). requester_checked is the
-        # requester's own self-declaration made at raise-time on the QA
-        # Request wizard's SAST step -- same pattern as Functional's
-        # checklist; can also still be revisited afterward from
-        # the SAST request's own Edit Details modal (see update_sast's
-        # checked_items). Mandatory items here block Submit itself, not just
-        # Security Readiness -- see routers/sast_dast.py::_require_checklist_ready.
+        # "Security Readiness" pre-scan checklist -- seeded from the
+        # Admin-configurable "SAST" checklist template (see
+        # checklist_config.py). requester_checked is the requester's own
+        # self-declaration made at raise-time on the QA Request wizard's SAST
+        # step -- same pattern as Functional's checklist; can also still be
+        # revisited afterward from the SAST request's own Edit Details modal
+        # (see update_sast's checked_items). Mandatory items here block
+        # Submit itself, not just Security Readiness -- see
+        # routers/sast_dast.py::_require_checklist_ready.
         sast_checked_set = sast_checked_items or set()
-        for item, owner, is_mandatory in DEFAULT_SAST_CHECKLIST_ITEMS:
+        for template in get_template_items(db, "SAST"):
             db.add(models.SASTChecklistItem(
-                sast_request_id=sast.id, item=item, owner=owner, is_mandatory=is_mandatory,
-                requester_checked=item in sast_checked_set,
+                sast_request_id=sast.id, item=template.item, owner=template.detail,
+                is_mandatory=template.is_mandatory,
+                requester_checked=template.item in sast_checked_set,
             ))
         _raise_child_to_sm(db, sast, "SAST", qa_request, current_user)
     if "DAST" in request_types and "DAST" not in existing_types:
@@ -393,24 +454,33 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         # so this request always has at least one row to edit. No
         # target_release here -- Target Release Date is already collected
         # once, on the QA Request itself (see DASTRequest.target_release_date).
+        # Reported directly: DAST scans are never run against Dev or SIT --
+        # DastStep.tsx's own Environment picker is restricted to
+        # POST_SIT_ENVIRONMENTS (UAT/Pre-Production/Production) with no blank
+        # option, so `t.get("environment")` is always one of those by the
+        # time this runs; submit_request's own gate above rejects the raise
+        # entirely if it somehow isn't. The "UAT" fallback below is a last
+        # resort only (e.g. a still-blank legacy placeholder row), never the
+        # gateway's own Deployment Environment (which can be SIT).
         targets = dast_components or [{}]
         for t in targets:
             db.add(models.DASTTarget(
                 dast_request_id=dast.id,
                 application_url=t.get("application_url") or f"To be confirmed — linked from {qa_request.request_id}",
-                environment=t.get("environment") or qa_request.environment,
+                environment=t.get("environment") or "UAT",
                 authentication_required=t.get("authentication_required") or "No",
                 test_credentials=t.get("test_credentials"),
             ))
-        # Same "Security Readiness" checklist pattern as SAST above (own item
-        # list, constants.DEFAULT_DAST_CHECKLIST_ITEMS, own self-declaration
-        # set from the QA Request wizard's DAST step) -- see the comment
-        # there for the full reasoning.
+        # Same "Security Readiness" checklist pattern as SAST above -- own
+        # Admin-configurable "DAST" template (see checklist_config.py), own
+        # self-declaration set from the QA Request wizard's DAST step -- see
+        # the comment there for the full reasoning.
         dast_checked_set = dast_checked_items or set()
-        for item, owner, is_mandatory in DEFAULT_DAST_CHECKLIST_ITEMS:
+        for template in get_template_items(db, "DAST"):
             db.add(models.DASTChecklistItem(
-                dast_request_id=dast.id, item=item, owner=owner, is_mandatory=is_mandatory,
-                requester_checked=item in dast_checked_set,
+                dast_request_id=dast.id, item=template.item, owner=template.detail,
+                is_mandatory=template.is_mandatory,
+                requester_checked=template.item in dast_checked_set,
             ))
         _raise_child_to_sm(db, dast, "DAST", qa_request, current_user)
     if "Performance Testing" in request_types and "Performance Testing" not in existing_types:
@@ -419,7 +489,18 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
             application_name=qa_request.application_name,
             epic_number=qa_request.epic_number,
             cr_number=qa_request.cr_number,
-            environment=qa_request.environment,
+            # Reported directly: Performance testing is never run against Dev
+            # or SIT, regardless of whatever Deployment Environment was picked
+            # on the gateway (e.g. a change might deploy to SIT first, but the
+            # actual load test only ever happens later, against UAT or
+            # beyond) -- so unlike every other delegated field below, this is
+            # its own explicit ask on the Performance wizard step
+            # (PerformanceStep.tsx's Environment picker, restricted to
+            # POST_SIT_ENVIRONMENTS with no blank option), not delegated from
+            # qa_request.environment. submit_request's own gate above rejects
+            # the raise entirely if this is somehow still missing/invalid by
+            # the time this runs; the "UAT" fallback is a last resort only.
+            environment=pd.get("performance_environment") or "UAT",
             # performance_risk_category/performance_priority land in `pd`
             # naturally via the "performance_" prefix sweep in create_request/
             # edit_request (same sweep that already catches
@@ -436,12 +517,12 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
             # target_promotion_environment are NOT re-collected there anymore
             # -- they're delegated straight from the gateway's own
             # "Application & Change Details" fields (same values the requester
-            # already typed once), matching how application_name/epic_number/
-            # environment above are delegated too (risk_category/priority are
-            # NOT delegated -- collected on this request type's own step, see
-            # above). hash_value has no gateway equivalent either, so it's
-            # simply left blank at intake and can be filled in later on this
-            # request's own page.
+            # already typed once), matching how application_name/epic_number
+            # above are delegated too (risk_category/priority are NOT
+            # delegated -- collected on this request type's own step, see
+            # above; environment isn't delegated either -- see above). hash_value
+            # has no gateway equivalent either, so it's simply left blank at
+            # intake and can be filled in later on this request's own page.
             request_type=pd.get("performance_request_type"),
             change_type=qa_request.change_type,
             vendor_si_partner=qa_request.vendor_si_partner,
@@ -453,19 +534,27 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         )
         db.add(performance)
         db.flush()  # need performance.id before the checklist items below can reference it
-        # "L1: Pre-Testing Readiness Checklist" (Annexure VIII) -- 19 fixed
-        # items, none mandatory (see constants.DEFAULT_PERFORMANCE_CHECKLIST_ITEMS).
-        # requester_checked is the requester's own self-declaration made at
-        # raise-time (see the QA Request wizard's Performance step) -- same
-        # pattern as Functional's checklist; it does NOT set
-        # is_complete, which QA still independently verifies (see
-        # routers/performance.py::update_checklist_item).
+        # "L1: Pre-Testing Readiness Checklist" (Annexure VIII) -- seeded from
+        # the Admin-configurable "PERFORMANCE" checklist template (see
+        # checklist_config.py); an item is only mandatory if configured that
+        # way (shipped default: none are -- see
+        # checklist_config._default_items_for -- but an Admin can now flip
+        # any of them on, and it's enforced at raise-time the same as
+        # Functional/SAST/DAST, see submit_request's pending_checklist_items
+        # gate further down this file; this used to be hardcoded to False
+        # here regardless of anything else, which is why Performance never
+        # had a working mandatory gate before). requester_checked is the
+        # requester's own self-declaration made at raise-time (see the QA
+        # Request wizard's Performance step) -- same pattern as Functional's
+        # checklist; it does NOT set is_complete, which QA still
+        # independently verifies (see routers/performance.py::
+        # update_checklist_item).
         performance_checked_set = performance_checked_items or set()
-        for item, data_required in DEFAULT_PERFORMANCE_CHECKLIST_ITEMS:
+        for template in get_template_items(db, "PERFORMANCE"):
             db.add(models.PerformanceChecklistItem(
-                performance_request_id=performance.id, item=item, data_required=data_required,
-                is_mandatory=False,
-                requester_checked=item in performance_checked_set,
+                performance_request_id=performance.id, item=template.item, data_required=template.detail,
+                is_mandatory=template.is_mandatory,
+                requester_checked=template.item in performance_checked_set,
             ))
         _raise_child_to_sm(db, performance, "PERFORMANCE", qa_request, current_user)
 
@@ -696,6 +785,11 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
         raise HTTPException(403, "Only the requester or an admin can submit this request")
     if obj.status != GatewayStatus.DRAFT:
         raise HTTPException(400, f"'Submit' requires status 'DRAFT' (currently '{obj.status}')")
+    # The one and only place request_id is ever assigned -- see its column
+    # comment on models.QARequest. A Draft that gets cancelled instead of
+    # raised never reaches this line, so it never burns a real ID.
+    if not obj.request_id:
+        obj.request_id = models.gen_id(models.BUSINESS_ID_PREFIXES["QA_REQUEST"], db)
     request_types = obj.request_types.split(",") if obj.request_types else []
     # This is the one and only point where linked child request(s) actually
     # get created -- everything collected on the wizard's SAST/DAST/
@@ -706,40 +800,81 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     checked_items, sast_components, dast_components, performance_details, performance_checked_items, classification_details, sast_checked_items, dast_checked_items = _unstash_draft_details(obj.draft_child_details)
     # Every linked child now lands straight at SM_APPROVAL_PENDING with no
     # separate per-module Submit click of its own (see _raise_child_to_sm),
-    # so the mandatory Security Readiness checklist gate that used to only
-    # fire on SAST/DAST's own subsequent submit (routers/sast_dast.py::
+    # so each module's own mandatory-checklist gate that would otherwise only
+    # fire on its own subsequent submit (e.g. routers/sast_dast.py::
     # _require_checklist_ready) has to be enforced here instead, before that
     # child is ever created -- otherwise a requester could raise the gateway
-    # with a mandatory item still unchecked and the linked SAST/DAST request
-    # would be born already sitting at SM Approval despite that. Scoped to
-    # SAST/DAST only -- Functional/Performance have no such gate by design.
-
+    # with a mandatory item still unchecked and the linked request would be
+    # born already sitting at SM Approval despite that.
+    #
+    # Covers all four modules now (Functional/SAST/DAST/Performance) --
+    # whatever is currently configured as mandatory for a module (see
+    # checklist_config.py; Admin > Readiness Checklist Configuration) must be
+    # self-declared before Raise, full stop. This used to only actually cover
+    # Functional/SAST/DAST (Performance's checklist had no way to be
+    # mandatory at all -- see _sync_linked_child_requests' own comment on
+    # PerformanceChecklistItem above) -- reported directly: "if I make any
+    # checklist mandatory in that configuration, that will be mandatory"
+    # means every module has to honor it the same way, not just three of
+    # four.
     pending_checklist_items = []
     if "Functional Testing" in request_types:
         functional_checked_set = set(checked_items)
         pending_checklist_items += [
-            item for item, owner, is_mandatory in DEFAULT_CHECKLIST_ITEMS
-            if is_mandatory and item not in functional_checked_set
+            template.item for template in get_template_items(db, "FUNCTIONAL")
+            if template.is_mandatory and template.item not in functional_checked_set
         ]
     if "SAST" in request_types:
         sast_checked_set = set(sast_checked_items)
         pending_checklist_items += [
-            item for item, owner, is_mandatory in DEFAULT_SAST_CHECKLIST_ITEMS
-            if is_mandatory and item not in sast_checked_set
+            template.item for template in get_template_items(db, "SAST")
+            if template.is_mandatory and template.item not in sast_checked_set
         ]
     if "DAST" in request_types:
         dast_checked_set = set(dast_checked_items)
         pending_checklist_items += [
-            item for item, owner, is_mandatory in DEFAULT_DAST_CHECKLIST_ITEMS
-            if is_mandatory and item not in dast_checked_set
+            template.item for template in get_template_items(db, "DAST")
+            if template.is_mandatory and template.item not in dast_checked_set
+        ]
+    if "Performance Testing" in request_types:
+        performance_checked_set = set(performance_checked_items)
+        pending_checklist_items += [
+            template.item for template in get_template_items(db, "PERFORMANCE")
+            if template.is_mandatory and template.item not in performance_checked_set
         ]
     if pending_checklist_items:
         raise HTTPException(
             400,
-            "Cannot raise -- the following mandatory Security Readiness checklist "
-            "item(s) must be self-declared ready first (Edit Request): "
+            "Cannot raise -- the following mandatory checklist item(s) must be "
+            "self-declared ready first (Edit Request): "
             + "; ".join(pending_checklist_items),
         )
+
+    # Reported directly: DAST scans and Performance tests are never run
+    # against Dev or SIT -- DastStep.tsx/PerformanceStep.tsx's own Environment
+    # pickers are already restricted to POST_SIT_ENVIRONMENTS client-side with
+    # no blank option, so this should never actually trip in normal use;
+    # enforced here too anyway (same belt-and-braces reasoning as every other
+    # gate in this function) in case of a stale/tampered request.
+    if "DAST" in request_types:
+        bad_dast_envs = [
+            c.get("environment") for c in (dast_components or [])
+            if c.get("environment") not in POST_SIT_ENVIRONMENTS
+        ]
+        if bad_dast_envs:
+            raise HTTPException(
+                400,
+                f"DAST target Environment must be one of {', '.join(POST_SIT_ENVIRONMENTS)} "
+                "-- DAST is not performed in Dev or SIT.",
+            )
+    if "Performance Testing" in request_types:
+        perf_env = (performance_details or {}).get("performance_environment")
+        if perf_env not in POST_SIT_ENVIRONMENTS:
+            raise HTTPException(
+                400,
+                f"Performance Testing Environment must be one of {', '.join(POST_SIT_ENVIRONMENTS)} "
+                "-- Performance testing is not performed in Dev or SIT.",
+            )
 
     _sync_linked_child_requests(db, obj, request_types, current_user, checked_items, sast_components, dast_components,
                                  performance_details,
@@ -761,6 +896,11 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
 
 @router.get("/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def request_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = db.query(models.QARequest).get(req_id)
+    if not obj:
+        raise HTTPException(404, "QA Request not found")
+    if not _can_view_gateway(obj, current_user):
+        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="QA_REQUEST", entity_id=req_id)
             .order_by(models.ApprovalAction.created_at).all())
@@ -778,6 +918,8 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    if not _can_view_gateway(obj, current_user):
+        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
 
     linked = []
     linked += [f"Functional QA {f.request_id}" for f in obj.linked_functional_requests]
@@ -826,8 +968,12 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
                          h.actor_role or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
 
+    # request_id isn't assigned until the gateway is actually raised (see its
+    # column comment) -- a still-Draft export (only ever reachable by its own
+    # requester/an admin, per _can_view_gateway above) has no business ID yet.
+    display_id = obj.request_id or f"Draft #{obj.id}"
     buf = build_request_detail_pdf(
-        title=f"{obj.request_id} — {obj.application_name}",
+        title=f"{display_id} — {obj.application_name}",
         subtitle="QA Request (Gateway) — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
@@ -836,7 +982,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{obj.request_id}.pdf"'},
+        headers={"Content-Disposition": f'attachment; filename="{display_id}.pdf"'},
     )
 
 
@@ -850,6 +996,8 @@ def _draft_request_for_evidence(db: Session, req_id: int, current_user: models.U
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
+    if not _can_view_gateway(req, current_user):
+        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
     if require_editable:
         if req.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
             raise HTTPException(403, "Only the requester or an admin can attach checklist evidence")
@@ -863,7 +1011,7 @@ def list_draft_checklist_evidence(req_id: int, kind: str, item_index: int,
                                   db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
     _draft_request_for_evidence(db, req_id, current_user)
-    return doc_store.list_documents(db, _draft_evidence_module(kind, item_index), req_id)
+    return doc_store.list_documents(db, _draft_evidence_module(db, kind, item_index), req_id)
 
 
 @router.post("/{req_id}/checklist-evidence/{kind}/{item_index}/documents", response_model=List[schemas.RequestDocumentOut])
@@ -871,9 +1019,9 @@ def upload_draft_checklist_evidence(req_id: int, kind: str, item_index: int,
                                     files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                                     current_user: models.User = Depends(get_current_user)):
     req = _draft_request_for_evidence(db, req_id, current_user, require_editable=True)
-    module = _draft_evidence_module(kind, item_index)
+    module = _draft_evidence_module(db, kind, item_index)
     return doc_store.save_documents(db, module, req_id,
-                                    f"{req.request_id}/{kind}-{item_index}", files, current_user.id)
+                                    f"{_storage_key(req)}/{kind}-{item_index}", files, current_user.id)
 
 
 @router.get("/{req_id}/checklist-evidence/{kind}/{item_index}/documents/{doc_id}/download")
@@ -882,7 +1030,7 @@ def download_draft_checklist_evidence(req_id: int, kind: str, item_index: int, d
                                       current_user: models.User = Depends(get_current_user)):
     _draft_request_for_evidence(db, req_id, current_user)
     doc = doc_store.get_document_or_404(
-        db, _draft_evidence_module(kind, item_index), req_id, doc_id)
+        db, _draft_evidence_module(db, kind, item_index), req_id, doc_id)
     full_path = doc_store.full_path(doc)
     if not os.path.exists(full_path):
         raise HTTPException(404, "File is missing on disk")
@@ -896,7 +1044,7 @@ def delete_draft_checklist_evidence(req_id: int, kind: str, item_index: int, doc
                                     current_user: models.User = Depends(get_current_user)):
     _draft_request_for_evidence(db, req_id, current_user, require_editable=True)
     doc = doc_store.get_document_or_404(
-        db, _draft_evidence_module(kind, item_index), req_id, doc_id)
+        db, _draft_evidence_module(db, kind, item_index), req_id, doc_id)
     if not doc_store.can_delete_document(doc, current_user):
         raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it")
     doc_store.delete_document(db, doc)
@@ -905,6 +1053,11 @@ def delete_draft_checklist_evidence(req_id: int, kind: str, item_index: int, doc
 
 @router.get("/{req_id}/documents", response_model=List[schemas.QARequestDocumentOut])
 def list_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    req = db.query(models.QARequest).get(req_id)
+    if not req:
+        raise HTTPException(404, "QA Request not found")
+    if not _can_view_gateway(req, current_user):
+        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
     return (db.query(models.QARequestDocument)
             .filter_by(qa_request_id=req_id)
             .order_by(models.QARequestDocument.uploaded_at).all())
@@ -931,8 +1084,16 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
         raise HTTPException(404, "QA Request not found")
     if req.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only this request's own requester or an admin can upload documents")
+    # Reported bug: uploads were still accepted on a Cancelled gateway, which
+    # has no further workflow at all -- there's nothing left to attach
+    # evidence to. Raised (and Draft/Submitted) still allow it, matching
+    # AddDocuments.tsx's own "adding more supporting documents after the
+    # request has already been raised" purpose.
+    if req.status == GatewayStatus.CANCELLED:
+        raise HTTPException(400, "Documents cannot be uploaded to a cancelled request")
 
-    request_dir = os.path.join(UPLOAD_ROOT, req.request_id)
+    storage_key = _storage_key(req)
+    request_dir = os.path.join(UPLOAD_ROOT, storage_key)
     os.makedirs(request_dir, exist_ok=True)
 
     created = []
@@ -950,7 +1111,7 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
         doc = models.QARequestDocument(
             qa_request_id=req.id,
             file_name=f.filename or original_name,
-            stored_path=os.path.join(req.request_id, original_name),
+            stored_path=os.path.join(storage_key, original_name),
             content_type=f.content_type,
             file_size=os.path.getsize(dest_path),
             uploaded_by_id=current_user.id,
@@ -967,6 +1128,11 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
 @router.get("/{req_id}/documents/{doc_id}/download")
 def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
+    req = db.query(models.QARequest).get(req_id)
+    if not req:
+        raise HTTPException(404, "QA Request not found")
+    if not _can_view_gateway(req, current_user):
+        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
     doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
     if not doc:
         raise HTTPException(404, "Document not found")

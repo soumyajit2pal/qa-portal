@@ -276,7 +276,7 @@ export function RichTextToolbar({
   codeButtonTitle?: string
   onCommand: (name: string, value?: string) => void
   onBeginLink: () => void
-  onPickImage: () => void
+  onPickImage?: () => void
 }) {
   return (
     <div className="jira-editor-toolbar" role="toolbar" aria-label={ariaLabel}>
@@ -291,7 +291,7 @@ export function RichTextToolbar({
       <button type="button" title={codeButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('formatBlock', 'pre')}>{'</>'}</button>
       <span />
       <button type="button" title="Add link" onMouseDown={(event) => event.preventDefault()} onClick={onBeginLink}>Link</button>
-      <button type="button" title={imageButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={onPickImage}>Image</button>
+      {onPickImage && <button type="button" title={imageButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={onPickImage}>Image</button>}
     </div>
   )
 }

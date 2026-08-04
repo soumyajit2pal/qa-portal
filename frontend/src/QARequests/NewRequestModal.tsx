@@ -62,8 +62,23 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     sast_hash_value: editing.draft_classification?.sast_hash_value || '',
     dast_priority: editing.linked_dast_requests?.[0]?.priority || editing.draft_classification?.dast_priority || 'Medium',
     dast_risk_category: editing.linked_dast_requests?.[0]?.risk_category || editing.draft_classification?.dast_risk_category || 'Medium',
-    performance_priority: editing.linked_performance_requests?.[0]?.priority || editing.draft_classification?.performance_priority || 'Medium',
-    performance_risk_category: editing.linked_performance_requests?.[0]?.risk_category || editing.draft_classification?.performance_risk_category || 'Medium',
+    // Reported directly: these two previously read from draft_classification
+    // like every field above -- but the backend only ever sweeps functional_/
+    // sast_/dast_-prefixed fields into draft_classification (see
+    // routers/qa_requests.py::create_request/edit_request); performance_*
+    // fields are swept into draft_performance instead (its own dict, purely
+    // because its sweep runs first and pops them out before
+    // classification_details' sweep ever sees them). Reading the wrong dict
+    // here meant reopening a still-Draft request with Performance Testing
+    // selected silently lost its previously-picked Priority/Risk Category.
+    performance_priority: editing.linked_performance_requests?.[0]?.priority || editing.draft_performance?.performance_priority || 'Medium',
+    performance_risk_category: editing.linked_performance_requests?.[0]?.risk_category || editing.draft_performance?.performance_risk_category || 'Medium',
+    // No live-value fallback here -- LinkedRequestRef is deliberately minimal
+    // (see sast_hash_value's comment above) and doesn't carry environment;
+    // only matters while the Performance step is still editable anyway
+    // (existingPerformance === false), so the staged Draft value is the only
+    // one that matters here.
+    performance_environment: editing.draft_performance?.performance_environment || 'UAT',
     target_release_date: editing.target_release_date || '',
     remarks: editing.remarks || '',
     // Pre-fill from the requester's previously-saved self-declaration ticks,
@@ -280,7 +295,7 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
 
   return (
     <Modal
-      title={editing ? `Edit ${editing.request_id}` : 'Raise QA Request'}
+      title={editing ? `Edit Draft — ${editing.application_name}` : 'Raise QA Request'}
       onClose={requestClose}
       wide
       variant="dialog"

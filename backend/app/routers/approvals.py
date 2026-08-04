@@ -9,13 +9,14 @@ from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user
 from .. import documents as doc_store
+from ..constants import GatewayStatus, Role
 
 router = APIRouter(prefix="/api/approvals", tags=["approval-workflow-engine"])
 
 
 def _resolve_request_ref(db: Session, entity_type: str, entity_id: int) -> Optional[str]:
     """Human-readable business ID for an ApprovalAction's entity_type/entity_id
-    (e.g. "TQA-REQ-...", "SAST-...", "SUP-...") -- shown in the Approval
+    (e.g. "TQA-REQ-...", "TQA-SAST-...", "TQA-SUP-...") -- shown in the Approval
     Workflow Log instead of the raw internal entity_id. Returns None if the
     underlying record no longer exists."""
     if entity_type == "QA_REQUEST":
@@ -65,13 +66,37 @@ def _to_out(db: Session, row: models.ApprovalAction) -> dict:
 @router.get("", response_model=List[schemas.ApprovalActionOut])
 def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] = None, db: Session = Depends(get_db),
                     current_user: models.User = Depends(get_current_user)):
-    """Module 7: cross-entity approval/audit feed (QA_REQUEST, TEST_CASE, SAST_DAST, SUPPRESSION, SIGNOFF)."""
+    """Module 7: cross-entity approval/audit feed (QA_REQUEST, TEST_CASE, SAST_DAST, SUPPRESSION, SIGNOFF).
+
+    Reported bug: this feed has no role gate on its own (any logged-in user
+    can open Approval Workflow Log) and was returning every row completely
+    unfiltered -- including "Drafted"/"Cancelled" QA_REQUEST entries for
+    every other user's gateway request that was never actually raised, the
+    same data routers/qa_requests.py::_can_view_gateway already restricts to
+    its own requester elsewhere. Pull extra rows, then drop any QA_REQUEST
+    entry whose underlying gateway is Draft or Cancelled (Cancelled can only
+    ever be reached FROM Draft -- there's no cancel path from Raised, so it's
+    always an abandoned Draft too) and isn't the caller's own, before
+    trimming to the usual 500."""
     q = db.query(models.ApprovalAction)
     if entity_type:
         q = q.filter(models.ApprovalAction.entity_type == entity_type)
     if entity_id is not None:
         q = q.filter(models.ApprovalAction.entity_id == entity_id)
-    rows = q.order_by(models.ApprovalAction.created_at.desc()).limit(500).all()
+    rows = q.order_by(models.ApprovalAction.created_at.desc()).limit(2000).all()
+    if not current_user.has_role(Role.ADMIN):
+        draft_qa_ids = {r.entity_id for r in rows if r.entity_type == "QA_REQUEST"}
+        if draft_qa_ids:
+            hidden_ids = {
+                row[0] for row in db.query(models.QARequest.id).filter(
+                    models.QARequest.id.in_(draft_qa_ids),
+                    models.QARequest.status.in_((GatewayStatus.DRAFT, GatewayStatus.CANCELLED)),
+                    models.QARequest.requester_id != current_user.id,
+                ).all()
+            }
+            if hidden_ids:
+                rows = [r for r in rows if not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
+    rows = rows[:500]
     return [_to_out(db, r) for r in rows]
 
 

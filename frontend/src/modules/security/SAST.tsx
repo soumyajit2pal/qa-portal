@@ -325,8 +325,11 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // that access disappears the moment they've approved/returned/rejected;
   // it never extends past Department Head's own decision into Security's
   // post-approval readiness stage.
+  // SM_REJECTED included alongside the RETURNED_BY_* statuses -- reported
+  // directly, a rejected request is now reopenable (edit + resubmit)
+  // instead of a dead end.
   const canEditDetails = hasRole(user, 'ADMIN')
-    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status))
+    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status))
     || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
     || (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   // Blocks Sign/Approve on both the SM and Department Head decision panels
@@ -344,7 +347,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
       ? "This request's Application Name was rejected -- the requester needs to pick a different name before this request can be approved."
       : 'Application Name is still pending your decision above -- decide it before approving this request.'
   const canSubmit = isRequester && status === 'DRAFT'
-  const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
+  const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
+  const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Request' : 'Re-submit'
   // Reported directly: a person who raised this request but also separately
   // holds SM/Department Head for the same department must not be able to
   // approve their own request -- someone else holding that role must decide
@@ -499,12 +503,12 @@ function SASTDetail({ req, onClose, onChanged, users }: {
               )}
               {canResubmit && (
                 <button className="btn btn-primary btn-sm"
-                        disabled={busy || (status === 'RETURNED_BY_SM' && pendingSelfDeclare.length > 0)}
+                        disabled={busy || (['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0)}
                         onClick={() => act('resubmit')}>
-                  Re-submit
+                  {resubmitLabel}
                 </button>
               )}
-              {canResubmit && status === 'RETURNED_BY_SM' && pendingSelfDeclare.length > 0 && (
+              {canResubmit && ['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0 && (
                 <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>
                   {pendingSelfDeclare.length} mandatory Security Readiness checklist item(s) not yet
                   self-declared ready — see Edit Details.

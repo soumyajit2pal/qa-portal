@@ -28,7 +28,13 @@ export interface DastComponent {
   test_credentials: string
 }
 export function blankDastComponent(): DastComponent {
-  return { application_url: '', environment: '', authentication_required: false, test_credentials: '' }
+  // Environment defaults to 'UAT', not blank -- DAST scans are never run
+  // against Dev or SIT, and the picker itself (DastStep.tsx) only ever
+  // offers POST_SIT_ENVIRONMENTS (UAT/Pre-Production/Production), no blank
+  // option -- so every row always carries a real, valid value from the
+  // moment it's added, the same way every other mandatory dropdown in this
+  // wizard already works (see validation.ts's detailsStepError comment).
+  return { application_url: '', environment: 'UAT', authentication_required: false, test_credentials: '' }
 }
 
 // The full shape of the "Raise QA Request" / "Edit Request" wizard's form
@@ -88,6 +94,15 @@ export const EMPTY_FORM = {
   // gateway equivalent and is simply filled in later on the Performance
   // request's own page, once raised.
   performance_request_types: [] as string[],
+  // Reported directly: Performance testing is never run against Dev or SIT
+  // -- unlike change_type/vendor_si_partner/technology_stack/etc above,
+  // Environment is NOT delegated from "Application & Change Details" for
+  // Performance. Its own mandatory ask on the Performance step
+  // (PerformanceStep.tsx), restricted to POST_SIT_ENVIRONMENTS
+  // (UAT/Pre-Production/Production) -- defaults to 'UAT', never blank, same
+  // "always a real value" convention as environment/target_promotion_environment
+  // above.
+  performance_environment: 'UAT',
   // Requester's own self-declaration against the 19-item "L1: Pre-Testing
   // Readiness Checklist" (DEFAULT_PERFORMANCE_CHECKLIST_ITEMS) -- seeds the
   // auto-created Performance request's checklist at raise time (same

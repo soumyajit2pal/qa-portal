@@ -224,20 +224,30 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
 @router.post("/{req_id}/resubmit", response_model=schemas.FunctionalOut)
 def resubmit_request(req_id: int, db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
-    """Re-submits a request returned by SM, by the Department Head, or by the QA Lead."""
+    """Re-submits a request returned by SM, by the Department Head, or by the
+    QA Lead -- or reopens one rejected by SM. Reported directly: a Rejected-
+    by-SM request used to be a dead end (see QA_REQUEST_TERMINAL_STATUSES),
+    with no way back in even if the requester fixed whatever caused the
+    rejection. It's now reopenable the same way a Return is: edit details,
+    then call this endpoint to send it straight back to SM_APPROVAL_PENDING
+    for a fresh decision."""
     obj = _get_or_404(db, req_id)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
-    _require(obj, [QAStatus.RETURNED_BY_SM, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD],
+    _require(obj, [QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
+                   QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD],
              "Resubmit")
-    if obj.status == QAStatus.RETURNED_BY_SM:
+    if obj.status in (QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED):
+        reopening = obj.status == QAStatus.SM_REJECTED
         if obj.application_master_status == "REJECTED":
             obj.status = QAStatus.SM_REJECTED
             _log(db, obj.id, "SM Approval", current_user, "Rejected",
                  "Auto-rejected: this request's Application Name was rejected by SM")
         else:
             obj.status = QAStatus.SM_APPROVAL_PENDING
-            _log(db, obj.id, "SM Approval", current_user, "Resubmitted", "Returned request re-submitted")
+            _log(db, obj.id, "SM Approval", current_user,
+                 "Reopened" if reopening else "Resubmitted",
+                 "Rejected request reopened and re-submitted" if reopening else "Returned request re-submitted")
     elif obj.status == QAStatus.RETURNED_BY_DEPARTMENT_HEAD:
         # A genuine direct return from Department Head Approval itself.
         obj.status = QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING
@@ -338,16 +348,20 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
     if payload.decision == "Passed":
         # Every item the requester actually self-declared ready
         # (requester_checked) must be QA-verified (is_complete) before
-        # Readiness Verification can Pass -- not just the mandatory ones
-        # (none of DEFAULT_CHECKLIST_ITEMS ship mandatory, see constants.py,
-        # so a mandatory-only gate here was a no-op: the QA Lead could click
-        # "Passed" the moment Readiness Verification started, without ever
-        # ticking a single item). Scoped to requester_checked rather than
-        # every item on the list -- an item the requester never declared
+        # Readiness Verification can Pass. Scoped to requester_checked rather
+        # than every item on the list -- an item the requester never declared
         # ready in the first place can't be QA-verified anyway (see
         # update_checklist_item's own gate below), so requiring it here too
         # would permanently block Passed with no way forward; the requester
         # simply never claimed it, so it isn't part of what QA is confirming.
+        # This checklist is Admin-configurable now (see checklist_config.py)
+        # -- a mandatory item is already forced to be self-declared
+        # (requester_checked) before the request can even be raised (see
+        # routers/qa_requests.py::submit_request's pending_checklist_items
+        # gate), so by the time a request reaches Readiness Verification at
+        # all, every mandatory item is already inside the requester_checked
+        # set checked below -- no separate mandatory-only check is needed
+        # here on top of it.
         pending = [c.item for c in obj.checklist_items if c.requester_checked and not c.is_complete]
         if pending:
             raise HTTPException(400, f"Readiness checklist incomplete: {', '.join(pending)}")
@@ -791,11 +805,17 @@ def _can_edit_details(obj: "models.FunctionalRequest", user: models.User) -> boo
     for a request already past their own checkpoint -- edit access for SM/
     Department Head stops at Department Head's own decision, never
     extending into QA's post-approval readiness/execution stages. Same
-    department-scoping as those stages' own decision endpoints."""
+    department-scoping as those stages' own decision endpoints.
+
+    SM_REJECTED is included alongside the RETURNED_BY_* statuses too --
+    reported directly, a rejected request is now reopenable (edit + call
+    resubmit_request), not a dead end, so the requester needs the same edit
+    access here as they'd have after a Return."""
     if user.has_role(Role.ADMIN):
         return True
     status = obj.status
-    if status in (QAStatus.DRAFT, QAStatus.RETURNED_BY_SM, QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD):
+    if status in (QAStatus.DRAFT, QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
+                  QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD):
         return obj.requester_id == user.id
     if status == QAStatus.SM_APPROVAL_PENDING:
         return user.has_role(Role.SM) and user.department == obj.department

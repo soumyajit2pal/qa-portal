@@ -40,6 +40,10 @@ class UserOut(ORMModel):
     # True right after first-ever LDAP login until the person picks their own
     # department via PATCH /api/auth/me -- see models.User.needs_department_selection.
     needs_department_selection: bool = False
+    # System-Admin-only flag -- see models.User.admin_managed_only. When True,
+    # this user is hidden from Department Admin / Executive COE local-admin
+    # rosters and only a System Admin can reassign their role(s) or status.
+    admin_managed_only: bool = False
 
     _normalize_full_name = field_validator("full_name", mode="before")(_plain_person_name)
 
@@ -64,6 +68,11 @@ class UserUpdate(BaseModel):
     login_type: Optional[str] = None
     is_active: Optional[bool] = None
     needs_role_review: Optional[bool] = None
+    # See models.User.admin_managed_only -- only reachable through this
+    # Admin-only endpoint (require_roles(Role.ADMIN)), never through
+    # LocalAdminUserUpdate below, so a Department Head/Executive COE can
+    # never set or clear this on anyone, including themselves.
+    admin_managed_only: Optional[bool] = None
 
 
 class PasswordReset(BaseModel):
@@ -348,6 +357,14 @@ class QARequestCreate(BaseModel):
     performance_request_type: Optional[str] = None       # comma-separated Load/Stress/Spike Testing
     performance_priority: Optional[str] = None
     performance_risk_category: Optional[str] = None
+    # Reported directly: Performance testing is never run against Dev or
+    # SIT, regardless of the gateway's own Deployment Environment -- so
+    # unlike every other field in this block, this one is NOT delegated from
+    # the gateway; it's its own mandatory ask on the Performance wizard step,
+    # restricted to constants.POST_SIT_ENVIRONMENTS (UAT/Pre-Production/
+    # Production). Enforced server-side in
+    # routers/qa_requests.py::submit_request.
+    performance_environment: Optional[str] = None
     # Readiness checklist self-declaration -- same pattern as checked_items
     # above, for Performance's own 19-item "L1:
     # Pre-Testing Readiness Checklist" (see constants.
@@ -366,7 +383,10 @@ class QARequestOut(ORMModel):
     auto-raised (see FunctionalOut for the Functional/Sanity/Regression
     Testing/UAT Support bucket's own full lifecycle)."""
     id: int
-    request_id: str
+    # Optional -- unlike every other business ID in this app, this one is not
+    # assigned at Draft-creation time (see models.QARequest.request_id's
+    # column comment); it stays null until the gateway is actually raised.
+    request_id: Optional[str] = None
     request_date: Optional[datetime.date] = None
     department: Optional[str] = None
     application_name: str
@@ -960,7 +980,7 @@ class SuppressionOut(ORMModel):
     sast_request_id: Optional[int] = None
     dast_request_id: Optional[int] = None
     # Whichever of sast_request_id/dast_request_id is actually set, resolved
-    # to its human-readable Request ID (e.g. "SAST-20260730-93A71B") -- see
+    # to its human-readable Request ID (e.g. "TQA-SAST-01") -- see
     # models.SuppressionRequest.linked_request. Lets the Overview tab show
     # which SAST/DAST request this suppression was raised against, instead
     # of just the scan type.
@@ -981,7 +1001,7 @@ class ApprovalActionOut(ORMModel):
     entity_type: str
     entity_id: int
     # Human-readable business ID of the underlying record (e.g. "TQA-REQ-...",
-    # "SAST-...", "SUP-...") resolved server-side from entity_type/entity_id --
+    # "TQA-SAST-...", "TQA-SUP-...") resolved server-side from entity_type/entity_id --
     # None if that record no longer exists. Lets the Approval Workflow Log
     # show something meaningful instead of the raw internal entity_id.
     request_ref: Optional[str] = None
@@ -1103,6 +1123,36 @@ class DepartmentUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+# ---------------- Configurable Readiness Checklists ----------------
+# See models.ChecklistTemplateItem / checklist_config.py / routers/
+# checklist_config.py for the full reasoning.
+class ChecklistTemplateItemOut(ORMModel):
+    id: int
+    module: str
+    item: str
+    detail: Optional[str] = None
+    is_mandatory: bool
+    sort_order: int
+    active: bool
+
+
+class ChecklistTemplateItemCreate(BaseModel):
+    item: str
+    detail: Optional[str] = None
+    is_mandatory: bool = False
+    # Appended to the end of the module's own list if left unset (see
+    # routers/checklist_config.py::create_item).
+    sort_order: Optional[int] = None
+
+
+class ChecklistTemplateItemUpdate(BaseModel):
+    item: Optional[str] = None
+    detail: Optional[str] = None
+    is_mandatory: Optional[bool] = None
+    sort_order: Optional[int] = None
+    active: Optional[bool] = None
+
+
 # ---------------- Module 10: Application Name Master ----------------
 class ApplicationMasterOut(ORMModel):
     id: int
@@ -1184,8 +1234,9 @@ class TestStepOut(ORMModel):
 
 
 class TestCaseCreate(BaseModel):
-    # Left optional -- if not supplied, the router auto-generates one
-    # (gen_id("TC")), same as every other business ID in this app.
+    # Retained for backward compatibility with older clients/templates. The
+    # router always assigns the governed TQA-TC-NN key and never trusts this
+    # caller-supplied value as the repository's business ID.
     test_case_key: Optional[str] = None
     folder_id: Optional[int] = None
     epic_id: Optional[str] = None
@@ -1314,6 +1365,7 @@ class TestExecutionAdd(BaseModel):
     """Add one or more existing test cases to a cycle -- creates a
     Not-Executed TestExecution row for each (see routers/test_execution.py)."""
     test_case_ids: List[int]
+    assigned_to_id: Optional[int] = None
 
 
 class TestExecutionUpdate(BaseModel):
@@ -1321,6 +1373,73 @@ class TestExecutionUpdate(BaseModel):
     actual_result: Optional[str] = None
     test_run_artifacts: Optional[str] = None
     defect_id: Optional[str] = None
+
+
+class TestExecutionBulkResult(BaseModel):
+    """Record the same execution outcome as a new attempt on several
+    testcase slots. The router validates the complete selection before it
+    writes anything, so the operation is atomic."""
+    execution_ids: List[int]
+    status: str
+    actual_result: Optional[str] = None
+    test_run_artifacts: Optional[str] = None
+    defect_id: Optional[str] = None
+    defect_url: Optional[str] = None
+    defect_title: Optional[str] = None
+    defect_status: Optional[str] = None
+    defect_notes: Optional[str] = None
+
+
+class TestExecutionBulkRemove(BaseModel):
+    execution_ids: List[int]
+
+
+class TestExecutionBulkRemoveResult(BaseModel):
+    removed_count: int
+    removed_execution_ids: List[int]
+    removed_test_case_keys: List[str]
+    removed_attempt_count: int
+    removed_evidence_count: int
+
+
+class TestExecutionAssign(BaseModel):
+    assigned_to_id: Optional[int] = None
+
+
+class TestRunDefectCreate(BaseModel):
+    defect_key: str
+    defect_url: Optional[str] = None
+    title: Optional[str] = None
+    defect_status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class TestRunDefectOut(ORMModel):
+    id: int
+    run_id: int
+    defect_key: str
+    defect_url: Optional[str] = None
+    title: Optional[str] = None
+    defect_status: Optional[str] = None
+    notes: Optional[str] = None
+    linked_by_id: Optional[int] = None
+    linked_by_name: Optional[str] = None
+    created_at: datetime.datetime
+
+
+class TestExecutionRunOut(ORMModel):
+    """One immutable historical attempt -- see models.TestExecutionRun."""
+    id: int
+    execution_id: int
+    attempt_no: int
+    status: str
+    actual_result: Optional[str] = None
+    test_run_artifacts: Optional[str] = None
+    defect_id: Optional[str] = None
+    executed_by_id: Optional[int] = None
+    executed_by_name: Optional[str] = None
+    executed_at: Optional[datetime.datetime] = None
+    defects: List[TestRunDefectOut] = []
 
 
 class TestExecutionOut(ORMModel):
@@ -1332,6 +1451,17 @@ class TestExecutionOut(ORMModel):
     actual_result: Optional[str] = None
     test_run_artifacts: Optional[str] = None
     defect_id: Optional[str] = None
+    assigned_to_id: Optional[int] = None
+    assigned_to_name: Optional[str] = None
+    assigned_by_id: Optional[int] = None
+    assigned_by_name: Optional[str] = None
+    assigned_at: Optional[datetime.datetime] = None
     executed_by_id: Optional[int] = None
+    executed_by_name: Optional[str] = None
     executed_at: Optional[datetime.datetime] = None
+    run_count: int = 0
     created_at: datetime.datetime
+    # Full attempt-by-attempt history, oldest first -- see
+    # models.TestExecutionRun. The columns above always mirror runs[-1] once
+    # at least one attempt has been recorded.
+    runs: List[TestExecutionRunOut] = []

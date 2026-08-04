@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
-import { ErrorText, Field } from "../../components/Common";
+import { Field } from "../../components/Common";
+import SearchableSelect from "../../components/SearchableSelect";
 import { CHANGE_TYPES, ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
 import { ApplicationMasterOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
@@ -61,27 +62,26 @@ export function DetailsStep({ form, set }: Props) {
         </div>
         <div className="form-row">
           <Field label="Application Name *">
-            <select
-              required={!showOther}
+            {/* Searchable -- this list only grows over time as new
+                applications get approved, so a plain <select> becomes hard
+                to scan (the original motivating case for this component). */}
+            <SearchableSelect
               value={showOther ? OTHER : form.application_name}
-              onChange={(e) => {
-                if (e.target.value === OTHER) {
+              placeholder="Select Application Name"
+              onChange={(v) => {
+                if (v === OTHER) {
                   setShowOther(true);
                   set("application_name", "");
                 } else {
                   setShowOther(false);
-                  set("application_name", e.target.value);
+                  set("application_name", v);
                 }
               }}
-            >
-              <option value="">Select Application Name</option>
-              {approvedNames.map((a) => (
-                <option key={a.id} value={a.name}>
-                  {a.name}
-                </option>
-              ))}
-              <option value={OTHER}>Other (new application)</option>
-            </select>
+              options={[
+                ...approvedNames.map((a) => ({ value: a.name, label: a.name })),
+                { value: OTHER, label: "Other (new application)" },
+              ]}
+            />
             {showOther && (
               <>
                 <input
@@ -127,20 +127,33 @@ export function DetailsStep({ form, set }: Props) {
               required
               maxLength={8}
               value={form.cr_number}
-              onChange={(e) => set("cr_number", e.target.value.toUpperCase())}
+              onChange={(e) => {
+                set("cr_number", e.target.value.toUpperCase());
+                // Clear as soon as they start correcting it -- otherwise the
+                // stale message just sits there under the field, unrelated
+                // to whatever they're currently typing, until the next blur.
+                if (crError) setCrError("");
+              }}
               onBlur={(e) => {
-                if (!CR_NUMBER_REGEX.test(e.target.value)) {
+                if (e.target.value && !CR_NUMBER_REGEX.test(e.target.value)) {
                   setCrError("Invalid format. Example: CR-1234");
                 } else {
                   setCrError("");
                 }
               }}
             />
-            <ErrorText
-              error={crError}
-              title="Invalid Change Request ID"
-              guidance="Enter the ID in CR-1234 format, then continue with the request."
-            />
+            {/* Plain inline text, not the shared ErrorText -- that component
+                renders a full blocking dialog (Modal), which is right for a
+                stopped save/submit action but was wrong here: tabbing through
+                both this field and Epic Number while either was invalid
+                popped up that dialog per field, so two near-identical
+                "invalid format" popups could appear stacked on screen at
+                once, reading as the same error "showing multiple times". */}
+            {crError && (
+              <p className="small" style={{ color: "var(--danger)", margin: "4px 0 0" }}>
+                {crError}
+              </p>
+            )}
           </Field>
 
           <Field label="Epic Number *">
@@ -148,22 +161,23 @@ export function DetailsStep({ form, set }: Props) {
               required
               maxLength={10}
               value={form.epic_number}
-              onChange={(epic_number) =>
-                set("epic_number", epic_number.target.value.toUpperCase())
-              }
-              onBlur={(epic_number) => {
-                if (!EPIC_NUMBER_REGEX.test(epic_number.target.value)) {
+              onChange={(e) => {
+                set("epic_number", e.target.value.toUpperCase());
+                if (epicError) setEpicError("");
+              }}
+              onBlur={(e) => {
+                if (e.target.value && !EPIC_NUMBER_REGEX.test(e.target.value)) {
                   setEpicError("Invalid format. Example: EPIC-1234");
                 } else {
                   setEpicError("");
                 }
               }}
             />
-            <ErrorText
-              error={epicError}
-              title="Invalid Epic Number"
-              guidance="Enter the Epic Number in EPIC-1234 format, then continue with the request."
-            />
+            {epicError && (
+              <p className="small" style={{ color: "var(--danger)", margin: "4px 0 0" }}>
+                {epicError}
+              </p>
+            )}
           </Field>
 
           <Field label="Change Type *">

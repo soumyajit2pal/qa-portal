@@ -224,11 +224,16 @@ def _can_edit_details(obj, user: models.User) -> bool:
     again for a request already past their own checkpoint -- edit access for
     SM/Department Head stops at Department Head's own decision, never
     extending into Security's post-approval readiness stage. Same
-    department-scoping as those stages' own decision endpoints above."""
+    department-scoping as those stages' own decision endpoints above.
+
+    SM_REJECTED is included alongside the RETURNED_BY_* statuses too --
+    reported directly, a rejected request is now reopenable (edit + call
+    _resubmit), not a dead end, so the requester needs the same edit access
+    here as they'd have after a Return."""
     if user.has_role(Role.ADMIN):
         return True
     status = obj.status
-    if status in ("DRAFT", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
+    if status in ("DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
@@ -238,10 +243,10 @@ def _can_edit_details(obj, user: models.User) -> bool:
 
 
 def _require_checklist_ready(obj):
-    """The Security Readiness checklist's mandatory items (see
-    constants.DEFAULT_SAST_CHECKLIST_ITEMS/DEFAULT_DAST_CHECKLIST_ITEMS) must
-    be self-declared ready by the requester before this request can be
-    Submitted for SM Approval at all -- these are prerequisites (repo
+    """The Security Readiness checklist's mandatory items (Admin-configurable
+    now -- see checklist_config.py) must be self-declared ready by the
+    requester before this request can be Submitted for SM Approval at all --
+    these are prerequisites (repo
     access, test environment reachability, credentials, etc.) the requester
     needs to have lined up themselves before a scan is worth scheduling,
     checked here rather than waiting until Security Readiness. This is
@@ -286,10 +291,17 @@ def _submit(db: Session, obj, current_user):
 
 
 def _resubmit(db: Session, obj, current_user):
+    """Re-submits a request returned by SM, by the Department Head, or by the
+    Security Lead -- or reopens one rejected by SM. Reported directly: a
+    Rejected-by-SM request used to be a dead end; it's now reopenable the
+    same way a Return is: edit details, then call this to send it straight
+    back to SM_APPROVAL_PENDING for a fresh decision."""
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
-    _require(obj, ["RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"], "Resubmit")
-    if obj.status == "RETURNED_BY_SM":
+    _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"],
+             "Resubmit")
+    if obj.status in ("RETURNED_BY_SM", "SM_REJECTED"):
+        reopening = obj.status == "SM_REJECTED"
         _require_checklist_ready(obj)
         if obj.application_master_status == "REJECTED":
             obj.status = "SM_REJECTED"
@@ -297,7 +309,9 @@ def _resubmit(db: Session, obj, current_user):
                  "Auto-rejected: this request's Application Name was rejected by SM")
         else:
             obj.status = "SM_APPROVAL_PENDING"
-            _log(db, obj, "SM Approval", current_user, "Resubmitted", "Returned request re-submitted")
+            _log(db, obj, "SM Approval", current_user,
+                 "Reopened" if reopening else "Resubmitted",
+                 "Rejected request reopened and re-submitted" if reopening else "Returned request re-submitted")
     elif obj.status == "RETURNED_BY_DEPARTMENT_HEAD":
         # A genuine direct return from Department Head Approval itself.
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"

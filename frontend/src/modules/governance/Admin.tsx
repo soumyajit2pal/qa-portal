@@ -310,7 +310,11 @@ export default function Admin() {
       )}
       <PageHeader
         title="Users & Access" count={users.length}
-        subtitle="Create Standard (local password) or LDAP-backed accounts, and assign roles."
+        subtitle={
+          'Create Standard (local password) or LDAP-backed accounts, and assign roles. Set ' +
+          '"Managed by Admin Only" to Yes to keep a user off Department Admin rosters entirely -- ' +
+          'only a System Admin will then be able to assign their role(s) or change their status.'
+        }
         actions={(
           <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
             <IconPlus width={14} height={14} /> Create User
@@ -356,6 +360,16 @@ export default function Admin() {
                 {u.login_type === 'LDAP' ? 'LDAP' : 'Standard'}
               </span>
             ) },
+            { key: 'admin_managed_only', header: 'Managed by Admin Only', render: (u) => (
+              <button
+                className={`btn btn-sm ${u.admin_managed_only ? 'btn-primary' : ''}`}
+                disabled={savingId === u.id}
+                title="When set to Yes, this user is hidden from Department Admin / Executive COE rosters -- only a System Admin can assign their role(s) or change their status."
+                onClick={() => patchUser(u.id, { admin_managed_only: !u.admin_managed_only })}
+              >
+                {u.admin_managed_only ? 'Yes' : 'No'}
+              </button>
+            ), filterValue: (u) => u.admin_managed_only ? 'Yes' : 'No' },
             { key: 'is_active', header: 'Status', render: (u) => (
               <button
                 className={`btn btn-sm ${u.is_active ? '' : 'btn-danger'}`}

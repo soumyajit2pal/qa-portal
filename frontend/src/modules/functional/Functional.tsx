@@ -603,13 +603,19 @@ function FunctionalDetail({
     status === "READINESS_VERIFICATION";
 
   const canSubmit = isRequester && status === "DRAFT";
+  // SM_REJECTED included alongside the RETURNED_BY_* statuses -- reported
+  // directly, a rejected request is now reopenable via the same resubmit
+  // action instead of being a dead end (see resubmitLabel below for the
+  // button's own wording).
   const canResubmit =
     isRequester &&
     [
       "RETURNED_BY_SM",
+      "SM_REJECTED",
       "RETURNED_BY_DEPARTMENT_HEAD",
       "RETURNED_BY_QA_LEAD",
     ].includes(status);
+  const resubmitLabel = status === "SM_REJECTED" ? "Reopen Request" : "Re-submit";
   // SM and Department Head approvals remain requester-department scoped.
   // QA is a central vertical, so QA Lead actions below are intentionally not
   // bound to the requester's department.
@@ -708,6 +714,7 @@ function FunctionalDetail({
       [
         "DRAFT",
         "RETURNED_BY_SM",
+        "SM_REJECTED",
         "RETURNED_BY_DEPARTMENT_HEAD",
         "RETURNED_BY_QA_LEAD",
       ].includes(status)) ||
@@ -904,7 +911,7 @@ function FunctionalDetail({
                   disabled={!!busyAction}
                   onClick={() => act("resubmit")}
                 >
-                  Re-submit
+                  {resubmitLabel}
                 </button>
               )}
 

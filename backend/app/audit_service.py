@@ -26,6 +26,7 @@ def user_snapshot(user: models.User) -> dict:
         "login_type": user.login_type,
         "is_active": bool(user.is_active),
         "needs_role_review": bool(user.needs_role_review),
+        "admin_managed_only": bool(user.admin_managed_only),
     }
 
 

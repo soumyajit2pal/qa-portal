@@ -411,7 +411,11 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   const isQADepartment = user?.department === QA_DEPARTMENT || isAdmin
 
   const canSubmit = isRequester && status === 'DRAFT'
-  const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status)
+  // SM_REJECTED ("Rejected by QA Lead" here) included alongside RETURNED_BY_*
+  // -- reported directly, a rejected certificate is now reopenable (edit +
+  // resubmit) instead of a dead end.
+  const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status)
+  const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Certificate' : 'Re-submit'
   // Reported directly: a person who raised this certificate but also
   // separately holds QA Lead/Executive COE must not be able to approve
   // their own certificate -- someone else holding that role must decide it
@@ -463,7 +467,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
         </button>
         {canEditDetails && <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setEditing(true)}>Edit Details</button>}
         {canSubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('submit')}>Submit for QA Lead Approval</button>}
-        {canResubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('resubmit')}>Re-submit</button>}
+        {canResubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
       </div>
 
       {(canQALeadDecide || canExecutiveCoeDecide) && (

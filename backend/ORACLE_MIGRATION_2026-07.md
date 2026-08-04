@@ -166,7 +166,7 @@ live Oracle database before deploying this change.
 > physical uploads folder as the Gateway's own documents, just namespaced by module.
 
 > **Update (v19):** No schema/API change at all -- frontend-only restructure. `frontend/src/pages/`
-> is split into a `shell/` (Login, Command Centre, the QA Request gateway -- cross-cutting, not owned
+> is split into a `shell/` (Login, Dashboard, the QA Request gateway -- cross-cutting, not owned
 > by one domain) and 4 `modules/` folders: `functional/` (Functional QA), `security/` (SAST/DAST/
 > Suppression), `specialised-testing/` (Automation/Performance), `governance/` (Sign-off/Approvals/
 > Admin/Reports). Each module is imported everywhere else only through its own `index.ts` barrel, never
@@ -1601,12 +1601,12 @@ UPDATE qap_performance_checklist_items SET is_mandatory = 0;
 Optional -- these gates only ever blocked forward progress, so leaving old rows as-is just means a
 request already mid-flight keeps whatever mandatory set it started with.
 
-## 36. Dashboard: "My Requests & My Department" moved out of Command Centre into its own tab (no schema/backend change)
+## 36. Dashboard: "My Requests & My Department" moved out of Dashboard into its own tab (no schema/backend change)
 
-Frontend-only. `Dashboard.tsx`'s Command Centre tab previously embedded a department/personal-scoped
+Frontend-only. `Dashboard.tsx`'s Dashboard tab previously embedded a department/personal-scoped
 card ("My Requests & My Department", toggling between the logged-in user's own requests and their
 department's, capped at 8 rows) alongside the org-wide stats -- moved into a new dedicated top-level
-tab, `MyRequestsTab` (labelled "My Requests" in the tab bar), with no row cap. Command Centre's "At a
+tab, `MyRequestsTab` (labelled "My Requests" in the tab bar), with no row cap. Dashboard's "At a
 Glance" row now shows an org-wide "Active requests (org-wide)" stat instead of a "My active requests"
 one, so the default dashboard view is unscoped/organization-wide throughout. No backend endpoints
 changed -- `dashboard.py`'s endpoints never filtered by department to begin with; this was purely a
@@ -2902,7 +2902,7 @@ instead of at each child's own since-removed Submit step.
 **Automation Testing removal -- frontend:** `modules/specialised-testing/Automation.tsx` and
 `QARequests/steps/AutomationStep.tsx` deleted outright. Every reference removed from `App.tsx` (route +
 lazy import), `components/Layout.tsx` (nav item, nav count, `/api/automation-requests` fetch),
-`Dashboard.tsx` (Command Centre and My Requests tab both dropped their Automation fetch/unify/terminal-status
+`Dashboard.tsx` (Dashboard and My Requests tab both dropped their Automation fetch/unify/terminal-status
 entries), `constants.ts` (`AUTOMATION_STATUSES`/`AUTOMATION_STATUS_LABELS`/`AUTOMATION_TERMINAL_STATUSES`/
 `AUTOMATION_EDITABLE_STATUSES`/`DEFAULT_AUTOMATION_CHECKLIST_ITEMS`/`"Automation Testing"` in
 `REQUEST_TYPES`), `types.ts` (`AutomationOut`/`AutomationChecklistItemOut`, `linked_automation_requests`/
@@ -4051,7 +4051,7 @@ re-synced, only the expected (excluded) `app/auth.py` difference reported.
 ## 102. Dashboard clarity pass -- every metric now explains what it counts, in plain English, on screen
 
 **Why:** reported directly -- "what is Active Project, What is pending Approval, What is Active requests /
-Aging distribution 16 pending how is calculating?" The four Command Centre "At a Glance" cards and the
+Aging distribution 16 pending how is calculating?" The four Dashboard "At a Glance" cards and the
 Ageing Distribution donut each use a genuinely different scope under the hood: Active Projects counts
 *distinct project epics* with a Functional Testing request in an in-flight `QAStatus` (see
 `ACTIVE_QA_STATUSES` in `dashboard.py`); Pending Approvals counts Functional requests sitting at an
@@ -4206,10 +4206,10 @@ disabled. No caller changes were needed -- `Functional.tsx`, `SAST.tsx`, `DAST.t
 `npx tsc --noEmit -p .` from `frontend/` -- clean; Documents and outputs re-synced with no unexpected
 differences.
 
-## 107. Command Centre: added a "Raised" date-range filter (within 1 hour / within 1 month / custom From-To)
+## 107. Dashboard: added a "Raised" date-range filter (within 1 hour / within 1 month / custom From-To)
 
 **Why:** reported directly -- "In dashboard add filter like within 1 hr raised, 1 month, from date to to
-date." The Command Centre had no way to narrow any of its data down to a specific time window; everything
+date." The Dashboard had no way to narrow any of its data down to a specific time window; everything
 shown was always all-time.
 
 **Fix:** added a new `RaisedRangeFilter` control (`Dashboard.tsx`) rendered above the "At a Glance" cards,
@@ -6076,3 +6076,945 @@ event to bump from.
 **Verified:** `python3 -m py_compile` on `models.py`, `schemas.py`, `routers/test_repository.py` -- clean;
 `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies re-synced and
 confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 141. Draft QA Request: scope visibility to requester + stop wasting request_id on cancel
+
+**Request:** "While raising QA requests, if it is in Draft that should be under the requster only, also
+why generating req id ? if i am cancelling draft then that reqid is actually wasting right ? then there
+will be lot of garbage request id"
+
+**Root cause (two separate bugs in the QA Request gateway's Draft handling):**
+1. `GET /api/qa-requests` (list) and `GET /api/qa-requests/{id}` (detail), plus the gateway's history/
+   export/documents endpoints, had no visibility scoping at all -- every authenticated user could see
+   every other user's Draft QA Requests, including ones that were pure personal scratch work never
+   intended to be raised.
+2. `QARequest.request_id` used the same eager `gen_id_default(...)` Column-default pattern as every other
+   business ID in the app, which fires at row-INSERT time. Since a QA Request row is created in Draft
+   status the moment the wizard's first step is saved, this meant a real `TQA-REQ-YYYYMMDD-N` number was
+   burned immediately -- even for a Draft that's cancelled a minute later without ever being raised,
+   permanently leaving a gap in the sequence. (This is unlike the linked Functional/SAST/DAST/Performance
+   child requests, whose own IDs are naturally never wasted this way, since those rows -- and therefore
+   their own gen_id_default -- don't exist at all until the gateway is actually raised; see
+   `_sync_linked_child_requests`.)
+
+**Backend changes:**
+- `routers/qa_requests.py`: new `_can_view_gateway(obj, user)` helper -- returns `True` for any non-Draft
+  request (unchanged, department-wide visibility, consistent with every other module in this app), and
+  for a Draft, only if `obj.requester_id == user.id` or the user is an Admin. Applied to: `list_requests`
+  (Drafts belonging to someone else are filtered out of the query entirely, not just masked), `get_request`,
+  `request_history`, `export_request`, `list_documents`, `download_document`, and
+  `_draft_request_for_evidence` (covers the checklist-evidence list/upload/download/delete endpoints).
+  Each returns 403 "This request is still in Draft and is only visible to its requester" for a
+  detail-style call, or is silently excluded for the list.
+- `models.py` `QARequest.request_id`: removed `default=gen_id_default("TQA-REQ")`, now `nullable=True` with
+  no default -- stays NULL through Draft. Oracle's UNIQUE constraint allows any number of NULLs, so this
+  doesn't block having several concurrent Drafts.
+- `routers/qa_requests.py` `submit_request`: now the one and only place `request_id` is ever assigned --
+  `if not obj.request_id: obj.request_id = models.gen_id("TQA-REQ", db)`, set right as the gateway is
+  raised (Draft -> Submitted -> Raised), before `_sync_linked_child_requests` runs (a DAST target's
+  placeholder URL references it). A cancelled Draft never reaches this line, so it never gets an ID at
+  all -- no gap, nothing to explain in an audit later.
+- New `_storage_key(req)` helper: `req.request_id or f"DRAFT-{req.id}"` -- the numeric PK is always
+  present from row-creation, unlike request_id now. Used as the on-disk folder-name prefix for both
+  general supporting-document uploads (`upload_documents`) and checklist-evidence uploads
+  (`upload_draft_checklist_evidence`, which can *only* ever run while Draft, so it would otherwise always
+  see `request_id = None` now). No migration/rename needed later -- each document's exact path is already
+  recorded on its own `stored_path` column at upload time and is never re-derived from this key again, so
+  files uploaded during Draft simply keep living under their `DRAFT-<id>` folder even after the request is
+  raised.
+- `export_request`: title/filename fall back to `f"Draft #{obj.id}"` when `request_id` is still None
+  (reachable now that a Draft's own requester can export it).
+- `schemas.py` `QARequestOut.request_id`: `str` -> `Optional[str] = None`.
+
+**Frontend changes:**
+- `types.ts` `QARequestOut.request_id`: `string` -> `string | null | undefined`.
+- `RequestDetail.tsx`: new `displayId = req.request_id || \`Draft #${req.id}\`` used for the modal title,
+  the PDF export filename, and the cancel-confirmation dialog (which, since cancel is Draft-only, would
+  otherwise always have shown "Cancel null?").
+- `NewRequestModal.tsx`: edit-mode modal title changed from `Edit ${editing.request_id}` (always null --
+  editing is Draft-only) to `Edit Draft — ${editing.application_name}`.
+- `QARequests/index.tsx`: the list table's "Request ID" column now renders `r.request_id || \`Draft
+  #${r.id}\`` instead of a blank cell for Drafts.
+- `Dashboard.tsx`: `toUnified`'s row-shape and the "My Requests & My Department" unified list apply the
+  same `Draft #<id>` fallback so a Draft QA Request gateway row displays sensibly there too.
+
+**Data notes:** no live DB connection from this sandbox; apply directly to Oracle before/with this
+deploy:
+```sql
+ALTER TABLE qap_requests MODIFY (request_id NULL);
+```
+(The column was already nullable=True at the SQLAlchemy level in practice since Oracle VARCHAR2 columns
+default to nullable unless declared otherwise, but this makes the intent explicit if a prior migration
+added an explicit NOT NULL.) No backfill needed -- existing Raised/Submitted/Cancelled rows already have
+whatever request_id they were given at creation time under the old eager scheme; only brand-new Drafts
+created after this deploy will see the new NULL-until-raised behavior.
+
+**Verified:** `python3 -m py_compile` on `models.py`, `schemas.py`, `routers/qa_requests.py`,
+`routers/reports.py` -- clean; `npx tsc --noEmit -p .` across the entire frontend -- clean (caught and
+fixed two knock-on type errors in `Dashboard.tsx` where `toUnified`'s helper type still required a
+non-optional `request_id`); traced every `.request_id` reference against `models.QARequest` specifically
+(not the linked Functional/SAST/DAST/Performance children, whose own IDs are unaffected) across both
+backend and frontend to find every place that would have broken on a null value; Documents and outputs
+copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers
+differ).
+
+## 142. Block document upload on a Cancelled QA Request
+
+**Request:** "if the status is cencelled then why uploading document is enabled ? it should be disabled"
+
+**Root cause:** `POST /api/qa-requests/{id}/documents` (the gateway's general supporting-document
+upload, `upload_documents` in `routers/qa_requests.py`) only ever checked that the caller was the
+request's own requester or an Admin -- it never checked `status` at all, so it kept accepting uploads
+even after the gateway was Cancelled (a dead-end status with no further workflow of any kind). The
+frontend's `AddDocuments` form (`RequestDetail.tsx`'s Documents tab) was rendered unconditionally too, so
+the upload control stayed visible and enabled regardless of status.
+
+**Backend changes:**
+- `routers/qa_requests.py` `upload_documents`: added `if req.status == GatewayStatus.CANCELLED: raise
+  HTTPException(400, "Documents cannot be uploaded to a cancelled request")`, right after the existing
+  requester/admin permission check. Draft, Submitted, and Raised are all still allowed -- `AddDocuments`
+  is explicitly meant to keep working after the gateway is raised (its own comment: "adding more
+  supporting documents after the request has already been raised"), so only Cancelled is blocked.
+
+**Frontend changes:**
+- `RequestDetail.tsx`'s Documents tab: `<AddDocuments .../>` now only renders when `status !==
+  "CANCELLED"`; a cancelled request shows "Documents cannot be added — this request has been cancelled."
+  in its place instead.
+
+**Data notes:** none -- permission/validation-only change, no schema impact.
+
+**Verified:** `python3 -m py_compile` on `routers/qa_requests.py` -- clean; `npx tsc --noEmit -p .` across
+the entire frontend -- clean; Documents and outputs copies re-synced and confirmed identical via `diff
+-rq` (only the standard `.env`/`uploads/` leftovers differ, including the new `DRAFT-<id>` folder pattern
+introduced in section 141).
+
+## 143. Close remaining Draft QA Request visibility leaks (Reports + Approval Workflow Log)
+
+**Request:** "still draft issue not fixed, if i am raising the request, and it is in draft then this
+should be visible to me only, not others untill i submit the request" (follow-up to section 141, which
+scoped the QA Requests list/detail/history/export/documents endpoints, but missed two other pages that
+read the same underlying data through a different path).
+
+**Root cause:** Section 141 scoped every endpoint directly under `/api/qa-requests`, but two other
+pages -- both reachable by *any* logged-in user, with no role gate at all in `Layout.tsx`'s nav (`Reports
+& Export Centre` and `Approval Workflow Log`) -- read the same `QARequest` rows and `ApprovalAction` log
+entries through their own, entirely separate, unfiltered queries:
+- `routers/reports.py`'s `qa_request_summary` (`GET /api/reports/qa-request-summary`, the "QA Request
+  Summary" operational report) did `db.query(models.QARequest).all()` with no filter at all -- one row
+  per request, Request ID/Application Name/Department/Status included, for every Draft belonging to
+  every user.
+- `routers/reports.py`'s `monthly_kpi` and `quality_scorecard` similarly counted every Draft into
+  "Total QA Requests" and the per-application scorecard, regardless of owner.
+- `routers/approvals.py`'s `list_approvals` (`GET /api/approvals`, the "Approval Workflow Log" cross-entity
+  audit feed) did `db.query(models.ApprovalAction)` with no filter beyond the caller-supplied
+  `entity_type`/`entity_id`, so every "Drafted"/"Cancelled" QA_REQUEST audit row -- written by
+  `routers/qa_requests.py::_log` on every Draft save/cancel -- was visible to anyone, along with the
+  resolved business ID via `_resolve_request_ref`.
+
+**Backend changes:**
+- `routers/reports.py`: new `_visible_qa_requests(db, current_user)` helper -- same rule as
+  `routers/qa_requests.py::_can_view_gateway`: a Draft row is only included if `requester_id ==
+  current_user.id` or the caller is an Admin; every non-Draft row is unaffected. Applied to
+  `qa_request_summary`, `monthly_kpi`'s `total_requests` count, and `quality_scorecard`'s app list/
+  per-app request count (both now built from one shared `_visible_qa_requests(...).all()` call instead of
+  two separate unfiltered queries).
+- `routers/approvals.py`: `list_approvals` now pulls a larger internal batch (2000 rows instead of the
+  final 500), then -- for non-Admins -- drops any `QA_REQUEST`-type row whose underlying gateway is still
+  Draft and not the caller's own, before trimming to the usual 500 most recent. `entity_id`-scoped queries
+  (`?entity_type=QA_REQUEST&entity_id=<id>`) are covered by the same check, so a direct lookup of someone
+  else's Draft's history can't bypass it either. `my_recent_actions` (`/pending-mine`) needed no change --
+  it was already scoped to `actor_id == current_user.id`.
+
+**Data notes:** none -- read-path filtering only, no schema impact.
+
+**Verified:** `python3 -m py_compile` on `routers/reports.py`, `routers/approvals.py` -- clean; `npx tsc
+--noEmit -p .` across the entire frontend -- clean (no frontend changes needed, both pages just render
+whatever JSON the API returns); re-audited every `db.query(models.QARequest)` call site across the whole
+backend (`grep -rn "models\.QARequest)"`) to confirm no other unfiltered read path remains --
+`applications.py`'s three call sites are internal audit-logging writes (fan out an approval decision to
+every linked QA Request regardless of status), not a user-facing read, so they're correctly left alone;
+`dashboard.py` and `export.py` never query `QARequest` directly at all. Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 144. Root cause found: Cancelled gateways were still department-wide visible
+
+**Request:** "still draft issue not fixed !, requester 1's request is visible to requester 2." Follow-up
+diagnosis (raw API response shared) showed the actual row: `"status": "CANCELLED"`, `"requester_id": 2`,
+visible to a different logged-in requester on the QA Requests list page.
+
+**Root cause:** Sections 141/143 correctly restricted **Draft** gateways to their own requester (or
+Admin) everywhere -- `list_requests`, `get_request`, `request_history`, `export_request`,
+`list_documents`, `download_document`, `_draft_request_for_evidence`, plus the Reports and Approval
+Workflow Log endpoints. But `_can_view_gateway`'s check was `if obj.status != GatewayStatus.DRAFT: return
+True` -- meaning Cancelled was treated exactly like Raised: fully department-wide visible. That's wrong.
+`GATEWAY_CANCELLABLE_STATUSES = [GatewayStatus.DRAFT]` (`constants.py`) means `cancel_request` can only
+ever fire while a gateway is still Draft -- there is no code path from Raised to Cancelled. So a Cancelled
+gateway is, by construction, always a Draft that the requester abandoned before ever raising it: it never
+got a `request_id`, never spun off a single linked Functional/SAST/DAST/Performance request, and nobody
+outside the requester was ever supposed to know it existed. Reaching "Cancelled" doesn't change any of
+that -- it's still 100% personal scratch work, not a real, department-relevant request.
+
+**Backend changes:**
+- `routers/qa_requests.py`: new module-level `_GATEWAY_PRIVATE_STATUSES = (GatewayStatus.DRAFT,
+  GatewayStatus.CANCELLED)`. `_can_view_gateway` now checks `obj.status not in _GATEWAY_PRIVATE_STATUSES`
+  instead of just `!= DRAFT`. `list_requests`'s inline OR-filter updated to
+  `status.notin_(_GATEWAY_PRIVATE_STATUSES)`. All six 403 messages across the file reworded from "This
+  request is still in Draft..." to "This request was never raised (still Draft, or Cancelled before being
+  raised) and is only visible to its requester" -- accurate for both statuses now.
+- `routers/reports.py`: `_visible_qa_requests` gained the same `_GATEWAY_PRIVATE_STATUSES` tuple and
+  `.notin_(...)` filter (was `!= GatewayStatus.DRAFT`).
+- `routers/approvals.py`: `list_approvals`'s hidden-QA_REQUEST-ids check now matches
+  `status.in_((GatewayStatus.DRAFT, GatewayStatus.CANCELLED))` instead of only `== DRAFT`.
+
+**Data notes:** none -- read-path filtering only, no schema impact. Any already-Cancelled gateway rows
+from before this fix need no backfill; the new rule applies automatically based on their existing
+`status`/`requester_id` values.
+
+**Verified:** `python3 -m py_compile` on `routers/qa_requests.py`, `routers/reports.py`,
+`routers/approvals.py` -- clean; `npx tsc --noEmit -p .` across the entire frontend -- clean (no frontend
+changes needed -- the leak was entirely in what the API returned, not how it was rendered); confirmed via
+the reported raw JSON (id 62, status CANCELLED, requester_id 2) that this exact row would now be excluded
+from a different requester's `GET /api/qa-requests` response; Documents and outputs copies re-synced and
+confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 145. Rejected by SM is now reopenable by the requester
+
+**Request:** "Rejected BY SM should give chnace to requester with edit details to reopen." Confirmed
+scope via follow-up: applies to Functional, SAST/DAST, Performance, and QA Sign-off (whose SM_REJECTED
+status is internally labeled "Rejected by QA Lead" -- see SIGNOFF_STATUS_LABELS). Reopen behavior:
+edit details, then send straight back to SM_APPROVAL_PENDING for a fresh decision -- the same path
+"Returned by SM" already uses, reusing the existing resubmit endpoint rather than adding a new one.
+
+**Root cause:** SM_REJECTED was treated as a genuine dead end everywhere -- absent from every module's
+own *_EDITABLE_STATUSES list (so the requester couldn't even fix whatever caused the rejection), absent
+from every resubmit endpoint's accepted-statuses list (so there was no way to send it back to the SM even
+if they could edit it), and present in every module's own *_TERMINAL_STATUSES list (so dashboards/nav
+counts treated it as finished, matching CLOSED/CANCELLED, rather than "waiting on the requester" the way
+RETURNED_BY_SM already is).
+
+**Backend changes (constants.py):**
+- `FUNCTIONAL_EDITABLE_STATUSES`, `SAST_DAST_EDITABLE_STATUSES`, `PERFORMANCE_EDITABLE_STATUSES`,
+  `SIGNOFF_EDITABLE_STATUSES`: added `SM_REJECTED` to each, alongside the existing `RETURNED_BY_SM`.
+- `READINESS_EVIDENCE_EDITABLE_STATUSES` (Functional): added `SM_REJECTED` too, so readiness evidence can
+  also be fixed up before reopening.
+- `QA_REQUEST_TERMINAL_STATUSES`, `SAST_DAST_TERMINAL_STATUSES`, `PERFORMANCE_TERMINAL_STATUSES`,
+  `SIGNOFF_TERMINAL_STATUSES`: removed `SM_REJECTED` from each (kept `DEPARTMENT_HEAD_REJECTED`/
+  `DEPT_HEAD_COE_REJECTED` untouched -- only SM/QA-Lead-tier rejection was asked to become reopenable).
+  Audited every real usage of each constant first (`QA_REQUEST_TERMINAL_STATUSES` turned out to be an
+  unused/dead import in dashboard.py; `SAST_DAST_TERMINAL_STATUSES` actually drives the 3W ageing
+  dashboard's "still outstanding" filter in routers/dashboard.py; `PERFORMANCE_TERMINAL_STATUSES` and
+  `SIGNOFF_TERMINAL_STATUSES` had no other real usage) to confirm removing SM_REJECTED here couldn't
+  silently break some other gate (e.g. a parent QA Request completion check) -- it doesn't; that
+  cross-module gate was already decoupled in an earlier round (see functional.py's `complete_qa`
+  docstring).
+- `routers/dashboard.py`: added `QAStatus.SM_REJECTED` to `STAGE_LABELS` ("Rework by Requester Pending")
+  and `STAGE_TEAM` ("Requester") so a rejected-but-reopenable Functional request shows up on the 3W
+  ageing dashboard the same way a Returned one already does.
+
+**Backend changes (routers):**
+- `functional.py` `resubmit_request`, `sast_dast.py` `_resubmit` (shared by both SAST and DAST),
+  `performance.py` `resubmit_performance`, `signoff.py` `resubmit_signoff`: each now accepts `SM_REJECTED`
+  alongside `RETURNED_BY_SM` in its status gate, and branches on `reopening = obj.status == "SM_REJECTED"`
+  to log a distinct "Reopened"/"...reopened and re-submitted" audit message instead of the Returned
+  wording, while landing at the exact same `SM_APPROVAL_PENDING` (or re-auto-rejected, if the Application
+  Name is still REJECTED in the meantime) outcome.
+- `functional.py` `_can_edit_details`, `sast_dast.py` `_can_edit_details`, `performance.py`
+  `_can_edit_details`: added `SM_REJECTED` to the requester-editable status tuple (signoff.py's
+  `update_signoff` needed no equivalent change -- it already reads directly off
+  `SIGNOFF_EDITABLE_STATUSES`). Each module's own `_can_upload_documents`-equivalent needed no change --
+  all four already grant the original requester upload access unconditionally, regardless of status.
+
+**Frontend changes (constants.ts):** mirrored every one of the above: `FUNCTIONAL_EDITABLE_STATUSES`,
+`SAST_DAST_EDITABLE_STATUSES`, `PERFORMANCE_EDITABLE_STATUSES`, `SIGNOFF_EDITABLE_STATUSES` gained
+`SM_REJECTED`; `QA_TERMINAL_STATUSES`, `SAST_DAST_TERMINAL_STATUSES`, `PERFORMANCE_TERMINAL_STATUSES`,
+`SIGNOFF_TERMINAL_STATUSES` dropped it; `QA_PENDING_WITH`, `SAST_DAST_PENDING_WITH`,
+`PERFORMANCE_PENDING_WITH` changed `SM_REJECTED` from `'—'` to `'Requester'`. `QA_ACTIVE_STATUSES` and
+every nav-count/dashboard computation already derives from these lists, so they automatically start
+counting a rejected-but-reopenable request as active/pending instead of closed, with no separate edit
+needed.
+
+**Frontend changes (Functional.tsx, SAST.tsx, DAST.tsx, Performance.tsx, SignOff.tsx):** each module's own
+`canResubmit`/`canEditDetails` now include `SM_REJECTED`; the resubmit button's label switches to "Reopen
+Request" (or "Reopen Certificate" for Sign-off) instead of "Re-submit" specifically when
+`status === 'SM_REJECTED'`. SAST.tsx/DAST.tsx's existing "mandatory Security Readiness checklist not yet
+self-declared" guard (previously only checked while `RETURNED_BY_SM`) now also covers `SM_REJECTED`, since
+the backend's `_require_checklist_ready` gate applies identically to both when resubmitting/reopening.
+
+**Data notes:** none -- status-transition/permission logic only, no schema impact. No backfill needed --
+any already-`SM_REJECTED` row simply becomes reopenable going forward under the new rule; nothing about
+its stored data needs to change.
+
+**Verified:** `python3 -m py_compile` on `constants.py`, `routers/functional.py`, `routers/sast_dast.py`,
+`routers/performance.py`, `routers/signoff.py`, `routers/dashboard.py` -- clean; `npx tsc --noEmit -p .`
+across the entire frontend -- clean; grepped every remaining `SM_REJECTED` reference across both
+frontend and backend to confirm nothing else (e.g. the shared Badge color map in Common.tsx, which
+already used the same "badge-red" for both RETURNED_BY_SM and SM_REJECTED) needed a matching change;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 146. Test Execution now logs every attempt instead of overwriting the result
+
+**Request:** "Test Lifecycle design is not correct, how multiuple execution will log? execution once
+failed, i log with attachment, then next run it passed, so design like this." -- i.e. a test case's
+execution result within a cycle is not a single fact that gets corrected in place; it is a sequence of
+distinct test runs over time (Run 1: Fail, with a screenshot of the error; Run 2, after a fix: Pass),
+and every prior attempt's result and evidence must remain on the record, not get silently overwritten by
+the next one.
+
+**Root cause:** `TestExecution` (one junction row per cycle + test case) stored `status`,
+`actual_result`, `test_run_artifacts`, `defect_id`, `executed_by_id`, `executed_at` directly on itself as
+mutable columns. Recording a new result (`PATCH /executions/{id}` or `POST
+/executions/{id}/rich-result`) simply overwrote these columns in place, and the evidence images
+(`RequestDocument`, module `TEST_EXEC_IMAGE`) were keyed by the parent `TestExecution.id` -- a single
+shared bucket. So logging Run 2's Pass result silently destroyed Run 1's Fail result, its actual-result
+text, and detached/re-mixed its screenshots with the next attempt's. There was no way to see "it failed
+once, here's the evidence, then it passed."
+
+**Backend changes (models.py):**
+- New table `TestExecutionRun` (`qap_test_execution_runs`): one immutable row per concrete attempt --
+  `id`, `execution_id` (FK to `qap_test_executions.id`), `attempt_no` (1, 2, 3, ... per execution),
+  `status`, `actual_result`, `test_run_artifacts`, `defect_id`, `executed_by_id` (FK to
+  `qap_users.id`), `executed_at`. Each attempt's own screenshots are stored the same way as before
+  (`RequestDocument`, module `TEST_EXEC_IMAGE`) but keyed by this row's own `id` instead of the parent
+  `TestExecution.id`, so attempt 1's evidence and attempt 2's evidence never mix.
+- `TestExecution` gained a `runs` relationship (`cascade="all,delete-orphan"`, ordered by `attempt_no`).
+  Its own mutable columns are kept, but are now a denormalized mirror of the *latest* attempt only, for
+  backward compatibility with anything still reading `execution.status` etc. directly (dashboard
+  aggregates, existing exports).
+
+**Backend changes (schemas.py):**
+- New `TestExecutionRunOut` (`id`, `execution_id`, `attempt_no`, `status`, `actual_result`,
+  `test_run_artifacts`, `defect_id`, `executed_by_id`, `executed_at`).
+- `TestExecutionOut` gained `runs: List[TestExecutionRunOut] = []`.
+
+**Backend changes (routers/test_execution.py):**
+- New `_migrate_legacy_result_if_needed(db, obj)`: lazily, on first attempt recorded against a
+  pre-existing `TestExecution` row that predates this feature, synthesizes attempt #1 from that row's
+  own already-stored columns and re-points its existing `RequestDocument`s (module `TEST_EXEC_IMAGE`,
+  `request_id = obj.id`) onto the new synthetic run's id. This is a safe, one-line bulk `UPDATE` because
+  `RequestDocument.request_id` is a plain `Integer`, not a foreign key, and `stored_path`/`folder_name`
+  were never derived from it -- no physical file needs to move. This means no backfill migration script
+  is required; the very first save against each old row performs its own migration on the fly.
+- New `_record_attempt(db, obj, status, actual_result, test_run_artifacts, defect_id, current_user)`:
+  calls the migration guard, computes the next `attempt_no`, inserts the new `TestExecutionRun`, then
+  updates `obj`'s own mirrored columns to match. Both `PATCH /executions/{id}` and `POST
+  /executions/{id}/rich-result` now go through this instead of mutating `obj` directly -- every save is
+  an insert, never an overwrite.
+- `POST /executions/{id}/rich-result` now saves uploaded evidence images keyed by the new run's `id`
+  (`doc_store.save_documents(db, _RESULT_IMAGE_MODULE, run.id, ...)`), not the execution's `id`.
+- New endpoints: `GET /executions/{id}/runs` (full attempt history, oldest first), `GET
+  /executions/{id}/runs/{run_id}/images`, `GET .../runs/{run_id}/images/{document_id}/download`, `DELETE
+  .../runs/{run_id}/images/{document_id}`.
+- Existing `GET /executions/{id}/result-images`, its `download`/`delete` siblings: kept, now resolve to
+  the *latest* run's evidence (running the same migration guard first) so any old integration hitting
+  these unchanged URLs keeps working exactly as before.
+- `DELETE /executions/{id}`: now also cleans up every historical run's evidence images (loops
+  `obj.runs`), not just the legacy execution-keyed bucket, before deleting the execution itself
+  (`cascade="all,delete-orphan"` removes the `TestExecutionRun` rows automatically).
+
+**Frontend changes (types.ts):** new `TestExecutionRunOut` interface mirroring the backend schema;
+`TestExecutionOut` gained `runs?: TestExecutionRunOut[]`.
+
+**Frontend changes (modules/test-management/TestExecution.tsx):**
+- New `ImageGallery` component: generic evidence viewer/uploader-cleanup parameterized by `basePath`, so
+  the same code renders either the legacy "latest attempt" gallery or (via `/runs/{run_id}/images`) any
+  specific historical attempt's own screenshots.
+- New `AttemptHistory` component: fetches `GET /executions/{id}/runs` and renders every attempt, newest
+  first, as a collapsible row -- attempt number, result Badge, defect ID, executed-at timestamp, and,
+  expanded, that attempt's own actual-result text and its own `ImageGallery`.
+- `RecordResultModal` reworked: no longer pre-fills its form from the execution's own (single, current)
+  fields, since opening it now means logging a brand-new attempt, not editing the last one. It shows a
+  "Latest result" summary Badge, the full `AttemptHistory`, and then (for users who can execute) a
+  separate "Log New Attempt" form with its own blank Result/Actual Result/Test Run Artifacts/Defect ID
+  fields and evidence upload, submitting to the unchanged `POST /rich-result` endpoint. Saving still
+  closes the modal (as before), so the next time it's opened `AttemptHistory` naturally re-fetches and
+  shows the new attempt already included.
+
+**Data notes:** new table `qap_test_execution_runs` needs to be created in Oracle (no live DB connection
+from this sandbox, so this is DDL-only, not executed):
+```sql
+CREATE TABLE qap_test_execution_runs (
+    id            NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    execution_id  NUMBER NOT NULL REFERENCES qap_test_executions(id),
+    attempt_no    NUMBER NOT NULL,
+    status        VARCHAR2(20) NOT NULL,
+    actual_result CLOB,
+    test_run_artifacts VARCHAR2(255),
+    defect_id     VARCHAR2(60),
+    executed_by_id NUMBER REFERENCES qap_users(id),
+    executed_at   DATE DEFAULT SYSDATE
+);
+CREATE INDEX ix_qap_test_execution_runs_execution_id ON qap_test_execution_runs(execution_id);
+```
+No backfill DML needed -- `_migrate_legacy_result_if_needed` synthesizes attempt #1 for any pre-existing
+row lazily, the first time a new attempt is recorded against it.
+
+**Verified:** `python3 -m py_compile app/routers/test_execution.py app/models.py app/schemas.py` --
+clean; `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ,
+plus the new `TEST_EXEC_IMAGE` folder already present in both).
+
+## 147. Change Request ID / Epic Number inline error popping up multiple times
+
+**Request:** "In New QA Request Form Change Request ID and Epic ID error message not behaving correctly
+sometime showing multiple times."
+
+**Root cause:** `steps/DetailsStep.tsx`'s onBlur handlers for both fields stored their "invalid format"
+message in local `crError`/`epicError` string state, then rendered that string through the shared
+`ErrorText` component -- but `ErrorText` (components/Common.tsx) doesn't render inline text at all, it
+renders a full blocking `<Modal>` dialog (title, "The requested action was stopped", a "What to do"
+panel, a Close button). That's the right component for a stopped save/submit action, but wrong for
+simple per-field format validation: tabbing from Change Request ID straight into Epic Number, with both
+still invalid, popped up two of these dialogs (one per field) essentially back to back / stacked, which
+read as the same "invalid format" error showing multiple times. Separately, blurring an empty (not yet
+typed-in) field also fired the "Invalid format. Example: CR-1234" message, which is misleading for a
+field that's simply empty rather than malformed -- that's a mandatory-field question the wizard's own
+`detailsStepError` "Please fill in: ..." gate already owns.
+
+**Frontend changes (steps/DetailsStep.tsx):**
+- Both fields now render their validation message as plain inline text (`<p className="small"
+  style={{ color: 'var(--danger)' }}>`) directly under the input, instead of through `ErrorText`/`Modal`
+  -- no more popup, so nothing can visually stack.
+- Each field's `onChange` now clears its own error state as soon as the user starts correcting it,
+  rather than leaving a stale message sitting under the field, unrelated to what's currently typed,
+  until the next blur.
+- `onBlur` now only runs the format check when the field actually has a value (`e.target.value &&
+  ...`) -- an empty field blurring no longer shows "Invalid format", since that's not what's wrong with
+  it.
+- `ErrorText` import removed from this file (no longer used here); `validation.ts`'s
+  `CR_NUMBER_REGEX`/`EPIC_NUMBER_REGEX` and the real submit/Next-blocking gate in `detailsStepError` are
+  unchanged -- this was purely a presentation-layer fix for the inline hint, not the underlying
+  validation rule.
+
+**Data notes:** none -- presentation-only change, no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 147. Test runner assignment and structured defect linking
+
+`TestExecution` is now the managed testcase slot in a cycle: any QA Engineer or QA Lead in IT-QA assigns one active IT-QA runner,
+and only that assignee (or an Administrator) can record the next numbered attempt. Reassignment affects
+future runs only; every historical `TestExecutionRun.executed_by_id` remains unchanged. The cycle screen
+shows assignment coverage, unassigned work, each user's own queue, total retained runs, latest runner and
+defect count.
+
+Defects are now structured many-per-run links rather than one free-text value: key, URL, title, status,
+notes, linker and timestamp. The legacy `defect_id` columns remain as latest/first-defect summaries for
+backward compatibility.
+
+Run once against an existing Oracle schema after section 146:
+
+```sql
+ALTER TABLE qap_test_executions ADD (
+    assigned_to_id NUMBER REFERENCES qap_users(id),
+    assigned_by_id NUMBER REFERENCES qap_users(id),
+    assigned_at DATE
+);
+
+ALTER TABLE qap_test_execution_runs ADD CONSTRAINT uq_qap_test_run_attempt
+    UNIQUE (execution_id, attempt_no);
+
+CREATE TABLE qap_test_run_defects (
+    id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    run_id NUMBER NOT NULL REFERENCES qap_test_execution_runs(id),
+    defect_key VARCHAR2(100) NOT NULL,
+    defect_url VARCHAR2(500),
+    title VARCHAR2(255),
+    defect_status VARCHAR2(40),
+    notes CLOB,
+    linked_by_id NUMBER REFERENCES qap_users(id),
+    created_at DATE DEFAULT SYSDATE,
+    CONSTRAINT uq_qap_run_defect_key UNIQUE (run_id, defect_key)
+);
+
+CREATE INDEX ix_qap_test_exec_assigned_to ON qap_test_executions(assigned_to_id);
+CREATE INDEX ix_qap_test_run_defects_run ON qap_test_run_defects(run_id);
+```
+
+Existing execution slots intentionally remain unassigned, requiring an IT-QA QA Engineer or QA Lead to establish explicit
+ownership before another attempt can be recorded. No historical runner or result data is rewritten.
+
+Assignment authority was subsequently widened from QA Lead-only to the full IT-QA execution team
+(QA Engineer or QA Lead), while runner eligibility remains restricted to active IT-QA users holding one
+of those roles. Administrators retain their standard global bypass.
+
+## 148. Standardized short TQA business IDs (supersedes section 131; no new table)
+
+All newly generated, human-facing IDs now use `TQA-<MODULE>-NN`. Each module owns an independent,
+lifetime counter:
+
+| Record | Prefix | Examples |
+|---|---|---|
+| QA Request | `TQA-REQ` | `TQA-REQ-01`, `TQA-REQ-02` |
+| Functional Request | `TQA-FUNC` | `TQA-FUNC-01`, `TQA-FUNC-02` |
+| SAST Request | `TQA-SAST` | `TQA-SAST-01`, `TQA-SAST-02` |
+| DAST Request | `TQA-DAST` | `TQA-DAST-01`, `TQA-DAST-02` |
+| Performance Request | `TQA-PERF` | `TQA-PERF-01`, `TQA-PERF-02` |
+| Suppression | `TQA-SUP` | `TQA-SUP-01`, `TQA-SUP-02` |
+| QA Sign-off | `TQA-SIGN` | `TQA-SIGN-01`, `TQA-SIGN-02` |
+| Test Project | `TQA-PROJ` | `TQA-PROJ-01`, `TQA-PROJ-02` |
+| Test Cycle | `TQA-CYCLE` | `TQA-CYCLE-01`, `TQA-CYCLE-02` |
+| Test Case | `TQA-TC` | `TQA-TC-01`, `TQA-TC-02` |
+
+The two digits are a minimum display width, not a maximum: sequence values continue naturally as
+`...-99`, `...-100`, and so on. Counters no longer reset daily and the date is no longer part of the ID.
+
+The existing `qap_id_counters` table is reused without a schema change. New lifetime counters use the
+fixed `counter_date` value `DATE '1900-01-01'`; rows from the previous daily-counter implementation remain
+untouched. The generator's atomic Oracle `MERGE` continues to serialize concurrent claims for a prefix.
+No counter seed DML is required: the first generated ID for a module inserts its fixed-scope row with
+`next_value = 1`.
+
+Existing business IDs are deliberately not renamed. They may be referenced by exported documents,
+external links, audit evidence, sign-off records, or user correspondence; rewriting them would damage
+that traceability. The new convention is enforced for every record created after deployment. Legacy
+Suppression and Sign-off prefixes remain recognized by global search.
+
+Test Case IDs are now fully system-owned. The create API ignores a caller-supplied `test_case_key`, the
+create form shows that the value will be generated, and Excel's Test Case ID is used to group its step
+rows and retained in the import activity message for source traceability. Every imported repository
+definition receives a new `TQA-TC-NN` key.
+
+## 149. Bulk removal of testcases from a Test Cycle (no schema change)
+
+The Test Execution selection column now supports lifecycle management as well as bulk execution. An
+IT-QA QA Engineer, QA Lead, or Administrator can select up to 100 testcase slots and choose **Remove from
+cycle**. The confirmation dialog shows the selected testcase count and the number of retained attempts and
+linked defects that will be removed. Repository testcase definitions are never deleted by this operation.
+
+`POST /api/test-execution/cycles/{cycle_id}/executions/bulk-remove` validates the full selection before
+writing: every execution id must exist, belong to the selected cycle, and the project must still be active.
+The endpoint removes the selected `TestExecution` rows, their cascaded `TestExecutionRun` and
+`TestRunDefect` rows, and associated `TEST_EXEC_IMAGE` document metadata in one database transaction. A
+single `Bulk Testcase Removal` approval/audit entry records the actor, testcase keys, attempt count and
+evidence count. Physical evidence files are unlinked only after the database commit succeeds.
+
+The frontend uses a governed in-app modal with destructive impact text, dynamic progress, a completion
+summary, and an error state that displays the exact backend reason. Bulk Execute remains disabled unless
+every selected testcase is assigned to the current runner; this broader selection permission applies only
+to lifecycle removal and other IT-QA management actions.
+
+## 150. Admin-configurable readiness checklists (Functional / SAST / DAST / Performance)
+
+**Request:** "I want to make configurable readiness checklist, what ever i will mentioned on that
+configuration that will automatically behave like that configuration, for example if I make any
+checklist mandatory in that configuration file, that will be mandatory." Clarified via follow-up
+questions: configuration should live in a new Admin page backed by the database *and* keep a
+file-based shipped-defaults fallback (both); all four existing checklists (Functional, SAST, DAST,
+Performance -- QA Sign-off has none) become configurable; a mandatory item should hard-block progress
+for Functional/Performance too (today only SAST/DAST actually enforce it); and editing the
+configuration later only affects requests raised after the change, never ones already in flight.
+
+**Root cause / starting state:** every one of the four checklists was a hardcoded python list
+(`constants.DEFAULT_CHECKLIST_ITEMS` / `DEFAULT_SAST_CHECKLIST_ITEMS` / `DEFAULT_DAST_CHECKLIST_ITEMS`
+/ `DEFAULT_PERFORMANCE_CHECKLIST_ITEMS`), mirrored by hand in a second, frontend-only copy
+(`constants.ts`), that had to be kept in sync manually and could only ever be changed by editing code
+and redeploying. Auditing "mandatory" specifically turned up a second, independent bug: Performance's
+seeding code hardcoded `is_mandatory=False` on every item regardless of anything else (constants.py's
+own tuple shape for Performance doesn't even carry a mandatory column), and `submit_request`'s
+raise-time gate only ever checked Functional/SAST/DAST -- Performance had no way to have a mandatory
+item, and no gate to enforce one, even in principle.
+
+**Backend changes (new `models.ChecklistTemplateItem` / `qap_checklist_template_items`):** one row per
+configured item -- `module` ("FUNCTIONAL"/"SAST"/"DAST"/"PERFORMANCE"), `item`, `detail` ("Owner" for
+Functional/SAST/DAST, "Data Required from Department" for Performance -- one shared free-text column,
+labeled differently per module by the frontend), `is_mandatory`, `sort_order`, `active` (soft-disable,
+never a hard delete from seeding's perspective -- an inactive item is simply excluded from what gets
+seeded onto new requests, but its row and history stay put unless an Admin explicitly deletes it).
+
+**Backend changes (new `app/checklist_config.py`):** `get_template_items(db, module, only_active)` --
+the one shared read path both the Admin API and request-seeding now go through. Lazily bootstraps a
+module's rows from that module's shipped defaults
+(`constants.DEFAULT_*_CHECKLIST_ITEMS`, normalized to a uniform `(item, detail, is_mandatory)` shape by
+`_default_items_for`) the first time it's read with zero rows -- same lazy-init-on-first-write pattern
+already used elsewhere in this app (e.g. `test_execution.py::_migrate_legacy_result_if_needed`), so a
+brand-new Oracle deployment needs no separate manual data-migration step beyond creating the table.
+`reseed_defaults(db, module)` backs the Admin "Restore Defaults" action. `constants.py`'s
+`DEFAULT_*_CHECKLIST_ITEMS` lists are kept, but only as this table's shipped defaults now -- nothing
+else in the app reads them directly any more (comments on each updated to say so).
+
+**Backend changes (new `routers/checklist_config.py`, mounted at `/api/checklist-config`):**
+`GET /{module}` (active items only, any authenticated user -- this is what the QA Request wizard reads
+while raising a request, same openness as `GET /api/departments`), `GET /{module}/all` (Admin, includes
+inactive), `POST /{module}` (Admin, create), `PATCH /{module}/{item_id}` (Admin, edit
+item/detail/mandatory/sort_order/active -- this single endpoint is the whole "whatever I configure,
+that's what happens" mechanism: flip `is_mandatory` here and the very next request raised for that
+module picks it up, no further wiring needed), `DELETE /{module}/{item_id}` (Admin, hard delete --
+safe even though older already-raised requests reference the same item text, because their own
+`ReadinessChecklistItem`/`SASTChecklistItem`/`DASTChecklistItem`/`PerformanceChecklistItem` rows were
+copied at seed time and never reference this table by id), `POST /{module}/restore-defaults` (Admin,
+wipe + reseed shipped defaults).
+
+**Backend changes (routers/qa_requests.py):** `_sync_linked_child_requests`'s four seeding loops
+(Functional/SAST/DAST/Performance) now call `get_template_items(db, "<MODULE>")` instead of iterating
+the old hardcoded constants tuples, copying `is_mandatory` straight through -- including fixing
+Performance's previous hardcoded `is_mandatory=False`. `submit_request`'s `pending_checklist_items`
+raise-time gate (previously Functional/SAST/DAST only, despite its own stale comment saying
+"Scoped to SAST/DAST only") now also has a Performance branch and reads every module's mandatory items
+from the same `get_template_items` call -- a mandatory item on any of the four modules must be
+self-declared ready before the QA Request can be raised at all, closing the gap that meant Performance
+could never actually have a working mandatory item before. `_draft_evidence_module` (evidence
+selected on the wizard before the real checklist rows exist) and `_promote_draft_checklist_evidence`
+(re-keying that evidence onto the real rows at Submit) both switched from the static
+`_DRAFT_EVIDENCE_DEFINITIONS` dict to a live `get_template_items` call per request, so evidence-slot
+bounds/ordering always matches whatever is currently configured rather than a python-process-startup
+snapshot.
+
+**Backend changes (functional.py / performance.py `readiness_decision`):** no logic change needed --
+both already gate "Passed" on every `requester_checked` item being QA-verified (`is_complete`); since a
+mandatory item is now forced `requester_checked` before the request can even be raised (the
+`submit_request` gate above), every mandatory item is already inside that same check by the time
+Readiness Verification/Readiness is reached. Stale comments claiming "none of these items ship
+mandatory, so a mandatory-only gate here would be a no-op" were corrected to explain the actual,
+now-connected reasoning instead.
+
+**Frontend changes:** new `useChecklistTemplate(module)` hook (QARequests/steps/useChecklistTemplate.ts)
+fetches `GET /api/checklist-config/{module}` -- used by `FunctionalStep`/`SastStep`/`DastStep`/
+`PerformanceStep.tsx` (replacing their static `DEFAULT_*_CHECKLIST_ITEMS` imports from constants.ts,
+which are now dead code and removed) and by `RequestDetail.tsx` (which independently used the same
+hardcoded lists three times over -- draft-evidence slot counts, the raise-time "pending mandatory"
+warning banner, and the "items without evidence" nudge -- all three switched to the live fetch, and the
+raise-time banner gained the same missing Performance branch as the backend gate, plus a stray leftover
+debug `console.log` in that file was removed). `PerformanceStep.tsx` also gained the "Mandatory" badge
+and required-evidence behavior the other three steps already had, since Performance can now actually
+carry a mandatory item. New Admin page `modules/governance/ChecklistConfig.tsx`
+(`/checklist-config`, nav item under Administration, Admin-only): per-module tabs, an editable table
+(item text and detail/owner both save on blur, Mandatory/Active toggle immediately, up/down reorder
+swaps `sort_order` with the neighboring row), an "+ Add Item" form, and a confirmed "Restore Defaults"
+action per module.
+
+**Data notes:** new table `qap_checklist_template_items` needs to be created in Oracle (no live DB
+connection from this sandbox, so this is DDL-only, not executed):
+```sql
+CREATE TABLE qap_checklist_template_items (
+    id            NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    module        VARCHAR2(20) NOT NULL,
+    item          VARCHAR2(255) NOT NULL,
+    detail        VARCHAR2(255),
+    is_mandatory  NUMBER(1) DEFAULT 0,
+    sort_order    NUMBER DEFAULT 0,
+    active        NUMBER(1) DEFAULT 1,
+    created_at    DATE DEFAULT SYSDATE,
+    updated_at    DATE DEFAULT SYSDATE
+);
+CREATE INDEX ix_qap_checklist_template_items_module ON qap_checklist_template_items(module);
+```
+No backfill DML needed -- `get_template_items` bootstraps each module's rows from
+`constants.DEFAULT_*_CHECKLIST_ITEMS` lazily, the first time it's ever read after the table exists.
+Editing the configuration only ever affects requests raised afterward -- an already-raised request's
+own checklist rows (`ReadinessChecklistItem`/`SASTChecklistItem`/`DASTChecklistItem`/
+`PerformanceChecklistItem`) were copied at seed time and never reference this new table, so nothing
+already in flight can be altered by a later configuration change.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean; `npx tsc --noEmit -p .` across
+the entire frontend -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (only the standard `.env`/`uploads/` leftovers differ). Note: section numbering collided
+with an already-present, independently-authored "## 147. Test runner assignment and structured defect
+linking" section found already in this file at edit time (this repo had sections 147-149 added outside
+this conversation) -- this entry is numbered 150 to avoid re-using either "147" already in use above.
+
+## 151. Hotfix: corrupted DEFAULT_PERFORMANCE_CHECKLIST_ITEMS row crashed checklist seeding
+
+**Request:** user reported a backend crash --
+```
+return [(item, data_required, is_mandatory) for item, data_required, is_mandatory in DEFAULT_PERFORMANCE_CHECKLIST_ITEMS]
+ValueError: not enough values to unpack (expected 3, got 2)
+```
+
+**Root cause:** between section 150 being written and this report, `constants.py`'s
+`DEFAULT_PERFORMANCE_CHECKLIST_ITEMS` was edited outside this conversation to add a per-item Mandatory
+`True`/`False` third value to every row (a reasonable, expected use of the new configurable-checklist
+feature), but one edit went wrong: the "Monitoring Dashboard Access" row's closing paren landed before
+the mandatory value instead of after it -- `("Monitoring Dashboard Access", "...")​, False,` -- which
+left that row a 2-tuple with a stray `False` sitting next to it as its own (invalid) list element, and
+the "Maximum Acceptable System Load Defined (Threshold Values)" item's long description got split
+across two separate rows in the same pass, corrupting a single 19-item list into 20 malformed entries.
+`checklist_config._default_items_for("PERFORMANCE")` unpacks every row as a 3-tuple, so the first
+malformed row it hit crashed with exactly the "expected 3, got 2" error reported.
+
+**Backend changes (constants.py):** `DEFAULT_PERFORMANCE_CHECKLIST_ITEMS` restored to 19 well-formed
+`(item, data_required, is_mandatory)` 3-tuples -- the "Monitoring Dashboard Access" row fixed to a
+proper 3-tuple (kept its `False`), and "Maximum Acceptable System Load Defined (Threshold Values)"
+merged back into a single row with its original two-part description text (kept the `True` one of the
+two split fragments had been given). Verified programmatically via `ast.parse` that the list now
+contains exactly 19 elements, all 3-tuples, before touching anything else.
+
+**Backend changes (checklist_config.py):** `_default_items_for` simplified -- Performance's list is
+the same 3-tuple shape as the other three modules' now (no longer needs special-casing), so it's now a
+single dict-lookup + uniform unpack (`_DEFAULTS_BY_MODULE`) rather than an if/elif per module. Updated
+its docstring, which still claimed "Performance has no mandatory column", to match reality.
+
+**Data notes:** none -- pure data-integrity fix to an existing constants list, no schema impact. Any
+already-bootstrapped `qap_checklist_template_items` rows for PERFORMANCE (seeded before this fix, if
+the crash didn't prevent that) are unaffected either way -- `get_template_items` only ever re-seeds
+from this list when the table has zero rows for that module.
+
+**Verified:** wrote a small `ast`-based script confirming `DEFAULT_PERFORMANCE_CHECKLIST_ITEMS` parses
+to exactly 19 elements, all well-formed 3-tuples; `python3 -m py_compile` on constants.py,
+checklist_config.py, routers/checklist_config.py, routers/qa_requests.py, models.py, schemas.py --
+clean; Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 152. Performance Edit Details: remove fields never collected at intake
+
+**Request:** "Edit performance testing request getting some fields which is not there during request
+creation like Target Load, Tool used, hash value -- remove this fields."
+
+**Root cause:** `PerformanceRequest.tool_used`/`target_load`/`hash_value` are real columns, and
+Performance.tsx's Edit Details modal exposed all three as editable inputs -- but none of the three are
+ever collected on the QA Request wizard's Performance step (PerformanceStep.tsx only collects
+Priority/Risk Category/Request Types + the readiness checklist) or seeded by
+`_sync_linked_child_requests` at raise time (`hash_value=None` is set explicitly there, and
+`tool_used`/`target_load` are never referenced at all outside this one edit form). Showing three
+inputs in "Edit Details" that were never part of "creation" read as unexplained, out-of-nowhere fields
+to the requester.
+
+**Frontend changes (modules/specialised-testing/Performance.tsx):** removed the Tool Used, Target
+Load, and Hash Value fields entirely from the Edit Details form (`PerformanceFormModal`'s form state
+and its "Test Basics"/"Annexure VIII Details" sections), from the Overview tab's read-only detail
+display ("Test Parameters & Environment"/"Release & Vendor" sections), and the "Tool" column from the
+main Performance Testing Requests list table -- all three would otherwise stay permanently blank going
+forward with no way to fill them in, which is just dead UI clutter once the edit inputs are gone.
+`change_type`/`vendor_si_partner`/`technology_stack`/`release_version`/`build_number`/
+`target_promotion_environment` were left untouched -- those genuinely are collected at creation
+(delegated from the QA Request gateway's own "Application & Change Details" step), they just aren't
+re-typed on Performance's own wizard step, so removing them wasn't part of this request.
+
+**Backend changes:** none -- `tool_used`/`target_load`/`hash_value` columns and the `PerformanceUpdate`
+schema fields are left in place (no destructive schema change); the edit endpoint already uses
+`payload.model_dump(exclude_unset=True)`, so simply never sending these keys from the frontend form
+leaves any already-stored value untouched rather than nulling it out.
+
+**Data notes:** none -- frontend-only change, no schema impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers
+differ).
+
+## 153. DAST/Performance Environment restricted to UAT and later
+
+**Request:** "On DAST details during request creation, under DAST target Environment should show from
+UAT only as in SIT, DEV DAST does not performed. For Performance Testing also during request creation
+ask to select environment which are mandatory and environment should show from UAT only as in DEV, SIT
+performance testing does not performed."
+
+**Root cause / starting state:** DastStep.tsx's per-target Environment picker offered the full
+`ENVIRONMENTS` list (Dev/SIT/UAT/Pre-Production/Production) plus a blank "defaults to Deployment
+Environment" option -- which could resolve to Dev or SIT, neither of which DAST is ever actually run
+against. Performance had no Environment ask on its own wizard step at all -- `PerformanceRequest.environment`
+was silently delegated from the gateway's own Deployment Environment field (same one Functional/SAST/DAST
+share), which also defaults to SIT and is never itself restricted, so a Performance request could be raised
+against SIT with no way to say otherwise short of editing it after the fact.
+
+**Backend changes (constants.py):** new `POST_SIT_ENVIRONMENTS = ENVIRONMENT_PIPELINE_ORDER[1:]` --
+`['UAT', 'Pre-Production', 'Production']` -- shared by both DAST and Performance's own environment
+restriction.
+
+**Backend changes (schemas.py):** `QARequestCreate` gained `performance_environment: Optional[str] =
+None` -- its own field, not delegated from the gateway's `environment` like every other Performance
+field in that block.
+
+**Backend changes (routers/qa_requests.py):**
+- `submit_request` gained two new raise-time gates (same belt-and-braces pattern as the existing
+  mandatory-checklist/environment-promotion-ordering checks): every DAST target's `environment` must be
+  in `POST_SIT_ENVIRONMENTS`, and (if "Performance Testing" is selected) `performance_environment` must
+  be too -- both reject the raise with a 400 explaining DAST/Performance testing isn't performed in
+  Dev/SIT if violated.
+- `_sync_linked_child_requests`'s DAST branch: target `environment` fallback changed from
+  `qa_request.environment` (could be SIT) to `"UAT"` (only used if a row is somehow still blank, which
+  the frontend no longer allows).
+- `_sync_linked_child_requests`'s Performance branch: `environment` changed from delegating
+  `qa_request.environment` to `pd.get("performance_environment") or "UAT"` -- Performance's own
+  explicit ask, not the gateway's Deployment Environment.
+
+**Frontend changes (constants.ts):** new `POST_SIT_ENVIRONMENTS` mirroring the backend list.
+
+**Frontend changes (QARequests/types.ts):** `blankDastComponent()`'s `environment` default changed
+from `''` to `'UAT'`; `EMPTY_FORM` gained `performance_environment: 'UAT'`. Both follow the same
+"dropdown always defaults to a real, non-blank value" convention validation.ts's own comment describes
+for every other select-type mandatory field in this wizard -- no separate "is it filled in" check is
+needed as a result (same reasoning already applied to Change Type/Deployment Environment/Priority/Risk
+Rating).
+
+**Frontend changes (steps/DastStep.tsx):** target Environment `<select>` options changed from
+`ENVIRONMENTS` (plus a blank "defaults to Deployment Environment" placeholder) to
+`POST_SIT_ENVIRONMENTS` with no blank option.
+
+**Frontend changes (steps/PerformanceStep.tsx):** new mandatory "Environment *" field, `<select>`
+restricted to `POST_SIT_ENVIRONMENTS`, bound to `form.performance_environment`; explanatory copy at the
+top of the step updated to call out that Environment (unlike every other delegated field there) is its
+own ask because Performance testing is never run against Dev or SIT.
+
+**Frontend changes (NewRequestModal.tsx):** `buildInitialForm` gained a `performance_environment`
+pre-fill (`editing.draft_performance?.performance_environment || 'UAT'`) for reopening a still-Draft
+request. While touching this block, also fixed a pre-existing bug found alongside it:
+`performance_priority`/`performance_risk_category` were reading from `editing.draft_classification`,
+but the backend only ever sweeps functional_/sast_/dast_-prefixed fields into `draft_classification` --
+performance_-prefixed fields (including these two) land in `draft_performance` instead (see
+routers/qa_requests.py::create_request's sweep order). Reading the wrong dict meant reopening a
+still-Draft request with Performance Testing selected silently lost its previously-picked
+Priority/Risk Category back to the 'Medium' fallback every time -- now reads `editing.draft_performance?.
+performance_priority`/`performance_risk_category` instead, matching where the backend actually stores them.
+
+**Data notes:** none -- no schema/column changes; `PerformanceRequest.environment` and
+`DASTTarget.environment` already existed as columns, this only changes what value populates them at
+creation and how tightly the choice is constrained beforehand.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean; `npx tsc --noEmit -p .` across
+the entire frontend -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 154. Excel test case import now shows a progress bar
+
+**Request:** "while uploading testcases using excel show progress bar, already progress bar is present,
+reuse it."
+
+**Root cause / starting state:** `TestRepository.tsx`'s `ImportModal` only ever showed "Importing..."
+as the disabled submit button's own label while a plain `busy` boolean was true -- no progress
+indicator, despite the app already having an established governed-progress pattern (`tm-operation-state`
+/`tm-operation-icon`/`tm-progress-track`/`tm-progress-meta`, a `stage` state machine driving a simulated
+percentage via `setInterval`) used four other places already: Bulk Approve and Bulk Update in this same
+file, and Bulk Execute/Bulk Removal in `TestExecution.tsx`.
+
+**Backend changes:** none -- frontend-only; the `import-xlsx` endpoint itself is unchanged.
+
+**Frontend changes (modules/test-management/TestRepository.tsx):** `ImportModal` reworked to reuse that
+exact pattern instead of the plain `busy` boolean:
+- New `stage: 'form' | 'importing'` state (plus the existing `result`, which still separately drives the
+  post-import summary view once a response comes back), replacing `busy`.
+- `submit()` now starts a simulated progress climb (`setInterval`, capped at 88% until the real response
+  lands, message switching from "Uploading file…" to "Validating rows and creating test cases…" partway
+  through -- same technique as the other four reuses, since the backend's `import-xlsx` endpoint is one
+  atomic request with no real progress events of its own), enforces the same minimum 600ms display floor
+  so a very fast import doesn't visually flash, then jumps to 100% once the real response arrives before
+  handing off to the existing result view. On failure, clears the timer and drops back to the form with
+  the error shown inline (unchanged from before).
+- While `stage === 'importing'`, the modal shows the shared `tm-operation-state`/`tm-progress-track`
+  progress UI instead of the form, and the modal itself is guarded the same way the other four bulk
+  modals already are (`preventBackdropClose`, backdrop/header close disabled) so it can't be dismissed
+  mid-upload.
+
+**Data notes:** none -- presentation-only change; no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 155. "Managed by Admin Only" flag on users (Users & Access)
+
+**Request:** "in user & Access add one functionlity manager by admin only, if it is set as yes, then
+those user will not show under department admin, only system admin can assign role."
+
+**Root cause / starting state:** A Department Head/Executive COE's "Department Admin" roster
+(`/api/auth/local-admin/users`) already excluded Administrator accounts (`"ADMIN" in target.roles`), but
+had no way to exclude any other individual user a System Admin might want to keep off that roster
+entirely -- e.g. a sensitive or cross-functional account mapped to a business department that a local
+admin still shouldn't be able to reassign a role on or deactivate.
+
+**Backend changes (models.py):** new `User.admin_managed_only` Boolean column, default `False`. Only
+ever settable through the System-Admin-only `PATCH /api/auth/users/{id}` endpoint -- never through the
+narrower `PATCH /api/auth/local-admin/users/{id}` (its own `LocalAdminUserUpdate` schema only accepts
+`roles`/`is_active`, so a local admin cannot set or clear this on anyone, including themselves).
+
+**Backend changes (schemas.py):** `UserOut` gained `admin_managed_only: bool = False`; `UserUpdate`
+(the Admin-only PATCH body) gained `admin_managed_only: Optional[bool] = None` -- picked up automatically
+by `update_user`'s existing generic `payload.model_dump(exclude_unset=True)` / `setattr` loop, so no
+router logic change was needed there.
+
+**Backend changes (routers/auth.py):**
+- `list_local_admin_users`: the existing `"ADMIN" not in u.roles` filter became `"ADMIN" not in u.roles
+  and not u.admin_managed_only` -- a flagged user simply never appears in a Department Head/Executive
+  COE's roster.
+- `_require_own_department_target` (shared guard used by `PATCH /local-admin/users/{id}`): gained a
+  check mirroring the existing `"ADMIN" in target.roles` one -- targeting a flagged user's ID directly
+  now 403s with "This account is managed by a System Admin only", so hiding the row from the list isn't
+  the only enforcement (defense in depth, matching how every other guard rail in this function already
+  works).
+
+**Backend changes (audit_service.py):** `user_snapshot` gained `admin_managed_only` so toggling it via
+the Admin page shows up correctly in that user's `USER_ACCESS_UPDATED` audit trail entry (before/after).
+
+**Frontend changes (types.ts):** `UserOut` gained `admin_managed_only: boolean`.
+
+**Frontend changes (modules/governance/Admin.tsx):** "Users & Access" table gained a "Managed by Admin
+Only" column -- a Yes/No toggle button (`PATCH` via the existing `patchUser` helper, same pattern as the
+Status column) available only here, since this is the System-Admin-only page. Page subtitle updated to
+explain the new toggle.
+
+**Frontend changes (modules/governance/DepartmentAdmin.tsx):** no logic change (the backend already
+excludes these users from the response), only the page subtitle updated to mention that a "Managed by
+Admin Only" account won't appear in the local roster, so it doesn't look like a missing/broken account to
+a Department Head/Executive COE looking for someone they expected to see.
+
+**Data notes:** new nullable-with-default column on `qap_users` (`admin_managed_only`, Boolean, default
+`False`/0) -- additive only, no backfill needed since the default already matches "not restricted" for
+every existing row.
+
+Run once against an existing Oracle schema:
+
+```sql
+ALTER TABLE qap_users ADD admin_managed_only NUMBER(1) DEFAULT 0;
+```
+
+(SQLAlchemy maps `Boolean` to `NUMBER(1)` for the Oracle dialect, same representation as
+`is_active`/`needs_role_review`/`needs_department_selection` on this same table -- no backfill UPDATE
+needed since `DEFAULT 0` already applies to every existing row.)
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean; `npx tsc --noEmit -p .` across
+the entire frontend -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 156. Growing-list dropdowns converted to searchable pickers
+
+**Request:** "whenever there is dropdown, try to make/convert to searchable dropdown, for example
+application name in qa request searchable required, if list increase its hard to find."
+
+**Root cause / starting state:** The app has ~76 native `<select>` elements. Most back short, fixed
+enums (Priority, Risk Rating, Change Type, Environment, Status filters, etc. -- 3-6 options each), where
+a search box adds a click with no real payoff. A handful, though, are bound to lists that only grow over
+time as data is created -- Application Name (the motivating example) being the clearest case, alongside
+Test Project, Test Folder, and team/department-derived filters -- and those get harder to scan with every
+new row added, exactly like Department already was before it got its own `SearchableSelect` treatment.
+Scope was confirmed with the user beforehand: convert growing/dynamic-list pickers only, leave fixed
+short enums as plain `<select>`s.
+
+**Backend changes:** none -- frontend-only.
+
+**Frontend changes (components/SearchableSelect.tsx):** generalized to a shared picker instead of a
+Department-only one:
+- `options` now accepts either `string[]` (unchanged -- value and label are the same, e.g. Department)
+  or `{value, label}[]` pairs, so it can drive id-keyed pickers (numeric id as the real value, a name as
+  the searched/displayed label) and sentinel rows alongside real ones (e.g. "-- Top level --" at value
+  `''`, "No change" at value `'unchanged'`) the same way a plain `<option value="...">` always could.
+  The 3 existing Department callers (Admin.tsx x2, DepartmentPrompt.tsx) needed no changes -- `string[]`
+  still works exactly as before.
+- New optional `style` prop, passed through to the root wrapper, for toolbar placements that aren't
+  already inside a width-constraining `Field`/table-cell wrapper (the trigger is `width: 100%` of its own
+  wrapper, which otherwise has no intrinsic width of its own in a plain flex toolbar row).
+
+**Frontend changes -- dropdowns converted:**
+- `QARequests/steps/DetailsStep.tsx`: Application Name -- the explicit motivating example. Preserves the
+  existing "Other (new application)" sentinel flow (typing a brand-new name, pending Application
+  Owner/SM approval) exactly as before, just via `SearchableSelect`'s options list instead of a trailing
+  `<option>`.
+- `modules/test-management/TestProjects.tsx`: `NewProjectModal`'s Application picker (same approved-name
+  list Application Name draws from).
+- `modules/test-management/TestRepository.tsx`: Parent Folder (`NewFolderModal`), Target Folder (Excel
+  `ImportModal`), Folder (test case create/edit modal), Folder (bulk-update modal -- kept its
+  `'unchanged'`/`'unfiled'` sentinel values), and the top-toolbar Project picker.
+- `modules/test-management/TestExecution.tsx`: the top-toolbar Project picker (same pattern as
+  TestRepository.tsx's).
+- `Dashboard.tsx`: the "All teams" filter (both the "Live Governance" and "Projects" tabs of the
+  Governance dashboard share the same `teamFilter` state) -- team names are department-derived and grow
+  the same way Department itself does.
+
+Left as plain `<select>`s (fixed, short enums -- Priority/Risk/Change Type/Environment/Status/etc.
+across DetailsStep.tsx, FunctionalStep/SastStep/DastStep/PerformanceStep.tsx, Functional.tsx, SAST.tsx,
+DAST.tsx, Performance.tsx, SignOff.tsx, TestExecution.tsx's status/defect-status fields, TestRepository.tsx's
+Test Type/Priority filters, Approvals.tsx, AuditLog.tsx, Admin.tsx's Login Type, Login.tsx's demo-account
+picker) since none of those lists grow over time.
+
+**Data notes:** none -- presentation-only change; no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).

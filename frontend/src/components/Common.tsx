@@ -249,7 +249,7 @@ export function MetricCard({
   value: ReactNode;
   // One plain-English line explaining exactly what's being counted --
   // reported directly: several dashboard numbers (e.g. "Total Pending
-  // Items", which is the same count as the Command Centre's Ageing
+  // Items", which is the same count as the Dashboard's Ageing
   // Distribution donut) had no visible explanation of their scope, so
   // people had to ask what they meant instead of reading it on screen.
   // Always rendered (not a hover-only tooltip) so it's self-explanatory

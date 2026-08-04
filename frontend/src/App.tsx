@@ -5,7 +5,7 @@ import Layout from './components/Layout'
 import DepartmentPrompt from './components/DepartmentPrompt'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
-// gateway feeds every module, the Command Centre summarizes across all of
+// gateway feeds every module, the Dashboard summarizes across all of
 // them, Login is pre-auth). Loaded eagerly since they're on the app's
 // default/most-common paths.
 import Login from './Login'
@@ -33,6 +33,7 @@ const Reports = lazy(() => import('./modules/governance/Reports'))
 const Admin = lazy(() => import('./modules/governance/Admin'))
 const DepartmentAdmin = lazy(() => import('./modules/governance/DepartmentAdmin'))
 const AuditLog = lazy(() => import('./modules/governance/AuditLog'))
+const ChecklistConfig = lazy(() => import('./modules/governance/ChecklistConfig'))
 
 // Test Management module (Project Management / Test Repository / Test
 // Execution) -- a Zephyr-style test case management layer, kept as its own
@@ -101,6 +102,7 @@ export default function App() {
         <Route path="/admin" element={<Protected><ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary></Protected>} />
         <Route path="/department-admin" element={<Protected><ModuleBoundary moduleName="Governance"><DepartmentAdmin /></ModuleBoundary></Protected>} />
         <Route path="/audit-log" element={<Protected><ModuleBoundary moduleName="Governance"><AuditLog /></ModuleBoundary></Protected>} />
+        <Route path="/checklist-config" element={<Protected><ModuleBoundary moduleName="Governance"><ChecklistConfig /></ModuleBoundary></Protected>} />
 
         {/* Test Management module */}
         <Route path="/test-projects" element={<Protected><ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary></Protected>} />

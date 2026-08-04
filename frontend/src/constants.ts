@@ -83,27 +83,12 @@ export function hasRole(user: RoleBearer | null | undefined, ...roles: string[])
 // QARequests.tsx's new-request form, etc). This export is intentionally
 // gone; nothing in the app should hardcode a department list anymore.
 
-export interface ChecklistItemDef {
-  item: string
-  owner: string
-  is_mandatory: boolean
-}
-
-// Mirrors backend constants.py DEFAULT_CHECKLIST_ITEMS. Used to also include
-// "SAST readiness"/"DAST readiness" as two conditionally-mandatory items
-// (see the removed CONDITIONAL_CHECKLIST_ITEMS) -- removed now that SAST and
-// DAST each have their own dedicated "Security Readiness" checklist, the
-// correct place for that concern to live.
-export const DEFAULT_CHECKLIST_ITEMS: ChecklistItemDef[] = [
-  { item: 'BRD / FRS / User Stories approved', owner: 'Business / BA' , is_mandatory: true},
-  { item: 'Scope finalized & change freeze', owner: 'Business / IT',is_mandatory: true },
-  { item: 'Test Environment availability (UAT / SIT)', owner: 'Business' , is_mandatory: true},
-  { item: 'Test data creation', owner: 'User dept / Dev team' , is_mandatory: false},
-  { item: 'Assess Test Scenarios', owner: 'User Dept' , is_mandatory: false},
-  { item: 'Project walkthrough to QA', owner: 'User Dept / Dev team' , is_mandatory: false},
-  { item: 'Application builds deployed & validated', owner: 'Dev team / Business' , is_mandatory: false},
-  { item: 'Security access (VPN Proxy/URLs whitelisting/credentials/firewall)', owner: 'User dept' , is_mandatory: false},
-]
+// Functional's "Ready for Testing" readiness checklist used to be hardcoded
+// here (DEFAULT_CHECKLIST_ITEMS) -- Admin-configurable now (Admin >
+// Readiness Checklist Configuration) and fetched live via
+// useChecklistTemplate('FUNCTIONAL') (see
+// QARequests/steps/useChecklistTemplate.ts), which returns
+// ChecklistTemplateItemOut (types.ts) rows instead of a static list.
 
 // The QA Request is a pure intake/gateway record ("QA request form is the
 // gateway only") -- must mirror backend app/constants.py GatewayStatus. It
@@ -183,7 +168,10 @@ export const QA_STATUS_LABELS: Record<string, string> = {
 // even though a QA Lead/Engineer clicks the button that logs them.
 export const QA_PENDING_WITH: Record<string, string> = {
   DRAFT: 'Requester', SUBMITTED: 'SM',
-  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: '—',
+  // SM_REJECTED: reported directly -- reopenable by the requester (edit +
+  // resubmit, same as RETURNED_BY_SM), not a dead end, so this is now
+  // "Requester" instead of "--".
+  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: 'Requester',
   DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head',
   RETURNED_BY_DEPARTMENT_HEAD: 'Requester', DEPARTMENT_HEAD_REJECTED: '—',
   QA_LEAD_ASSIGNED: 'QA Lead', READINESS_VERIFICATION: 'QA Lead', RETURNED_BY_QA_LEAD: 'Requester',
@@ -204,16 +192,19 @@ export const QA_PENDING_WITH: Record<string, string> = {
 // Exactly who may edit at each of these is further scoped in Functional.tsx
 // (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are that stage's
 // own reviewer only, not the requester -- see canEditDetails there).
+// SM_REJECTED: reported directly -- reopenable by the requester (edit
+// details + resubmit, same path as RETURNED_BY_SM) instead of a dead end.
 export const FUNCTIONAL_EDITABLE_STATUSES: string[] = [
-  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
+  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM', 'SM_REJECTED',
   'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_QA_LEAD',
 ]
 // Checklist evidence is normally collected before the Department Head
 // decision and locked after approval. Any RETURNED_BY_* status is the
 // deliberate exception: the request is back with the requester, who must be
 // able to attach the evidence requested by whichever later stage returned it.
+// SM_REJECTED is the same exception now that it's reopenable too.
 export const READINESS_EVIDENCE_EDITABLE_STATUSES: string[] = [
-  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
+  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM', 'SM_REJECTED',
   'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD',
 ]
 export function canManageReadinessEvidence(status?: string | null): boolean {
@@ -222,8 +213,10 @@ export function canManageReadinessEvidence(status?: string | null): boolean {
     || status.startsWith('RETURNED_BY_')
   )
 }
-// Terminal statuses -- no further transitions possible.
-export const QA_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED']
+// Terminal statuses -- no further transitions possible. SM_REJECTED is
+// deliberately NOT here -- reported directly, it's reopenable by the
+// requester rather than a dead end. DEPARTMENT_HEAD_REJECTED is untouched.
+export const QA_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', 'DEPARTMENT_HEAD_REJECTED']
 // Statuses from which the request may still be cancelled -- mirrors backend
 // constants.py QA_REQUEST_CANCELLABLE_STATUSES. Once the Department Head
 // approves and a QA Lead is assigned, cancellation is no longer offered.
@@ -319,7 +312,9 @@ export const SAST_DAST_STATUS_LABELS: Record<string, string> = {
 // also click "Mark Fixed".
 export const SAST_DAST_PENDING_WITH: Record<string, string> = {
   DRAFT: 'Requester', SUBMITTED: 'SM',
-  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: '—',
+  // SM_REJECTED: reopenable by the requester (edit + resubmit), not a dead
+  // end -- see SAST_DAST_TERMINAL_STATUSES below.
+  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: 'Requester',
   DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head',
   RETURNED_BY_DEPARTMENT_HEAD: 'Requester', DEPARTMENT_HEAD_REJECTED: '—',
   SECURITY_LEAD_ASSIGNED: 'QA Lead', SECURITY_READINESS: 'QA Lead', RETURNED_BY_SECURITY_LEAD: 'Requester',
@@ -333,40 +328,19 @@ export const SAST_DAST_PENDING_WITH: Record<string, string> = {
 }
 
 export const SAST_DAST_EDITABLE_STATUSES: string[] = [
-  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
+  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM', 'SM_REJECTED',
   'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD',
 ]
-export const SAST_DAST_TERMINAL_STATUSES: string[] = ['REPORT_READY', 'CLOSED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED']
+// SM_REJECTED deliberately NOT here -- reopenable by the requester, not a
+// dead end (mirrors backend constants.SAST_DAST_TERMINAL_STATUSES).
+export const SAST_DAST_TERMINAL_STATUSES: string[] = ['REPORT_READY', 'CLOSED', 'DEPARTMENT_HEAD_REJECTED']
 
-// SAST/DAST's own "Security Readiness" pre-scan checklists -- distinct from
-// DEFAULT_CHECKLIST_ITEMS (Functional's) and each other. Must mirror backend
-// app/constants.py DEFAULT_SAST_CHECKLIST_ITEMS / DEFAULT_DAST_CHECKLIST_ITEMS.
-// Shown in the QA Request wizard's own SAST/DAST steps (see
-// shell/QARequests.tsx::buildSteps -- Security Readiness Checklist is part of
-// the SAST/DAST step itself, not a separate step) so the requester can
-// self-declare at intake time instead of only from the SAST/DAST module's own
-// Edit Details modal afterward. Unlike every other checklist in this app, a
-// mandatory item here also blocks that child request's own Submit, not just
-// Security Readiness -- see routers/sast_dast.py::_require_checklist_ready.
-export interface SecurityChecklistItemDef {
-  item: string
-  owner: string
-  is_mandatory: boolean
-}
-export const DEFAULT_SAST_CHECKLIST_ITEMS: SecurityChecklistItemDef[] = [
-  { item: 'Application/source code repository access provided to the scan team', owner: 'Dev team', is_mandatory: true },
-  { item: 'Change freeze / business hours confirmed for the scan window', owner: 'Business / User dept', is_mandatory: false },
-  { item: 'Point of contact identified for application/code-level queries during the scan', owner: 'User dept / Dev team', is_mandatory: false },
-]
-export const DEFAULT_DAST_CHECKLIST_ITEMS: SecurityChecklistItemDef[] = [
-  { item: 'Test environment / application URL accessible and stable', owner: 'User dept / Dev team', is_mandatory: true },
-  { item: 'Test accounts and role-based credentials provided', owner: 'User dept', is_mandatory: true },
-  { item: 'Firewall / VPN / IP whitelisting completed for scan tool access', owner: 'User dept / IT', is_mandatory: true },
-  { item: 'Change freeze / business hours confirmed for the scan window', owner: 'Business / User dept', is_mandatory: false },
-  { item: 'Backup taken / rollback plan confirmed before scanning starts', owner: 'Dev team', is_mandatory: false },
-  { item: 'Third-party services, OTP, CAPTCHA and payment dependencies identified with test-mode or bypass mechanisms', owner: 'Business / Dev team', is_mandatory: false },
-  { item: 'Point of contact identified for application/code-level queries during the scan', owner: 'User dept / Dev team', is_mandatory: false },
-]
+// SAST/DAST's own "Security Readiness" pre-scan checklists used to be
+// hardcoded here (DEFAULT_SAST_CHECKLIST_ITEMS/DEFAULT_DAST_CHECKLIST_ITEMS)
+// -- both are Admin-configurable now (Admin > Readiness Checklist
+// Configuration) and fetched live via useChecklistTemplate('SAST'/'DAST')
+// (see QARequests/steps/useChecklistTemplate.ts), which returns
+// ChecklistTemplateItemOut (types.ts) rows instead of a static list.
 
 // ---- Performance Testing lifecycle -- must mirror backend
 // app/constants.py PERFORMANCE_STATUSES. Auto-created from a QA Request when
@@ -394,7 +368,9 @@ export const PERFORMANCE_STATUS_LABELS: Record<string, string> = {
   SIGNOFF_PENDING: 'Sign-off Pending', SIGNED_OFF: 'Signed Off',
   REQUESTER_VERIFICATION: 'Requester Verification', CLOSED: 'Closed', CANCELLED: 'Cancelled',
 }
-export const PERFORMANCE_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', 'SM_REJECTED', 'DEPARTMENT_HEAD_REJECTED']
+// SM_REJECTED deliberately NOT here -- reopenable by the requester, not a
+// dead end (mirrors backend constants.PERFORMANCE_TERMINAL_STATUSES).
+export const PERFORMANCE_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', 'DEPARTMENT_HEAD_REJECTED']
 // "Pending With" -- who needs to act next, for the list table column of the
 // same name. Derived from each transition's require_roles() gate in
 // routers/performance.py: QA Lead owns Readiness through Result Analysis/
@@ -406,7 +382,9 @@ export const PERFORMANCE_TERMINAL_STATUSES: string[] = ['CLOSED', 'CANCELLED', '
 // happens on the requester/dev side even though QA clicks "Complete".
 export const PERFORMANCE_PENDING_WITH: Record<string, string> = {
   DRAFT: 'Requester', SUBMITTED: 'SM',
-  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: '—',
+  // SM_REJECTED: reopenable by the requester (edit + resubmit), not a dead
+  // end -- see PERFORMANCE_TERMINAL_STATUSES above.
+  SM_APPROVAL_PENDING: 'SM', RETURNED_BY_SM: 'Requester', SM_REJECTED: 'Requester',
   DEPARTMENT_HEAD_APPROVAL_PENDING: 'Department Head',
   RETURNED_BY_DEPARTMENT_HEAD: 'Requester', DEPARTMENT_HEAD_REJECTED: '—',
   ENGINEER_ASSIGNED: 'QA Lead', RETURNED_BY_ENGINEER: 'Requester',
@@ -420,7 +398,7 @@ export const PERFORMANCE_PENDING_WITH: Record<string, string> = {
 // (SM_APPROVAL_PENDING/DEPARTMENT_HEAD_APPROVAL_PENDING are that stage's
 // own reviewer only, not the requester -- see canEditDetails there).
 export const PERFORMANCE_EDITABLE_STATUSES: string[] = [
-  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM',
+  'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM', 'SM_REJECTED',
   'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER',
 ]
 
@@ -432,33 +410,11 @@ export const PERFORMANCE_REQUEST_TYPES: string[] = ['Load Testing', 'Stress Test
 export const CHANGE_TYPES: string[] = ['New', 'Enhancement', 'Bug Fix']
 
 // Annexure VIII ("QA Request Form & Checklist (Performance Testing)"),
-// table 2: "L1: Pre-Testing Readiness Checklist" -- 19 fixed items, must
-// mirror backend app/constants.py DEFAULT_PERFORMANCE_CHECKLIST_ITEMS.
-export interface PerformanceChecklistItemDef {
-  item: string
-  data_required: string
-}
-export const DEFAULT_PERFORMANCE_CHECKLIST_ITEMS: PerformanceChecklistItemDef[] = [
-  { item: 'Application Architecture Diagram', data_required: 'Architecture Diagram' },
-  { item: 'Transaction Flow', data_required: 'Transaction Flow / Business Process Flow Document for Critical Transactions' },
-  { item: 'Dependency Matrix', data_required: 'List of Dependent Applications, APIs, Databases & External Systems' },
-  { item: 'API / Interface Inventory (If Applicable)', data_required: 'API List, API Specifications, Swagger/OpenAPI Document' },
-  { item: 'Expected Average TPS', data_required: 'Average Transactions Per Second expected in Production' },
-  { item: 'Peak TPS', data_required: 'Peak Transactions Per Second expected during Business Peak Hours' },
-  { item: 'Concurrent Users / Sessions', data_required: 'Expected Peak Concurrent Users / Sessions' },
-  { item: 'Average & Max Message Size', data_required: 'Average and Maximum Request/Response Payload Size (KB/MB)' },
-  { item: 'Server Configuration', data_required: 'Application, Middleware and Database Server Details' },
-  { item: 'JVM/Application Parameters (If Applicable)', data_required: 'Heap Size, Thread Pool, JVM & GC Parameters' },
-  { item: 'Database Configuration', data_required: 'Database Version, Sizing, Connection Pool Details' },
-  { item: 'API Timeout & Retry Settings', data_required: 'Timeout Values and Retry Logic Configuration' },
-  { item: 'Performance SLA', data_required: 'Response Time SLA, Throughput Targets, Availability Targets' },
-  { item: 'Maximum Acceptable System Load Defined (Threshold Values)', data_required: 'Maximum TPS, Concurrent Users, Transaction Volume, System Capacity Limits' },
-  { item: 'Monitoring Dashboard Access', data_required: 'Monitoring Tool URLs and Required Access Details' },
-  { item: 'Batch/Scheduler Details (If Applicable)', data_required: 'Batch Jobs, Schedule Details, Expected Volumes' },
-  { item: 'Test Data Availability', data_required: 'Test Users, Test Accounts, Test Data Sets' },
-  { item: 'Rollback Procedure', data_required: 'Rollback Document and Recovery Steps' },
-  { item: 'Teardown Procedure', data_required: 'Environment Cleanup / Reset Procedure' },
-]
+// table 2: "L1: Pre-Testing Readiness Checklist" -- 19 fixed items, used to
+// be hardcoded here (DEFAULT_PERFORMANCE_CHECKLIST_ITEMS). Admin-configurable
+// now (Admin > Readiness Checklist Configuration) and fetched live via
+// useChecklistTemplate('PERFORMANCE') (see
+// QARequests/steps/useChecklistTemplate.ts).
 
 // ---- Suppression request lifecycle (Application Owner step removed --
 // must mirror backend app/constants.py SUPPRESSION_STATUSES). Requester ->
@@ -511,8 +467,11 @@ export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
   // migration includes a one-time UPDATE moving any existing certificate off
   // those old values onto DRAFT/ISSUED instead (see ORACLE_MIGRATION_2026-07.md).
 }
-export const SIGNOFF_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPT_HEAD_COE']
-export const SIGNOFF_TERMINAL_STATUSES: string[] = ['ISSUED', 'SM_REJECTED', 'DEPT_HEAD_COE_REJECTED']
+// SM_REJECTED ("Rejected by QA Lead" -- see SIGNOFF_STATUS_LABELS above)
+// included alongside RETURNED_BY_SM/RETURNED_BY_DEPT_HEAD_COE -- reopenable
+// by the requester (edit + resubmit) rather than a dead end.
+export const SIGNOFF_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE']
+export const SIGNOFF_TERMINAL_STATUSES: string[] = ['ISSUED', 'DEPT_HEAD_COE_REJECTED']
 // "Pending With" -- who needs to act next, for the list table column of the
 // same name. Derived from each transition's require_roles() gate in
 // routers/signoff.py -- "Tester" (not "Requester") for the originator here,
@@ -561,6 +520,15 @@ export function validTargetPromotionOptions(environment: string): string[] {
   if (idx === -1) return ENVIRONMENT_PIPELINE_ORDER.slice()
   return ENVIRONMENT_PIPELINE_ORDER.slice(idx + 1)
 }
+
+// Reported directly: DAST scans and Performance tests are never run against
+// Dev or SIT -- both are restricted to UAT and later. Simply
+// ENVIRONMENT_PIPELINE_ORDER without its first entry (SIT); Dev was never in
+// that list to begin with. Used by DastStep.tsx's own target Environment
+// picker and PerformanceStep.tsx's Environment picker -- both offer only
+// these three options, no blank/"Dev"/"SIT" choice. Mirrors backend
+// app/constants.py's POST_SIT_ENVIRONMENTS exactly.
+export const POST_SIT_ENVIRONMENTS: string[] = ENVIRONMENT_PIPELINE_ORDER.slice(1)
 
 // Same ordering rule as backend/app/constants.py's
 // validate_environment_promotion -- used to gate Next/Submit/Save so a

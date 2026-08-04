@@ -31,13 +31,12 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
   const isAdmin = hasRole(user, 'ADMIN')
   const [form, setForm] = useState({
     application_name: editing.application_name || '', epic_number: editing.epic_number || '',
-    cr_number: editing.cr_number || '', tool_used: editing.tool_used || '',
-    target_load: editing.target_load || '', environment: editing.environment || 'UAT',
+    cr_number: editing.cr_number || '', environment: editing.environment || 'UAT',
     risk_category: editing.risk_category || 'Medium', priority: editing.priority || 'Medium',
     request_type: (editing.request_type || '').split(',').filter(Boolean) as string[],
     change_type: editing.change_type || '', vendor_si_partner: editing.vendor_si_partner || '',
     technology_stack: editing.technology_stack || '', release_version: editing.release_version || '',
-    build_number: editing.build_number || '', hash_value: editing.hash_value || '',
+    build_number: editing.build_number || '',
     target_promotion_environment: editing.target_promotion_environment || '',
   })
   // Lets the requester revisit their readiness-checklist self-declaration
@@ -99,8 +98,6 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
         <div className="form-section">
           <div className="form-section-title">Test Basics</div>
           <div className="form-row">
-            <Field label="Tool Used"><input placeholder="e.g. JMeter, LoadRunner" value={form.tool_used} onChange={(e) => set('tool_used', e.target.value)} /></Field>
-            <Field label="Target Load"><input placeholder="e.g. 500 concurrent users / 200 TPS" value={form.target_load} onChange={(e) => set('target_load', e.target.value)} /></Field>
             <Field label="Environment">
               <select value={form.environment} onChange={(e) => set('environment', e.target.value)}>
                 {ENVIRONMENTS.map((e_) => <option key={e_} value={e_}>{e_}</option>)}
@@ -144,7 +141,6 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
             <Field label="Technology Stack"><input value={form.technology_stack} onChange={(e) => set('technology_stack', e.target.value)} /></Field>
             <Field label="Release Version"><input value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>
             <Field label="Build Number"><input value={form.build_number} onChange={(e) => set('build_number', e.target.value)} /></Field>
-            <Field label="Hash Value"><input value={form.hash_value} onChange={(e) => set('hash_value', e.target.value)} /></Field>
             <Field label="Target Promotion Environment">
               <select value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
                 <option value="">Select...</option>
@@ -269,12 +265,16 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 
   // Edit access -- see the matching (and more detailed) comment in
   // SAST.tsx's canEditDetails for the full reasoning; same rule here.
+  // SM_REJECTED included alongside the RETURNED_BY_* statuses -- reported
+  // directly, a rejected request is now reopenable (edit + resubmit)
+  // instead of a dead end.
   const canEditDetails = hasRole(user, 'ADMIN')
-    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status))
+    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status))
     || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
     || (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   const canSubmit = isRequester && status === 'DRAFT'
-  const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status)
+  const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status)
+  const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Request' : 'Re-submit'
   // Blocks Sign/Approve on both the SM and Department Head decision panels
   // below while this request's Application Name is still PENDING/REJECTED
   // (not yet APPROVED) -- see ApplicationNameBanner.
@@ -380,8 +380,6 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
           </DetailSection>
 
           <DetailSection title="Test Parameters & Environment">
-            <DetailField label="Tool Used">{req.tool_used || '—'}</DetailField>
-            <DetailField label="Target Load">{req.target_load || '—'}</DetailField>
             <DetailField label="Environment">{req.environment || '—'}</DetailField>
             <DetailField label="Target Promotion Environment">{req.target_promotion_environment || '—'}</DetailField>
           </DetailSection>
@@ -389,7 +387,6 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
           <DetailSection title="Release & Vendor">
             <DetailField label="Release Version">{req.release_version || '—'}</DetailField>
             <DetailField label="Build Number">{req.build_number || '—'}</DetailField>
-            <DetailField label="Hash Value">{req.hash_value || '—'}</DetailField>
             <DetailField label="Vendor / SI Partner">{req.vendor_si_partner || '—'}</DetailField>
             <DetailField label="Technology Stack">{req.technology_stack || '—'}</DetailField>
           </DetailSection>
@@ -422,7 +419,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
             </button>
             {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
             {canSubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
-            {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('resubmit')}>Re-submit</button>}
+            {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
             {canSMDecide && (
               <ApprovalDecisionButtons
                 userName={user?.full_name}
@@ -684,7 +681,6 @@ export default function Performance() {
           { key: 'application_name', header: 'Application' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'engineer_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.engineer_id) || 'Not assigned', filterValue: (r) => userName(users, r.engineer_id) || '' },
-          { key: 'tool_used', header: 'Tool', render: (r) => r.tool_used || '—' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },

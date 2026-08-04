@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
+import SearchableSelect from '../../components/SearchableSelect'
 import { hasRole, TEST_CASE_TYPES, TEST_CASE_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES } from '../../constants'
 import { TestProjectOut, TestFolderOut, TestCaseOut, TestStepIn, TestCaseImportResult, ApprovalActionOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -46,10 +47,16 @@ function NewFolderModal({ projectId, folders, onClose, onCreated }: {
     <Modal title="New Folder" onClose={onClose}>
       <form onSubmit={submit}>
         <Field label="Parent Folder">
-          <select value={parentId} onChange={(e) => setParentId(e.target.value ? Number(e.target.value) : '')}>
-            <option value="">-- Top level --</option>
-            {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-          </select>
+          {/* Searchable -- a project's folder tree only grows over time. */}
+          <SearchableSelect
+            value={parentId === '' ? '' : String(parentId)}
+            onChange={(v) => setParentId(v ? Number(v) : '')}
+            placeholder="-- Top level --"
+            options={[
+              { value: '', label: '-- Top level --' },
+              ...folders.map((f) => ({ value: String(f.id), label: f.name })),
+            ]}
+          />
         </Field>
         <Field label="Folder Name *">
           <input required value={name} onChange={(e) => setName(e.target.value)} />
@@ -74,9 +81,21 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
   const [file, setFile] = useState<File | null>(null)
   const [targetFolder, setTargetFolder] = useState<number | ''>(folderId)
   const [error, setError] = useState<unknown>(null)
-  const [busy, setBusy] = useState(false)
   const [downloadingTemplate, setDownloadingTemplate] = useState(false)
   const [result, setResult] = useState<TestCaseImportResult | null>(null)
+  // Same governed-progress pattern already used for Bulk Approve/Bulk Update
+  // (this file) and Bulk Execute/Bulk Removal (TestExecution.tsx) -- reused
+  // here rather than just a plain "Importing..." button label, since an
+  // Excel import can take a few seconds for a large file and gives no
+  // feedback otherwise. The backend import is one atomic request with no
+  // real progress events of its own, so -- same as every other reuse of this
+  // pattern -- the percentage/message below is a simulated approximation of
+  // where the import likely is, not a literal server-reported progress
+  // stream; it always completes for real once the response actually comes
+  // back (see submit() below).
+  const [stage, setStage] = useState<'form' | 'importing'>('form')
+  const [progress, setProgress] = useState(0)
+  const [progressMessage, setProgressMessage] = useState('Uploading file…')
 
   async function downloadTemplate() {
     setDownloadingTemplate(true)
@@ -97,49 +116,87 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!file) { setError(new Error('Choose an .xlsx file first')); return }
-    setBusy(true); setError(null)
+    setError(null)
+    setStage('importing')
+    setProgress(8)
+    setProgressMessage('Uploading file…')
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => {
+      setProgress((current) => {
+        const next = Math.min(88, current + (current < 50 ? 10 : 5))
+        setProgressMessage(next >= 60 ? 'Validating rows and creating test cases…' : 'Uploading file…')
+        return next
+      })
+    }, 280)
     try {
       const res = await api.uploadForm<TestCaseImportResult>(
         `/api/test-repository/projects/${projectId}/import-xlsx`,
         { file, folder_id: targetFolder ? String(targetFolder) : undefined }
       )
+      const remainingDisplayTime = Math.max(0, 600 - (Date.now() - startedAt))
+      if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))
+      window.clearInterval(timer)
+      setProgress(100)
+      setProgressMessage('Import complete')
       setResult(res)
       onImported()
-    } catch (err) { setError(err) } finally { setBusy(false) }
+    } catch (err) {
+      window.clearInterval(timer)
+      setError(err)
+      setStage('form')
+    }
   }
 
   return (
-    <Modal title="Import Test Cases from Excel" onClose={onClose}>
+    <Modal
+      title={stage === 'importing' ? 'Importing test cases' : 'Import Test Cases from Excel'}
+      onClose={stage === 'importing' ? () => undefined : onClose}
+      preventBackdropClose={stage === 'importing'}
+    >
       {!result ? (
-        <form onSubmit={submit}>
-          <p className="muted small">
-            Use the standard "Test Cases - Template" xlsx format -- one row per test step,
-            with Epic ID / Feature ID / Test Scenario / Priority etc. filled in only on each
-            test case's first row. Imported definitions enter QA Lead review; execution-result
-            columns are not added to a cycle until the testcase is approved.
-          </p>
-          <div className="info-banner">
-            Only this exact template is supported for import.{' '}
-            <button type="button" className="link-btn" style={{ display: 'inline', padding: 0 }} onClick={downloadTemplate} disabled={downloadingTemplate}>
-              {downloadingTemplate ? 'Downloading…' : 'Download the template'}
-            </button>
-            {' '}before filling it in.
+        stage === 'importing' ? (
+          <div className="tm-operation-state" aria-live="polite">
+            <div className="tm-operation-icon">↻</div>
+            <strong>{progressMessage}</strong>
+            <div className="tm-progress-track" role="progressbar" aria-label="Excel import progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+            <div className="tm-progress-meta"><span>Please keep this dialog open</span><strong>{progress}%</strong></div>
           </div>
-          <Field label="Target Folder">
-            <select value={targetFolder} onChange={(e) => setTargetFolder(e.target.value ? Number(e.target.value) : '')}>
-              <option value="">-- Unfiled --</option>
-              {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-            </select>
-          </Field>
-          <Field label="Excel File (.xlsx) *">
-            <input type="file" accept=".xlsx" required onChange={(e) => setFile(e.target.files?.[0] || null)} />
-          </Field>
-          <ErrorText error={error} />
-          <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className="btn btn-primary" disabled={busy}>{busy ? 'Importing...' : 'Import'}</button>
-            <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          </div>
-        </form>
+        ) : (
+          <form onSubmit={submit}>
+            <p className="muted small">
+              Use the standard "Test Cases - Template" xlsx format -- one row per test step,
+              with Epic ID / Feature ID / Test Scenario / Priority etc. filled in only on each
+              test case's first row. Imported definitions enter QA Lead review; execution-result
+              columns are not added to a cycle until the testcase is approved.
+            </p>
+            <div className="info-banner">
+              Only this exact template is supported for import.{' '}
+              <button type="button" className="link-btn" style={{ display: 'inline', padding: 0 }} onClick={downloadTemplate} disabled={downloadingTemplate}>
+                {downloadingTemplate ? 'Downloading…' : 'Download the template'}
+              </button>
+              {' '}before filling it in.
+            </div>
+            <Field label="Target Folder">
+              <SearchableSelect
+                value={targetFolder === '' ? '' : String(targetFolder)}
+                onChange={(v) => setTargetFolder(v ? Number(v) : '')}
+                placeholder="-- Unfiled --"
+                options={[
+                  { value: '', label: '-- Unfiled --' },
+                  ...folders.map((f) => ({ value: String(f.id), label: f.name })),
+                ]}
+              />
+            </Field>
+            <Field label="Excel File (.xlsx) *">
+              <input type="file" accept=".xlsx" required onChange={(e) => setFile(e.target.files?.[0] || null)} />
+            </Field>
+            <ErrorText error={error} />
+            <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+              <button className="btn btn-primary">Import</button>
+              <button type="button" className="btn" onClick={onClose}>Cancel</button>
+            </div>
+          </form>
+        )
       ) : (
         <div className="import-result">
           <div className={`import-result-summary ${resultErrors.length || result.skipped_rows || primaryFailureReason ? 'has-issues' : 'success'}`}>
@@ -362,7 +419,6 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
   canAuthor: boolean
   canReview: boolean
 }) {
-  const [testCaseKey, setTestCaseKey] = useState(existing?.test_case_key || '')
   const [folder, setFolder] = useState<number | ''>(existing?.folder_id ?? folderId)
   const [epicId, setEpicId] = useState(existing?.epic_id || '')
   const [crNumber, setCrNumber] = useState(existing?.cr_number || '')
@@ -392,7 +448,7 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
     e.preventDefault()
     setBusy(true); setError(null)
     const body = {
-      test_case_key: testCaseKey.trim() || null,
+      test_case_key: null,
       folder_id: folder || null,
       epic_id: epicId || null, cr_number: crNumber || null, feature_id: featureId || null, user_story_id: userStoryId || null,
       test_type: testType || null, module_name: moduleName || null, test_scenario: scenario || null,
@@ -421,14 +477,20 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
     <Modal title={existing ? `Test Case ${existing.test_case_key}` : 'New Test Case'} onClose={onClose} wide>
       <form onSubmit={submit}>
         <div className="grid grid-2">
-          <Field label="Test Case ID (leave blank to auto-generate)">
-            <input value={testCaseKey} onChange={(e) => setTestCaseKey(e.target.value)} disabled={!!existing || readOnly} />
+          <Field label="Test Case ID">
+            <input value={existing?.test_case_key || 'Generated automatically (for example TQA-TC-01)'} disabled />
           </Field>
           <Field label="Folder">
-            <select value={folder} onChange={(e) => setFolder(e.target.value ? Number(e.target.value) : '')} disabled={readOnly}>
-              <option value="">-- Unfiled --</option>
-              {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-            </select>
+            <SearchableSelect
+              value={folder === '' ? '' : String(folder)}
+              onChange={(v) => setFolder(v ? Number(v) : '')}
+              disabled={readOnly}
+              placeholder="-- Unfiled --"
+              options={[
+                { value: '', label: '-- Unfiled --' },
+                ...folders.map((f) => ({ value: String(f.id), label: f.name })),
+              ]}
+            />
           </Field>
           <Field label="Epic ID">
             <input value={epicId} onChange={(e) => setEpicId(e.target.value)} disabled={readOnly} />
@@ -620,11 +682,15 @@ function BulkUpdateModal({ projectId, selectedIds, folders, onClose, onUpdated }
       {stage === 'edit' && <form onSubmit={review}>
         <p className="muted small">Only the fields changed below will be applied. Existing test steps and other details will remain unchanged.</p>
         <Field label="Folder">
-          <select value={folder} onChange={(e) => setFolder(e.target.value)}>
-            <option value="unchanged">No change</option>
-            <option value="unfiled">Unfiled</option>
-            {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-          </select>
+          <SearchableSelect
+            value={folder}
+            onChange={setFolder}
+            options={[
+              { value: 'unchanged', label: 'No change' },
+              { value: 'unfiled', label: 'Unfiled' },
+              ...folders.map((f) => ({ value: String(f.id), label: f.name })),
+            ]}
+          />
         </Field>
         <Field label="Priority">
           <select value={priority} onChange={(e) => setPriority(e.target.value)}>
@@ -713,12 +779,24 @@ export default function TestRepository() {
   const [showBulkApprove, setShowBulkApprove] = useState(false)
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false)
   const [downloadingTemplate, setDownloadingTemplate] = useState(false)
+  const [exportingRepository, setExportingRepository] = useState(false)
 
   async function downloadTemplate() {
     setDownloadingTemplate(true)
     try {
       await api.downloadFile('/api/test-repository/import-template', 'Test Case Import Template.xlsx')
     } catch (err) { setError(err) } finally { setDownloadingTemplate(false) }
+  }
+
+  async function exportRepository() {
+    if (!projectId || !selectedProject) return
+    setExportingRepository(true); setError(null)
+    try {
+      await api.downloadFile(
+        `/api/test-repository/projects/${projectId}/export-xlsx`,
+        `${selectedProject.project_key}_test_repository.xlsx`,
+      )
+    } catch (err) { setError(err) } finally { setExportingRepository(false) }
   }
 
   useEffect(() => {
@@ -817,12 +895,21 @@ export default function TestRepository() {
         subtitle="Design and organize reusable test cases using the Epic → Feature → Story hierarchy from your Excel template."
         actions={(
           <div style={{ display: 'flex', gap: 8 }}>
-            <select value={projectId} onChange={(e) => { setProjectId(e.target.value ? Number(e.target.value) : ''); setSelectedFolder('') }}>
-              {projects.length === 0 && <option value="">No Test Projects yet</option>}
-              {projects.map((p) => <option key={p.id} value={p.id}>{p.project_key} -- {p.name}{p.is_active ? '' : ' [Inactive]'}</option>)}
-            </select>
+            <SearchableSelect
+              value={projectId === '' ? '' : String(projectId)}
+              onChange={(v) => { setProjectId(v ? Number(v) : ''); setSelectedFolder('') }}
+              placeholder={projects.length === 0 ? 'No Test Projects yet' : 'Select a project...'}
+              style={{ minWidth: 220 }}
+              options={projects.map((p) => ({
+                value: String(p.id),
+                label: `${p.project_key} -- ${p.name}${p.is_active ? '' : ' [Inactive]'}`,
+              }))}
+            />
             <button className="btn" onClick={downloadTemplate} disabled={downloadingTemplate}>
               {downloadingTemplate ? 'Downloading…' : 'Download Template'}
+            </button>
+            <button className="btn" onClick={exportRepository} disabled={!projectId || exportingRepository}>
+              {exportingRepository ? 'Exporting…' : 'Export Repository'}
             </button>
             {canAuthor && projectId && projectIsActive && (
               <>

@@ -18,12 +18,13 @@ import {
 // this file only owns what's specific to being a controlled form field
 // (seeding from an initial markdown value, reporting images back up,
 // character-count footer).
-export default function JiraRichTextField({ value, disabled, onChange, onImagesChange, maxLength = 10000 }: {
+export default function JiraRichTextField({ value, disabled, onChange, onImagesChange, maxLength = 10000, allowImages = true }: {
   value: string
   disabled?: boolean
   onChange: (value: string) => void
   onImagesChange: (files: File[]) => void
   maxLength?: number
+  allowImages?: boolean
 }) {
   const editorRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -72,10 +73,10 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
           imageButtonTitle="Upload images"
           onCommand={command}
           onBeginLink={beginLink}
-          onPickImage={() => fileRef.current?.click()}
+          onPickImage={allowImages ? () => fileRef.current?.click() : undefined}
         />
       )}
-      <RichTextImageInput inputRef={fileRef} onFiles={addImages} />
+      {allowImages && <RichTextImageInput inputRef={fileRef} onFiles={addImages} />}
       {showLink && (
         <RichTextLinkEditor
           linkUrl={linkUrl}
@@ -94,13 +95,13 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
         aria-multiline="true"
         data-placeholder="Describe the observed result. Paste screenshots with Ctrl/Cmd+V…"
         onInput={sync}
-        onPaste={pasteImages}
+        onPaste={allowImages ? pasteImages : undefined}
         suppressContentEditableWarning
       />
-      <RichTextPastedImages images={images} onRemove={removeImage} />
+      {allowImages && <RichTextPastedImages images={images} onRemove={removeImage} />}
       {!disabled && (
         <div className="jira-result-editor-foot">
-          <span className={count > maxLength ? 'over-limit' : ''}>{count}/{maxLength} · Rich text · Paste or upload images</span>
+          <span className={count > maxLength ? 'over-limit' : ''}>{count}/{maxLength} · Rich text{allowImages ? ' · Paste or upload images' : ''}</span>
         </div>
       )}
       <ErrorText error={error} title="Actual Result image could not be added" guidance="Use a supported image under 10 MB, then paste or upload it again. Your formatted result remains available." />

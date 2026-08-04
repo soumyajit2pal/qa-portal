@@ -125,7 +125,15 @@ export default function QARequests() {
           rowKey="id"
           onRowClick={(r) => setSelected(r)}
           columns={[
-            { key: "request_id", header: "Request ID" },
+            {
+              key: "request_id",
+              header: "Request ID",
+              // Not assigned until raised (see backend's request_id column
+              // comment) -- a still-Draft row shows a placeholder instead of
+              // a blank cell.
+              render: (r) => r.request_id || `Draft #${r.id}`,
+              filterValue: (r) => r.request_id || `Draft #${r.id}`,
+            },
             { key: "application_name", header: "Application" },
             { key: "epic_number", header: "Epic Number" },
             {

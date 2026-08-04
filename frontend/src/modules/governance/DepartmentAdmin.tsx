@@ -74,7 +74,7 @@ export default function DepartmentAdmin() {
         subtitle={
           `Assign ${isQAAdmin ? 'QA team' : 'working-level'} roles and activate/deactivate accounts mapped to ` +
           `${user?.department || 'your department'} -- Administrator, Department Head, and Executive COE access ` +
-          'still require a System Admin.'
+          'still require a System Admin, as does any account marked "Managed by Admin Only" (won\'t appear below).'
         }
       />
       <Card>

@@ -170,17 +170,26 @@ def submit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
 
 @router.post("/{signoff_id}/resubmit", response_model=schemas.SignOffOut)
 def resubmit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """Re-submits a certificate returned by QA Lead or Executive COE. A
-    return from Executive COE goes straight back to their own queue
-    (QA Lead already approved it once) -- the direct return goes back to
-    Executive COE rather than repeating QA Lead approval."""
+    """Re-submits a certificate returned by QA Lead or Executive COE -- or
+    reopens one rejected by QA Lead (SM_REJECTED; see SIGNOFF_STATUS_LABELS
+    -- this checkpoint is labeled "QA Lead" here even though it reuses the
+    SM_* status names). Reported directly: a Rejected-by-QA-Lead certificate
+    used to be a dead end; it's now reopenable the same way a Return is:
+    edit details, then call this to send it straight back to
+    SM_APPROVAL_PENDING for a fresh decision. A return from Executive COE
+    goes straight back to their own queue (QA Lead already approved it
+    once) -- the direct return goes back to Executive COE rather than
+    repeating QA Lead approval."""
     obj = _get_or_404(db, signoff_id)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this certificate")
-    _require(obj, ["RETURNED_BY_SM", "RETURNED_BY_DEPT_HEAD_COE"], "Resubmit")
-    if obj.status == "RETURNED_BY_SM":
+    _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"], "Resubmit")
+    if obj.status in ("RETURNED_BY_SM", "SM_REJECTED"):
+        reopening = obj.status == "SM_REJECTED"
         obj.status = "SM_APPROVAL_PENDING"
-        _log(db, obj.id, "QA Lead Approval", current_user, "Resubmitted", "Returned certificate re-submitted")
+        _log(db, obj.id, "QA Lead Approval", current_user,
+             "Reopened" if reopening else "Resubmitted",
+             "Rejected certificate reopened and re-submitted" if reopening else "Returned certificate re-submitted")
     else:
         obj.status = "DEPT_HEAD_COE_APPROVAL_PENDING"
         _log(db, obj.id, "Executive COE Approval", current_user, "Resubmitted", "Returned certificate re-submitted")

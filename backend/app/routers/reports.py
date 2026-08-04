@@ -1,12 +1,37 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import get_db
 from ..deps import get_current_user
-from ..constants import SUPPRESSION_TERMINAL_STATUSES, QAStatus
+from ..constants import SUPPRESSION_TERMINAL_STATUSES, QAStatus, GatewayStatus, Role
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
+
+
+_GATEWAY_PRIVATE_STATUSES = (GatewayStatus.DRAFT, GatewayStatus.CANCELLED)
+
+
+def _visible_qa_requests(db: Session, current_user: models.User):
+    """Reported bug: this and the other report endpoints below queried every
+    QARequest row unfiltered, so the "QA Request Summary" report (visible to
+    every logged-in user, not just QA/management roles -- see
+    Layout.tsx's nav, /reports has no role gate) leaked every user's
+    still-Draft gateway requests -- Request ID, Application Name,
+    Department, etc. -- to everyone. Same rule as
+    routers/qa_requests.py::_can_view_gateway: Draft AND Cancelled (which can
+    only ever be reached FROM Draft -- there is no cancel path from Raised --
+    so it's always an abandoned Draft, never a real workflow) are only
+    visible to their own requester (or an Admin); once genuinely Raised it's
+    fair game for reporting like everything else."""
+    q = db.query(models.QARequest)
+    if not current_user.has_role(Role.ADMIN):
+        q = q.filter(or_(
+            models.QARequest.status.notin_(_GATEWAY_PRIVATE_STATUSES),
+            models.QARequest.requester_id == current_user.id,
+        ))
+    return q
 
 
 # ---------------- 4.10.1 Operational Reports ----------------
@@ -16,7 +41,7 @@ def qa_request_summary(db: Session = Depends(get_db), current_user: models.User 
     for its own Draft/Submitted/Raised/Cancelled status). "QA Testing Status"
     additionally surfaces the linked Functional Testing Request's own Draft ->
     ... -> Closed status, if one was raised alongside it."""
-    rows = db.query(models.QARequest).all()
+    rows = _visible_qa_requests(db, current_user).all()
     out = []
     for r in rows:
         functional = next(iter(r.linked_functional_requests), None)
@@ -100,7 +125,7 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
 # ---------------- 4.10.3 Management Reports ----------------
 @router.get("/monthly-qa-kpi")
 def monthly_kpi(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    total_requests = db.query(models.QARequest).count()
+    total_requests = _visible_qa_requests(db, current_user).count()
     # "Completed" is measured on the linked Functional Testing Request (the
     # QA Request gateway's own status is just Draft/Submitted/Raised/Cancelled
     # -- see constants.GatewayStatus).
@@ -114,10 +139,11 @@ def monthly_kpi(db: Session = Depends(get_db), current_user: models.User = Depen
 
 @router.get("/application-quality-scorecard")
 def quality_scorecard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    apps = {r.application_name for r in db.query(models.QARequest).all() if r.application_name}
+    visible = _visible_qa_requests(db, current_user).all()
+    apps = {r.application_name for r in visible if r.application_name}
     out = []
     for app in apps:
-        reqs = db.query(models.QARequest).filter(models.QARequest.application_name == app).all()
+        reqs = [r for r in visible if r.application_name == app]
         completed = 0
         for r in reqs:
             functional = next(iter(r.linked_functional_requests), None)

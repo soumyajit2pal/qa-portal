@@ -328,7 +328,7 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
     # attention" count shown elsewhere in the app (e.g. the old Approval
     # Workflow Log nav badge) -- if the one pending item was actually a SAST/
     # DAST/Suppression request, approving it there never changed this number,
-    # so the Command Centre banner looked stuck even after it was cleared.
+    # so the Dashboard banner looked stuck even after it was cleared.
     # Now counts the same things everywhere: QA Requests awaiting a decision,
     # plus SAST/DAST requests still "Requested", plus open Suppressions.
     pending_approvals = (
@@ -415,6 +415,11 @@ STAGE_LABELS = {
     QAStatus.SUBMITTED: "SM Approval Pending",
     QAStatus.SM_APPROVAL_PENDING: "SM Approval Pending",
     QAStatus.RETURNED_BY_SM: "Rework by Requester Pending",
+    # Reported directly: Rejected by SM is now reopenable by the requester
+    # (edit + resubmit, see routers/functional.py::resubmit_request) rather
+    # than a dead end -- surfaced on this ageing dashboard the same way
+    # RETURNED_BY_SM already is.
+    QAStatus.SM_REJECTED: "Rework by Requester Pending",
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING: "Department Head Approval Pending",
     QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Rework by Requester Pending",
     QAStatus.QA_LEAD_ASSIGNED: "QA Readiness Verification Pending",
@@ -437,6 +442,7 @@ STAGE_TEAM = {
     QAStatus.SUBMITTED: "SM",
     QAStatus.SM_APPROVAL_PENDING: "SM",
     QAStatus.RETURNED_BY_SM: "Requester",
+    QAStatus.SM_REJECTED: "Requester",
     QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING: "Department Head",
     QAStatus.RETURNED_BY_DEPARTMENT_HEAD: "Requester",
     QAStatus.QA_LEAD_ASSIGNED: "QA Lead",

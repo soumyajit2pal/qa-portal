@@ -342,12 +342,16 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 
   // Edit access -- see the matching (and more detailed) comment in
   // SAST.tsx's canEditDetails for the full reasoning; same rule here.
+  // SM_REJECTED included alongside the RETURNED_BY_* statuses -- reported
+  // directly, a rejected request is now reopenable (edit + resubmit)
+  // instead of a dead end.
   const canEditDetails = hasRole(user, 'ADMIN')
-    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status))
+    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status))
     || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
     || (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   const canSubmit = isRequester && status === 'DRAFT'
-  const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
+  const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
+  const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Request' : 'Re-submit'
   // Blocks Sign/Approve on both the SM and Department Head decision panels
   // below while this request's Application Name is still PENDING/REJECTED
   // (not yet APPROVED) -- see ApplicationNameBanner.
@@ -519,12 +523,12 @@ function DASTDetail({ req, onClose, onChanged, users }: {
               )}
               {canResubmit && (
                 <button className="btn btn-primary btn-sm"
-                        disabled={busy || (status === 'RETURNED_BY_SM' && pendingSelfDeclare.length > 0)}
+                        disabled={busy || (['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0)}
                         onClick={() => act('resubmit')}>
-                  Re-submit
+                  {resubmitLabel}
                 </button>
               )}
-              {canResubmit && status === 'RETURNED_BY_SM' && pendingSelfDeclare.length > 0 && (
+              {canResubmit && ['RETURNED_BY_SM', 'SM_REJECTED'].includes(status) && pendingSelfDeclare.length > 0 && (
                 <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>
                   {pendingSelfDeclare.length} mandatory Security Readiness checklist item(s) not yet
                   self-declared ready — see Edit Details.

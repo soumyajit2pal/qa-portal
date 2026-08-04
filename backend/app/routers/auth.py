@@ -313,6 +313,9 @@ def _require_own_department_target(current_user: models.User, target: models.Use
         raise HTTPException(status_code=403, detail="You cannot manage your own account here")
     if "ADMIN" in target.roles:
         raise HTTPException(status_code=403, detail="Administrator accounts cannot be managed from here")
+    if target.admin_managed_only:
+        raise HTTPException(status_code=403,
+                             detail="This account is managed by a System Admin only")
     if not current_user.department:
         raise HTTPException(status_code=403, detail="Your own profile has no department set")
     if target.department != current_user.department:
@@ -345,8 +348,9 @@ def list_local_admin_users(db: Session = Depends(get_db),
                                 Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
     """Every user mapped to the local admin's own department (any status,
     so a previously-disabled account can be re-activated too), excluding
-    their own account and any Administrator accounts -- mirrors the guard
-    rails in _require_own_department_target/update_local_admin_user below."""
+    their own account, any Administrator accounts, and any account flagged
+    admin_managed_only -- mirrors the guard rails in
+    _require_own_department_target/update_local_admin_user below."""
     if not current_user.department:
         raise HTTPException(status_code=400, detail="Your own profile has no department set")
     rows = (
@@ -355,7 +359,7 @@ def list_local_admin_users(db: Session = Depends(get_db),
         .order_by(models.User.full_name)
         .all()
     )
-    return [u for u in rows if "ADMIN" not in u.roles]
+    return [u for u in rows if "ADMIN" not in u.roles and not u.admin_managed_only]
 
 
 @router.patch("/local-admin/users/{user_id}", response_model=schemas.UserOut)

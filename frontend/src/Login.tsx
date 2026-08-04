@@ -50,10 +50,10 @@ export default function Login() {
       <section className="login-shell" aria-label="QualityHub sign in">
         <aside className="login-brand">
           <div className="login-brand-top">
-            <div className="logo-mark" aria-hidden="true">Q</div>
+            <span className="bank-logo login-bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
             <div className="brand-name">
-              <strong>QualityHub</strong>
-              <span>Enterprise QA Portal</span>
+              <strong>Bank of Maharashtra</strong>
+              <span>QualityHub · Enterprise QA Portal</span>
             </div>
           </div>
 
@@ -71,14 +71,14 @@ export default function Login() {
 
           <div className="login-brand-foot">
             <span><IconApprove /> Controlled &amp; traceable</span>
-            <span>Information Technology Department</span>
+            <span>Quality Assurance Department - IT</span>
           </div>
         </aside>
 
         <div className="login-card">
           <div className="login-mobile-brand">
-            <div className="logo-mark">Q</div>
-            <strong>QualityHub</strong>
+            <span className="bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
+            <div><strong>QualityHub</strong><small>Bank of Maharashtra</small></div>
           </div>
 
           <div className="login-card-head">
@@ -133,7 +133,9 @@ export default function Login() {
         </div>
       </section>
 
-      <footer className="login-page-footer">Bank of Maharashtra <span>•</span> Internal systems only</footer>
+      <footer className="login-page-footer">
+        Developed By <strong>Soumyajit Pal</strong><span>•</span>Quality Assurance Department - IT
+      </footer>
     </main>
   )
 }

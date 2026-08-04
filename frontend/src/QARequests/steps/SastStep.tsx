@@ -1,12 +1,9 @@
 import React from "react";
 import { Field, RepeatableGroupInput } from "../../components/Common";
-import {
-  PRIORITIES,
-  RISK_RATINGS,
-  DEFAULT_SAST_CHECKLIST_ITEMS,
-} from "../../constants";
+import { PRIORITIES, RISK_RATINGS } from "../../constants";
 import { QARequestForm, SetField, SAST_COMPONENT_FIELDS } from "../types";
 import { ChecklistEvidencePicker, EvidenceKind } from "./ChecklistEvidencePicker";
+import { useChecklistTemplate } from "./useChecklistTemplate";
 
 interface Props {
   form: QARequestForm;
@@ -23,6 +20,8 @@ interface Props {
 // auto-created SAST request's repository details and its own Security
 // Readiness checklist self-declaration, up front.
 export function SastStep({ form, set, existingSast, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
+  const { items: checklistItems, loading: checklistLoading } = useChecklistTemplate("SAST");
+
   function toggleChecked(item: string) {
     set(
       "sast_checked_items",
@@ -101,7 +100,8 @@ export function SastStep({ form, set, existingSast, draftRequestId, evidenceFile
             once raised). Items marked "mandatory" must be ticked before the
             SAST request can be submitted for SM Approval.
           </p>
-          {DEFAULT_SAST_CHECKLIST_ITEMS.map((ci, itemIndex) => {
+          {checklistLoading && <p className="muted small">Loading checklist...</p>}
+          {checklistItems.map((ci, itemIndex) => {
             const checked = form.sast_checked_items.includes(ci.item);
             return (
               <div
@@ -116,7 +116,7 @@ export function SastStep({ form, set, existingSast, draftRequestId, evidenceFile
                 <label style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
                   <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
                   <span>
-                    {ci.item} <span className="muted small">({ci.owner})</span>{" "}
+                    {ci.item} <span className="muted small">({ci.detail})</span>{" "}
                     {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
                   </span>
                 </label>

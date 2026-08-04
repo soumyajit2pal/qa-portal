@@ -18,6 +18,11 @@ export interface UserOut {
   // their own department via the department-selection popup (see
   // components/DepartmentPrompt.tsx, PATCH /api/auth/me).
   needs_department_selection: boolean
+  // System-Admin-only flag (see backend models.User.admin_managed_only) --
+  // when true, this user is hidden from Department Admin / Executive COE
+  // rosters (DepartmentAdmin.tsx) and only a System Admin (Admin.tsx) can
+  // reassign their role(s) or activate/deactivate them.
+  admin_managed_only: boolean
 }
 
 export interface AuditLogOut {
@@ -62,6 +67,18 @@ export interface DepartmentOut {
   id: number
   name: string
   is_active: boolean
+}
+
+// ---------------- Configurable Readiness Checklists ----------------
+// See backend models.ChecklistTemplateItem / checklist_config.py.
+export interface ChecklistTemplateItemOut {
+  id: number
+  module: string
+  item: string
+  detail?: string | null
+  is_mandatory: boolean
+  sort_order: number
+  active: boolean
 }
 
 // ---------------- Application Name Master ----------------
@@ -150,7 +167,8 @@ export type RequestDocumentOut = QARequestDocumentOut
 // Testing/UAT Support bucket's own full lifecycle).
 export interface QARequestOut {
   id: number
-  request_id: string
+  // Only assigned once this gateway is actually raised -- null while Draft.
+  request_id?: string | null
   request_date?: string | null
   department?: string | null
   application_name: string
@@ -693,6 +711,34 @@ export interface TestCycleOut {
   created_at: string
 }
 
+// One immutable historical attempt -- see backend models.TestExecutionRun.
+export interface TestRunDefectOut {
+  id: number
+  run_id: number
+  defect_key: string
+  defect_url?: string | null
+  title?: string | null
+  defect_status?: string | null
+  notes?: string | null
+  linked_by_id?: number | null
+  linked_by_name?: string | null
+  created_at: string
+}
+
+export interface TestExecutionRunOut {
+  id: number
+  execution_id: number
+  attempt_no: number
+  status: string
+  actual_result?: string | null
+  test_run_artifacts?: string | null
+  defect_id?: string | null
+  executed_by_id?: number | null
+  executed_by_name?: string | null
+  executed_at?: string | null
+  defects: TestRunDefectOut[]
+}
+
 export interface TestExecutionOut {
   id: number
   cycle_id: number
@@ -702,7 +748,17 @@ export interface TestExecutionOut {
   actual_result?: string | null
   test_run_artifacts?: string | null
   defect_id?: string | null
+  assigned_to_id?: number | null
+  assigned_to_name?: string | null
+  assigned_by_id?: number | null
+  assigned_by_name?: string | null
+  assigned_at?: string | null
   executed_by_id?: number | null
+  executed_by_name?: string | null
   executed_at?: string | null
+  run_count: number
   created_at: string
+  // Full attempt-by-attempt history, oldest first. These columns above
+  // always mirror runs[runs.length - 1] once at least one attempt exists.
+  runs?: TestExecutionRunOut[]
 }

@@ -1,8 +1,9 @@
 import React from 'react'
 import { Field, RepeatableRows } from '../../components/Common'
-import { PRIORITIES, RISK_RATINGS, ENVIRONMENTS, DEFAULT_DAST_CHECKLIST_ITEMS } from '../../constants'
+import { PRIORITIES, RISK_RATINGS, POST_SIT_ENVIRONMENTS } from '../../constants'
 import { QARequestForm, SetField, blankDastComponent } from '../types'
 import { ChecklistEvidencePicker, EvidenceKind } from './ChecklistEvidencePicker'
+import { useChecklistTemplate } from './useChecklistTemplate'
 
 interface Props {
   form: QARequestForm
@@ -19,6 +20,8 @@ interface Props {
 // auto-created DAST request's target details and its own Security
 // Readiness checklist self-declaration, up front.
 export function DastStep({ form, set, existingDast, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
+  const { items: checklistItems, loading: checklistLoading } = useChecklistTemplate('DAST')
+
   function toggleChecked(item: string) {
     set(
       'dast_checked_items',
@@ -71,13 +74,16 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
                     onChange={(e) => setField('application_url', e.target.value)}
                     style={{ flex: 2, minWidth: 180 }}
                   />
+                  {/* DAST is never run against Dev or SIT -- restricted to
+                      POST_SIT_ENVIRONMENTS with no blank option, so this
+                      always carries a real, valid value (defaults to 'UAT',
+                      see blankDastComponent). */}
                   <select
                     value={row.environment}
                     onChange={(e) => setField('environment', e.target.value)}
                     style={{ flex: 1, minWidth: 130 }}
                   >
-                    <option value="">Select Environment (defaults to Deployment Environment)</option>
-                    {ENVIRONMENTS.map((o) => <option key={o} value={o}>{o}</option>)}
+                    {POST_SIT_ENVIRONMENTS.map((o) => <option key={o} value={o}>{o}</option>)}
                   </select>
                   <label style={{ display: 'flex', gap: 6, alignItems: 'center', flex: '0 0 auto' }}>
                     <input
@@ -112,14 +118,15 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
             linked DAST request, once raised). Items marked "mandatory" must be ticked before the
             DAST request can be submitted for SM Approval.
           </p>
-          {DEFAULT_DAST_CHECKLIST_ITEMS.map((ci, itemIndex) => {
+          {checklistLoading && <p className="muted small">Loading checklist...</p>}
+          {checklistItems.map((ci, itemIndex) => {
             const checked = form.dast_checked_items.includes(ci.item)
             return (
               <div key={ci.item} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
                 <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
                   <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
                   <span>
-                    {ci.item} <span className="muted small">({ci.owner})</span>{' '}
+                    {ci.item} <span className="muted small">({ci.detail})</span>{' '}
                     {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
                   </span>
                 </label>

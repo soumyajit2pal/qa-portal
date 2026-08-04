@@ -45,7 +45,7 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
     {
       label: 'Overview',
       items: [
-        { to: '/', label: 'Command Centre', icon: IconGrid },
+        { to: '/', label: 'Dashboard', icon: IconGrid },
       ],
     },
     {
@@ -101,6 +101,7 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
   const adminItems: NavItem[] = []
   if (hasRole(user, 'ADMIN')) {
     adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers, count: counts.pendingReview })
+    adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
   }
   if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')) {
     adminItems.push({ to: '/department-admin', label: 'Department Admin', icon: IconUsers })
@@ -121,14 +122,19 @@ function isOpenSecurityStatus(status: string): boolean {
 
 // Maps each request type's own ID prefix (see models.py's gen_id calls) to
 // the module that owns it, for the topbar search box (submitSearch below).
-// TQA-FUNC/TQA-SAST/TQA-DAST/TQA-PERF/TQA-REQ all share the "TQA-" namespace
-// but diverge right after it, so none is a prefix of another -- order doesn't
-// matter among them, only that each full prefix string is checked.
+// Every new business ID shares the TQA namespace and has a module segment.
+// Legacy Suppression/Sign-off aliases remain searchable for records created
+// before the standardized ID convention was introduced.
 const ID_PREFIX_ROUTES: { prefix: string; path: string }[] = [
   { prefix: 'TQA-FUNC', path: '/functional-requests' },
   { prefix: 'TQA-SAST', path: '/sast' },
   { prefix: 'TQA-DAST', path: '/dast' },
   { prefix: 'TQA-PERF', path: '/performance' },
+  { prefix: 'TQA-SUP', path: '/suppression' },
+  { prefix: 'TQA-SIGN', path: '/signoff' },
+  { prefix: 'TQA-PROJ', path: '/test-projects' },
+  { prefix: 'TQA-TC', path: '/test-repository' },
+  { prefix: 'TQA-CYCLE', path: '/test-execution' },
   { prefix: 'SUP', path: '/suppression' },
   { prefix: 'QA-CERT', path: '/signoff' },
 ]
@@ -306,10 +312,10 @@ export default function Layout({ children }: { children?: ReactNode }) {
       <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">
-          <div className="logo-mark">Q</div>
+          <span className="bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
           <div className="brand-copy">
             <h1>QualityHub</h1>
-            <p>Enterprise QA Portal</p>
+            <p>Bank of Maharashtra · QA Portal</p>
           </div>
           <button className="sidebar-collapse-control" onClick={toggleSidebarSize} aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'} title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>
             {sidebarCollapsed ? '›' : '‹'}
@@ -350,6 +356,11 @@ export default function Layout({ children }: { children?: ReactNode }) {
               <div className="title">Governed workspace</div>
               <div className="desc">Actions and approvals are audit logged.</div>
             </div>
+          </div>
+          <div className="portal-credit">
+            <span>Developed by</span>
+            <strong>Soumyajit Pal</strong>
+            <small>Quality Assurance Department - IT</small>
           </div>
           {user && (
             <div className="user-chip">

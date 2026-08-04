@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
+import SearchableSelect from '../../components/SearchableSelect'
 import { hasRole } from '../../constants'
 import { ApplicationMasterOut, TestProjectOut, TestCaseOut, TestCycleOut, ApprovalActionOut } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
@@ -57,10 +58,17 @@ function NewProjectModal({ applications, onClose, onCreated }: {
     <Modal title="New Test Project" onClose={onClose}>
       <form onSubmit={submit}>
         <Field label="Application (optional -- links this Project to an approved application)">
-          <select value={applicationId} onChange={(e) => pickApplication(e.target.value)}>
-            <option value="">-- Not linked --</option>
-            {applications.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+          {/* Searchable -- same growing-list case as Application Name in the
+              QA Request wizard (this reuses that same approved-name list). */}
+          <SearchableSelect
+            value={applicationId === '' ? '' : String(applicationId)}
+            onChange={pickApplication}
+            placeholder="-- Not linked --"
+            options={[
+              { value: '', label: '-- Not linked --' },
+              ...applications.map((a) => ({ value: String(a.id), label: a.name })),
+            ]}
+          />
         </Field>
         <Field label="Project Name *">
           <input required value={name} onChange={(e) => setName(e.target.value)} />

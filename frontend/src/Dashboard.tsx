@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from './api'
 import { useAuth } from './context/AuthContext'
 import { Card, MetricCard, BarChart, Table, Badge, ErrorText, TableColumn } from './components/Common'
+import SearchableSelect from './components/SearchableSelect'
 import {
   IconGrid, IconWarning, IconApprove, IconWorkflow, IconCheckCircle,
 } from './components/Icons'
@@ -32,11 +33,14 @@ interface UnifiedRequestRow {
 }
 
 function toUnified(type: string, rows: {
-  id: number; request_id: string; application_name?: string | null
+  id: number; request_id?: string | null; application_name?: string | null
   department?: string | null; status: string; requester_id?: number | null; created_at: string
 }[]): UnifiedRequestRow[] {
   return rows.map((r) => ({
-    id: r.id, request_id: r.request_id, type, application_name: r.application_name || '—',
+    // A still-Draft QA Request gateway has no request_id yet -- see the
+    // backend's matching column comment -- so fall back to a stable
+    // placeholder rather than showing a blank/undefined cell here.
+    id: r.id, request_id: r.request_id || `Draft #${r.id}`, type, application_name: r.application_name || '—',
     department: r.department, status: r.status, requester_id: r.requester_id, created_at: r.created_at,
   }))
 }
@@ -449,7 +453,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
       <div className="dashboard-brief">
         <div>
           <span className="dashboard-brief-kicker">Enterprise quality overview</span>
-          <h2>Release governance command centre</h2>
+          <h2>Release governance Dashboard</h2>
           <p>Live visibility across testing, security, approvals, sign-offs, and audit readiness.</p>
         </div>
         <div className="dashboard-brief-meta">
@@ -525,10 +529,12 @@ function CommandCentre({ range }: { range: RaisedRange }) {
                 </div>
                 <div className="spacer" />
                 <input className="governance-search" value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} placeholder="Search project, application, owner…" aria-label="Search pending items" />
-                <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
-                  <option value="">All teams</option>
-                  {teams.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
+                <SearchableSelect
+                  value={teamFilter}
+                  onChange={setTeamFilter}
+                  style={{ minWidth: 160 }}
+                  options={[{ value: '', label: 'All teams' }, ...teams.map((t) => ({ value: t, label: t }))]}
+                />
                 <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}>
                   <option value="">All priorities</option>
                   {priorities.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -557,7 +563,12 @@ function CommandCentre({ range }: { range: RaisedRange }) {
           <div style={{ marginTop: 12 }}>
             <div className="governance-filter-strip">
               <input value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} placeholder="Search project, application, owner…" />
-              <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}><option value="">All teams</option>{teams.map((t) => <option key={t}>{t}</option>)}</select>
+              <SearchableSelect
+                value={teamFilter}
+                onChange={setTeamFilter}
+                style={{ minWidth: 160 }}
+                options={[{ value: '', label: 'All teams' }, ...teams.map((t) => ({ value: t, label: t }))]}
+              />
               <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}><option value="">All priorities</option>{priorities.map((p) => <option key={p}>{p}</option>)}</select>
               <span>{visibleItems.length} result{visibleItems.length !== 1 ? 's' : ''}</span>
             </div>
@@ -739,7 +750,7 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
   )
 }
 
-// Own dedicated tab (not a card mixed into Command Centre) so the main
+// Own dedicated tab (not a card mixed into Dashboard) so the main
 // dashboard always shows the whole portal's data, and this personal/
 // department-scoped view is a deliberate, separate destination instead of
 // something narrowing the default landing view. Fetches its own copy of the
@@ -996,7 +1007,7 @@ export default function Dashboard() {
   ))
 
   const tabs = [
-    { key: 'command', label: 'Command Centre' },
+    { key: 'command', label: 'Dashboard' },
     ...(hideRequestsTab ? [] : [{ key: 'my-requests', label: 'Requests' }]),
     { key: 'security', label: 'Security (SAST/DAST)' },
     { key: 'suppression', label: 'Suppression' },

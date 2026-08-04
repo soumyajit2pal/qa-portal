@@ -23,22 +23,32 @@ def now():
     return datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
 
 
-# Reported directly: IDs must read "{PREFIX}-{YYYYMMDD}-{n}", e.g.
-# "TQA-FUNC-20260801-1", with n a small sequential counter that starts back
-# at 1 each day for that prefix (so it stays a short, rememberable number
-# instead of growing forever). Oracle's native SEQUENCE object has no daily
-# reset, so a small counter table (IdCounter, one row per prefix+date) plus a
-# single atomic MERGE statement (_claim_daily_seq below) does the counting
-# instead -- the MERGE takes a row lock on that prefix+date's counter row, so
-# two concurrent requests for the same prefix on the same day serialize
-# correctly and never hand out the same number twice. Every app-generated
-# business ID (the human-facing string field -- request_id/suppression_id/
-# certificate_id/project_key/cycle_key/test_case_key -- as opposed to the
-# internal numeric `id` PK) uses this scheme. Existing legacy-format IDs
-# already in the database are left as-is (no backfill/rename) -- old formats
-# (a random-hex suffix, or a bare "{PREFIX}-{n}" from an earlier revision of
-# this scheme) remain distinguishable from the current format by hyphen
-# count/shape, so old and new formats coexist indefinitely.
+# Every system-generated, user-facing business ID uses one consistent shape:
+# "TQA-{MODULE}-{NN}", for example TQA-FUNC-01, TQA-FUNC-02 and
+# TQA-SAST-01. Counters are independent per module and never reset. `02` is
+# a minimum width rather than a hard limit, so item 100 becomes `...-100`.
+#
+# Oracle-safe concurrency continues to use qap_id_counters. Its historical
+# `counter_date` key is retained to avoid a destructive table migration, but
+# all new-format counters use one fixed lifetime scope date. Existing dated
+# counter rows and already-issued business IDs remain untouched for audit and
+# deep-link stability; new-format numbering starts at 01 for each prefix.
+BUSINESS_ID_PREFIXES = {
+    "QA_REQUEST": "TQA-REQ",
+    "FUNCTIONAL": "TQA-FUNC",
+    "SAST": "TQA-SAST",
+    "DAST": "TQA-DAST",
+    "PERFORMANCE": "TQA-PERF",
+    "SUPPRESSION": "TQA-SUP",
+    "SIGNOFF": "TQA-SIGN",
+    "TEST_PROJECT": "TQA-PROJ",
+    "TEST_CYCLE": "TQA-CYCLE",
+    "TEST_CASE": "TQA-TC",
+}
+_BUSINESS_ID_PREFIX_SET = frozenset(BUSINESS_ID_PREFIXES.values())
+_LIFETIME_COUNTER_SCOPE = datetime.date(1900, 1, 1)
+
+
 class IdCounter(Base):
     __tablename__ = "qap_id_counters"
     prefix = Column(String(20), primary_key=True)
@@ -46,20 +56,13 @@ class IdCounter(Base):
     next_value = Column(Integer, nullable=False)
 
 
-def _ist_today() -> datetime.date:
-    return now().date()
-
-
-def _claim_daily_seq(prefix, executable, ist_date) -> int:
+def _claim_business_seq(prefix, executable) -> int:
     """`executable` is anything exposing .execute(text(...)) -- a raw
     Connection (from a Column default's ExecutionContext, see
     gen_id_default below) or an ORM Session (when called directly from
-    router code, e.g. routers/test_repository.py's manual gen_id("TC", db)
-    calls). The MERGE is a single atomic statement: Oracle locks the target
-    row (inserting it first if this is the first ID of the day for this
-    prefix) so a concurrent MERGE against the same prefix+date blocks until
-    this transaction commits, then sees the updated value -- no separate
-    read-then-write race window."""
+    router code). The fixed scope means the per-prefix number never resets."""
+    if prefix not in _BUSINESS_ID_PREFIX_SET:
+        raise ValueError(f"Unsupported business ID prefix: {prefix}")
     executable.execute(
         text(
             "MERGE INTO qap_id_counters t "
@@ -69,25 +72,24 @@ def _claim_daily_seq(prefix, executable, ist_date) -> int:
             "WHEN NOT MATCHED THEN INSERT (prefix, counter_date, next_value) "
             "VALUES (s.prefix, s.counter_date, 1)"
         ),
-        {"prefix": prefix, "cdate": ist_date},
+        {"prefix": prefix, "cdate": _LIFETIME_COUNTER_SCOPE},
     )
     return executable.execute(
         text("SELECT next_value FROM qap_id_counters WHERE prefix = :prefix AND counter_date = :cdate"),
-        {"prefix": prefix, "cdate": ist_date},
+        {"prefix": prefix, "cdate": _LIFETIME_COUNTER_SCOPE},
     ).scalar()
 
 
 def gen_id(prefix, db):
     """Call directly with the active Session when a business ID is needed
     outside of a Column default (e.g. routers/test_repository.py, where a
-    Test Case's key is only generated if the user left it blank). For
+    Test Case's key is generated explicitly by its router). For
     Column-level defaults, use gen_id_default below instead -- a plain 0-arg
     callable has no access to the live connection Oracle needs for the
     MERGE, only the ExecutionContext SQLAlchemy hands a 1-arg default at
     flush time."""
-    ist_date = _ist_today()
-    n = _claim_daily_seq(prefix, db, ist_date)
-    return f"{prefix}-{ist_date:%Y%m%d}-{n}"
+    n = _claim_business_seq(prefix, db)
+    return f"{prefix}-{n:02d}"
 
 
 def gen_id_default(prefix):
@@ -96,9 +98,8 @@ def gen_id_default(prefix):
     1-argument signature and supplies the ExecutionContext automatically at
     flush/insert time, whose .connection is used to run the MERGE."""
     def _default(context):
-        ist_date = _ist_today()
-        n = _claim_daily_seq(prefix, context.connection, ist_date)
-        return f"{prefix}-{ist_date:%Y%m%d}-{n}"
+        n = _claim_business_seq(prefix, context.connection)
+        return f"{prefix}-{n:02d}"
     return _default
 
 
@@ -128,6 +129,19 @@ class User(Base):
     # do. Unlike needs_role_review, this is never cleared by an admin action
     # -- only the user's own self-service pick resolves it.
     needs_department_selection = Column(Boolean, default=False)
+    # Set by a System Admin only (PATCH /api/auth/users/{id} -- Admin.tsx's
+    # "Users & Access" page; never exposed on the narrower local-admin
+    # endpoints below). When True, this user is hidden from every Department
+    # Head / Executive COE's local-admin roster (see
+    # routers/auth.py::list_local_admin_users) and can't be targeted by
+    # PATCH /api/auth/local-admin/users/{id} even by ID (see
+    # _require_own_department_target) -- same treatment "ADMIN" accounts
+    # already get there, just opt-in per user rather than tied to a role.
+    # Intended for people a department head shouldn't be able to reassign or
+    # deactivate even though they're mapped to that department (e.g. a
+    # sensitive or cross-functional account) -- only a System Admin can
+    # change their role(s) or active status from here on.
+    admin_managed_only = Column(Boolean, default=False)
     created_at = Column(DateTime, default=now)
 
     qa_requests = relationship("QARequest", back_populates="requester", foreign_keys="QARequest.requester_id")
@@ -260,7 +274,17 @@ class QARequest(Base):
     """
     __tablename__ = "qap_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-REQ"))
+    # Deliberately NOT gen_id_default -- unlike every other business ID in
+    # this app, this one is not assigned at row-creation time. A QA Request
+    # starts life as a Draft (pure scratch work, see status below) and is
+    # commonly cancelled before ever being raised; burning a real
+    # TQA-REQ-NN number on every Draft (including ones that are
+    # immediately cancelled) would leave the sequence full of gaps for
+    # nothing. Stays NULL while Draft; assigned exactly once, by
+    # routers/qa_requests.py::submit_request, the moment it's actually
+    # raised. Oracle's UNIQUE constraint permits any number of NULLs, so
+    # multiple concurrent Drafts are never blocked by this.
+    request_id = Column(String(40), unique=True, nullable=True)
     request_date = Column(Date, default=lambda: datetime.date.today())
     department = Column(String(150))
     application_name = Column(String(150), nullable=False)
@@ -422,7 +446,7 @@ class FunctionalRequest(Base):
     underlying change."""
     __tablename__ = "qap_functional_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-FUNC"))
+    request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["FUNCTIONAL"]))
     status = Column(String(32), default=QAStatus.DRAFT, index=True)
     # Set (independently of `status`) when the QA Lead fails Readiness
     # Verification with "require re-approval" ticked. `status` is always set
@@ -599,7 +623,7 @@ class WalkthroughSession(Base):
 class SASTRequest(Base):
     __tablename__ = "qap_sast_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-SAST"))
+    request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["SAST"]))
     application_name = Column(String(150), nullable=False)
     epic_number = Column(String(150))
     cr_number = Column(String(64))
@@ -793,7 +817,7 @@ class SASTWalkthrough(Base):
 class DASTRequest(Base):
     __tablename__ = "qap_dast_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-DAST"))
+    request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["DAST"]))
     risk_category = Column(String(16))
     # See SASTRequest.priority for the full reasoning.
     priority = Column(String(16))
@@ -990,7 +1014,7 @@ class PerformanceRequest(Base):
     pre-testing readiness checklist."""
     __tablename__ = "qap_performance_requests"
     id = pk_column()
-    request_id = Column(String(40), unique=True, default=gen_id_default("TQA-PERF"))
+    request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["PERFORMANCE"]))
     application_name = Column(String(150), nullable=False)
     epic_number = Column(String(150))
     cr_number = Column(String(64))
@@ -1084,6 +1108,54 @@ class PerformanceChecklistItem(Base):
     performance_request = relationship("PerformanceRequest", back_populates="checklist_items")
 
 
+class ChecklistTemplateItem(Base):
+    """Admin-configurable checklist item definition -- the live source of
+    truth every new Functional/SAST/DAST/Performance request's own readiness
+    checklist (ReadinessChecklistItem/SASTChecklistItem/DASTChecklistItem/
+    PerformanceChecklistItem above) is seeded from (see
+    checklist_config.get_template_items and
+    routers/qa_requests.py::_sync_linked_child_requests, which read active
+    rows here ordered by sort_order instead of the old hardcoded
+    constants.DEFAULT_*_CHECKLIST_ITEMS python lists).
+
+    Reported directly: "I want to make configurable readiness checklist,
+    whatever I mention on that configuration will automatically behave like
+    that -- if I make any checklist item mandatory, that will be mandatory."
+    Editing this table (Admin > Readiness Checklist Configuration, see
+    routers/checklist_config.py) only ever affects requests raised from that
+    point forward -- a request already in flight keeps its own already-seeded
+    checklist item rows untouched (they were copied at seed time, they don't
+    reference this table), so changing a definition here can never silently
+    alter what's already in progress somewhere else.
+
+    constants.DEFAULT_*_CHECKLIST_ITEMS remain in the codebase as this
+    table's shipped defaults -- used to bootstrap it the first time a module
+    is read with zero rows (see checklist_config.get_template_items), and
+    offered back to an Admin as a one-click "Restore Defaults" action."""
+    __tablename__ = "qap_checklist_template_items"
+    id = pk_column()
+    # One of checklist_config.CHECKLIST_MODULES: "FUNCTIONAL", "SAST", "DAST",
+    # "PERFORMANCE". Plain string column (not a FK/enum table) -- same
+    # convention as every other "kind"/"module" discriminator column already
+    # in this app (e.g. RequestDocument.module).
+    module = Column(String(20), nullable=False)
+    item = Column(String(255), nullable=False)
+    # "Owner" for Functional/SAST/DAST, "Data Required from Department" for
+    # Performance (Annexure VIII) -- one shared free-text column, labeled
+    # differently per module by the frontend rather than two near-duplicate
+    # nullable columns for what is, functionally, the same "extra context per
+    # row" field.
+    detail = Column(String(255))
+    is_mandatory = Column(Boolean, default=False)
+    sort_order = Column(Integer, default=0)
+    # Soft-disable rather than hard delete -- keeps this row's history (and
+    # any audit trail that might reference its text) intact, and makes
+    # "oops, put that back" a one-click toggle instead of re-typing it.
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
 class PerformanceWalkthrough(Base):
     """Walkthrough session log for a Performance Testing Request -- own
     dedicated table, mirroring WalkthroughSession (Functional Testing's)."""
@@ -1108,7 +1180,7 @@ class PerformanceWalkthrough(Base):
 class SuppressionRequest(Base):
     __tablename__ = "qap_suppression_requests"
     id = pk_column()
-    suppression_id = Column(String(40), unique=True, default=gen_id_default("SUP"))
+    suppression_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["SUPPRESSION"]))
     application_name = Column(String(150), nullable=False)
     scan_type = Column(String(16))     # SAST / DAST
     # Auto-populated (at creation time, from whichever SAST/DAST request the
@@ -1157,7 +1229,7 @@ class SuppressionRequest(Base):
     @property
     def linked_request(self):
         """Whichever of sast_request/dast_request is actually set, matching
-        scan_type -- lets the UI show the raw SAST-xxxx/DAST-xxxx Request ID
+        scan_type -- lets the UI show the raw TQA-SAST-NN/TQA-DAST-NN Request ID
         this suppression was raised against (see schemas.LinkedRequestRef),
         the same way SAST/DAST/Functional/Performance already show their own
         linked QA Request."""
@@ -1300,7 +1372,7 @@ class RequestDocument(Base):
 class QASignOff(Base):
     __tablename__ = "qap_signoffs"
     id = pk_column()
-    certificate_id = Column(String(40), unique=True, default=gen_id_default("QA-CERT"))
+    certificate_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["SIGNOFF"]))
     certificate_date = Column(Date, default=lambda: datetime.date.today())
     certificate_type = Column(String(32))
     testing_type = Column(String(16))
@@ -1368,7 +1440,7 @@ class QASignOff(Base):
 class TestProject(Base):
     __tablename__ = "qap_test_projects"
     id = pk_column()
-    project_key = Column(String(40), unique=True, default=gen_id_default("TPROJ"))
+    project_key = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["TEST_PROJECT"]))
     name = Column(String(150), nullable=False)
     application_master_id = Column(Integer, ForeignKey("qap_application_master.id"), nullable=True)
     department = Column(String(150))
@@ -1487,7 +1559,7 @@ class TestCycle(Base):
     over time, each getting its own independent execution history."""
     __tablename__ = "qap_test_cycles"
     id = pk_column()
-    cycle_key = Column(String(40), unique=True, default=gen_id_default("CYCLE"))
+    cycle_key = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["TEST_CYCLE"]))
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
     name = Column(String(150), nullable=False)
     description = Column(Text)
@@ -1503,12 +1575,20 @@ class TestCycle(Base):
 
 
 class TestExecution(Base):
-    """One test case's result within one cycle. Created (status defaults to
-    Not Executed) the moment a test case is added to a cycle; updated in
-    place as it's actually run. Field names mirror the xlsx template's own
-    execution-time columns (Actual Result, Status, Test Run Artifacts,
-    Defect ID) so the same shape is used whether the result was typed in
-    the UI or came in via the Excel import."""
+    """One test case's *slot* within one cycle -- created (status defaults to
+    Not Executed) the moment a test case is added to a cycle. A case is very
+    often run more than once before it's genuinely done (e.g. Fail with
+    evidence attached, the defect gets fixed, then a Pass on retest), so this
+    row's own status/actual_result/test_run_artifacts/defect_id/
+    executed_by_id/executed_at are a denormalized mirror of the single most
+    recent attempt only -- kept so every existing list/filter/report that
+    reads these columns directly keeps working unchanged. The authoritative,
+    never-overwritten history of every attempt (including each attempt's own
+    attached evidence) lives on the child TestExecutionRun rows below -- see
+    routers/test_execution.py's _record_attempt/_migrate_legacy_result_if_needed.
+    Field names mirror the xlsx template's own execution-time columns
+    (Actual Result, Status, Test Run Artifacts, Defect ID) so the same shape
+    is used whether a result was typed in the UI or came in via Excel import."""
     __tablename__ = "qap_test_executions"
     __table_args__ = (UniqueConstraint("cycle_id", "test_case_id", name="uq_qap_test_exec_cycle_case"),)
     id = pk_column()
@@ -1518,10 +1598,95 @@ class TestExecution(Base):
     actual_result = Column(Text)
     test_run_artifacts = Column(String(255))
     defect_id = Column(String(60))
+    assigned_to_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    assigned_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    assigned_at = Column(DateTime, nullable=True)
     executed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     executed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=now)
 
     cycle = relationship("TestCycle", back_populates="executions")
     test_case = relationship("TestCase", back_populates="executions")
+    assigned_to = relationship("User", foreign_keys=[assigned_to_id])
+    assigned_by = relationship("User", foreign_keys=[assigned_by_id])
     executed_by = relationship("User", foreign_keys=[executed_by_id])
+    runs = relationship("TestExecutionRun", back_populates="execution",
+                         cascade="all,delete-orphan", order_by="TestExecutionRun.attempt_no")
+
+    @property
+    def assigned_to_name(self):
+        return self.assigned_to.full_name if self.assigned_to else None
+
+    @property
+    def assigned_by_name(self):
+        return self.assigned_by.full_name if self.assigned_by else None
+
+    @property
+    def executed_by_name(self):
+        return self.executed_by.full_name if self.executed_by else None
+
+    @property
+    def run_count(self):
+        return len(self.runs)
+
+
+class TestExecutionRun(Base):
+    """One concrete, immutable attempt at running a test case within a
+    cycle. Reported directly: the previous design overwrote TestExecution's
+    own result columns in place on every run, so a Fail (with its attached
+    evidence) was silently destroyed the moment a later retest was logged as
+    a Pass -- there was no way to see that the case had ever failed at all.
+    Every save now inserts a new row here instead (attempt_no 1, 2, 3, ...),
+    and TestExecution's own columns are updated to mirror only the newest
+    one. Each attempt's own screenshots are stored the same way as before
+    (models.RequestDocument, module "TEST_EXEC_IMAGE") but keyed by this
+    row's own id instead of the parent TestExecution's -- so attempt 1's
+    evidence and attempt 2's evidence never mix."""
+    __tablename__ = "qap_test_execution_runs"
+    __table_args__ = (UniqueConstraint("execution_id", "attempt_no", name="uq_qap_test_run_attempt"),)
+    id = pk_column()
+    execution_id = Column(Integer, ForeignKey("qap_test_executions.id"), nullable=False)
+    attempt_no = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False)
+    actual_result = Column(Text)
+    test_run_artifacts = Column(String(255))
+    defect_id = Column(String(60))
+    executed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    executed_at = Column(DateTime, default=now)
+
+    execution = relationship("TestExecution", back_populates="runs")
+    executed_by = relationship("User", foreign_keys=[executed_by_id])
+    defects = relationship("TestRunDefect", back_populates="run", cascade="all,delete-orphan",
+                           order_by="TestRunDefect.created_at")
+
+    @property
+    def executed_by_name(self):
+        return self.executed_by.full_name if self.executed_by else None
+
+
+class TestRunDefect(Base):
+    """A structured defect link owned by one concrete execution attempt.
+
+    One failed run may uncover several defects and the same testcase may link
+    different defects on later retests. This replaces the single free-text
+    defect_id field as the authoritative relationship; that legacy field is
+    retained only as the latest-run summary for compatibility.
+    """
+    __tablename__ = "qap_test_run_defects"
+    __table_args__ = (UniqueConstraint("run_id", "defect_key", name="uq_qap_run_defect_key"),)
+    id = pk_column()
+    run_id = Column(Integer, ForeignKey("qap_test_execution_runs.id"), nullable=False, index=True)
+    defect_key = Column(String(100), nullable=False)
+    defect_url = Column(String(500), nullable=True)
+    title = Column(String(255), nullable=True)
+    defect_status = Column(String(40), nullable=True)
+    notes = Column(Text, nullable=True)
+    linked_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    run = relationship("TestExecutionRun", back_populates="defects")
+    linked_by = relationship("User", foreign_keys=[linked_by_id])
+
+    @property
+    def linked_by_name(self):
+        return self.linked_by.full_name if self.linked_by else None

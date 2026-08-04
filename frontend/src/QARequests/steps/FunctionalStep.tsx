@@ -1,12 +1,9 @@
 import React from "react";
 import { Field } from "../../components/Common";
-import {
-  PRIORITIES,
-  RISK_RATINGS,
-  DEFAULT_CHECKLIST_ITEMS,
-} from "../../constants";
+import { PRIORITIES, RISK_RATINGS } from "../../constants";
 import { QARequestForm, SetField } from "../types";
 import { ChecklistEvidencePicker, EvidenceKind } from "./ChecklistEvidencePicker";
+import { useChecklistTemplate } from "./useChecklistTemplate";
 
 interface Props {
   form: QARequestForm;
@@ -24,6 +21,8 @@ interface Props {
 // one) to match how SAST/DAST already self-declare their own Security
 // Readiness checklist within their own step (see SastStep.tsx/DastStep.tsx).
 export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
+  const { items: checklistItems, loading: checklistLoading } = useChecklistTemplate("FUNCTIONAL");
+
   function toggleChecked(item: string) {
     set(
       "checked_items",
@@ -76,7 +75,8 @@ export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEv
         only — the QA Lead will independently verify every item during Readiness
         Verification (on the linked Functional Testing Request, once raised).
       </p>
-      {DEFAULT_CHECKLIST_ITEMS.map((ci, itemIndex) => {
+      {checklistLoading && <p className="muted small">Loading checklist...</p>}
+      {checklistItems.map((ci, itemIndex) => {
         const checked = form.checked_items.includes(ci.item);
         return (
           <div
@@ -91,7 +91,7 @@ export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEv
             <label style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
               <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
               <span>
-                {ci.item} <span className="muted small">({ci.owner})</span>
+                {ci.item} <span className="muted small">({ci.detail})</span>
                 {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
               </span>
             </label>
