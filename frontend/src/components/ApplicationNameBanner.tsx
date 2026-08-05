@@ -9,25 +9,7 @@ interface Props {
   applicationMasterStatus?: string | null
   applicationName?: string | null
   department?: string | null
-  // Reloads the parent request after a decision so application_master_status
-  // moves on (PENDING_APP_OWNER -> APPROVED, or -> REJECTED -- single-tier,
-  // 2026-08 v2, see models.ApplicationMaster's own docstring) and this
-  // banner disappears on its own. Receives the decision that was just made
-  // -- Rejected reverts the gateway straight back to Draft (see
-  // routers/applications.py::decide_app_owner_name), which the reviewer
-  // usually can no longer even view (Draft is requester/admin-only), so the
-  // parent needs to know WHICH decision just happened to react sensibly to
-  // that reload failing rather than silently leaving the modal stale.
   onDecided: (decision: 'Approved' | 'Rejected') => void
-  // Best-effort, honest resync used only when a decision attempt itself
-  // FAILED (see decide()'s catch branch below) -- unlike onDecided above,
-  // this makes no assumption that a decision was actually recorded, so it
-  // must never trigger the "rejected, returned to requester" notice. Its one
-  // job is to pick up whatever the real current state already is (most
-  // commonly: someone else in the same department decided this exact name a
-  // moment earlier, and the backend correctly 400s this second attempt) so
-  // stale, now-pointless Approve/Reject buttons don't keep sitting there
-  // waiting to fail again on retry.
   onRefresh: () => void
 }
 

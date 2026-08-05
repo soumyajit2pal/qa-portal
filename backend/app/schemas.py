@@ -237,6 +237,20 @@ class DraftChecklistEvidenceOut(RequestDocumentOut):
     item_index: int
 
 
+class ChecklistItemDocumentOut(RequestDocumentOut):
+    """Response shape for GET .../checklist/documents -- the batched
+    counterpart, once per request (Functional/SAST/DAST/Performance), to the
+    per-item list_*_checklist_documents endpoints below. ChecklistEvidence
+    (frontend/src/components/Common.tsx) renders one instance per readiness
+    checklist item on a raised request's detail page, and each independently
+    fired its own GET on mount -- reported directly via server logs showing
+    8 parallel .../checklist/{item_id}/documents calls for one Functional
+    request with 8 checklist items. `item_id` tags each row so the frontend
+    can regroup this one flat list back into its existing per-item buckets,
+    same idea as DraftChecklistEvidenceOut above for the pre-raise wizard."""
+    item_id: int
+
+
 class SASTComponentIn(BaseModel):
     """One repository row -- Repository URL/Branch/Commit ID/Tech Stack/Build
     Number all belong together (see RepeatableGroupInput on the SAST form and

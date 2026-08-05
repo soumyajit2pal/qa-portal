@@ -84,8 +84,19 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     results: List[dict] = []
     is_admin = user.has_role(Role.ADMIN)
 
-    def _gateway_path(app_id: int) -> str:
-        gw = (
+    # Reported directly: "Draft requests should not appear under Pending
+    # Approvals." A name only introduced by (or still attached to) a Draft
+    # gateway hasn't actually been Submitted/Raised yet -- there's nothing
+    # for an Application Owner to act on until then (see submit_request's
+    # PENDING_APP_OWNER-defers-child-creation branch), so it shouldn't show
+    # up as "awaiting approval" just because a requester saved a Draft with
+    # a brand-new name. Cancelled gateways are excluded the same way (never
+    # going anywhere either). One name can be reused across more than one
+    # separately-raised QA Request over time, so this looks for ANY such
+    # gateway, not just the one originally recorded on ApplicationMaster.
+    # qa_request_id (see _resolve_application_name).
+    def _active_gateway(app_id: int):
+        return (
             db.query(models.QARequest)
             .filter(
                 models.QARequest.application_master_id == app_id,
@@ -94,6 +105,8 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
             .order_by(models.QARequest.created_at.desc())
             .first()
         )
+
+    def _gateway_path(gw) -> str:
         if gw and gw.request_id:
             return f"/qa-requests?search={gw.request_id}"
         return "/qa-requests"
@@ -103,11 +116,14 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
         if not is_admin:
             q = q.filter(models.ApplicationMaster.department == user.department)
         for obj in q.order_by(models.ApplicationMaster.created_at).all():
+            gw = _active_gateway(obj.id)
+            if not gw:
+                continue
             results.append(_item(
                 "Application Name -- Application Owner Approval", "APPLICATION_MASTER", obj.id, None,
                 f"New Application Name: {obj.name}", obj.status,
                 APPLICATION_MASTER_STATUS_LABELS.get(obj.status, obj.status),
-                obj.department, _name(obj.requested_by), obj.created_at, _gateway_path(obj.id),
+                obj.department, _name(obj.requested_by), obj.created_at, _gateway_path(gw),
             ))
 
     if user.has_role(Role.SM):
@@ -115,11 +131,14 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
         if not is_admin:
             q = q.filter(models.ApplicationMaster.department == user.department)
         for obj in q.order_by(models.ApplicationMaster.created_at).all():
+            gw = _active_gateway(obj.id)
+            if not gw:
+                continue
             results.append(_item(
                 "Application Name -- SM Approval", "APPLICATION_MASTER", obj.id, None,
                 f"New Application Name: {obj.name}", obj.status,
                 APPLICATION_MASTER_STATUS_LABELS.get(obj.status, obj.status),
-                obj.department, _name(obj.requested_by), obj.created_at, _gateway_path(obj.id),
+                obj.department, _name(obj.requested_by), obj.created_at, _gateway_path(gw),
             ))
     return results
 

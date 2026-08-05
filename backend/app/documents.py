@@ -29,6 +29,23 @@ def list_documents(db: Session, module: str, request_id: int) -> List[models.Req
             .order_by(models.RequestDocument.uploaded_at).all())
 
 
+def list_documents_for_items(db: Session, module: str, item_ids: List[int]) -> List[models.RequestDocument]:
+    """Batched counterpart to list_documents above, for the "*_ITEM" modules
+    (FUNCTIONAL_ITEM/SAST_ITEM/DAST_ITEM/PERFORMANCE_ITEM) where request_id
+    actually stores a checklist item's own id, not the parent request's --
+    one query for every item's documents instead of one query per item, so
+    routes like GET .../checklist/documents can return everything a page
+    needs in a single round trip (see ChecklistItemDocumentOut). Caller is
+    responsible for grouping the flat result back out by .request_id
+    (== item id) since that's response-shape-specific."""
+    if not item_ids:
+        return []
+    return (db.query(models.RequestDocument)
+            .filter(models.RequestDocument.module == module,
+                    models.RequestDocument.request_id.in_(item_ids))
+            .order_by(models.RequestDocument.uploaded_at).all())
+
+
 def save_documents(db: Session, module: str, request_id: int, folder_name: str,
                     files: List[UploadFile], uploaded_by_id: int) -> List[models.RequestDocument]:
     """Accepts one or more files (multipart/form-data, field name 'files')

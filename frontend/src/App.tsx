@@ -1,9 +1,10 @@
 import React, { ReactNode, Suspense, lazy } from 'react'
-import { Routes, Route, Navigate, Link } from 'react-router-dom'
+import { Routes, Route, Navigate, Link, Outlet } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
 import DepartmentPrompt from './components/DepartmentPrompt'
 import PendingApprovalsNotice from './components/PendingApprovalsNotice'
+import { UserOut } from './types'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
 // gateway feeds every module, the Dashboard summarizes across all of
@@ -48,10 +49,13 @@ const TestProjects = lazy(() => import('./modules/test-management/TestProjects')
 const TestRepository = lazy(() => import('./modules/test-management/TestRepository'))
 const TestExecution = lazy(() => import('./modules/test-management/TestExecution'))
 
-function Protected({ children }: { children?: ReactNode }) {
-  const { user, loading } = useAuth()
-  if (loading) return <div style={{ padding: 40 }}>Loading...</div>
-  if (!user) return <Navigate to="/login" replace />
+// The chrome every signed-in page sits inside -- sidebar/topbar (Layout)
+// plus the two blocking pop-ups that can appear on top of any of them
+// (DepartmentPrompt, PendingApprovalsNotice). Factored out so both
+// ProtectedLayout (the normal nested-route case, below) and HelpRoute's
+// signed-in branch (still a one-off special case -- see its own comment)
+// render identically without duplicating this logic.
+function AuthenticatedChrome({ user, children }: { user: UserOut; children: ReactNode }) {
   return (
     <Layout>
       {children}
@@ -73,20 +77,51 @@ function Protected({ children }: { children?: ReactNode }) {
   )
 }
 
+// Reported directly (twice now): "there are lots of api calling, sometime
+// same api calling multiple time" -- traced (see ORACLE_MIGRATION_2026-07.md
+// section 185) to every protected route independently wrapping its OWN
+// `<Protected><Page /></Protected>` instance with no shared parent route --
+// so Layout (sidebar/topbar, and its pending-approvals badge fetch) actually
+// unmounted and remounted on every single navigation between pages, not just
+// re-ran an effect. Section 185 papered over the symptom with a short-lived
+// cache; THIS is the real fix: one pathless parent route
+// (`<Route element={<ProtectedLayout />}>`, a React Router v6 "layout
+// route") wrapping every protected page below it via `<Outlet/>`, so
+// `AuthenticatedChrome`/`Layout` mounts ONCE for the whole signed-in session
+// and only the `<Outlet/>` content swaps as you navigate between its child
+// routes -- the sidebar, topbar, and the badge fetch no longer tear down and
+// rebuild on every click. `/login` and `/help` stay outside this group
+// deliberately: `/login` must render with no chrome at all, and `/help` must
+// still work when signed OUT (see HelpRoute below, unchanged in shape from
+// before), which a route nested under an auth-gated parent could never do.
+function ProtectedLayout() {
+  const { user, loading } = useAuth()
+  if (loading) return <div style={{ padding: 40 }}>Loading...</div>
+  if (!user) return <Navigate to="/login" replace />
+  return (
+    <AuthenticatedChrome user={user}>
+      <Outlet />
+    </AuthenticatedChrome>
+  )
+}
+
 // Reported directly: "Help & user Manual should come on login page as well,
 // without login atleast user can read" -- Help.tsx is entirely static
 // content (no API calls, no auth-scoped data, see its own file), so there's
 // nothing that actually requires being signed in to view it. Routes to this
 // same /help path either way: signed-in users still get the normal
-// Protected/Layout experience (sidebar, DepartmentPrompt, pending-approvals
-// notice -- unchanged from before); a signed-out visitor instead gets
-// PublicHelp below, a minimal standalone shell (brand mark + a way back to
-// the login page) around the exact same <Help /> content, rather than a
-// second copy of the manual to keep in sync.
+// Layout/DepartmentPrompt/PendingApprovalsNotice chrome via
+// AuthenticatedChrome above (a deliberate one-off exception to "everything
+// protected lives under ProtectedLayout" -- /help itself must remain
+// reachable signed OUT, which a route nested under an auth-gated parent
+// could never be); a signed-out visitor instead gets PublicHelp below, a
+// minimal standalone shell (brand mark + a way back to the login page)
+// around the exact same <Help /> content, rather than a second copy of the
+// manual to keep in sync.
 function HelpRoute() {
   const { user, loading } = useAuth()
   if (loading) return <div style={{ padding: 40 }}>Loading...</div>
-  if (user) return <Protected><Help /></Protected>
+  if (user) return <AuthenticatedChrome user={user}><Help /></AuthenticatedChrome>
   return <PublicHelp />
 }
 
@@ -110,7 +145,7 @@ function PublicHelp() {
 
 // Fallback shown while a lazy-loaded module's chunk is still downloading
 // (typically instant on a warm cache, briefly visible on first visit to a
-// module or right after a fresh deploy) -- matches Protected's own
+// module or right after a fresh deploy) -- matches ProtectedLayout's own
 // plain-text loading state above rather than introducing a spinner
 // component just for this.
 function ModuleFallback() {
@@ -122,41 +157,46 @@ export default function App() {
     <Suspense fallback={<ModuleFallback />}>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/" element={<Protected><Dashboard /></Protected>} />
-        <Route path="/qa-requests" element={<Protected><QARequests /></Protected>} />
         <Route path="/help" element={<HelpRoute />} />
 
-        {/* Functional module. Each lazy route is wrapped in its own
-            ModuleBoundary instance (not one boundary around the whole
-            <Routes>) so a failed chunk load shows a clear, actionable
-            error for just that module instead of silently blanking the
-            entire app, and so navigating away from a failed module to a
-            working one gets a fresh boundary instead of a stuck error
-            screen. */}
-        <Route path="/functional-requests" element={<Protected><ModuleBoundary moduleName="Functional"><Functional /></ModuleBoundary></Protected>} />
+        {/* Every protected page below shares this one pathless layout route
+            -- see ProtectedLayout's own comment above for why. */}
+        <Route element={<ProtectedLayout />}>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/qa-requests" element={<QARequests />} />
 
-        {/* Security module */}
-        <Route path="/sast" element={<Protected><ModuleBoundary moduleName="Security"><SAST /></ModuleBoundary></Protected>} />
-        <Route path="/dast" element={<Protected><ModuleBoundary moduleName="Security"><DAST /></ModuleBoundary></Protected>} />
-        <Route path="/suppression" element={<Protected><ModuleBoundary moduleName="Security"><Suppression /></ModuleBoundary></Protected>} />
+          {/* Functional module. Each lazy route is wrapped in its own
+              ModuleBoundary instance (not one boundary around the whole
+              <Routes>) so a failed chunk load shows a clear, actionable
+              error for just that module instead of silently blanking the
+              entire app, and so navigating away from a failed module to a
+              working one gets a fresh boundary instead of a stuck error
+              screen. */}
+          <Route path="/functional-requests" element={<ModuleBoundary moduleName="Functional"><Functional /></ModuleBoundary>} />
 
-        {/* Specialised Testing module */}
-        <Route path="/performance" element={<Protected><ModuleBoundary moduleName="Specialised Testing"><Performance /></ModuleBoundary></Protected>} />
+          {/* Security module */}
+          <Route path="/sast" element={<ModuleBoundary moduleName="Security"><SAST /></ModuleBoundary>} />
+          <Route path="/dast" element={<ModuleBoundary moduleName="Security"><DAST /></ModuleBoundary>} />
+          <Route path="/suppression" element={<ModuleBoundary moduleName="Security"><Suppression /></ModuleBoundary>} />
 
-        {/* Governance module */}
-        <Route path="/signoff" element={<Protected><ModuleBoundary moduleName="Governance"><SignOff /></ModuleBoundary></Protected>} />
-        <Route path="/pending-approvals" element={<Protected><ModuleBoundary moduleName="Governance"><PendingApprovals /></ModuleBoundary></Protected>} />
-        <Route path="/approvals" element={<Protected><ModuleBoundary moduleName="Governance"><Approvals /></ModuleBoundary></Protected>} />
-        <Route path="/reports" element={<Protected><ModuleBoundary moduleName="Governance"><Reports /></ModuleBoundary></Protected>} />
-        <Route path="/admin" element={<Protected><ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary></Protected>} />
-        <Route path="/department-admin" element={<Protected><ModuleBoundary moduleName="Governance"><DepartmentAdmin /></ModuleBoundary></Protected>} />
-        <Route path="/audit-log" element={<Protected><ModuleBoundary moduleName="Governance"><AuditLog /></ModuleBoundary></Protected>} />
-        <Route path="/checklist-config" element={<Protected><ModuleBoundary moduleName="Governance"><ChecklistConfig /></ModuleBoundary></Protected>} />
+          {/* Specialised Testing module */}
+          <Route path="/performance" element={<ModuleBoundary moduleName="Specialised Testing"><Performance /></ModuleBoundary>} />
 
-        {/* Test Management module */}
-        <Route path="/test-projects" element={<Protected><ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary></Protected>} />
-        <Route path="/test-repository" element={<Protected><ModuleBoundary moduleName="Test Management"><TestRepository /></ModuleBoundary></Protected>} />
-        <Route path="/test-execution" element={<Protected><ModuleBoundary moduleName="Test Management"><TestExecution /></ModuleBoundary></Protected>} />
+          {/* Governance module */}
+          <Route path="/signoff" element={<ModuleBoundary moduleName="Governance"><SignOff /></ModuleBoundary>} />
+          <Route path="/pending-approvals" element={<ModuleBoundary moduleName="Governance"><PendingApprovals /></ModuleBoundary>} />
+          <Route path="/approvals" element={<ModuleBoundary moduleName="Governance"><Approvals /></ModuleBoundary>} />
+          <Route path="/reports" element={<ModuleBoundary moduleName="Governance"><Reports /></ModuleBoundary>} />
+          <Route path="/admin" element={<ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary>} />
+          <Route path="/department-admin" element={<ModuleBoundary moduleName="Governance"><DepartmentAdmin /></ModuleBoundary>} />
+          <Route path="/audit-log" element={<ModuleBoundary moduleName="Governance"><AuditLog /></ModuleBoundary>} />
+          <Route path="/checklist-config" element={<ModuleBoundary moduleName="Governance"><ChecklistConfig /></ModuleBoundary>} />
+
+          {/* Test Management module */}
+          <Route path="/test-projects" element={<ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary>} />
+          <Route path="/test-repository" element={<ModuleBoundary moduleName="Test Management"><TestRepository /></ModuleBoundary>} />
+          <Route path="/test-execution" element={<ModuleBoundary moduleName="Test Management"><TestExecution /></ModuleBoundary>} />
+        </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

@@ -335,17 +335,37 @@ function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
   )
 }
 
-function CommandCentre({ range }: { range: RaisedRange }) {
+// Reported directly: "lots of api calling, sometime same api calling
+// multiple time". requests/functionalRequests/sastRequests/dastRequests/
+// performanceRequests used to be fetched independently here AND again in
+// MyRequestsTab below -- since only one tab is ever mounted at a time
+// (see Dashboard's own tab switch), toggling between the "Dashboard" and
+// "Requests" tabs re-fetched all 5 full lists every single time. Lifted
+// to Dashboard itself instead (fetched once, passed down as props) so
+// switching tabs back and forth reuses the same data instead of
+// re-requesting it.
+function CommandCentre({ range, requests, functionalRequests, sastRequests, dastRequests, performanceRequests, requestsLoaded, requestsError }: {
+  range: RaisedRange
+  requests: QARequestOut[]
+  functionalRequests: FunctionalOut[]
+  sastRequests: SASTOut[]
+  dastRequests: DASTOut[]
+  performanceRequests: PerformanceOut[]
+  requestsLoaded: boolean
+  requestsError: unknown
+}) {
   const [proj, setProj] = useState<ProjectWiseOut | null>(null)
   const [threeW, setThreeW] = useState<ThreeWOut | null>(null)
-  const [requests, setRequests] = useState<QARequestOut[]>([])
-  const [functionalRequests, setFunctionalRequests] = useState<FunctionalOut[]>([])
-  const [sastRequests, setSastRequests] = useState<SASTOut[]>([])
-  const [dastRequests, setDastRequests] = useState<DASTOut[]>([])
-  const [performanceRequests, setPerformanceRequests] = useState<PerformanceOut[]>([])
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [govTab, setGovTab] = useState('Overview')
+  // Reported directly: "Dashboard is too much of details and tracker." The
+  // 3W governance card below is the densest thing on the default landing
+  // tab -- a tabbed chart/donut/filter-toolbar/table tracker -- so it now
+  // starts collapsed, showing only the card's own KPI strip (4 numbers) plus
+  // a toggle, instead of dumping the full tracker in front of every visitor
+  // by default. Nothing removed, just deferred behind one click.
+  const [govExpanded, setGovExpanded] = useState(false)
   const [teamFilter, setTeamFilter] = useState('')
   const [priorityFilter, setPriorityFilter] = useState('')
   const [ageingFilter, setAgeingFilter] = useState('')
@@ -356,18 +376,9 @@ function CommandCentre({ range }: { range: RaisedRange }) {
     Promise.all([
       api.get<ProjectWiseOut>(`/api/dashboard/project-wise${query}`),
       api.get<ThreeWOut>(`/api/dashboard/3w${query}`),
-      api.get<QARequestOut[]>('/api/qa-requests'),
-      api.get<FunctionalOut[]>('/api/functional-requests'),
       api.get<ApprovalActionOut[]>('/api/approvals'),
-      api.get<SASTOut[]>('/api/sast-requests'),
-      api.get<DASTOut[]>('/api/dast-requests'),
-      api.get<PerformanceOut[]>('/api/performance-requests'),
-    ]).then(([p, w, r, f, a, sast, dast, perf]) => {
-      // Kept as the full list (not pre-sliced to 6) so the Raised filter
-      // below has something to actually narrow down before RecentActivity
-      // takes its top-6 slice for display.
-      setProj(p); setThreeW(w); setRequests(r); setFunctionalRequests(f); setActivity(a)
-      setSastRequests(sast); setDastRequests(dast); setPerformanceRequests(perf)
+    ]).then(([p, w, a]) => {
+      setProj(p); setThreeW(w); setActivity(a)
     }).catch(setError)
   }, [range])
 
@@ -416,8 +427,8 @@ function CommandCentre({ range }: { range: RaisedRange }) {
 
   const activeRequestsCount = filteredUnifiedRequests.filter(isActiveRequest).length
 
-  if (error) return <ErrorText error={error} />
-  if (!proj || !threeW) return <p className="muted">Loading...</p>
+  if (error || requestsError) return <ErrorText error={error || requestsError} />
+  if (!proj || !threeW || !requestsLoaded) return <p className="muted">Loading...</p>
 
   const m = proj.metrics
   const slaWithin = threeW.items.filter((i) => i.ageing_days <= 7).length
@@ -487,10 +498,17 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         title="3W project governance"
         subtitle="What is pending, where it is pending, and since when."
         right={(
-          <div className="pill-tabs">
-            {['Overview', 'Projects', 'Ageing'].map((t) => (
-              <button key={t} className={govTab === t ? 'active' : ''} onClick={() => setGovTab(t)}>{t}</button>
-            ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {govExpanded && (
+              <div className="pill-tabs">
+                {['Overview', 'Projects', 'Ageing'].map((t) => (
+                  <button key={t} className={govTab === t ? 'active' : ''} onClick={() => setGovTab(t)}>{t}</button>
+                ))}
+              </div>
+            )}
+            <button type="button" className="btn btn-sm" onClick={() => setGovExpanded((v) => !v)}>
+              {govExpanded ? 'Hide details' : 'Show details'}
+            </button>
           </div>
         )}
       >
@@ -500,7 +518,13 @@ function CommandCentre({ range }: { range: RaisedRange }) {
           <div><small>Critical / high</small><strong className={highRiskPending ? 'warning' : ''}>{highRiskPending}</strong><span>Priority items requiring focus</span></div>
           <div><small>Owning teams</small><strong>{teams.length}</strong><span>Teams with pending work</span></div>
         </div>
-        {govTab === 'Overview' && (
+        {!govExpanded && (
+          <p className="muted small" style={{ margin: '10px 0 0' }}>
+            {threeW.total_pending} pending item{threeW.total_pending !== 1 ? 's' : ''} across {teams.length} team{teams.length !== 1 ? 's' : ''} --
+            click "Show details" for the breakdown, ageing, and full list.
+          </p>
+        )}
+        {govExpanded && govTab === 'Overview' && (
           <>
             <div className="grid grid-2 governance-chart-grid" style={{ marginTop: 12 }}>
               <div className="subpanel">
@@ -559,7 +583,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
           </>
         )}
 
-        {govTab === 'Projects' && (
+        {govExpanded && govTab === 'Projects' && (
           <div style={{ marginTop: 12 }}>
             <div className="governance-filter-strip">
               <ClearableSearchInput value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} onClear={() => setGovernanceSearch('')} clearLabel="Clear project search" wrapperClassName="search-grow" placeholder="Search project, application, owner…" />
@@ -585,7 +609,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
           </div>
         )}
 
-        {govTab === 'Ageing' && (
+        {govExpanded && govTab === 'Ageing' && (
           <div className="subpanel" style={{ marginTop: 12 }}>
             <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>
               All {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} (QA, SAST, DAST & Suppression,
@@ -748,35 +772,25 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
 // Own dedicated tab (not a card mixed into Dashboard) so the main
 // dashboard always shows the whole portal's data, and this personal/
 // department-scoped view is a deliberate, separate destination instead of
-// something narrowing the default landing view. Fetches its own copy of the
-// 6 request-type endpoints (same pattern as SecurityTab/SuppressionTab/
-// ThreeWTab each fetching independently) rather than sharing CommandCentre's
-// state, since only one of these tab components is ever mounted at a time.
-function MyRequestsTab({ range }: { range: RaisedRange }) {
+// something narrowing the default landing view. Reported directly: "lots
+// of api calling, sometime same api calling multiple time" -- this used to
+// fetch its own copy of the same 5 request-type endpoints CommandCentre
+// already fetches, refiring every time a visitor switched to this tab (and
+// again switching back and forth). Now takes them as props from Dashboard,
+// which fetches them once and shares them across whichever tab is mounted.
+function MyRequestsTab({ range, requests, functionalRequests, sastRequests, dastRequests, performanceRequests, loaded, error }: {
+  range: RaisedRange
+  requests: QARequestOut[]
+  functionalRequests: FunctionalOut[]
+  sastRequests: SASTOut[]
+  dastRequests: DASTOut[]
+  performanceRequests: PerformanceOut[]
+  loaded: boolean
+  error: unknown
+}) {
   const navigate = useNavigate()
   const { user } = useAuth()
-  const [requests, setRequests] = useState<QARequestOut[]>([])
-  const [functionalRequests, setFunctionalRequests] = useState<FunctionalOut[]>([])
-  const [sastRequests, setSastRequests] = useState<SASTOut[]>([])
-  const [dastRequests, setDastRequests] = useState<DASTOut[]>([])
-  const [performanceRequests, setPerformanceRequests] = useState<PerformanceOut[]>([])
-  const [error, setError] = useState<unknown>(null)
-  const [loaded, setLoaded] = useState(false)
   const [reqScope, setReqScope] = useState<'mine' | 'department'>('mine')
-
-  useEffect(() => {
-    Promise.all([
-      api.get<QARequestOut[]>('/api/qa-requests'),
-      api.get<FunctionalOut[]>('/api/functional-requests'),
-      api.get<SASTOut[]>('/api/sast-requests'),
-      api.get<DASTOut[]>('/api/dast-requests'),
-      api.get<PerformanceOut[]>('/api/performance-requests'),
-    ]).then(([r, f, sast, dast, perf]) => {
-      setRequests(r); setFunctionalRequests(f)
-      setSastRequests(sast); setDastRequests(dast); setPerformanceRequests(perf)
-      setLoaded(true)
-    }).catch(setError)
-  }, [])
 
   const unifiedRequests = useMemo<UnifiedRequestRow[]>(() => {
     const all = [
@@ -992,6 +1006,33 @@ export default function Dashboard() {
   const { user } = useAuth()
   const [tab, setTab] = useState('command')
   const range = DEFAULT_RAISED_RANGE
+
+  // Shared across CommandCentre and MyRequestsTab (see each of their own
+  // comments) -- fetched once here instead of separately by whichever tab
+  // happens to be mounted, so switching between "Dashboard" and "Requests"
+  // reuses the same data instead of re-fetching all 5 lists every time.
+  const [requests, setRequests] = useState<QARequestOut[]>([])
+  const [functionalRequests, setFunctionalRequests] = useState<FunctionalOut[]>([])
+  const [sastRequests, setSastRequests] = useState<SASTOut[]>([])
+  const [dastRequests, setDastRequests] = useState<DASTOut[]>([])
+  const [performanceRequests, setPerformanceRequests] = useState<PerformanceOut[]>([])
+  const [requestsLoaded, setRequestsLoaded] = useState(false)
+  const [requestsError, setRequestsError] = useState<unknown>(null)
+
+  useEffect(() => {
+    Promise.all([
+      api.get<QARequestOut[]>('/api/qa-requests'),
+      api.get<FunctionalOut[]>('/api/functional-requests'),
+      api.get<SASTOut[]>('/api/sast-requests'),
+      api.get<DASTOut[]>('/api/dast-requests'),
+      api.get<PerformanceOut[]>('/api/performance-requests'),
+    ]).then(([r, f, sast, dast, perf]) => {
+      setRequests(r); setFunctionalRequests(f)
+      setSastRequests(sast); setDastRequests(dast); setPerformanceRequests(perf)
+      setRequestsLoaded(true)
+    }).catch(setRequestsError)
+  }, [])
+
   const hideRequestsTab = !!user?.roles?.some((r) => REQUESTS_TAB_HIDDEN_ROLES.includes(r))
     && !user?.roles?.includes('ADMIN')
   // QA workload contains internal tester assignment information. This uses
@@ -1025,8 +1066,30 @@ export default function Dashboard() {
           <button key={t.key} className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}>{t.label}</button>
         ))}
       </div>
-      {tab === 'command' && <CommandCentre range={range} />}
-      {tab === 'my-requests' && !hideRequestsTab && <MyRequestsTab range={range} />}
+      {tab === 'command' && (
+        <CommandCentre
+          range={range}
+          requests={requests}
+          functionalRequests={functionalRequests}
+          sastRequests={sastRequests}
+          dastRequests={dastRequests}
+          performanceRequests={performanceRequests}
+          requestsLoaded={requestsLoaded}
+          requestsError={requestsError}
+        />
+      )}
+      {tab === 'my-requests' && !hideRequestsTab && (
+        <MyRequestsTab
+          range={range}
+          requests={requests}
+          functionalRequests={functionalRequests}
+          sastRequests={sastRequests}
+          dastRequests={dastRequests}
+          performanceRequests={performanceRequests}
+          loaded={requestsLoaded}
+          error={requestsError}
+        />
+      )}
       {tab === 'security' && <SecurityTab range={range} />}
       {tab === 'suppression' && <SuppressionTab range={range} />}
       {tab === '3w' && <ThreeWTab range={range} />}

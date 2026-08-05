@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, applicationNameAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
@@ -58,6 +58,7 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   )
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/sast-requests', editing.id)
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) { setForm((f) => ({ ...f, [k]: v })) }
   function toggleChecked(item: string) {
     setCheckedItems((items) => (items.includes(item) ? items.filter((i) => i !== item) : [...items, item]))
@@ -175,7 +176,9 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
                 {c.is_complete && <span className="badge badge-green">Verified</span>}
                 <ChecklistEvidence apiBase="/api/sast-requests" reqId={editing.id} itemId={c.id}
                   canManage={canManageReadinessEvidence(editing.status)}
-                  required={c.is_mandatory || c.requester_checked} />
+                  required={c.is_mandatory || c.requester_checked}
+                  documents={documentsByItem[c.id] || []}
+                  onReload={reloadEvidence} />
               </div>
             ))}
           </div>
@@ -221,6 +224,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>(req.checklist_items || [])
   useEffect(() => { setChecklist(req.checklist_items || []) }, [req])
+  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/sast-requests', req.id)
   // Complete Scan (at Scanning) and the Rescan decision (at Rescan) both ask
   // the same "were any findings identified?" confirmation before branching --
   // this tracks which of the two triggered the pop-up currently showing (or
@@ -668,7 +672,9 @@ function SASTDetail({ req, onClose, onChanged, users }: {
               </span>
               <ChecklistEvidence apiBase="/api/sast-requests" reqId={req.id} itemId={c.id}
                 canManage={canManageReadinessEvidence(req.status)}
-                required={c.is_mandatory || c.requester_checked} />
+                required={c.is_mandatory || c.requester_checked}
+                documents={documentsByItem[c.id] || []}
+                onReload={reloadEvidence} />
             </div>
           ))}
         </div>

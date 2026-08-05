@@ -1,12 +1,9 @@
 import React, { useEffect, useState, useCallback, useRef, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import {
-  ROLE_LABELS, GATEWAY_TERMINAL_STATUSES, QA_ACTIVE_STATUSES, SAST_DAST_TERMINAL_STATUSES,
-  PERFORMANCE_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasRole,
-} from '../constants'
+import { ROLE_LABELS, hasRole } from '../constants'
 import { api } from '../api'
-import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, SuppressionOut, SignOffOut, UserOut, PendingApprovalItem } from '../types'
+import { UserOut, PendingApprovalItem } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
   IconCertificate, IconApprove, IconChart, IconSearch, IconWorkflow,
@@ -15,15 +12,19 @@ import {
 } from './Icons'
 import ClearableSearchInput from './ClearableSearchInput'
 
+// Reported directly: "lots of api calling, sometime same api calling
+// multiple time, also i see api is getting late." Root cause: this used to
+// carry a count for every nav item (qaRequests/functional/sast/dast/
+// performance/suppression/signoff/pendingReview), each requiring its own
+// full-list (or, for pendingReview, whole-user-table) fetch -- but the nav
+// item render below only ever displays a badge for Pending Approvals (see
+// its own comment there); every other count was computed and thrown away
+// unused. Worse, all of it re-ran on EVERY route change (see loadCounts'
+// own useEffect dependency on location.pathname), so navigating around the
+// app repeatedly re-fetched 7 full request lists plus (for Admins) the
+// entire user table, none of which anything on screen ever used. Trimmed
+// to just the one count that's actually rendered.
 interface NavCounts {
-  qaRequests: number
-  functional: number
-  sast: number
-  dast: number
-  performance: number
-  suppression: number
-  signoff: number
-  pendingReview: number
   pendingApprovals: number
 }
 
@@ -54,13 +55,13 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
     {
       label: 'Request Management',
       items: [
-        { to: '/qa-requests', label: 'QA Requests', icon: IconEdit, count: counts.qaRequests },
+        { to: '/qa-requests', label: 'QA Requests', icon: IconEdit },
       ],
     },
     {
       label: 'Functional',
       items: [
-        { to: '/functional-requests', label: 'Functional Requests', icon: IconFolder, count: counts.functional },
+        { to: '/functional-requests', label: 'Functional Requests', icon: IconFolder },
       ],
     },
     {
@@ -74,21 +75,21 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
     {
       label: 'Security',
       items: [
-        { to: '/sast', label: 'SAST Requests', icon: IconShield, count: counts.sast },
-        { to: '/dast', label: 'DAST Requests', icon: IconTarget, count: counts.dast },
-        { to: '/suppression', label: 'Suppression / False Positive', icon: IconEyeOff, count: counts.suppression },
+        { to: '/sast', label: 'SAST Requests', icon: IconShield },
+        { to: '/dast', label: 'DAST Requests', icon: IconTarget },
+        { to: '/suppression', label: 'Suppression / False Positive', icon: IconEyeOff },
       ],
     },
     {
       label: 'Specialized Testing',
       items: [
-        { to: '/performance', label: 'Performance Testing', icon: IconWorkflow, count: counts.performance },
+        { to: '/performance', label: 'Performance Testing', icon: IconWorkflow },
       ],
     },
     {
       label: 'Governance',
       items: [
-        { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate, count: counts.signoff },
+        { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate },
         { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell, count: counts.pendingApprovals },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
@@ -110,7 +111,7 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
   // separately-labeled groups.
   const adminItems: NavItem[] = []
   if (hasRole(user, 'ADMIN')) {
-    adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers, count: counts.pendingReview })
+    adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers })
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
   }
   if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')) {
@@ -120,14 +121,6 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
     groups.push({ label: 'Administration', items: adminItems })
   }
   return groups
-}
-
-// "Open" = anything not yet in a terminal SAST/DAST state (see
-// SAST_DAST_TERMINAL_STATUSES) -- computed as an exclusion rather than a
-// hardcoded list of in-flight statuses so this nav badge doesn't silently
-// go stale the next time the lifecycle's stage names change.
-function isOpenSecurityStatus(status: string): boolean {
-  return !SAST_DAST_TERMINAL_STATUSES.includes(status)
 }
 
 // Maps each request type's own ID prefix (see models.py's gen_id calls) to
@@ -160,13 +153,35 @@ function initials(name?: string | null): string {
   return ((parts[0]?.[0] || '') + (parts[1]?.[0] || '')).toUpperCase()
 }
 
+// Reported directly (follow-up, after the fix above): "still there are some
+// calls are multiple times" -- confirmed while "just navigating around
+// generally", not tied to one page. Root cause: every route in App.tsx
+// independently wraps its own `<Protected><Page /></Protected>` (there's no
+// single shared parent/layout route with an <Outlet/>), so this whole
+// Layout component -- and everything in it, including the pending-approvals
+// badge fetch above -- actually UNMOUNTS AND REMOUNTS on every single
+// navigation, not just re-runs one effect. Restructuring routing to share
+// one persistent Layout instance is the "real" fix but a much larger,
+// riskier change; this is a smaller, safe mitigation in the meantime: a
+// module-level (outside React, so it survives remounts) cache of the last
+// fetched count, reused as long as it's still fresh, so rapidly clicking
+// between pages doesn't keep re-hitting the endpoint on every single click
+// the way a fresh useState always reset to 0 and refetched. Still refreshes
+// automatically after PENDING_APPROVALS_CACHE_MS, so the badge doesn't go
+// stale for someone who stays on one page a while.
+const PENDING_APPROVALS_CACHE_MS = 20000
+let pendingApprovalsCache: { count: number; fetchedAt: number } | null = null
+
 export default function Layout({ children }: { children?: ReactNode }) {
   const { user, logout } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
+  // Seeded from the module-level cache (if still fresh) rather than always
+  // starting at 0 -- see PENDING_APPROVALS_CACHE_MS's own comment above --
+  // so a remount from simple navigation doesn't even flash a stale "0"
+  // before the (possibly skipped) refetch resolves.
   const [counts, setCounts] = useState<NavCounts>({
-    qaRequests: 0, functional: 0, sast: 0, dast: 0, performance: 0, suppression: 0, signoff: 0, pendingReview: 0,
-    pendingApprovals: 0,
+    pendingApprovals: pendingApprovalsCache ? pendingApprovalsCache.count : 0,
   })
   const [search, setSearch] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -245,65 +260,34 @@ export default function Layout({ children }: { children?: ReactNode }) {
     })
   }
 
-  const loadCounts = useCallback(async () => {
-    try {
-      const [reqs, functional, sast, dast, performance, suppression, signoffs] = await Promise.all([
-        api.get<QARequestOut[]>('/api/qa-requests'),
-        api.get<FunctionalOut[]>('/api/functional-requests'),
-        api.get<SASTOut[]>('/api/sast-requests'),
-        api.get<DASTOut[]>('/api/dast-requests'),
-        api.get<PerformanceOut[]>('/api/performance-requests'),
-        api.get<SuppressionOut[]>('/api/suppressions'),
-        api.get<SignOffOut[]>('/api/signoffs'),
-      ])
-      // The QA Request gateway itself only has Draft/Submitted/Raised/
-      // Cancelled (see constants.GATEWAY_STATUSES) -- "still in flight" here
-      // just means "not yet Raised or Cancelled", i.e. still sitting in Draft.
-      const qaRequests = reqs.filter((r) => !GATEWAY_TERMINAL_STATUSES.includes(r.status)).length
-      // The real workflow (and its in-flight count) lives on the linked
-      // Functional Testing Request -- see constants.QA_ACTIVE_STATUSES.
-      const functionalCount = functional.filter((r) => QA_ACTIVE_STATUSES.includes(r.status)).length
-      // SAST and DAST are separate nav items, each with their own badge --
-      // previously these were wrongly added together into one combined
-      // number and shown only on the SAST badge (so SAST's badge showed the
-      // total of both, and DAST never showed one at all).
-      const sastCount = sast.filter((r) => isOpenSecurityStatus(r.status)).length
-      const dastCount = dast.filter((r) => isOpenSecurityStatus(r.status)).length
-      // Same "not yet in a terminal state" idea, mirrored for the remaining
-      // request-type nav items so every module with its own workflow gets a
-      // consistent in-flight badge (previously only QA Requests/Functional
-      // QA/SAST/DAST had one).
-      const performanceCount = performance.filter((r) => !PERFORMANCE_TERMINAL_STATUSES.includes(r.status)).length
-      const suppressionCount = suppression.filter((r) => !SUPPRESSION_TERMINAL_STATUSES.includes(r.status)).length
-      // Sign-off certificates have only two states (Draft / Issued, see
-      // models.SignOffCertificate) -- "open" here means still a Draft, i.e.
-      // not yet issued/signed.
-      const signoffCount = signoffs.filter((s) => s.status === 'Draft').length
+  // Clears the module-level pending-approvals cache (see its own comment
+  // above) before signing out -- otherwise a different account signing in
+  // right after on the same browser tab could briefly see the previous
+  // account's stale cached count instead of their own.
+  function handleLogout() {
+    pendingApprovalsCache = null
+    logout()
+  }
 
-      let pendingReview = 0
-      if (hasRole(user, 'ADMIN')) {
-        try {
-          const allUsers = await api.get<UserOut[]>('/api/auth/users/all')
-          pendingReview = allUsers.filter((u) => u.needs_role_review).length
-        } catch (e) { /* ignore */ }
-      }
-      // Pending Approvals gets a live badge (unlike every other nav item's
-      // count above, which is rendered but currently switched off -- see the
-      // commented-out <span className="nav-count"> below) since the whole
-      // point of that page is "how many things need me right now" -- a
-      // silent nav entry would defeat that.
-      let pendingApprovals = 0
-      try {
-        const items = await api.get<PendingApprovalItem[]>('/api/pending-approvals')
-        pendingApprovals = items.length
-      } catch (e) { /* ignore */ }
-      setCounts({
-        qaRequests, functional: functionalCount, sast: sastCount, dast: dastCount,
-        performance: performanceCount, suppression: suppressionCount,
-        signoff: signoffCount, pendingReview, pendingApprovals,
-      })
-    } catch (e) { /* badges are non-critical; ignore failures */ }
-  }, [user])
+  // Pending Approvals is the one nav item with a live badge (see the
+  // render below) -- "how many things need me right now" is the whole point
+  // of that page, so a silent nav entry would defeat it. Every other nav
+  // item's count used to be computed here too (see NavCounts' own comment
+  // above for why that was removed) -- this now only ever makes the one
+  // fetch its one consumer actually needs.
+  const loadCounts = useCallback(async () => {
+    if (pendingApprovalsCache && Date.now() - pendingApprovalsCache.fetchedAt < PENDING_APPROVALS_CACHE_MS) {
+      // Still fresh from a previous mount (e.g. the page navigated to a
+      // moment ago) -- reuse it instead of re-hitting the endpoint again.
+      setCounts({ pendingApprovals: pendingApprovalsCache.count })
+      return
+    }
+    try {
+      const items = await api.get<PendingApprovalItem[]>('/api/pending-approvals')
+      pendingApprovalsCache = { count: items.length, fetchedAt: Date.now() }
+      setCounts({ pendingApprovals: items.length })
+    } catch (e) { /* badge is non-critical; ignore failures */ }
+  }, [])
 
   useEffect(() => { loadCounts() }, [loadCounts, location.pathname])
 
@@ -405,7 +389,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
                 </div>
                 <div className="dept">{user.department || 'No department set'}</div>
               </div>
-              <button onClick={logout} title="Log out"><IconLogout width={16} height={16} /></button>
+              <button onClick={handleLogout} title="Log out"><IconLogout width={16} height={16} /></button>
             </div>
           )}
         </div>

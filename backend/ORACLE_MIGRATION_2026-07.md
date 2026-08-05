@@ -8186,3 +8186,296 @@ the backend to begin with).
 
 **Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
 via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 183. Dashboard: collapse the 3W governance tracker behind a toggle
+
+**Request:** Reported directly: "Dashboard is too much of details and tracker." Asked to clarify the intended
+direction (trim entirely / collapse behind toggles / remove specific sections) -- chose "collapse detail
+behind toggles": keep all the existing data, but hide the dense/tracker-style sections by default so the
+initial view is clean, with a way to expand back to the full detail.
+
+**Scope:** The default "Dashboard" tab (`CommandCentre` in `Dashboard.tsx`) is what every visitor lands on
+first, so it was the target -- the other tabs (Security, Suppression, 3W Pending Items, Requests, QA Tester
+Overview) are each an explicit, deliberate navigation choice already, not something shown unsolicited. Within
+`CommandCentre`, the "3W project governance" card was clearly the densest, most tracker-like piece: a 3-way
+tab switcher (Overview/Projects/Ageing) containing a bar chart, a donut, a full search/team/priority/ageing
+filter toolbar, a CSV export button, and a paginated attention table -- all rendered immediately, above the
+lighter-weight Lifecycle/Activity section further down the page. That lighter section (a lifecycle stepper +
+a short 6-item recent-activity list) was left alone -- it reads as a compact summary, not a tracker, and
+matches what a decluttered dashboard should still show.
+
+**Frontend changes (`Dashboard.tsx::CommandCentre`):** added a `govExpanded` state, defaulting to `false`. The
+card's own KPI strip (Total pending / SLA breached / Critical-high / Owning teams -- 4 plain numbers) stays
+always visible, immediately followed by a one-line summary sentence when collapsed ("N pending items across N
+teams -- click Show details for the breakdown, ageing, and full list"). The `Overview`/`Projects`/`Ageing` tab
+bodies (chart, donut, filter toolbar, tables) now all additionally require `govExpanded` to render, and the
+tab-switcher pills themselves only show once expanded (they have nothing to switch between while collapsed).
+A "Show details" / "Hide details" button in the card's own header toggles `govExpanded`. Nothing was deleted
+-- every chart, filter, and table is exactly as before, one click away instead of on-screen unconditionally.
+
+**Data notes:** none -- client-side-only presentation change, no new/changed API calls.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 184. Eliminate wasted/duplicate API calls (nav badges + Dashboard tab switching)
+
+**Request:** Reported directly: "there are lots of api calling, sometime same api calling multiple time, also
+i see api is getting late."
+
+**Finding #1 -- the big one (`components/Layout.tsx`):** `Layout` wraps every single protected page (see
+`App.tsx`'s `Protected`), and its `loadCounts()` was refetching, on **every route change**
+(`useEffect(() => { loadCounts() }, [loadCounts, location.pathname])`): the full `/api/qa-requests`,
+`/api/functional-requests`, `/api/sast-requests`, `/api/dast-requests`, `/api/performance-requests`,
+`/api/suppressions`, and `/api/signoffs` lists, plus (for Admin accounts) the entire `/api/auth/users/all`
+table -- 8 heavy calls, on top of whatever the page being navigated to fetches for itself, every time anyone
+clicked anywhere in the app. Checked the nav item render (`{item.to === '/pending-approvals' && ... <span
+className="nav-count">}`) and confirmed only the Pending Approvals badge is ever actually displayed -- every
+other one of those 8 calls fed a `count` that was computed and stored but never rendered anywhere (a leftover
+from an earlier design where every nav item had a live badge, since disabled in the render but never removed
+from the fetch). Fixed by deleting the dead computations entirely: `loadCounts` now only calls
+`/api/pending-approvals`, `NavCounts` shrunk to `{ pendingApprovals: number }`, and the `count` prop was
+removed from every nav item except Pending Approvals. Also removed the now-dead `isOpenSecurityStatus` helper
+and the constants/type imports (`GATEWAY_TERMINAL_STATUSES`, `QA_ACTIVE_STATUSES`,
+`SAST_DAST_TERMINAL_STATUSES`, `PERFORMANCE_TERMINAL_STATUSES`, `SUPPRESSION_TERMINAL_STATUSES`,
+`QARequestOut`, `FunctionalOut`, `SASTOut`, `DASTOut`, `PerformanceOut`, `SuppressionOut`, `SignOffOut`) that
+only existed to support them. This alone cuts every navigation anywhere in the app from 8 extra full-list
+fetches (9 for Admins) down to 1 small aggregator call.
+
+**Finding #2 (`Dashboard.tsx`):** `CommandCentre` (the default "Dashboard" tab) and `MyRequestsTab` (the
+"Requests" tab) each independently fetched their own copies of the same 5 endpoints
+(`/api/qa-requests`/`/api/functional-requests`/`/api/sast-requests`/`/api/dast-requests`/
+`/api/performance-requests`) -- since only one tab is ever mounted at a time, switching from "Dashboard" to
+"Requests" and back re-fetched all 5 lists on every switch, a direct match for "same api calling multiple
+time." Fixed by lifting that fetch up to the parent `Dashboard` component (fetched once via a new `useEffect`
+there) and passing the results down as props (`requests`/`functionalRequests`/`sastRequests`/`dastRequests`/
+`performanceRequests`/`requestsLoaded`/`requestsError`) to both `CommandCentre` and `MyRequestsTab`, which no
+longer fetch these themselves. `CommandCentre` still runs its own smaller fetch for what only it needs
+(`/api/dashboard/project-wise`, `/api/dashboard/3w`, `/api/approvals` -- 3 calls, down from 8) and now also
+surfaces `requestsError` (previously, a failure in the shared fetch would have left it stuck on a perpetual
+"Loading..." rather than showing an error). `SecurityTab`, `SuppressionTab`, `ThreeWTab`, and
+`TesterOverviewTab` were left untouched -- each already fetches only its own distinct dashboard-aggregation
+endpoint, no duplication there.
+
+**Not changed:** backend endpoint implementations themselves were not audited for N+1 query patterns or
+missing indexes in this pass -- this fix targeted the concretely-identified duplicate/wasted frontend calls,
+which account for the large majority of request volume described (every navigation, everywhere in the app).
+If pages still feel slow after this, that would point at the endpoints themselves rather than call volume, and
+is worth a separate, focused look.
+
+**Data notes:** none -- client-side-only, no schema or endpoint changes.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean (no backend files touched, run anyway
+per the standing verification habit); `npx tsc --noEmit -p .` and `npx tsc --noEmit -p .
+--noUnusedLocals --noUnusedParameters` -- both clean (the latter confirms no new dead imports/locals were left
+behind by the removals above). Documents and outputs copies re-synced and confirmed identical via `diff -rq`
+(only the standard `.env`/`uploads/` leftovers differ).
+
+## 185. Pending-approvals badge: cache across Layout remounts (follow-up to section 184)
+
+**Request:** Follow-up, reported directly: "still there are some calls are multiple times." Asked where --
+answer: "Just navigating around generally" (not tied to one specific page/action).
+
+**Root cause:** `App.tsx` defines 21 independent top-level `<Route path="..." element={<Protected><Page
+/></Protected>}>` entries -- there is no single shared parent/layout route with an `<Outlet/>` that every page
+renders inside. That means `Layout` (sidebar, topbar, and -- after section 184 -- its one remaining
+`/api/pending-approvals` fetch) doesn't just re-run an effect on navigation, it fully **unmounts and remounts**
+on every single route change, since each navigation switches to matching a completely different top-level
+`<Route>` element. A fresh mount means a fresh `useState({ pendingApprovals: 0 })` and a fresh `loadCounts()`
+call every time -- so "just navigating around" was still re-hitting `/api/pending-approvals` on literally every
+click, which is exactly the residual "same api calling multiple time" being described. (Restructuring routing
+so every page shares one persistent Layout instance via nested routes + `<Outlet/>` would be the more complete
+fix, but that's a much larger, riskier change touching all 21 routes -- out of scope for this pass.)
+
+**Frontend changes (`components/Layout.tsx`):** added a module-level cache (`pendingApprovalsCache: { count,
+fetchedAt } | null`, `PENDING_APPROVALS_CACHE_MS = 20000`) declared outside the component, so it survives a
+remount the way component state can't. `loadCounts()` now checks this cache first -- if fetched within the
+last 20 seconds, it reuses the cached count instead of calling the endpoint again; only once that window
+expires does it actually re-fetch (and refresh the cache). The initial `counts` state is also seeded from the
+cache (if present) instead of always starting at 0, so a remount doesn't even flash a stale zero badge while
+waiting. Added `handleLogout()` (clears `pendingApprovalsCache` before calling the real `logout()`) so a
+different account signing in on the same browser tab right after can't briefly inherit the previous account's
+cached count.
+
+**Trade-off, stated plainly:** the badge can now lag up to ~20 seconds behind reality if someone else's
+decision changes what's pending for you while you're actively clicking around the app -- accepted deliberately
+in exchange for not re-fetching on every single navigation; 20 seconds was chosen as short enough that the
+badge still feels live, long enough that rapid navigation (the reported symptom) doesn't defeat the point.
+
+**Data notes:** none -- client-side-only, reuses the existing `GET /api/pending-approvals` endpoint.
+
+**Verified:** `npx tsc --noEmit -p .` and the same command with `--noUnusedLocals --noUnusedParameters` --
+both clean. Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 186. The real fix: one shared, persistent Layout via nested routes (replaces section 185's cache)
+
+**Request:** Explicit follow-up to section 185's mitigation: "do the real fix."
+
+**Root cause (recap from 185):** `App.tsx` had 21 independent top-level `<Route path="..." element={<Protected>
+<Page /></Protected>}>` entries -- no shared parent route, so `Protected`/`Layout` fully unmounted and
+remounted on every single navigation between pages, refetching the pending-approvals badge (and, before
+section 184, 7 other full-list endpoints) every time. Section 185 added a module-level cache so the repeated
+mounts wouldn't repeatedly hit the network, but the underlying churn -- Layout's entire sidebar/topbar tree,
+and every bit of its component state (menu-open, expanded nav groups, search box text) -- was still being
+torn down and rebuilt on every click.
+
+**The actual fix (`App.tsx`):** restructured routing to use a React Router v6 "layout route" -- a single
+pathless parent `<Route element={<ProtectedLayout />}>` wrapping every protected page as a nested child
+`<Route>`, rendered via `<Outlet/>`. `ProtectedLayout` does the exact same auth check as the old `Protected`
+(loading state, redirect to `/login` if signed out), but now renders `<AuthenticatedChrome user={user}><Outlet
+/></AuthenticatedChrome>` instead of `<Layout>{children}</Layout>` -- `AuthenticatedChrome` (new, factored out
+of the old `Protected`) is the actual `Layout` + `DepartmentPrompt` + `PendingApprovalsNotice` chrome, now
+shared verbatim by both this and `HelpRoute` (see below) instead of duplicated. Every one of the 18 previously
+top-level protected routes (`/`, `/qa-requests`, `/functional-requests`, `/sast`, `/dast`, `/suppression`,
+`/performance`, `/signoff`, `/pending-approvals`, `/approvals`, `/reports`, `/admin`, `/department-admin`,
+`/audit-log`, `/checklist-config`, `/test-projects`, `/test-repository`, `/test-execution`) moved to become a
+child of this one parent route, keeping its own `path` and `ModuleBoundary` wrapping exactly as before --
+only the auth-gating wrapper moved from being repeated per-route to being shared once at the parent. The
+practical effect: `Layout` now mounts once for the whole signed-in session and stays mounted while navigating
+between any of these 18 pages -- only the page content inside `<Outlet/>` swaps (React Router unmounts/mounts
+the *child* route's own element as before, which is correct and desired -- each page's own state should still
+reset when you navigate to a different page; what's fixed is the shared chrome around it no longer doing the
+same).
+
+**Deliberate exception -- `/help`:** left as its own separate top-level route (`HelpRoute`, unchanged in
+shape from section 182) rather than folded into the new nested group, because it's the one page that must
+keep working both signed in AND signed out -- a child of an auth-gated parent route can never render for a
+signed-out visitor (the parent would already have redirected to `/login` before any child route is
+evaluated). `HelpRoute`'s signed-in branch now calls the same shared `AuthenticatedChrome` component the main
+nested group uses (previously it called `<Protected><Help /></Protected>`, now-removed) so the experience is
+identical -- the one accepted trade-off is that navigating to/from `/help` specifically still remounts
+`Layout`, since it sits outside the shared parent route. Given `/help` is a low-traffic reference page, not
+part of the day-to-day click-around-between-pages flow the report was about, this was judged an acceptable,
+clearly-documented exception rather than a reason to block the fix or attempt a more convoluted merge of the
+signed-in/signed-out cases.
+
+**Section 185's cache:** left in place in `components/Layout.tsx` (harmless, not reverted) -- with Layout no
+longer remounting on ordinary navigation, `loadCounts()`'s own `useEffect(() => { loadCounts() }, [loadCounts,
+location.pathname])` still re-invokes on every pathname change (Layout itself doesn't unmount, but this
+specific effect's dependency still fires), so the cache now serves as a simple "don't hit the network more
+than once every 20 seconds" throttle within a single long-lived mount instead of surviving repeated
+mounts -- still exactly the behavior wanted, just for a slightly different reason than originally written.
+
+**Data notes:** none -- purely a client-side routing restructure, no backend or endpoint changes.
+
+**Verified:** `npx tsc --noEmit -p .` and `npx tsc --noEmit -p . --noUnusedLocals --noUnusedParameters` --
+both clean. A full `vite build` could not be run in this sandbox (pre-existing, unrelated environment issue --
+`Cannot find module @rollup/rollup-linux-arm64-gnu`, a known npm optional-dependency bug, not caused by this
+change); `tsc` is this project's established verification method throughout every prior change in this
+document and remains clean here. Documents and outputs copies re-synced and confirmed identical via `diff -rq`
+(only the standard `.env`/`uploads/` leftovers differ). Recommended follow-up for whoever deploys this: run
+`npm run build` in a normal (non-sandboxed) environment once to confirm the production bundle builds clean,
+and click through a few pages to confirm Layout no longer visibly "flickers" (sidebar/topbar re-mounting) on
+navigation.
+
+## 187. Batch the per-checklist-item evidence documents fetch (Functional/SAST/DAST/Performance)
+
+**Request:** Reported directly with server log evidence -- opening a raised Functional request (#161, with 8
+readiness checklist items) fired 8 parallel `GET /api/functional-requests/161/checklist/{item_id}/documents`
+calls (ids 201-208), one per item, in a single page load: "why multiple documents call? can we just not make
+single one."
+
+**Root cause:** `ChecklistEvidence` (`components/Common.tsx`) is rendered once per readiness-checklist item
+next to each row (in both the requester's edit modal and the raised request's detail/checklist tab, across
+all 4 modules), and every instance independently ran its own `useEffect(() => { load() }, [load])` fetching
+just that one item's documents on mount -- N checklist items on a page meant N simultaneous GETs. This is the
+exact same anti-pattern already fixed once in this document (section 31/32) for the pre-raise QA Request
+wizard's sibling component, `ChecklistEvidencePicker` -- that fix batched the *draft* evidence fetch; this one
+had never been applied to `ChecklistEvidence`, the separate component used for already-raised requests.
+
+**Backend changes:** added one new batched `GET .../checklist/documents` endpoint per module, alongside the
+existing per-item one (different path-segment count, so no routing ambiguity):
+- `routers/functional.py`: `list_functional_checklist_documents_batch`
+- `routers/performance.py`: `list_performance_checklist_documents_batch`
+- `routers/sast_dast.py`: `list_sast_checklist_documents_batch` (`/api/sast-requests/...`) and
+  `list_dast_checklist_documents_batch` (`/api/dast-requests/...`)
+
+Each looks up every checklist item belonging to the request (one query), then fetches every one of those
+items' documents in a single `WHERE module = ? AND request_id IN (...)` query via a new shared helper,
+`documents.py::list_documents_for_items` (recall: for the `*_ITEM` modules, `RequestDocument.request_id`
+actually stores the checklist item's own id, not the parent request's -- same convention as the existing
+per-item endpoints). Response is a flat list (`schemas.ChecklistItemDocumentOut`, extends `RequestDocumentOut`
+with an `item_id` field) so the frontend can regroup it into per-item buckets -- same shape convention as
+section 31's `DraftChecklistEvidenceOut`. The existing per-item GET/POST/download/DELETE endpoints are
+untouched; uploads and deletes still go through them one item at a time (only the *read* fetch was the N+1).
+
+**Frontend changes:**
+- `components/Common.tsx`: added `useChecklistDocuments(apiBase, reqId)`, a small hook that calls the new
+  batched endpoint once and returns `{ documentsByItem, reload }`. `ChecklistEvidence` no longer fetches its
+  own documents -- it now takes `documents: RequestDocumentOut[]` and `onReload: () => void` as props (mirrors
+  `ChecklistEvidencePicker`'s existing `savedFiles`/`onReload` props from section 32); upload/delete still hit
+  this item's own per-item endpoint, then call `onReload()` instead of a local `load()` so every instance on
+  the page picks up the change from one shared re-fetch.
+- `types.ts`: added `ChecklistItemDocumentOut` (mirrors the new backend schema).
+- Wired `useChecklistDocuments` into all 8 render sites (editing-modal + raised-detail view, x4 modules):
+  `modules/functional/Functional.tsx` (`FunctionalFormModal`, `FunctionalDetail`), `modules/security/SAST.tsx`
+  (`SASTFormModal`, `SASTDetail`), `modules/security/DAST.tsx` (`DASTFormModal`, `DASTDetail`),
+  `modules/specialised-testing/Performance.tsx` (`PerformanceFormModal`, `PerformanceDetail`) -- each calls the
+  hook once per component instance and passes `documentsByItem[c.id] || []` / the shared `reload` down to
+  every `<ChecklistEvidence/>` in that component's own checklist `.map()`.
+
+**Data notes:** none -- no schema changes, existing `RequestDocument` table and `*_ITEM` module keying reused
+as-is.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. `npx tsc --noEmit -p .` -- clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 188. Pending Approvals / Application Name: Draft leakage, stale duplicate entries, and a silent re-flip on plain Save
+
+**Request:** Five bugs reported together, all around the Application Name -- Application Owner Approval
+checkpoint: (1) Draft QA Requests shouldn't appear in Pending Approvals; (2) editing the Application Name
+should update the existing approval entry, not add a second one; (3) only the latest name should show for
+approval; (4) the original name shouldn't remain as a separate pending entry; (5) rejecting a name, having the
+gateway revert to Draft, then simply clicking Edit and Save (not Submit/Raise) was sending it back for
+approval anyway.
+
+**Root cause 1 (Draft leakage, covers bug 1 and much of bug 5):**
+`pending_approvals.py::_application_master_items` queried every `ApplicationMaster` row with status
+`PENDING_APP_OWNER`/`PENDING_SM` with no regard for whether the QA Request gateway that actually needs the
+decision had ever been Submitted -- a name only ever used by a still-Draft (or Cancelled) gateway showed up
+in the aggregator exactly the same as one genuinely awaiting a real decision.
+
+**Root cause 2 (silent re-flip on plain Save, the rest of bug 5):** `routers/qa_requests.py::edit_request`
+called `_resolve_application_name` (which flips a `REJECTED` row straight back to `PENDING_APP_OWNER`,
+treating it as a fresh proposal) whenever the request body included an `application_name` key at all --
+`exclude_unset=True` was meant to make this a no-op unless the requester actually touched that field, but the
+wizard (`NewRequestModal.tsx`) always resends the current `application_name` value on every Save regardless of
+which step was actually edited, so this fired on every single save of a Draft, not just ones that changed the
+name.
+
+**Root cause 3 (bugs 2-4, stale duplicate entries):** `_resolve_application_name`'s own docstring already
+called this out as accepted queue clutter: if a requester swaps one brand-new (still-pending) Application Name
+for a different one while still in Draft, the FIRST name's `ApplicationMaster` row was simply left behind,
+still `PENDING_APP_OWNER`, with nothing pointing at it any more except its own now-stale `qa_request_id` --
+Pending Approvals would then show both the abandoned old name and the new one for what looks like one request.
+
+**Backend changes (`routers/qa_requests.py`):**
+- `edit_request`'s Application Name handling now compares the incoming (uppercased) name against
+  `obj.application_name` and only calls `_resolve_application_name` when it's genuinely different -- a plain
+  re-save with the name field unchanged is now a complete no-op for `ApplicationMaster`, so it can never
+  re-flip a `REJECTED` row back to pending just because the wizard resent the same value. A consequence,
+  called out directly in a new comment on `submit_request`'s existing `REJECTED` block: simply re-selecting
+  the exact same rejected name no longer un-rejects it on its own -- a genuinely different Application Name is
+  now the only way through, so that endpoint's error message was reworded to drop the now-incorrect
+  "or re-select/re-type this same name" suggestion.
+- New `_cleanup_orphaned_application_master(db, old_master_id, qa_request_id)`: called right after
+  `edit_request` resolves to a genuinely different name. If the name this request used to point at is still
+  un-decided (`PENDING_APP_OWNER`/`PENDING_SM`) and no OTHER QA Request still resolves to it, the row is
+  deleted outright -- there's no audit trail keyed off the `ApplicationMaster` row itself (`ApprovalAction`
+  entries key off the QA Request/child request's own id), and nothing else needs it. A row that was already
+  `APPROVED`/`REJECTED` (a real decision was made) is never touched, regardless of who still points at it.
+
+**Backend changes (`routers/pending_approvals.py`):** `_application_master_items` now looks up, per candidate
+`ApplicationMaster` row, whether at least one QA Request gateway resolving to it is in a status other than
+Draft/Cancelled (`_active_gateway`, replacing the old `_gateway_path`'s inline query with the same lookup
+reused for both the exclusion check and the existing "link to the right gateway" display logic) -- a row with
+no such gateway is skipped entirely, for both the Application Owner and legacy SM tiers.
+
+**Data notes:** none -- no schema changes. `_cleanup_orphaned_application_master` deletes rows, but only ones
+that were never decided and are provably unreferenced by any other QA Request at the moment of deletion.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. No frontend changes were needed for
+any of the 5 reports (all backend query/resolve logic). Documents and outputs copies re-synced and confirmed
+identical via `diff -rq` (only the standard `.env` leftover differs).

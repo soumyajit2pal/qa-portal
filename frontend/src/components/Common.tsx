@@ -16,7 +16,7 @@ import {
 import { IconFolder, IconFilter } from "./Icons";
 import { api } from "../api";
 import { useAuth } from "../context/AuthContext";
-import type { RequestDocumentOut } from "../types";
+import type { RequestDocumentOut, ChecklistItemDocumentOut } from "../types";
 
 // Every status across every module (QA Request, SAST/DAST,
 // Performance, Suppression, Sign-off) funnels through this one Badge, so its
@@ -1360,6 +1360,45 @@ export function RequestDocuments({
   );
 }
 
+// Batched fetch of every checklist item's evidence documents for one
+// raised (post-Draft) Functional/SAST/DAST/Performance request -- reported
+// directly via server logs showing one GET .../checklist/{item_id}/documents
+// per checklist item (e.g. 8 parallel calls for one Functional request with
+// 8 items) because every <ChecklistEvidence/> instance used to fetch its
+// own. One call per page instead: GET .../checklist/documents returns every
+// item's documents in one flat list tagged with item_id (see
+// ChecklistItemDocumentOut), regrouped here into per-item buckets. Same
+// pattern already used for the pre-raise wizard's ChecklistEvidencePicker
+// (see QARequests/steps/ChecklistEvidencePicker.tsx + NewRequestModal.tsx).
+export function useChecklistDocuments(apiBase: string, reqId: number | undefined) {
+  const [documentsByItem, setDocumentsByItem] = useState<Record<number, RequestDocumentOut[]>>({});
+
+  const reload = useCallback(async () => {
+    if (!reqId) {
+      setDocumentsByItem({});
+      return;
+    }
+    try {
+      const rows = await api.get<ChecklistItemDocumentOut[]>(`${apiBase}/${reqId}/checklist/documents`);
+      const grouped: Record<number, RequestDocumentOut[]> = {};
+      for (const row of rows) {
+        (grouped[row.item_id] || (grouped[row.item_id] = [])).push(row);
+      }
+      setDocumentsByItem(grouped);
+    } catch {
+      // Swallow -- a failed batched fetch just leaves every item's count at
+      // 0; each ChecklistEvidence instance's own upload/delete still
+      // surfaces its own errors independently.
+    }
+  }, [apiBase, reqId]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  return { documentsByItem, reload };
+}
+
 // Compact evidence uploader rendered beside one readiness-checklist item.
 // Evidence uses checklist-specific endpoints, so it stays associated with
 // this row instead of being mixed into the request's general Documents tab.
@@ -1370,6 +1409,8 @@ export function ChecklistEvidence({
   canManage = true,
   required = false,
   onCountChange,
+  documents,
+  onReload,
 }: {
   apiBase: string;
   reqId: number;
@@ -1385,28 +1426,24 @@ export function ChecklistEvidence({
   // can (for example) disable a "verify" checkbox until evidence exists,
   // mirroring the backend's verify-time gate.
   onCountChange?: (count: number) => void;
+  // This item's own slice of the parent's batched fetch (see
+  // useChecklistDocuments above) -- no longer fetched by this component
+  // itself, so N items on one page cost one request, not N.
+  documents: RequestDocumentOut[];
+  // Re-runs that same batched fetch -- called after this instance uploads or
+  // deletes evidence, so every other instance on the page (and this one)
+  // picks up the change too.
+  onReload: () => Promise<void> | void;
 }) {
   const { user } = useAuth();
   const isAdmin = !!user?.roles?.includes("ADMIN");
   const inputRef = useRef<HTMLInputElement>(null);
-  const [documents, setDocuments] = useState<RequestDocumentOut[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [pendingDelete, setPendingDelete] = useState<RequestDocumentOut | null>(null);
 
   const endpoint = `${apiBase}/${reqId}/checklist/${itemId}/documents`;
-  const load = useCallback(async () => {
-    try {
-      setDocuments(await api.get<RequestDocumentOut[]>(endpoint));
-    } catch (err) {
-      setError(err);
-    }
-  }, [endpoint]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
 
   useEffect(() => {
     onCountChange?.(documents.length);
@@ -1419,7 +1456,7 @@ export function ChecklistEvidence({
     setError(null);
     try {
       await api.uploadFiles(endpoint, files);
-      await load();
+      await onReload();
       setExpanded(true);
     } catch (err) {
       setError(err);
@@ -1436,7 +1473,7 @@ export function ChecklistEvidence({
     try {
       await api.del(`${endpoint}/${pendingDelete.id}`);
       setPendingDelete(null);
-      await load();
+      await onReload();
     } catch (err) {
       setError(err);
     } finally {

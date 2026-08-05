@@ -257,6 +257,40 @@ def _resolve_application_name(db: Session, name: Optional[str], department: Opti
     return name_upper, new_entry.id
 
 
+def _cleanup_orphaned_application_master(db: Session, old_master_id: Optional[int], qa_request_id: int) -> None:
+    """Called right after edit_request resolves a QA Request's Application
+    Name to a genuinely DIFFERENT ApplicationMaster row -- reported directly:
+    "the original application name should not remain as a separate pending
+    approval entry" / "only the latest application name should be displayed
+    for approval." Previously the name this request used to point at was
+    just left behind still PENDING_APP_OWNER/PENDING_SM (see
+    _resolve_application_name's own docstring, "a minor, rare bit of queue
+    clutter... not worth extra bookkeeping to prevent") -- Pending Approvals
+    would then show both the old, abandoned name AND the new one for what
+    looks like the same request. If nothing else still resolves to that old
+    row and it was never actually decided (still pending either tier), it's
+    deleted outright here -- there's no audit trail pointing at the
+    ApplicationMaster row itself (ApprovalAction entries key off the QA
+    Request/child request's own id, not this one), and no other request
+    needs it. A row that's already APPROVED or REJECTED (a real decision was
+    made) is left untouched regardless -- only un-decided, abandoned rows are
+    cleaned up."""
+    if not old_master_id:
+        return
+    old = db.query(models.ApplicationMaster).get(old_master_id)
+    if not old or old.status not in ("PENDING_APP_OWNER", "PENDING_SM"):
+        return
+    still_used = (
+        db.query(models.QARequest.id)
+        .filter(models.QARequest.application_master_id == old_master_id,
+                models.QARequest.id != qa_request_id)
+        .first()
+    )
+    if still_used:
+        return
+    db.delete(old)
+
+
 def _stash_draft_details(checked_items: Optional[set], sast_components: list, dast_components: list,
                           performance_details: dict,
                           performance_checked_items: Optional[set] = None,
@@ -742,10 +776,27 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     for k, v in data.items():
         setattr(obj, k, v)
 
+    # Reported directly: merely opening a Draft (e.g. one an Application
+    # Owner just rejected, which reverts the gateway to Draft -- see
+    # decide_app_owner_name's Reject branch) and clicking Save WITHOUT
+    # actually changing the Application Name field was silently re-flipping
+    # a REJECTED name back to PENDING_APP_OWNER and sending it back for
+    # approval -- because the wizard always resends the current
+    # application_name value on every save (see NewRequestModal.tsx), not
+    # just when the user actually edited that field, so `application_name_in
+    # is not None` was true on every single save regardless. Only actually
+    # re-resolving (and so only actually able to un-reject a REJECTED row)
+    # when the incoming name is genuinely DIFFERENT from what's already
+    # resolved fixes this: a plain re-save of an unrelated field no longer
+    # sends the name back for approval -- only really changing it does.
     if application_name_in is not None:
-        obj.application_name, obj.application_master_id = _resolve_application_name(
-            db, application_name_in, obj.department, current_user.id, qa_request_id=obj.id,
-        )
+        incoming_upper = (application_name_in or "").strip().upper()
+        if incoming_upper != (obj.application_name or "").strip().upper():
+            old_master_id = obj.application_master_id
+            obj.application_name, obj.application_master_id = _resolve_application_name(
+                db, application_name_in, obj.department, current_user.id, qa_request_id=obj.id,
+            )
+            _cleanup_orphaned_application_master(db, old_master_id, obj.id)
 
     if request_types is not None:
         obj.request_types = ",".join(request_types)
@@ -851,11 +902,17 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     if obj.status != GatewayStatus.DRAFT:
         raise HTTPException(400, f"'Submit' requires status 'DRAFT' (currently '{obj.status}')")
     if obj.application_master_status == "REJECTED":
+        # Wording note: since edit_request now only re-resolves (and so only
+        # un-rejects) the Application Name when it's actually changed to
+        # different text -- see edit_request's own comment, fixing "editing
+        # and saving a Draft without touching the name field was silently
+        # resubmitting a rejected name for approval" -- simply re-selecting
+        # the exact same rejected name no longer clears this on its own; a
+        # genuinely different Application Name is the only way through.
         raise HTTPException(
             400,
             f"Cannot raise -- the Application Name '{obj.application_name}' was rejected. Edit this request "
-            "and either choose a different Application Name, or re-select/re-type this same name to resubmit "
-            "it for fresh approval, before raising.",
+            "and choose a different Application Name before raising.",
         )
     # The one and only place request_id is ever assigned -- see its column
     # comment on models.QARequest. A Draft that gets cancelled instead of

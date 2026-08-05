@@ -917,6 +917,21 @@ def _sast_checklist_item_or_404(db: Session, req_id: int, item_id: int):
     return item
 
 
+@router.get("/api/sast-requests/{req_id}/checklist/documents", response_model=List[schemas.ChecklistItemDocumentOut])
+def list_sast_checklist_documents_batch(req_id: int, db: Session = Depends(get_db),
+                                        current_user: models.User = Depends(get_current_user)):
+    """Batched counterpart to list_sast_checklist_documents below -- see
+    ChecklistItemDocumentOut for why this exists."""
+    _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    item_ids = [row.id for row in db.query(models.SASTChecklistItem.id)
+                .filter_by(sast_request_id=req_id).all()]
+    docs = doc_store.list_documents_for_items(db, "SAST_ITEM", item_ids)
+    return [schemas.ChecklistItemDocumentOut(
+        id=d.id, file_name=d.file_name, content_type=d.content_type,
+        file_size=d.file_size, uploaded_by_id=d.uploaded_by_id, uploaded_at=d.uploaded_at,
+        item_id=d.request_id) for d in docs]
+
+
 @router.get("/api/sast-requests/{req_id}/checklist/{item_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_sast_checklist_documents(req_id: int, item_id: int, db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
@@ -1342,6 +1357,21 @@ def _dast_checklist_item_or_404(db: Session, req_id: int, item_id: int):
     if not item:
         raise HTTPException(404, "Checklist item not found")
     return item
+
+
+@router.get("/api/dast-requests/{req_id}/checklist/documents", response_model=List[schemas.ChecklistItemDocumentOut])
+def list_dast_checklist_documents_batch(req_id: int, db: Session = Depends(get_db),
+                                        current_user: models.User = Depends(get_current_user)):
+    """Batched counterpart to list_dast_checklist_documents below -- see
+    ChecklistItemDocumentOut for why this exists."""
+    _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    item_ids = [row.id for row in db.query(models.DASTChecklistItem.id)
+                .filter_by(dast_request_id=req_id).all()]
+    docs = doc_store.list_documents_for_items(db, "DAST_ITEM", item_ids)
+    return [schemas.ChecklistItemDocumentOut(
+        id=d.id, file_name=d.file_name, content_type=d.content_type,
+        file_size=d.file_size, uploaded_by_id=d.uploaded_by_id, uploaded_at=d.uploaded_at,
+        item_id=d.request_id) for d in docs]
 
 
 @router.get("/api/dast-requests/{req_id}/checklist/{item_id}/documents", response_model=List[schemas.RequestDocumentOut])

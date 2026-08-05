@@ -869,6 +869,21 @@ def _functional_checklist_item_or_404(db: Session, req_id: int, item_id: int):
     return item
 
 
+@router.get("/{req_id}/checklist/documents", response_model=List[schemas.ChecklistItemDocumentOut])
+def list_functional_checklist_documents_batch(req_id: int, db: Session = Depends(get_db),
+                                               current_user: models.User = Depends(get_current_user)):
+    """Batched counterpart to list_functional_checklist_documents below --
+    see ChecklistItemDocumentOut for why this exists."""
+    _get_or_404(db, req_id)
+    item_ids = [row.id for row in db.query(models.ReadinessChecklistItem.id)
+                .filter_by(functional_request_id=req_id).all()]
+    docs = doc_store.list_documents_for_items(db, "FUNCTIONAL_ITEM", item_ids)
+    return [schemas.ChecklistItemDocumentOut(
+        id=d.id, file_name=d.file_name, content_type=d.content_type,
+        file_size=d.file_size, uploaded_by_id=d.uploaded_by_id, uploaded_at=d.uploaded_at,
+        item_id=d.request_id) for d in docs]
+
+
 @router.get("/{req_id}/checklist/{item_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_functional_checklist_documents(req_id: int, item_id: int, db: Session = Depends(get_db),
                                          current_user: models.User = Depends(get_current_user)):

@@ -15,6 +15,7 @@ import {
   DetailField,
   RequestDocuments,
   ChecklistEvidence,
+  useChecklistDocuments,
   applicationNameAwareStatusLabel,
 } from "../../components/Common";
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
@@ -101,6 +102,10 @@ function FunctionalFormModal({
   );
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments(
+    "/api/functional-requests",
+    editing.id
+  );
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) {
     setForm((f) => ({ ...f, [k]: v }));
   }
@@ -339,7 +344,9 @@ function FunctionalFormModal({
                 )}
                 <ChecklistEvidence apiBase="/api/functional-requests" reqId={editing.id} itemId={c.id}
                   canManage={canManageReadinessEvidence(editing.status)}
-                  required={c.is_mandatory || c.requester_checked} />
+                  required={c.is_mandatory || c.requester_checked}
+                  documents={documentsByItem[c.id] || []}
+                  onReload={reloadEvidence} />
               </div>
             ))}
           </div>
@@ -492,6 +499,10 @@ function FunctionalDetail({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [editingDetails, setEditingDetails] = useState(false);
   const [showSignoffModal, setShowSignoffModal] = useState(false);
+  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments(
+    "/api/functional-requests",
+    req.id
+  );
 
   const load = useCallback(async () => {
     try {
@@ -1288,7 +1299,9 @@ function FunctionalDetail({
               </span>
               <ChecklistEvidence apiBase="/api/functional-requests" reqId={req.id} itemId={c.id}
                 canManage={canManageReadinessEvidence(req.status)}
-                required={c.is_mandatory || c.requester_checked} />
+                required={c.is_mandatory || c.requester_checked}
+                documents={documentsByItem[c.id] || []}
+                onReload={reloadEvidence} />
             </div>
           ))}
         </div>

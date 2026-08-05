@@ -159,6 +159,15 @@ export interface DraftChecklistEvidenceOut extends QARequestDocumentOut {
   item_index: number
 }
 
+// Response shape for GET .../checklist/documents on a raised (post-Draft)
+// Functional/SAST/DAST/Performance request -- the batched counterpart to
+// the per-item .../checklist/{item_id}/documents endpoint, tagged with
+// item_id so the flat list can be regrouped client-side (see
+// useChecklistDocuments in components/Common.tsx).
+export interface ChecklistItemDocumentOut extends QARequestDocumentOut {
+  item_id: number
+}
+
 // The QA Request is a pure intake/gateway record -- `status` here is just
 // Draft/Submitted/Raised/Cancelled (see constants.GATEWAY_STATUSES). The
 // real workflow state lives on whichever linked child request(s) below were

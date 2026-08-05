@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, applicationNameAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import MultiUserAssignSelect from '../../components/MultiUserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -48,6 +48,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
   )
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/performance-requests', editing.id)
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) { setForm((f) => ({ ...f, [k]: v })) }
   function toggleReqType(t: string) {
     setForm((f) => ({
@@ -170,7 +171,9 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
                 {c.is_complete && <span className="badge badge-green">QA verified</span>}
                 <ChecklistEvidence apiBase="/api/performance-requests" reqId={editing.id} itemId={c.id}
                   canManage={canManageReadinessEvidence(editing.status)}
-                  required={c.is_mandatory || c.requester_checked} />
+                  required={c.is_mandatory || c.requester_checked}
+                  documents={documentsByItem[c.id] || []}
+                  onReload={reloadEvidence} />
               </div>
             ))}
           </div>
@@ -205,6 +208,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const [checklist, setChecklist] = useState<PerformanceChecklistItemOut[]>(req.checklist_items || [])
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   useEffect(() => { setChecklist(req.checklist_items || []) }, [req])
+  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/performance-requests', req.id)
 
   const loadExtras = useCallback(async () => {
     try {
@@ -554,7 +558,9 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
               </span>
               <ChecklistEvidence apiBase="/api/performance-requests" reqId={req.id} itemId={c.id}
                 canManage={canManageReadinessEvidence(req.status)}
-                required={c.is_mandatory || c.requester_checked} />
+                required={c.is_mandatory || c.requester_checked}
+                documents={documentsByItem[c.id] || []}
+                onReload={reloadEvidence} />
             </div>
           ))}
         </div>
