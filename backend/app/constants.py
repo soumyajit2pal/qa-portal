@@ -708,21 +708,28 @@ SUPPRESSION_TERMINAL_STATUSES = ["Done", "Rejected"]
 
 # ---- Application Name Master (see models.ApplicationMaster) ----
 # A brand-new name introduced via the QA Request wizard's "Other" option
-# starts PENDING; an SM from the same department either APPROVEs it (making
-# it a selectable option in the dropdown for everyone going forward) or
-# REJECTs it. Independent of the QA Request's own workflow -- this never
-# gates Submit/Raise (see routers/qa_requests.py::_resolve_application_name).
-# Two-tier approval for a brand-new Application Name (2026-08): a name typed
-# via "Other" on the wizard now needs an Application Owner from the same
-# department to approve it FIRST (PENDING_APP_OWNER), and only once they
-# approve does it move on to SM (PENDING_SM) -- SM's own approval is what
-# finally flips it to APPROVED, same as before. Either tier can Reject,
-# which is terminal (see routers/applications.py::_auto_reject_linked_requests
-# -- reused by both tiers). Replaces the old single "PENDING" state.
+# starts PENDING_APP_OWNER; an Application Owner from the same department
+# either APPROVEs it (making it a selectable option in the dropdown for
+# everyone going forward, and sending its request's own linked child
+# requests straight to their assigned SM's normal readiness-verification
+# queue -- reported directly: "only application owner approval required, no
+# SM involvement. if application owner approved then automatically come to
+# SM for readiness verification and all") or REJECTs it -- either outcome is
+# terminal (single-tier, 2026-08 v2). Independent of the QA Request's own
+# workflow -- this never gates Submit/Raise (see routers/qa_requests.py::
+# _resolve_application_name).
+# PENDING_SM is LEGACY-ONLY: a short-lived 2026-08 v1 second tier (a
+# separate SM decision on the name itself, see routers/applications.py::
+# decide_application_name) that a NEW name can never reach anymore -- kept
+# in this list only so any pre-existing row left at PENDING_SM from before
+# v2 shipped still round-trips correctly through the API while its one-time
+# data fix-up (see the migration notes) is applied.
 APPLICATION_MASTER_STATUSES = ["PENDING_APP_OWNER", "PENDING_SM", "APPROVED", "REJECTED"]
 APPLICATION_MASTER_STATUS_LABELS = {
-    "PENDING_APP_OWNER": "Pending Application Owner Approval",
-    "PENDING_SM": "Pending SM Approval",
+    # Reported directly, with this exact wording: "the request status shall
+    # be displayed as 'Application Owner Approval Pending.'"
+    "PENDING_APP_OWNER": "Application Owner Approval Pending",
+    "PENDING_SM": "Pending SM Approval",  # legacy-only, see above
     "APPROVED": "Approved",
     "REJECTED": "Rejected",
 }

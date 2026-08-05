@@ -93,6 +93,67 @@ def create_folder(project_id: int, payload: schemas.TestFolderCreate, db: Sessio
     return obj
 
 
+def _descendant_folder_ids(db: Session, folder_id: int) -> set:
+    """Every folder id nested anywhere beneath folder_id, at any depth --
+    used by _validate_new_parent's cycle guard below (a folder can never be
+    re-parented under one of its own descendants, since that would
+    disconnect it from the project's tree entirely -- parent_id would point
+    at a node that itself hangs off the folder being moved)."""
+    ids: set = set()
+    frontier = [folder_id]
+    while frontier:
+        rows = db.query(models.TestFolder.id).filter(models.TestFolder.parent_id.in_(frontier)).all()
+        frontier = [row[0] for row in rows]
+        ids.update(frontier)
+    return ids
+
+
+def _validate_new_parent(db: Session, folder_id: int, project_id: int, new_parent_id: Optional[int]) -> None:
+    """Shared cycle/existence guard for both move_folder and update_folder's
+    parent_id reassignment -- raises if new_parent_id isn't a real folder in
+    the same project, is the folder itself, or is one of its own descendants
+    (either of which would disconnect the folder from the project's tree
+    entirely). A None new_parent_id (top level) is always valid."""
+    if new_parent_id is None:
+        return
+    if new_parent_id == folder_id:
+        raise HTTPException(400, "A folder cannot be its own parent")
+    parent = db.query(models.TestFolder).filter_by(id=new_parent_id, project_id=project_id).first()
+    if not parent:
+        raise HTTPException(404, "Destination folder not found in this project")
+    if new_parent_id in _descendant_folder_ids(db, folder_id):
+        raise HTTPException(400, "A folder cannot be moved into one of its own sub-folders")
+
+
+@router.patch("/folders/{folder_id}", response_model=schemas.TestFolderOut)
+def update_folder(folder_id: int, payload: schemas.TestFolderUpdate, db: Session = Depends(get_db),
+                   current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    """Reported directly: "Once folder is created, folder details should be
+    editable." A folder's only real "detail" beyond its position in the tree
+    is its name -- parent_id is accepted here too (same semantics as
+    move_folder, via the shared _validate_new_parent guard) purely so this
+    general-purpose PATCH is a complete edit endpoint on its own, even though
+    the UI's dedicated Move action (see move_folder) is the primary, faster
+    path for repositioning a folder."""
+    obj = db.query(models.TestFolder).get(folder_id)
+    if not obj:
+        raise HTTPException(404, "Folder not found")
+    _require_active_project(_get_project_or_404(db, obj.project_id))
+    data = payload.model_dump(exclude_unset=True)
+    if "name" in data:
+        name = (data["name"] or "").strip()
+        if not name:
+            raise HTTPException(400, "Folder name cannot be blank")
+        obj.name = name
+    if "parent_id" in payload.model_fields_set:
+        new_parent_id = data.get("parent_id")
+        _validate_new_parent(db, folder_id, obj.project_id, new_parent_id)
+        obj.parent_id = new_parent_id
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
 @router.delete("/folders/{folder_id}")
 def delete_folder(folder_id: int, db: Session = Depends(get_db),
                    current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
@@ -109,6 +170,106 @@ def delete_folder(folder_id: int, db: Session = Depends(get_db),
     db.delete(obj)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/folders/{folder_id}/move", response_model=schemas.TestFolderOut)
+def move_folder(folder_id: int, payload: schemas.TestFolderMove, db: Session = Depends(get_db),
+                 current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    """Re-parents a folder (and everything already nested beneath it, which
+    moves along with it automatically since children only reference their
+    parent's id) to a different point in the same project's tree, or to top
+    level if parent_id is null. Reported directly: "Add functionality of
+    copy the folder and move the folder." Same author gate as create_folder
+    -- QA Engineer or QA Lead. Cycle/existence checks are shared with
+    update_folder's own parent_id handling via _validate_new_parent above."""
+    obj = db.query(models.TestFolder).get(folder_id)
+    if not obj:
+        raise HTTPException(404, "Folder not found")
+    _require_active_project(_get_project_or_404(db, obj.project_id))
+    _validate_new_parent(db, folder_id, obj.project_id, payload.parent_id)
+    obj.parent_id = payload.parent_id
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def _clone_folder_subtree(db: Session, source: models.TestFolder, new_parent_id: Optional[int],
+                           current_user: models.User, name_override: Optional[str] = None) -> models.TestFolder:
+    """Recursively duplicates `source` -- itself, every test case directly
+    inside it (own steps included), and every child folder at any depth,
+    each with its own test cases -- under new_parent_id. Every cloned test
+    case is a brand-new definition (its own governed TQA-TC key, own steps)
+    with status forced back to Draft, exactly like create_test_case/import
+    already do for anything new: a copy is not the same approved artifact as
+    its source, so it re-enters QA Lead review rather than inheriting the
+    source case's current approval status."""
+    new_folder = models.TestFolder(
+        project_id=source.project_id, parent_id=new_parent_id,
+        name=name_override or source.name, created_by_id=current_user.id,
+    )
+    db.add(new_folder)
+    db.flush()
+
+    for case in db.query(models.TestCase).filter_by(folder_id=source.id).order_by(models.TestCase.test_case_key).all():
+        new_key = models.gen_id(models.BUSINESS_ID_PREFIXES["TEST_CASE"], db)
+        new_case = models.TestCase(
+            project_id=source.project_id, folder_id=new_folder.id, test_case_key=new_key,
+            epic_id=case.epic_id, cr_number=case.cr_number, feature_id=case.feature_id,
+            user_story_id=case.user_story_id, test_type=case.test_type, module_name=case.module_name,
+            test_scenario=case.test_scenario, pre_condition=case.pre_condition, description=case.description,
+            priority=case.priority, status="Draft", created_by_id=current_user.id,
+        )
+        new_case.steps = [
+            models.TestStep(step_no=step.step_no, step_text=step.step_text, expected_result=step.expected_result)
+            for step in case.steps
+        ]
+        db.add(new_case)
+        db.flush()
+        db.add(_case_workflow_action(
+            new_case.id, current_user, "Submitted for review",
+            f"Duplicated from {case.test_case_key} via folder copy and submitted to the QA Lead for verification.",
+        ))
+
+    children = db.query(models.TestFolder).filter_by(parent_id=source.id).order_by(models.TestFolder.name).all()
+    for child in children:
+        _clone_folder_subtree(db, child, new_folder.id, current_user)
+
+    return new_folder
+
+
+@router.post("/folders/{folder_id}/copy", response_model=schemas.TestFolderOut)
+def copy_folder(folder_id: int, payload: schemas.TestFolderCopy, db: Session = Depends(get_db),
+                 current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    """Duplicates a folder and its entire subtree -- child folders and every
+    test case inside, at any depth -- into a new, independent copy. Reported
+    directly, alongside Move above: "Add functionality of copy the folder
+    and move the folder." No cycle guard is needed here (unlike Move): the
+    copy always gets brand-new folder/test-case ids, so "copying a folder
+    into one of its own sub-folders" is well-defined -- it just nests the
+    new copy under the (untouched) original subtree."""
+    source = db.query(models.TestFolder).get(folder_id)
+    if not source:
+        raise HTTPException(404, "Folder not found")
+    _require_active_project(_get_project_or_404(db, source.project_id))
+    dest_parent_id = payload.parent_id if payload.parent_id is not None else source.parent_id
+    if dest_parent_id:
+        dest_parent = db.query(models.TestFolder).filter_by(id=dest_parent_id, project_id=source.project_id).first()
+        if not dest_parent:
+            raise HTTPException(404, "Destination folder not found in this project")
+    name_override = None
+    if payload.name is not None:
+        name_override = payload.name.strip()
+        if not name_override:
+            raise HTTPException(400, "Folder name cannot be blank")
+    elif dest_parent_id == source.parent_id:
+        # Copying into the same location as the original with no caller-given
+        # name -- auto-suffix so the duplicate doesn't read as an unlabeled
+        # second "same" folder sitting right next to it.
+        name_override = f"{source.name} (Copy)"
+    new_root = _clone_folder_subtree(db, source, dest_parent_id, current_user, name_override)
+    db.commit()
+    db.refresh(new_root)
+    return new_root
 
 
 # ---- Test Cases ----
@@ -253,11 +414,90 @@ def create_test_case(project_id: int, payload: schemas.TestCaseCreate, db: Sessi
     return obj
 
 
+@router.get("/test-cases/by-key/{test_case_key}", response_model=schemas.TestCaseOut)
+def get_test_case_by_key(test_case_key: str, db: Session = Depends(get_db),
+                         current_user: models.User = Depends(get_current_user)):
+    """Resolve a globally unique test-case business ID for Global Search.
+
+    This route must remain above `/test-cases/{case_id}` so FastAPI does not
+    try to parse the literal `by-key` path segment as an integer case ID.
+    """
+    normalized_key = test_case_key.strip().upper()
+    obj = db.query(models.TestCase).filter_by(test_case_key=normalized_key).first()
+    if not obj:
+        raise HTTPException(404, f"Test Case {normalized_key} was not found")
+    return obj
+
+
 @router.get("/test-cases/{case_id}", response_model=schemas.TestCaseOut)
 def get_test_case(case_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = db.query(models.TestCase).get(case_id)
     if not obj:
         raise HTTPException(404, "Test Case not found")
+    return obj
+
+
+def _enforce_checkout_lock(case: models.TestCase, current_user: models.User) -> None:
+    """A checked-out test case is locked for editing/deleting to everyone
+    except whoever holds the checkout -- Admin always bypasses (same escape
+    hatch every other role gate in this router already gives Admin), so a
+    lock nobody remembers to release can still be broken by an Administrator
+    without anyone touching the database directly."""
+    if case.checked_out_by_id and case.checked_out_by_id != current_user.id and not current_user.has_role():
+        raise HTTPException(
+            423,
+            f"{case.test_case_key} is checked out by {case.checked_out_by_name} and locked for editing. "
+            "Check it in first, or ask them to.",
+        )
+
+
+@router.post("/test-cases/{case_id}/checkout", response_model=schemas.TestCaseOut)
+def checkout_test_case(case_id: int, db: Session = Depends(get_db),
+                        current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    """Reported directly: "check in checkout option should be available for
+    testcases, otherwise multiple people can edit at once, if checkout, the
+    testcase is locked for editing by that user." Explicit, SharePoint-style
+    checkout -- locks a test case to whoever checks it out so nobody else's
+    concurrent edit can silently race with theirs; update_test_case /
+    delete_test_case / bulk_update_test_cases / bulk_delete_test_cases all
+    refuse to touch a case someone else holds (see _enforce_checkout_lock).
+    Idempotent for the current holder (re-checking out just refreshes the
+    timestamp); rejected for anyone else while it's already held."""
+    obj = db.query(models.TestCase).get(case_id)
+    if not obj:
+        raise HTTPException(404, "Test Case not found")
+    _require_active_project(_get_project_or_404(db, obj.project_id))
+    if obj.checked_out_by_id and obj.checked_out_by_id != current_user.id:
+        raise HTTPException(423, f"Already checked out by {obj.checked_out_by_name}")
+    obj.checked_out_by_id = current_user.id
+    obj.checked_out_at = models.now()
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.post("/test-cases/{case_id}/checkin", response_model=schemas.TestCaseOut)
+def checkin_test_case(case_id: int, db: Session = Depends(get_db),
+                       current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
+    """Releases a checkout. Only the holder can normally check a case back
+    in; Admin may force-release an abandoned lock, same bypass as the edit/
+    delete guard itself. Checking in a case that isn't checked out at all is
+    a harmless no-op rather than an error -- the UI's Check In button and a
+    second tab/user racing to release the same lock should never surface a
+    confusing failure."""
+    obj = db.query(models.TestCase).get(case_id)
+    if not obj:
+        raise HTTPException(404, "Test Case not found")
+    if obj.checked_out_by_id and obj.checked_out_by_id != current_user.id and not current_user.has_role():
+        raise HTTPException(
+            423,
+            f"This test case is checked out by {obj.checked_out_by_name} -- only they "
+            "(or an Administrator) can check it back in",
+        )
+    obj.checked_out_by_id = None
+    obj.checked_out_at = None
+    db.commit()
+    db.refresh(obj)
     return obj
 
 
@@ -268,6 +508,7 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
     if not obj:
         raise HTTPException(404, "Test Case not found")
     _require_active_project(_get_project_or_404(db, obj.project_id))
+    _enforce_checkout_lock(obj, current_user)
     if "status" in payload.model_fields_set:
         raise HTTPException(400, "Test case status is controlled by QA Lead review and cannot be changed while editing")
     data = payload.model_dump(exclude_unset=True, exclude={"steps"})
@@ -294,6 +535,7 @@ def delete_test_case(case_id: int, db: Session = Depends(get_db),
     if not obj:
         raise HTTPException(404, "Test Case not found")
     _require_active_project(_get_project_or_404(db, obj.project_id))
+    _enforce_checkout_lock(obj, current_user)
     db.delete(obj)
     db.commit()
     return {"ok": True}
@@ -349,6 +591,8 @@ def bulk_update_test_cases(project_id: int, payload: schemas.TestCaseBulkUpdate,
                            current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
     _require_active_project(_get_project_or_404(db, project_id))
     rows = _selected_project_cases(db, project_id, payload.ids)
+    for row in rows:
+        _enforce_checkout_lock(row, current_user)
     changes = payload.model_fields_set - {"ids"}
     if not changes:
         raise HTTPException(400, "Choose at least one field to update")
@@ -382,6 +626,8 @@ def bulk_delete_test_cases(project_id: int, payload: schemas.TestCaseBulkDelete,
                            current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
     _require_active_project(_get_project_or_404(db, project_id))
     rows = _selected_project_cases(db, project_id, payload.ids)
+    for row in rows:
+        _enforce_checkout_lock(row, current_user)
     deleted_ids = [row.id for row in rows]
     for row in rows:
         db.delete(row)

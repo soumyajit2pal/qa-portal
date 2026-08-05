@@ -24,6 +24,7 @@ constants lists directly any more.
 """
 from typing import List, Tuple
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import models
@@ -102,10 +103,29 @@ def get_template_items(db: Session, module: str, only_active: bool = True) -> Li
     checklist rows -- only_active=True, an inactive/disabled template item
     should never be seeded onto a new request) and by routers/
     checklist_config.py's Admin read endpoints (only_active=False when the
-    Admin needs to see -- and re-enable -- disabled items too)."""
+    Admin needs to see -- and re-enable -- disabled items too).
+
+    Reported directly: "readiness checklist item sometime showing multiple in
+    UI while raising request." This function is on the hot path of opening
+    the QA Request wizard (4 modules x however many concurrent users), so the
+    naive "count() == 0, then seed" check below has a real race window: two
+    requests can both see zero rows for a module (neither has committed yet)
+    and both insert a full default set, doubling every item. The seed
+    attempt below runs inside its own SAVEPOINT (db.begin_nested()) rather
+    than the outer transaction, guarded by the unique (module, item)
+    constraint on ChecklistTemplateItem -- if another concurrent request won
+    that race and already committed its own seed first, this one's INSERTs
+    hit that constraint, only the SAVEPOINT rolls back (not the caller's own
+    still-in-progress transaction, e.g. mid-Raise), and execution falls
+    through to just read what the other request already seeded. Lost the
+    race, not an error."""
     _validate_module(module)
     if db.query(models.ChecklistTemplateItem).filter_by(module=module).count() == 0:
-        _seed_defaults(db, module)
+        try:
+            with db.begin_nested():
+                _seed_defaults(db, module)
+        except IntegrityError:
+            pass
     q = db.query(models.ChecklistTemplateItem).filter_by(module=module)
     if only_active:
         q = q.filter_by(active=True)

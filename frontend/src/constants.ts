@@ -56,7 +56,9 @@ export const QA_DEPARTMENT = 'IT - QA'
 // (PENDING_APP_OWNER, then PENDING_SM) before becoming APPROVED; either
 // tier can REJECT it, which is terminal. See ApplicationNameBanner.tsx.
 export const APPLICATION_MASTER_STATUS_LABELS: Record<string, string> = {
-  PENDING_APP_OWNER: 'Pending Application Owner Approval',
+  // Reported directly, with this exact wording: "the request status shall be
+  // displayed as 'Application Owner Approval Pending.'"
+  PENDING_APP_OWNER: 'Application Owner Approval Pending',
   PENDING_SM: 'Pending SM Approval',
   APPROVED: 'Approved',
   REJECTED: 'Rejected',

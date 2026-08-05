@@ -40,7 +40,7 @@ export default function DepartmentAdmin() {
   if (!isQAAdmin && !isDeptAdmin) {
     return (
       <Card title="Access Restricted">
-        <p className="muted">The Department Admin section is only available to Department Head or Executive COE accounts.</p>
+        <p className="muted">The Department Coordinator section is only available to Department Head or Executive COE accounts.</p>
       </Card>
     )
   }
@@ -70,7 +70,7 @@ export default function DepartmentAdmin() {
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="Department Admin" count={users.length}
+        title="Department Coordinator" count={users.length}
         subtitle={
           `Assign ${isQAAdmin ? 'QA team' : 'working-level'} roles and activate/deactivate accounts mapped to ` +
           `${user?.department || 'your department'} -- Administrator, Department Head, and Executive COE access ` +

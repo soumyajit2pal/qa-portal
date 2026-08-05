@@ -4,6 +4,7 @@ import { api } from './api'
 import { useAuth } from './context/AuthContext'
 import { Card, MetricCard, BarChart, Table, Badge, ErrorText, TableColumn } from './components/Common'
 import SearchableSelect from './components/SearchableSelect'
+import ClearableSearchInput from './components/ClearableSearchInput'
 import {
   IconGrid, IconWarning, IconApprove, IconWorkflow, IconCheckCircle,
 } from './components/Icons'
@@ -528,7 +529,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
                   <p className="muted small" style={{ margin: 0 }}>{visibleItems.length} of {threeW.total_pending} items · oldest first</p>
                 </div>
                 <div className="spacer" />
-                <input className="governance-search" value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} placeholder="Search project, application, owner…" aria-label="Search pending items" />
+                <ClearableSearchInput className="governance-search" value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} onClear={() => setGovernanceSearch('')} clearLabel="Clear pending item search" wrapperClassName="governance-search-wrap" placeholder="Search project, application, owner…" aria-label="Search pending items" />
                 <SearchableSelect
                   value={teamFilter}
                   onChange={setTeamFilter}
@@ -562,7 +563,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         {govTab === 'Projects' && (
           <div style={{ marginTop: 12 }}>
             <div className="governance-filter-strip">
-              <input value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} placeholder="Search project, application, owner…" />
+              <ClearableSearchInput value={governanceSearch} onChange={(e) => setGovernanceSearch(e.target.value)} onClear={() => setGovernanceSearch('')} clearLabel="Clear project search" wrapperClassName="search-grow" placeholder="Search project, application, owner…" />
               <SearchableSelect
                 value={teamFilter}
                 onChange={setTeamFilter}
@@ -601,11 +602,6 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         <Card
           title="QA Lifecycle Health"
           subtitle="Projects by current workflow stage"
-          right={(
-            <a style={{ cursor: 'pointer', color: 'var(--navy)', fontSize: 13, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }} onClick={() => navigate('/qa-requests')}>
-              <IconWorkflow width={14} height={14} /> View workflow
-            </a>
-          )}
         >
           <LifecycleStepper requests={functionalRequests} />
         </Card>

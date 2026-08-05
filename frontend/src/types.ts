@@ -113,18 +113,6 @@ export interface ChecklistItemOut {
   approved_at?: string | null
 }
 
-export interface WalkthroughOut {
-  id: number
-  session_date: string
-  conducted_by?: string | null
-  participants?: string | null
-  recording_path?: string | null
-  document_path?: string | null
-  qa_acknowledged_by_id?: number | null
-  qa_acknowledged_at?: string | null
-  notes?: string | null
-}
-
 export interface LinkedRequestRef {
   id: number
   request_id: string
@@ -159,6 +147,17 @@ export interface QARequestDocumentOut {
 // every other module (Functional/SAST/DAST/Performance/
 // Suppression/Sign-off), backed by the shared models.RequestDocument table.
 export type RequestDocumentOut = QARequestDocumentOut
+
+// Response shape for GET /api/qa-requests/{id}/checklist-evidence/documents
+// -- the batched fetch of every readiness-checklist evidence document for a
+// Draft QA Request in one call (see NewRequestModal.tsx), tagged with which
+// checklist item each document belongs to so the flat list can be regrouped
+// client-side using the same evidenceKey(kind, item_index) keying already
+// used for not-yet-uploaded pending files.
+export interface DraftChecklistEvidenceOut extends QARequestDocumentOut {
+  kind: string
+  item_index: number
+}
 
 // The QA Request is a pure intake/gateway record -- `status` here is just
 // Draft/Submitted/Raised/Cancelled (see constants.GATEWAY_STATUSES). The
@@ -645,6 +644,10 @@ export interface TestProjectOut {
   is_active: boolean
   created_by_id?: number | null
   created_at: string
+  pending_is_active?: boolean | null
+  pending_requested_by_id?: number | null
+  pending_requested_by_name?: string | null
+  pending_requested_at?: string | null
 }
 
 export interface TestFolderOut {
@@ -687,6 +690,9 @@ export interface TestCaseOut {
   created_by_name?: string | null
   created_at: string
   updated_at: string
+  checked_out_by_id?: number | null
+  checked_out_by_name?: string | null
+  checked_out_at?: string | null
   steps: TestStepOut[]
 }
 
@@ -761,4 +767,26 @@ export interface TestExecutionOut {
   // Full attempt-by-attempt history, oldest first. These columns above
   // always mirror runs[runs.length - 1] once at least one attempt exists.
   runs?: TestExecutionRunOut[]
+}
+
+// One row in the logged-in user's Pending Approvals feed -- see
+// backend/app/routers/pending_approvals.py's own module docstring for
+// exactly how "awaiting this user" is worked out per category (Application
+// Name Application Owner/SM tiers, Functional/SAST/DAST/Performance SM/
+// Department Head/Readiness, Suppression SM/Department Head/Security Team,
+// QA Sign-off QA Lead/Executive COE, Test Project activation). Not tied to
+// any single entity's own Out type -- built up from many different tables
+// on the backend, so this is its own flat shape.
+export interface PendingApprovalItem {
+  category: string
+  entity_type: string
+  entity_id: number
+  display_id?: string | null
+  title: string
+  status: string
+  status_label: string
+  department?: string | null
+  submitted_by?: string | null
+  submitted_at?: string | null
+  path: string
 }

@@ -12,6 +12,7 @@ import {
   applicationNameAwareStatusLabel,
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
+import { ApplicationNameBanner } from "../components/ApplicationNameBanner";
 import {
   GATEWAY_CANCELLABLE_STATUSES,
   GATEWAY_EDITABLE_STATUSES,
@@ -23,10 +24,9 @@ import {
   QARequestOut,
   UserOut,
   QARequestDocumentOut,
-  RequestDocumentOut,
+  DraftChecklistEvidenceOut,
   ApprovalActionOut,
 } from "../types";
-import { EvidenceKind } from "./steps/ChecklistEvidencePicker";
 import { GatewayPreview, gatewayStageIndex } from "./GatewayPreview";
 import { classificationSummary, linkedSections, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
@@ -84,6 +84,16 @@ export function RequestDetail({
   // Cancelled has no way back), so it's now gated behind a confirmation
   // pop-up instead of firing straight off the button click.
   const [confirmCancel, setConfirmCancel] = useState(false);
+  // Set when an Application Owner/SM's decision on this request's
+  // Application Name (see ApplicationNameBanner below) succeeds but the
+  // follow-up reload can't -- typically because rejecting a brand-new name
+  // at the Application Owner tier reverts this gateway straight back to
+  // Draft (see routers/applications.py::decide_app_owner_name), which is
+  // requester/admin-only, so the reviewer who just rejected it loses the
+  // ability to even view it again. Holds the message to show; dismissing it
+  // closes this whole modal too, since there's nothing left here for that
+  // viewer to look at.
+  const [appNameDecisionNotice, setAppNameDecisionNotice] = useState<string | null>(null);
 
   // Every readiness checklist is Admin-configurable now (see
   // backend checklist_config.py) -- fetched live instead of the old
@@ -126,35 +136,26 @@ export function RequestDetail({
       setDraftEvidenceCounts({});
       return;
     }
-    const requestTypes = (req.request_types || "").split(",").map((t) => t.trim());
-    const kindsToLoad: { kind: EvidenceKind; count: number }[] = [];
-    if (requestTypes.includes("Functional Testing")) {
-      kindsToLoad.push({ kind: "functional", count: functionalChecklist.length });
-    }
-    if (requestTypes.includes("SAST")) {
-      kindsToLoad.push({ kind: "sast", count: sastChecklist.length });
-    }
-    if (requestTypes.includes("DAST")) {
-      kindsToLoad.push({ kind: "dast", count: dastChecklist.length });
-    }
-    if (requestTypes.includes("Performance Testing")) {
-      kindsToLoad.push({ kind: "performance", count: performanceChecklist.length });
-    }
-    const entries: [string, number][] = [];
-    for (const { kind, count } of kindsToLoad) {
-      for (let index = 0; index < count; index++) {
-        try {
-          const docs = await api.get<RequestDocumentOut[]>(
-            `/api/qa-requests/${req.id}/checklist-evidence/${kind}/${index}/documents`
-          );
-          entries.push([`${kind}:${index}`, docs.length]);
-        } catch {
-          entries.push([`${kind}:${index}`, 0]);
-        }
+    // One batched call instead of one GET per checklist item (reported
+    // directly, twice: this used to loop sequentially -- awaited one at a
+    // time, not even in parallel -- over every mandatory/checked item across
+    // every selected module just to get a per-item file count). Same
+    // endpoint NewRequestModal.tsx's own loadSavedEvidence uses; grouped
+    // into counts here since that's all this component needs.
+    try {
+      const rows = await api.get<DraftChecklistEvidenceOut[]>(
+        `/api/qa-requests/${req.id}/checklist-evidence/documents`
+      );
+      const counts: Record<string, number> = {};
+      for (const row of rows) {
+        const key = `${row.kind}:${row.item_index}`;
+        counts[key] = (counts[key] || 0) + 1;
       }
+      setDraftEvidenceCounts(counts);
+    } catch {
+      setDraftEvidenceCounts({});
     }
-    setDraftEvidenceCounts(Object.fromEntries(entries));
-  }, [req.id, req.status, req.request_types, functionalChecklist, sastChecklist, dastChecklist, performanceChecklist]);
+  }, [req.id, req.status]);
 
   useEffect(() => {
     loadDraftEvidenceCounts();
@@ -181,6 +182,92 @@ export function RequestDetail({
   const isAdmin = hasRole(user, "ADMIN");
   const isRequester = req.requester_id === user?.id || isAdmin;
   const status = req.status;
+  // Reported directly: "Request Raised with new application name... it must
+  // be at master request level, not on individual request level of childs."
+  // The App Owner/SM decision banner (ApplicationNameBanner) used to only
+  // ever render on the linked Functional/SAST/DAST/Performance request's own
+  // page -- moved here instead, the one master QA Request gateway page,
+  // since application_master_id/status already live on this same QARequestOut
+  // and the decision endpoints (routers/applications.py) key off the
+  // ApplicationMaster row directly, not off any specific child request --
+  // nothing backend-side needed to change. Same same-department gate every
+  // other approval checkpoint in the app uses.
+  const sameDept = !!user?.department && user.department === req.department;
+
+  // After an Application Owner/SM approves or rejects this request's
+  // Application Name (see ApplicationNameBanner below), refetch this
+  // specific request so application_master_status moves on
+  // (PENDING_APP_OWNER -> PENDING_SM -> APPROVED, or -> REJECTED) and the
+  // rest of this modal (status badges, Application Name field, etc.) picks
+  // that up. Reported directly (twice): this used to throw straight into
+  // the banner's own try/catch whenever it failed, showing a confusing raw
+  // "Action could not be completed" error even though the decision itself
+  // had already succeeded -- and since nothing here ever updated `req`, the
+  // banner kept re-rendering with its stale pre-decision props, buttons
+  // re-enabled, letting the same reviewer click Approve/Reject again and
+  // again.
+  //
+  // Rejecting a brand-new name at the Application Owner tier reverts the
+  // gateway straight back to Draft (see routers/applications.py::
+  // decide_app_owner_name / section 173) -- Draft is requester/admin-only
+  // (_can_view_gateway) -- so this reload is GUARANTEED to fail for any
+  // reviewer who isn't also the requester or an admin. Rather than firing
+  // it anyway and reacting to the predictable 403 after the fact (a round
+  // trip that also left a window for the stale-banner bug above), that
+  // specific case is detected up front from what's already known locally
+  // (this decision + the gateway's own tier just before the call) and
+  // skips the network call entirely -- deterministic, and the notice below
+  // shows immediately instead of waiting on a request that was never going
+  // to succeed.
+  async function reloadAfterApplicationNameDecision(decision: "Approved" | "Rejected") {
+    const wasAppOwnerTier = req.application_master_status === "PENDING_APP_OWNER";
+    if (decision === "Rejected" && wasAppOwnerTier && !isRequester && !isAdmin) {
+      setAppNameDecisionNotice(
+        "Application Name rejected. Since no linked request had been generated yet for this QA Request, it has been returned to the requester as a Draft and is no longer visible to you here."
+      );
+      return;
+    }
+    try {
+      // Refresh Activity together with the gateway record. The decision API
+      // writes its ApprovalAction before returning, but this drawer's
+      // `history` state previously stayed on the pre-decision snapshot until
+      // the user closed/reopened it or reloaded the page.
+      const [fresh, freshHistory] = await Promise.all([
+        api.get<QARequestOut>(`/api/qa-requests/${req.id}`),
+        api.get<ApprovalActionOut[]>(`/api/qa-requests/${req.id}/history`),
+      ]);
+      setHistory(freshHistory);
+      onChanged(fresh);
+    } catch (err) {
+      // Fallback for any other way this reload could fail (e.g. someone
+      // else cancelled the request in the meantime) -- same message pattern,
+      // still never leaks the raw backend error into a blocking pop-up.
+      setAppNameDecisionNotice(
+        decision === "Rejected"
+          ? "Application Name rejected. This request is no longer visible to you here."
+          : "Application Name decision recorded, but this request is no longer visible to you here."
+      );
+    }
+  }
+
+  // Reported directly (again, after sections 175/177): the Approve/Reject
+  // buttons could still be showing after a click. The one remaining gap
+  // (see ApplicationNameBanner.tsx's own onRefresh docstring): if the
+  // decision POST itself failed -- most commonly because someone else in
+  // the same department had already decided this exact name a moment
+  // earlier, so the backend correctly 400s a second attempt -- the banner's
+  // local `decided` state never gets set, and it kept showing the same
+  // now-stale buttons with nothing to make them go away short of manually
+  // closing and reopening the drawer. Unlike reloadAfterApplicationNameDecision
+  // above, this makes no assumption a decision succeeded (so it must never
+  // show the "rejected, returned to requester" notice) -- it's a plain,
+  // silent best-effort resync: pick up whatever the real current state is,
+  // and if this reviewer can no longer even view it (e.g. it turned out to
+  // already be Draft), just leave the existing error dialog as the
+  // explanation and do nothing further.
+  function silentRefreshRequest() {
+    api.get<QARequestOut>(`/api/qa-requests/${req.id}`).then(onChanged).catch(() => {});
+  }
 
   // Mirrors the backend's own gate on POST .../submit (see routers/
   // qa_requests.py::submit_request) -- surfaced here too so the requester
@@ -295,6 +382,16 @@ export function RequestDetail({
     }
   }
 
+  // Reported directly: a "sibling" gateway that resolved to the exact same
+  // brand-new Application Name as a DIFFERENT request could still be raised
+  // clean even after that name was rejected -- application_master_status is
+  // a live property (see models.QARequest), so this reads REJECTED here
+  // immediately once any Application Owner/SM rejects the shared name,
+  // without this request itself needing to be touched. Mirrors the new
+  // backend gate in routers/qa_requests.py::submit_request -- blocked here
+  // too so the requester sees why up front instead of only after clicking
+  // Submit and getting a 400.
+  const applicationNameRejected = req.application_master_status === "REJECTED";
   const canSubmit = isRequester && status === "DRAFT";
   // Mirrors backend GATEWAY_CANCELLABLE_STATUSES -- the gateway can only be
   // cancelled while still Draft (i.e. before it's ever been raised).
@@ -387,6 +484,27 @@ export function RequestDetail({
         <div>
           <GatewayPreview activeIndex={gatewayStageIndex(req.status)} />
 
+          {/* Gated on status !== "DRAFT" -- application_master_id/status get
+              set on the ApplicationMaster row the moment a brand-new "Other"
+              name is typed (see _resolve_application_name's own docstring: it
+              runs on every create/edit, not just Submit/Raise), so without
+              this gate an Application Owner could approve/reject a name
+              before the requester has even raised the request -- while it's
+              still a private, freely-editable Draft nobody else should be
+              acting on yet. Once raised, this is the only place the name's
+              own Approve/Reject decision is made (see the comment on the
+              badges below for why it moved here from each linked child
+              request's own page). */}
+          {(sameDept || isAdmin) && req.status !== "DRAFT" && (
+            <ApplicationNameBanner
+              applicationMasterId={req.application_master_id}
+              applicationMasterStatus={req.application_master_status}
+              applicationName={req.application_name}
+              onDecided={reloadAfterApplicationNameDecision}
+              onRefresh={silentRefreshRequest}
+            />
+          )}
+
           <DetailSection title="Status">
             <DetailField label="Status">
               <Badge status={req.status} />
@@ -409,16 +527,47 @@ export function RequestDetail({
           <DetailSection title="Application & Change">
             <DetailField label="Application Name">
               {req.application_name || "—"}
-              {req.application_master_status === "PENDING_APP_OWNER" && (
-                <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                  Pending Application Owner Approval
-                </span>
-              )}
-              {req.application_master_status === "PENDING_SM" && (
-                <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                  Pending SM Approval
-                </span>
-              )}
+              {/* PENDING_APP_OWNER/PENDING_SM get set on the ApplicationMaster
+                  row the moment a brand-new "Other" name is typed -- even
+                  while this gateway is still sitting in Draft (see
+                  _resolve_application_name's own docstring: it runs on every
+                  create/edit, not just Submit/Raise). Reported directly:
+                  "Request Raised with new application name... it must be at
+                  master request level, not on individual request level of
+                  childs" -- the actual App Owner/SM decision banner
+                  (ApplicationNameBanner, above) now lives on this one master
+                  QA Request page instead of being duplicated across every
+                  linked Functional/SAST/DAST/Performance request's own page.
+                  It's also still gated to status !== "DRAFT" (see the banner
+                  above), same reasoning as this badge: showing "Pending ...
+                  Approval" while still Draft would wrongly imply the name is
+                  already under active review, when nothing can act on it yet
+                  -- softened to a neutral, accurate note for that case; the
+                  real "Pending" badges only show once raised. REJECTED is
+                  left as-is regardless of Draft status: unlike "Pending",
+                  it's immediately actionable information (pick a different
+                  name) even before raising, and can genuinely apply to a
+                  still-open Draft if another request sharing the same name
+                  gets it rejected in the meantime. */}
+              {req.status === "DRAFT" &&
+                (req.application_master_status === "PENDING_APP_OWNER" ||
+                  req.application_master_status === "PENDING_SM") && (
+                  <span className="badge badge-gray" style={{ marginLeft: 8 }}>
+                    New name — enters approval once raised
+                  </span>
+                )}
+              {req.status !== "DRAFT" &&
+                req.application_master_status === "PENDING_APP_OWNER" && (
+                  <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
+                    Application Owner Approval Pending
+                  </span>
+                )}
+              {req.status !== "DRAFT" &&
+                req.application_master_status === "PENDING_SM" && (
+                  <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
+                    Pending SM Approval
+                  </span>
+                )}
               {req.application_master_status === "REJECTED" && (
                 <span className="badge badge-red" style={{ marginLeft: 8 }}>
                   Rejected — pick a different name
@@ -499,7 +648,26 @@ export function RequestDetail({
               types call for — nothing shows here until then.
             </p>
           )}
-          {canSubmit && pendingMandatory.length > 0 && (
+          {canSubmit && applicationNameRejected && (
+            <div
+              style={{
+                marginTop: 8,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                borderRadius: 10,
+                padding: "10px 14px",
+                color: "#991b1b",
+                fontSize: 13,
+              }}
+            >
+              <strong>Cannot Submit / Raise</strong> — the Application Name{" "}
+              <strong>{req.application_name || "—"}</strong> was rejected.
+              Edit this request and either choose a different Application
+              Name, or re-select/re-type this same name to resubmit it for
+              fresh approval, before raising.
+            </div>
+          )}
+          {canSubmit && !applicationNameRejected && pendingMandatory.length > 0 && (
             <div
               style={{
                 marginTop: 8,
@@ -562,9 +730,11 @@ export function RequestDetail({
               {canSubmit && (
                 <button
                   className="btn btn-primary btn-sm"
-                  disabled={!!busyAction || pendingMandatory.length > 0}
+                  disabled={!!busyAction || applicationNameRejected || pendingMandatory.length > 0}
                   title={
-                    pendingMandatory.length > 0
+                    applicationNameRejected
+                      ? "This request's Application Name was rejected -- edit the request first"
+                      : pendingMandatory.length > 0
                       ? "Complete the mandatory checklist item(s) below first"
                       : undefined
                   }
@@ -586,6 +756,8 @@ export function RequestDetail({
                 <span className="muted small">
                   No gateway actions available — this request has been{" "}
                   {(GATEWAY_STATUS_LABELS[status] || status).toLowerCase()}.
+                  {status === "SUBMITTED" &&
+                    " Its Application Name is a brand-new entry awaiting Application Owner approval (see above) — no linked request has been generated yet."}
                   {hasLinked &&
                     " Manage progress on each linked request's own page from here."}
                 </span>
@@ -807,7 +979,36 @@ export function RequestDetail({
         </InfoModal>
       )}
 
-      {raisedNotice && (
+      {/* 2026-08: a brand-new "Other" Application Name defers child-request
+          creation until an Application Owner approves it (see
+          routers/qa_requests.py::submit_request) -- this modal fires right
+          after Submit either way (see act() above), but when that's the
+          case raisedNotice.status is "SUBMITTED", not "RAISED", and there
+          is genuinely nothing under linkedSections() yet (every linked_*
+          array is still empty). Showing the normal "go review each section"
+          copy against an empty list would be confusing, so this case gets
+          its own explanation instead; the normal copy only applies once
+          status is actually RAISED. */}
+      {raisedNotice && raisedNotice.status === "SUBMITTED" && (
+        <InfoModal title="Request Submitted" onClose={() => setRaisedNotice(null)}>
+          <p style={{ marginTop: -4 }}>
+            <strong>{raisedNotice.request_id}</strong> has been submitted, but
+            not raised yet — its Application Name{" "}
+            <strong>{raisedNotice.application_name || "—"}</strong> is a
+            brand-new entry and needs Application Owner approval first.
+          </p>
+          <p className="muted small">
+            No Functional/SAST/DAST/Performance request has been created yet.
+            Once the Application Owner approves the name, this request will
+            move to Raised automatically, its linked request(s) will be
+            generated, and they'll be assigned to SM — you'll see them appear
+            on this page and its respective section(s) at that point. If the
+            name is rejected instead, this request reverts to Draft so you
+            can edit and resubmit under a different name.
+          </p>
+        </InfoModal>
+      )}
+      {raisedNotice && raisedNotice.status !== "SUBMITTED" && (
         <InfoModal title="Request Raised" onClose={() => setRaisedNotice(null)}>
           <p style={{ marginTop: -4 }}>
             <strong>{raisedNotice.request_id}</strong> has been raised. Each
@@ -824,6 +1025,18 @@ export function RequestDetail({
               </li>
             ))}
           </ul>
+        </InfoModal>
+      )}
+
+      {appNameDecisionNotice && (
+        <InfoModal
+          title="Application Name Decision Recorded"
+          onClose={() => {
+            setAppNameDecisionNotice(null);
+            onClose();
+          }}
+        >
+          <p style={{ marginTop: -4 }}>{appNameDecisionNotice}</p>
         </InfoModal>
       )}
     </Modal>

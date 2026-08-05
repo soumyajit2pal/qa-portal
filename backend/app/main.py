@@ -13,6 +13,7 @@ from .routers import (
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, audit, checklist_config,
+    pending_approvals,
 )
 
 Base.metadata.create_all(bind=engine)
@@ -113,6 +114,7 @@ app.include_router(test_repository.router)
 app.include_router(test_execution.router)
 app.include_router(audit.router)
 app.include_router(checklist_config.router)
+app.include_router(pending_approvals.router)
 
 
 @app.get("/api/health")

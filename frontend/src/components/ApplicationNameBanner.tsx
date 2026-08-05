@@ -10,32 +10,71 @@ interface Props {
   applicationName?: string | null
   department?: string | null
   // Reloads the parent request after a decision so application_master_status
-  // moves on (PENDING_APP_OWNER -> PENDING_SM -> APPROVED, or -> REJECTED)
-  // and this banner re-renders for the next tier or disappears on its own.
-  onDecided: () => void
+  // moves on (PENDING_APP_OWNER -> APPROVED, or -> REJECTED -- single-tier,
+  // 2026-08 v2, see models.ApplicationMaster's own docstring) and this
+  // banner disappears on its own. Receives the decision that was just made
+  // -- Rejected reverts the gateway straight back to Draft (see
+  // routers/applications.py::decide_app_owner_name), which the reviewer
+  // usually can no longer even view (Draft is requester/admin-only), so the
+  // parent needs to know WHICH decision just happened to react sensibly to
+  // that reload failing rather than silently leaving the modal stale.
+  onDecided: (decision: 'Approved' | 'Rejected') => void
+  // Best-effort, honest resync used only when a decision attempt itself
+  // FAILED (see decide()'s catch branch below) -- unlike onDecided above,
+  // this makes no assumption that a decision was actually recorded, so it
+  // must never trigger the "rejected, returned to requester" notice. Its one
+  // job is to pick up whatever the real current state already is (most
+  // commonly: someone else in the same department decided this exact name a
+  // moment earlier, and the backend correctly 400s this second attempt) so
+  // stale, now-pointless Approve/Reject buttons don't keep sitting there
+  // waiting to fail again on retry.
+  onRefresh: () => void
 }
 
-// Shown inline on a request's own SM Approval screen (Functional/SAST/DAST/
-// Performance) when its Application Name is still a brand-new,
-// not-yet-approved entry (see backend models.ApplicationMaster) -- lets
-// whoever holds the checkpoint for the CURRENT tier approve/reject the name
-// itself right here. Two-tier chain (2026-08): PENDING_APP_OWNER -> an
-// Application Owner decides first; PENDING_SM -> then an SM makes the final
-// call. Approving at either tier never touches the request's own status
-// except to move the name on to the next tier (App Owner) or leave it
-// APPROVED (SM). Rejecting at EITHER tier is terminal: the backend
-// (routers/applications.py::decide_app_owner_name /
-// decide_application_name) also force-rejects the request itself if it's
-// still sitting at SM Approval, since it can't be allowed to proceed to
-// Department Head under a name that was just rejected -- onDecided() below
-// reloads the parent request so its status/badge picks that up immediately.
-// Only rendered for whichever role owns the CURRENT tier (or Admin);
-// require_same_department is enforced server-side regardless, so someone
-// from a different department gets a 403 here rather than silently
-// succeeding.
-export function ApplicationNameBanner({ applicationMasterId, applicationMasterStatus, applicationName, onDecided }: Props) {
+// Shown inline on the master QA Request gateway's own Overview tab (see
+// QARequests/RequestDetail.tsx) when its Application Name is still a
+// brand-new, not-yet-approved entry (see backend models.ApplicationMaster) --
+// lets whoever holds the checkpoint for the CURRENT tier approve/reject the
+// name itself right here. Reported directly: "Request Raised with new
+// application name... it must be at master request level, not on individual
+// request level of childs" -- this used to render separately on every one of
+// the linked Functional/SAST/DAST/Performance requests' own pages instead
+// (duplicating the same decision across however many child requests shared
+// the name); those pages still show read-only "Pending .../Rejected" badges
+// (see applicationNameAwareStatusLabel and each page's own Application Name
+// field) and still block SM/Department Head approval while the name isn't
+// APPROVED, but the actual Approve/Reject action only lives here now.
+// Single-tier (2026-08 v2, reported directly: "only application owner
+// approval required, no SM involvement. if application owner approved then
+// automatically come to SM for readiness verification and all"):
+// PENDING_APP_OWNER -> an Application Owner decides, Approved or Rejected,
+// and either outcome is immediately terminal. Approving finalizes the name
+// (APPROVED) and, if this request's own child requests hadn't been created
+// yet (see routers/qa_requests.py::submit_request's deferred-creation
+// branch), creates them now and sends them straight to their assigned SM's
+// own normal readiness-verification queue -- no separate Application Name
+// decision from that SM exists anymore. Rejecting force-rejects the request
+// itself if it's still sitting at SM Approval, since it can't be allowed to
+// proceed to Department Head under a name that was just rejected --
+// onDecided() below reloads the parent request so its status/badge picks
+// that up immediately. (PENDING_SM/isSmTier below is legacy-only, for any
+// row that predates this change -- see decide_application_name's own
+// docstring; no new name can ever reach it.) Only rendered for whichever
+// role owns the CURRENT tier (or Admin); require_same_department is
+// enforced server-side regardless, so someone from a different department
+// gets a 403 here rather than silently succeeding.
+export function ApplicationNameBanner({ applicationMasterId, applicationMasterStatus, applicationName, onDecided, onRefresh }: Props) {
   const { user } = useAuth()
   const [busy, setBusy] = useState<'Approved' | 'Rejected' | null>(null)
+  // Reported directly: a reviewer could click Approve/Reject more than once
+  // -- this banner kept re-rendering with its stale, pre-decision props
+  // (still PENDING_APP_OWNER/PENDING_SM, buttons re-enabled) whenever the
+  // parent's own post-decision reload silently failed (see onDecided's own
+  // comment above). Tracked locally, independent of whatever the reload
+  // does or doesn't manage to do, so the buttons are gone for good the
+  // instant the decision itself succeeds -- not "until the next prop
+  // update that may never come."
+  const [decided, setDecided] = useState<'Approved' | 'Rejected' | null>(null)
   const [error, setError] = useState<unknown>(null)
 
   const isAppOwnerTier = applicationMasterStatus === 'PENDING_APP_OWNER'
@@ -43,7 +82,7 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
   const canDecideHere = (isAppOwnerTier && hasRole(user, 'APPLICATION_OWNER'))
     || (isSmTier && hasRole(user, 'SM'))
 
-  if (!applicationMasterId || !canDecideHere) return null
+  if (!applicationMasterId || (!canDecideHere && !decided)) return null
 
   const endpoint = isAppOwnerTier ? 'app-owner-decision' : 'decision'
   const tierLabel = isAppOwnerTier ? 'Application Owner' : 'SM'
@@ -53,12 +92,52 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
     setError(null)
     try {
       await api.post(`/api/application-names/${applicationMasterId}/${endpoint}`, { decision })
-      onDecided()
+      setDecided(decision)
+      // Reported directly (again, after section 175/177): buttons were still
+      // showing after a click. AWAITED now (was fire-and-forget) so the
+      // parent's own refresh -- or its "returned to requester as Draft, no
+      // longer visible" notice, which also closes this drawer -- has
+      // actually finished before this click's lifecycle is considered done,
+      // instead of leaving a window where a slow/failed reload could leave
+      // stale data sitting behind the (already-correct) local `decided`
+      // view. Errors from it are swallowed here on purpose: onDecided
+      // already turns any reload failure into its own user-facing notice
+      // (see reloadAfterApplicationNameDecision's docstring) -- must not
+      // also dump that as a second raw error on top of a decision that
+      // itself already succeeded.
+      try {
+        await onDecided(decision)
+      } catch {
+        /* already handled by the parent -- see comment above */
+      }
     } catch (err) {
       setError(err)
+      // Deliberately onRefresh here, NOT onDecided -- this decision attempt
+      // itself failed, so nothing was actually recorded; onDecided assumes
+      // success and would incorrectly fire the "rejected, returned to
+      // requester" notice (closing the drawer) over a click that never
+      // actually went through. onRefresh makes no such assumption -- it just
+      // picks up whatever the real current state already is. See its own
+      // docstring above for why this matters (most commonly: someone else
+      // already decided this exact name a moment earlier).
+      onRefresh()
     } finally {
       setBusy(null)
     }
+  }
+
+  if (decided) {
+    return (
+      <div style={{
+        marginBottom: 14, background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10,
+        padding: '10px 14px', color: '#166534', fontSize: 13,
+      }}>
+        <strong>Application Name {decided === 'Approved' ? 'approved' : 'rejected'}.</strong>{' '}
+        {decided === 'Approved'
+          ? 'It is now a selectable option for everyone else, and the linked request has moved on to SM for readiness verification.'
+          : 'This decision has been recorded.'}
+      </div>
+    )
   }
 
   return (
@@ -70,7 +149,7 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
       <span>
         <strong>New Application Name Pending {tierLabel} Approval:</strong> {applicationName || '—'} -- this
         was introduced as a new "Other" entry on the QA Request and needs your decision{isAppOwnerTier
-          ? ' before it moves on to SM for final approval.'
+          ? ' before it becomes a selectable option for everyone else and the linked request can move on to SM for readiness verification.'
           : ' before it becomes a selectable option for everyone else.'}
       </span>
       <div style={{ display: 'flex', gap: 8 }}>

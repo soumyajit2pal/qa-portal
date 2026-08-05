@@ -202,20 +202,35 @@ class ApplicationMaster(Base):
     always upper-cased at the point of entry, see the same resolver, to
     minimise case-sensitivity duplicates).
 
-    Two-tier approval (2026-08): a brand-new name starts at
+    Single-tier approval (2026-08 v2): a brand-new name starts at
     PENDING_APP_OWNER -- an Application Owner from the same department must
-    approve it first (see routers/applications.py::decide_app_owner) --
-    before it moves to PENDING_SM for the existing SM approval step (see
-    decide_application_name). Only once SM approves does it become APPROVED
-    and: (a) show up as a pickable option for everyone else going forward,
-    and (b) stop showing as "pending" on this particular request. Either
-    tier can Reject, which is terminal. Approving/rejecting the name is
-    independent of approving the request itself in the sense that raising/
-    saving a request is never blocked on it (_resolve_application_name never
-    blocks the caller) -- but the request's own SM/Department Head Approval
-    decisions ARE blocked from reaching "Approved" while this is anything
-    other than APPROVED (see application_name_block_message in constants.py
-    and its 6 call sites across functional.py/sast_dast.py/performance.py)."""
+    approve it (see routers/applications.py::decide_app_owner_name) -- and
+    that decision is immediately terminal either way: Approved goes straight
+    to APPROVED (a pickable option for everyone else going forward, and no
+    longer "pending" on this particular request), Rejected goes straight to
+    REJECTED. Reported directly: "only application owner approval required,
+    no SM involvement. if application owner approved then automatically come
+    to SM for readiness verification and all" -- the linked request's own
+    child requests (Functional/SAST/DAST/Performance) are created the moment
+    the name is Approved and go straight to their assigned SM's own normal
+    readiness-verification queue, same as any other Raised request; no
+    separate SM decision on the NAME itself exists anymore.
+
+    Historical note: for a short window in 2026-08 (v1 of this feature) there
+    was a second, SM tier in between (PENDING_SM, decided via
+    decide_application_name) before a name became APPROVED. That tier is now
+    legacy-only -- PENDING_SM is kept as a valid status value purely so any
+    row that was already sitting there before v2 shipped keeps working via
+    decide_application_name (a one-time data fix-up documented in the
+    migration notes converts any such row straight to APPROVED, so this
+    should not normally be reachable at all) -- no NEW name can ever reach
+    PENDING_SM again. Approving/rejecting the name is independent of
+    approving the request itself in the sense that raising/saving a request
+    is never blocked on it (_resolve_application_name never blocks the
+    caller) -- but the request's own SM/Department Head Approval decisions
+    ARE blocked from reaching "Approved" while this is anything other than
+    APPROVED (see application_name_block_message in constants.py and its 6
+    call sites across functional.py/sast_dast.py/performance.py)."""
     __tablename__ = "qap_application_master"
     id = pk_column()
     name = Column(String(150), unique=True, nullable=False)
@@ -234,18 +249,21 @@ class ApplicationMaster(Base):
     # a REJECTED name that gets proposed again later re-links to whichever
     # QA Request triggered that.
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
-    # Application Owner's own tier -- populated only when an Application
-    # Owner decides (Approved moves the row on to PENDING_SM without
-    # touching decided_by_id/decided_at/comments below; Rejected is terminal
-    # and populates BOTH this tier's fields and the SM-tier fields below, so
-    # anything reading decided_by_id/decided_at/comments as "the decision
-    # that made this terminal" keeps working regardless of which tier made
-    # the call).
+    # Application Owner's own decision -- the only tier that decides a NEW
+    # name (2026-08 v2). Populated whenever an Application Owner decides,
+    # Approved or Rejected; either outcome is terminal, so both this tier's
+    # own fields AND the (legacy-named, but no longer SM-specific) fields
+    # below get populated together -- anything reading decided_by_id/
+    # decided_at/comments as "the decision that made this terminal" keeps
+    # working regardless.
     app_owner_decided_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     app_owner_decided_at = Column(DateTime, nullable=True)
     app_owner_comments = Column(Text, nullable=True)
-    # SM's own tier -- populated when SM makes the final Approved/Rejected
-    # call, or when an Application Owner rejects (see above).
+    # Historically the SM's own tier (see the class docstring's "Historical
+    # note") -- now just mirrors whichever decision (by the Application
+    # Owner) was terminal. Left named as-is rather than renamed, since this
+    # is a live Oracle column (see ORACLE_MIGRATION_2026-07.md) and no
+    # renaming DDL has been requested.
     decided_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     decided_at = Column(DateTime, nullable=True)
     comments = Column(Text, nullable=True)
@@ -1131,8 +1149,19 @@ class ChecklistTemplateItem(Base):
     constants.DEFAULT_*_CHECKLIST_ITEMS remain in the codebase as this
     table's shipped defaults -- used to bootstrap it the first time a module
     is read with zero rows (see checklist_config.get_template_items), and
-    offered back to an Admin as a one-click "Restore Defaults" action."""
+    offered back to an Admin as a one-click "Restore Defaults" action.
+
+    Reported directly: "readiness checklist item sometime showing multiple in
+    UI while raising request." Root cause was a race in the lazy-bootstrap
+    seeding this table (see checklist_config.get_template_items): two
+    concurrent requests could both see zero rows for a module and both insert
+    a full default set, with nothing at the DB level stopping it. The unique
+    constraint below is the actual fix -- makes a second concurrent seed
+    attempt fail outright instead of silently duplicating every item -- see
+    get_template_items' own comment for how that failure is now handled
+    gracefully (lost the race, not an error)."""
     __tablename__ = "qap_checklist_template_items"
+    __table_args__ = (UniqueConstraint("module", "item", name="uq_qap_checklist_template_item"),)
     id = pk_column()
     # One of checklist_config.CHECKLIST_MODULES: "FUNCTIONAL", "SAST", "DAST",
     # "PERFORMANCE". Plain string column (not a FK/enum table) -- same
@@ -1448,12 +1477,28 @@ class TestProject(Base):
     is_active = Column(Boolean, default=True)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
+    # Reported directly: "Project Activation, deactivation should need
+    # approval from QA lead." pending_is_active is the *requested* new value
+    # while it awaits QA Lead sign-off -- None means no request is pending.
+    # Set by update_test_project when a QA Engineer (not QA Lead/Admin, who
+    # both apply immediately -- see the same router) asks to activate or
+    # deactivate; cleared by routers/test_projects.py::review_project_activation
+    # (approve applies it to is_active, reject just discards it) or by a
+    # QA Lead/Admin's own direct toggle superseding it.
+    pending_is_active = Column(Boolean, nullable=True)
+    pending_requested_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    pending_requested_at = Column(DateTime, nullable=True)
 
     application_master = relationship("ApplicationMaster", foreign_keys=[application_master_id])
     created_by = relationship("User", foreign_keys=[created_by_id])
+    pending_requested_by = relationship("User", foreign_keys=[pending_requested_by_id])
     folders = relationship("TestFolder", back_populates="project", cascade="all,delete-orphan")
     test_cases = relationship("TestCase", back_populates="project", cascade="all,delete-orphan")
     cycles = relationship("TestCycle", back_populates="project", cascade="all,delete-orphan")
+
+    @property
+    def pending_requested_by_name(self):
+        return self.pending_requested_by.full_name if self.pending_requested_by else None
 
 
 class TestFolder(Base):
@@ -1519,10 +1564,23 @@ class TestCase(Base):
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
+    # Explicit, SharePoint-style checkout lock. Reported directly: "check in
+    # checkout option should be available for testcases, otherwise multiple
+    # people can edit at once, if checkout, the testcase is locked for
+    # editing by that user." Set/cleared only via routers/test_repository.py
+    # ::checkout_test_case / checkin_test_case; update_test_case,
+    # delete_test_case, bulk_update_test_cases, and bulk_delete_test_cases
+    # all refuse to touch a case someone else holds the checkout on (see
+    # _enforce_checkout_lock -- Admin always bypasses). Review/approval is a
+    # separate QA Lead workflow step, not an author edit, so it is
+    # deliberately NOT gated by this lock.
+    checked_out_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    checked_out_at = Column(DateTime, nullable=True)
 
     project = relationship("TestProject", back_populates="test_cases")
     folder = relationship("TestFolder")
     created_by = relationship("User", foreign_keys=[created_by_id])
+    checked_out_by = relationship("User", foreign_keys=[checked_out_by_id])
     steps = relationship("TestStep", back_populates="test_case", cascade="all,delete-orphan",
                           order_by="TestStep.step_no")
     executions = relationship("TestExecution", back_populates="test_case", cascade="all,delete-orphan")
@@ -1534,6 +1592,10 @@ class TestCase(Base):
     @property
     def created_by_name(self):
         return self.created_by.full_name if self.created_by else None
+
+    @property
+    def checked_out_by_name(self):
+        return self.checked_out_by.full_name if self.checked_out_by else None
 
     @property
     def version(self):

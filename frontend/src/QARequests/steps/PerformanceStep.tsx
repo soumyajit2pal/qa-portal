@@ -2,9 +2,10 @@ import React from 'react'
 import { Field } from '../../components/Common'
 import { IconCheckCircle } from '../../components/Icons'
 import { PRIORITIES, RISK_RATINGS, PERFORMANCE_REQUEST_TYPES, POST_SIT_ENVIRONMENTS } from '../../constants'
+import { DraftChecklistEvidenceOut } from '../../types'
 import { QARequestForm, SetField } from '../types'
-import { ChecklistEvidencePicker, EvidenceKind } from './ChecklistEvidencePicker'
-import { useChecklistTemplate } from './useChecklistTemplate'
+import { EvidenceKind } from './ChecklistEvidencePicker'
+import { ReadinessChecklistSection } from './ReadinessChecklistSection'
 
 interface Props {
   form: QARequestForm
@@ -15,14 +16,14 @@ interface Props {
   draftRequestId?: number
   evidenceFiles: (kind: EvidenceKind, itemIndex: number) => File[]
   setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void
+  savedEvidenceFor: (kind: EvidenceKind, itemIndex: number) => DraftChecklistEvidenceOut[]
+  onEvidenceChanged: () => void
 }
 
 // Shown only while "Performance Testing" is a selected request type --
 // collects the Annexure VIII request type(s) and the 19-item "L1:
 // Pre-Testing Readiness Checklist" self-declaration.
-export function PerformanceStep({ form, set, existingPerformance, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
-  const { items: checklistItems, loading: checklistLoading } = useChecklistTemplate('PERFORMANCE')
-
+export function PerformanceStep({ form, set, existingPerformance, draftRequestId, evidenceFiles, setEvidenceFiles, savedEvidenceFor, onEvidenceChanged }: Props) {
   function toggleType(t: string) {
     set(
       'performance_request_types',
@@ -41,81 +42,72 @@ export function PerformanceStep({ form, set, existingPerformance, draftRequestId
   }
 
   return (
-    <div className="form-section">
-      <div className="form-section-title">Performance Testing Details</div>
-      <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>
-        Per Annexure VIII — QA Request Form &amp; Checklist (Performance Testing). Change Type,
-        Vendor / SI Partner, Technology Stack, Release Version, Build Number and Target
-        Promotion Environment aren't collected again here — they're already captured once on
-        "Application &amp; Change Details" and carry straight over to the Performance request.
-        Environment is the one exception — Performance testing is never run against Dev or SIT,
-        so it's asked for separately below rather than reusing Deployment Environment.
-      </p>
+    <div className="security-request-step security-request-step-performance">
+      <div className="security-step-intro">
+        <span>Performance request configuration</span>
+        <h3>Performance testing details</h3>
+        <p>Define classification, target environment, testing scope, and pre-testing readiness evidence.</p>
+      </div>
       {existingPerformance ? (
-        <p className="muted small">
-          The linked Performance request has already been raised — edit any of these details
-          (including Hash Value) on its own page (Performance Testing Requests) instead of here.
-        </p>
+        <div className="security-existing-request">
+          <strong>Performance request already raised</strong>
+          <span>Edit its configuration from Performance Requests. This intake step is now read-only.</span>
+        </div>
       ) : (
         <>
-          <div className="form-row">
-            <Field label="Priority">
-              <select value={form.performance_priority} onChange={(e) => set('performance_priority', e.target.value)}>
-                {PRIORITIES.map((o) => <option key={o} value={o}>{o}</option>)}
-              </select>
-            </Field>
-            <Field label="Risk Category">
-              <select value={form.performance_risk_category} onChange={(e) => set('performance_risk_category', e.target.value)}>
-                {RISK_RATINGS.map((o) => <option key={o} value={o}>{o}</option>)}
-              </select>
-            </Field>
-            {/* Performance testing is never run against Dev or SIT --
-                restricted to POST_SIT_ENVIRONMENTS with no blank option, so
-                this always carries a real, valid value (defaults to 'UAT',
-                see EMPTY_FORM). */}
-            <Field label="Environment *">
-              <select value={form.performance_environment} onChange={(e) => set('performance_environment', e.target.value)}>
-                {POST_SIT_ENVIRONMENTS.map((o) => <option key={o} value={o}>{o}</option>)}
-              </select>
-            </Field>
-          </div>
-          <div className="chip-select">
-            {PERFORMANCE_REQUEST_TYPES.map((t) => {
-              const active = form.performance_request_types.includes(t)
-              return (
-                <label key={t} className={`chip-toggle ${active ? 'active' : ''}`}>
-                  <input type="checkbox" checked={active} onChange={() => toggleType(t)} />
-                  <span className="chip-dot">{active && <IconCheckCircle width={9} height={9} strokeWidth={3} />}</span>
-                  {t}
-                </label>
-              )
-            })}
-          </div>
+          <section className="security-request-panel">
+            <div className="security-panel-heading">
+              <span className="security-panel-number">01</span>
+              <div><h4>Classification and environment</h4><p>Set urgency, risk, and the post-SIT environment where performance testing will run.</p></div>
+            </div>
+            <div className="security-classification-grid security-performance-classification">
+              <Field label="Priority *">
+                <select value={form.performance_priority} onChange={(e) => set('performance_priority', e.target.value)}>
+                  {PRIORITIES.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </Field>
+              <Field label="Risk Category *">
+                <select value={form.performance_risk_category} onChange={(e) => set('performance_risk_category', e.target.value)}>
+                  {RISK_RATINGS.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </Field>
+              <Field label="Environment *">
+                <select value={form.performance_environment} onChange={(e) => set('performance_environment', e.target.value)}>
+                  {POST_SIT_ENVIRONMENTS.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </Field>
+            </div>
+          </section>
 
-          <div className="section-title" style={{ marginTop: 16 }}>L1: Pre-Testing Readiness Checklist — Self-Declaration</div>
-          <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>
-            Tick what's already in place. This is your own declaration for reference only — QA
-            will independently verify every item during Readiness (on the linked Performance
-            Testing Request, once raised).
-          </p>
-          {checklistLoading && <p className="muted small">Loading checklist...</p>}
-          {checklistItems.map((ci, itemIndex) => {
-            const checked = form.performance_checked_items.includes(ci.item)
-            return (
-              <div key={ci.item} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
-                <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
-                  <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
-                  <span>
-                    {ci.item} <span className="muted small">({ci.detail})</span>{' '}
-                    {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
-                  </span>
-                </label>
-                <ChecklistEvidencePicker kind="performance" itemIndex={itemIndex} draftRequestId={draftRequestId}
-                  files={evidenceFiles('performance', itemIndex)} onFilesChange={(files) => setEvidenceFiles('performance', itemIndex, files)}
-                  required={ci.is_mandatory || checked} />
-              </div>
-            )
-          })}
+          <section className="security-request-panel">
+            <div className="security-panel-heading">
+              <span className="security-panel-number">02</span>
+              <div><h4>Testing scope</h4><p>Select every performance testing type required for this request.</p></div>
+            </div>
+            <div className="chip-select security-performance-types">
+              {PERFORMANCE_REQUEST_TYPES.map((type) => {
+                const active = form.performance_request_types.includes(type)
+                return (
+                  <label key={type} className={`chip-toggle ${active ? 'active' : ''}`}>
+                    <input type="checkbox" checked={active} onChange={() => toggleType(type)} />
+                    <span className="chip-dot">{active && <IconCheckCircle width={9} height={9} strokeWidth={3} />}</span>
+                    {type}
+                  </label>
+                )
+              })}
+            </div>
+          </section>
+
+          <ReadinessChecklistSection
+            module="PERFORMANCE" kind="performance" sectionNumber="03"
+            heading="L1 pre-testing readiness — self-declaration"
+            description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. QA will verify every declaration independently."
+            noticeLabel="Before SM approval"
+            noticeText="Every mandatory criterion must be selected. Evidence is recommended for mandatory and selected items."
+            selectedItems={form.performance_checked_items} onToggle={toggleChecked}
+            draftRequestId={draftRequestId} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles}
+            savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={onEvidenceChanged}
+          />
         </>
       )}
     </div>

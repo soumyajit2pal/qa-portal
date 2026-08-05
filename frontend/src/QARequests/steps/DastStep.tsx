@@ -1,9 +1,10 @@
 import React from 'react'
-import { Field, RepeatableRows } from '../../components/Common'
+import { Field } from '../../components/Common'
 import { PRIORITIES, RISK_RATINGS, POST_SIT_ENVIRONMENTS } from '../../constants'
+import { DraftChecklistEvidenceOut } from '../../types'
 import { QARequestForm, SetField, blankDastComponent } from '../types'
-import { ChecklistEvidencePicker, EvidenceKind } from './ChecklistEvidencePicker'
-import { useChecklistTemplate } from './useChecklistTemplate'
+import { EvidenceKind } from './ChecklistEvidencePicker'
+import { ReadinessChecklistSection } from './ReadinessChecklistSection'
 
 interface Props {
   form: QARequestForm
@@ -14,14 +15,14 @@ interface Props {
   draftRequestId?: number
   evidenceFiles: (kind: EvidenceKind, itemIndex: number) => File[]
   setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void
+  savedEvidenceFor: (kind: EvidenceKind, itemIndex: number) => DraftChecklistEvidenceOut[]
+  onEvidenceChanged: () => void
 }
 
 // Shown only while "DAST" is a selected request type -- fills in the
 // auto-created DAST request's target details and its own Security
 // Readiness checklist self-declaration, up front.
-export function DastStep({ form, set, existingDast, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
-  const { items: checklistItems, loading: checklistLoading } = useChecklistTemplate('DAST')
-
+export function DastStep({ form, set, existingDast, draftRequestId, evidenceFiles, setEvidenceFiles, savedEvidenceFor, onEvidenceChanged }: Props) {
   function toggleChecked(item: string) {
     set(
       'dast_checked_items',
@@ -31,111 +32,133 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
     )
   }
 
+  function setTarget<K extends keyof (typeof form.dast_components)[number]>(
+    index: number,
+    key: K,
+    value: (typeof form.dast_components)[number][K],
+  ) {
+    set('dast_components', form.dast_components.map((row, rowIndex) => (
+      rowIndex === index ? { ...row, [key]: value } : row
+    )))
+  }
+
+  function addTarget() {
+    set('dast_components', [...form.dast_components, blankDastComponent()])
+  }
+
+  function removeTarget(index: number) {
+    if (form.dast_components.length <= 1) return
+    set('dast_components', form.dast_components.filter((_, rowIndex) => rowIndex !== index))
+  }
+
   return (
-    <div className="form-section">
-      <div className="form-section-title">DAST Details *</div>
+    <div className="security-request-step security-request-step-dast">
+      <div className="security-step-intro">
+        <span>DAST request configuration</span>
+        <h3>Dynamic application security testing details</h3>
+        <p>Define classification, reachable scan targets, authentication requirements, and readiness evidence.</p>
+      </div>
       {existingDast ? (
-        <p className="muted small" style={{ marginTop: -4 }}>
-          The linked DAST request has already been raised — edit these details on its own page
-          (DAST Requests) instead of here.
-        </p>
+        <div className="security-existing-request">
+          <strong>DAST request already raised</strong>
+          <span>Edit its configuration from DAST Requests. This intake step is now read-only.</span>
+        </div>
       ) : (
         <>
-          <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>
-            Fills in the auto-created DAST request's details up front, instead of leaving them as
-            placeholders to fill in later.
-          </p>
-          <p className="muted small" style={{ marginTop: -4, marginBottom: 10 }}>
-            Target Release Date is already set on the "Application &amp; Change Details" step
-            ({form.target_release_date || 'not set'}) — no separate one here.
-          </p>
-          <div className="form-row">
-            <Field label="Priority *">
-              <select value={form.dast_priority} onChange={(e) => set('dast_priority', e.target.value)}>
-                {PRIORITIES.map((o) => <option key={o} value={o}>{o}</option>)}
-              </select>
-            </Field>
-            <Field label="Risk Category *">
-              <select value={form.dast_risk_category} onChange={(e) => set('dast_risk_category', e.target.value)}>
-                {RISK_RATINGS.map((o) => <option key={o} value={o}>{o}</option>)}
-              </select>
-            </Field>
-          </div>
-          <Field label="DAST Targets">
-            <RepeatableRows
-              rows={form.dast_components}
-              blankRow={blankDastComponent}
-              onChange={(v) => set('dast_components', v)}
-              renderRow={(row, setField) => (
-                <>
-                  <input
-                    placeholder="Application URL"
-                    value={row.application_url}
-                    onChange={(e) => setField('application_url', e.target.value)}
-                    style={{ flex: 2, minWidth: 180 }}
-                  />
-                  {/* DAST is never run against Dev or SIT -- restricted to
-                      POST_SIT_ENVIRONMENTS with no blank option, so this
-                      always carries a real, valid value (defaults to 'UAT',
-                      see blankDastComponent). */}
-                  <select
-                    value={row.environment}
-                    onChange={(e) => setField('environment', e.target.value)}
-                    style={{ flex: 1, minWidth: 130 }}
-                  >
-                    {POST_SIT_ENVIRONMENTS.map((o) => <option key={o} value={o}>{o}</option>)}
-                  </select>
-                  <label style={{ display: 'flex', gap: 6, alignItems: 'center', flex: '0 0 auto' }}>
-                    <input
-                      type="checkbox"
-                      checked={row.authentication_required}
-                      onChange={(e) => setField('authentication_required', e.target.checked)}
-                    />
-                    <span className="small">Auth required</span>
-                  </label>
-                  {row.authentication_required && (
-                    <input
-                      required
-                      placeholder="Test Credentials *"
-                      value={row.test_credentials}
-                      onChange={(e) => setField('test_credentials', e.target.value)}
-                      style={{ flex: 2, minWidth: 160 }}
-                    />
-                  )}
-                </>
-              )}
-            />
-          </Field>
-          <p className="muted small" style={{ marginTop: 6 }}>
-            Click "+" to add another target URL if this project spans more than one.
-          </p>
-          <div className="form-section-title" style={{ marginTop: 16 }}>
-            Security Readiness Checklist — Self-Declaration
-          </div>
-          <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>
-            Tick what's already in place. This is your own declaration for reference only — the
-            Security Analyst will independently verify every item during Security Readiness (on the
-            linked DAST request, once raised). Items marked "mandatory" must be ticked before the
-            DAST request can be submitted for SM Approval.
-          </p>
-          {checklistLoading && <p className="muted small">Loading checklist...</p>}
-          {checklistItems.map((ci, itemIndex) => {
-            const checked = form.dast_checked_items.includes(ci.item)
-            return (
-              <div key={ci.item} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
-                <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
-                  <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
-                  <span>
-                    {ci.item} <span className="muted small">({ci.detail})</span>{' '}
-                    {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
-                  </span>
-                </label>
-                <ChecklistEvidencePicker kind="dast" itemIndex={itemIndex} draftRequestId={draftRequestId}
-                  files={evidenceFiles('dast', itemIndex)} onFilesChange={(files) => setEvidenceFiles('dast', itemIndex, files)}
-                  required={ci.is_mandatory || checked} />
-              </div>
-            )
-          })}
+          <section className="security-request-panel">
+            <div className="security-panel-heading">
+              <span className="security-panel-number">01</span>
+              <div><h4>Classification</h4><p>Set the operational urgency and security risk independently for this DAST request.</p></div>
+            </div>
+            <div className="security-classification-grid">
+              <Field label="Priority *">
+                <select value={form.dast_priority} onChange={(e) => set('dast_priority', e.target.value)}>
+                  {PRIORITIES.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </Field>
+              <Field label="Risk Category *">
+                <select value={form.dast_risk_category} onChange={(e) => set('dast_risk_category', e.target.value)}>
+                  {RISK_RATINGS.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div className="security-context-note">
+              <span>Target release date</span>
+              <strong>{form.target_release_date || 'Not provided'}</strong>
+              <small>Managed on the Application &amp; Change Details step.</small>
+            </div>
+          </section>
+
+          <section className="security-request-panel">
+            <div className="security-panel-heading security-panel-heading-with-action">
+              <span className="security-panel-number">02</span>
+              <div><h4>Application scan targets</h4><p>Add every reachable URL as its own target with environment and authentication details.</p></div>
+              <button type="button" className="btn security-add-button" onClick={addTarget}>+ Add target</button>
+            </div>
+            <div className="security-target-list">
+              {form.dast_components.map((target, index) => {
+                const authId = `dast-target-auth-${index}`
+                return (
+                  <div className="security-target-card" key={index}>
+                    <div className="security-target-card-head">
+                      <span>Target {String(index + 1).padStart(2, '0')}</span>
+                      {form.dast_components.length > 1 && (
+                        <button type="button" className="security-remove-button" aria-label={`Remove target ${index + 1}`} onClick={() => removeTarget(index)}>Remove</button>
+                      )}
+                    </div>
+                    <div className="security-dast-target-grid">
+                      <label className="security-control security-control-application-url">
+                        <span>Application URL *</span>
+                        <input
+                          required type="url" value={target.application_url}
+                          placeholder="https://application.example.com"
+                          onChange={(event) => setTarget(index, 'application_url', event.target.value)}
+                        />
+                      </label>
+                      <label className="security-control security-control-environment">
+                        <span>Environment *</span>
+                        <select value={target.environment} onChange={(event) => setTarget(index, 'environment', event.target.value)}>
+                          {POST_SIT_ENVIRONMENTS.map((option) => <option key={option} value={option}>{option}</option>)}
+                        </select>
+                      </label>
+                      <div className="security-auth-control">
+                        <span>Authentication</span>
+                        <label htmlFor={authId}>
+                          <input
+                            id={authId} type="checkbox" checked={target.authentication_required}
+                            onChange={(event) => setTarget(index, 'authentication_required', event.target.checked)}
+                          />
+                          <span><strong>{target.authentication_required ? 'Required' : 'Not required'}</strong><small>Does this target require sign-in?</small></span>
+                        </label>
+                      </div>
+                      {target.authentication_required && (
+                        <label className="security-control security-control-credentials">
+                          <span>Test Credentials *</span>
+                          <input
+                            required value={target.test_credentials}
+                            placeholder="Provide a dedicated non-production test account"
+                            onChange={(event) => setTarget(index, 'test_credentials', event.target.value)}
+                          />
+                          <small>Use credentials approved for security testing. Do not enter personal production credentials.</small>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+
+          <ReadinessChecklistSection
+            module="DAST" kind="dast" sectionNumber="03"
+            heading="Security readiness self-declaration"
+            description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. The Security Analyst will verify every declaration independently."
+            noticeLabel="Before SM approval"
+            noticeText="Every mandatory criterion must be selected. Evidence is recommended for mandatory and selected items."
+            selectedItems={form.dast_checked_items} onToggle={toggleChecked}
+            draftRequestId={draftRequestId} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles}
+            savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={onEvidenceChanged}
+          />
         </>
       )}
     </div>

@@ -225,6 +225,18 @@ class RequestDocumentOut(ORMModel):
     uploaded_at: datetime.datetime
 
 
+class DraftChecklistEvidenceOut(RequestDocumentOut):
+    """Response shape for GET /{req_id}/checklist-evidence/documents -- the
+    batched counterpart to list_draft_checklist_evidence (routers/
+    qa_requests.py), which returns just one checklist item's own documents at
+    a time. `kind`/`item_index` tag each row so the frontend can regroup this
+    one flat list back into per-item buckets itself (see ChecklistEvidencePicker.
+    tsx's own evidenceKey(kind, item_index) helper -- the same keying used
+    client-side for not-yet-uploaded pending files)."""
+    kind: str
+    item_index: int
+
+
 class SASTComponentIn(BaseModel):
     """One repository row -- Repository URL/Branch/Commit ID/Tech Stack/Build
     Number all belong together (see RepeatableGroupInput on the SAST form and
@@ -1188,6 +1200,7 @@ class TestProjectCreate(BaseModel):
 
 class TestProjectUpdate(BaseModel):
     name: Optional[str] = None
+    application_master_id: Optional[int] = None
     department: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
@@ -1203,6 +1216,15 @@ class TestProjectOut(ORMModel):
     is_active: bool
     created_by_id: Optional[int] = None
     created_at: datetime.datetime
+    pending_is_active: Optional[bool] = None
+    pending_requested_by_id: Optional[int] = None
+    pending_requested_by_name: Optional[str] = None
+    pending_requested_at: Optional[datetime.datetime] = None
+
+
+class TestProjectActivationReview(BaseModel):
+    decision: str
+    comments: Optional[str] = None
 
 
 class TestFolderCreate(BaseModel):
@@ -1218,6 +1240,30 @@ class TestFolderOut(ORMModel):
     created_by_id: Optional[int] = None
     created_by_name: Optional[str] = None
     created_at: datetime.datetime
+
+
+class TestFolderMove(BaseModel):
+    # None means "move to top level" (no parent) -- explicit null is a real,
+    # valid destination, not "leave unchanged" (this endpoint is POST-only,
+    # always applied, unlike TestCaseBulkUpdate's model_fields_set trick).
+    parent_id: Optional[int] = None
+
+
+class TestFolderCopy(BaseModel):
+    # None means "copy to the same parent as the source folder" -- i.e.
+    # duplicate in place, as a sibling of the original.
+    parent_id: Optional[int] = None
+    name: Optional[str] = None
+
+
+class TestFolderUpdate(BaseModel):
+    # Reported directly: "Once folder is created, folder details should be
+    # editable." Uses model_fields_set (see update_folder) rather than
+    # TestFolderMove's "always applied" convention, since this is a general
+    # PATCH that may only touch name and leave parent_id untouched -- an
+    # explicit null still means "move to top level", same as TestFolderMove.
+    name: Optional[str] = None
+    parent_id: Optional[int] = None
 
 
 class TestStepIn(BaseModel):
@@ -1317,6 +1363,9 @@ class TestCaseOut(ORMModel):
     created_by_name: Optional[str] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    checked_out_by_id: Optional[int] = None
+    checked_out_by_name: Optional[str] = None
+    checked_out_at: Optional[datetime.datetime] = None
     steps: List[TestStepOut] = []
 
 
@@ -1465,3 +1514,27 @@ class TestExecutionOut(ORMModel):
     # models.TestExecutionRun. The columns above always mirror runs[-1] once
     # at least one attempt has been recorded.
     runs: List[TestExecutionRunOut] = []
+
+
+# ---------------- Pending Approvals (see routers/pending_approvals.py) ----------------
+class PendingApprovalItem(BaseModel):
+    """One row in the logged-in user's Pending Approvals feed -- a single
+    checkpoint, on a single entity, that is genuinely awaiting THIS user's
+    decision right now (see routers/pending_approvals.py's own module
+    docstring for exactly how "awaiting this user" is worked out per
+    category). Not an ORM model -- built up as plain dicts across many
+    different tables (ApplicationMaster, FunctionalRequest, SASTRequest,
+    DASTRequest, PerformanceRequest, SuppressionRequest, QASignOff,
+    TestProject), so there's no single underlying row shape to map
+    from_attributes onto."""
+    category: str          # e.g. "Application Name -- Application Owner Approval"
+    entity_type: str        # e.g. "APPLICATION_MASTER", "FUNCTIONAL_REQUEST", "SAST", ...
+    entity_id: int
+    display_id: Optional[str] = None    # business id, e.g. "TQA-FUNC-0007" -- None where the entity has no business id of its own (ApplicationMaster)
+    title: str               # short human label, e.g. the application name or "Functional Testing -- SM Approval"
+    status: str
+    status_label: str
+    department: Optional[str] = None
+    submitted_by: Optional[str] = None
+    submitted_at: Optional[datetime.datetime] = None
+    path: str                # frontend route to open this item for review

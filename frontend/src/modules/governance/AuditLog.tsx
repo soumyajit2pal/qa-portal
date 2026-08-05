@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
 import { AuditLogOut, AuditLogPage } from '../../types'
 import { Card, ErrorText, Modal, PageHeader, Table } from '../../components/Common'
+import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 const EVENT_TYPES = ['', 'AUTHENTICATION', 'ACCESS_MANAGEMENT', 'DATA_CHANGE', 'ACCESS']
 
@@ -67,7 +68,7 @@ export default function AuditLog() {
       </div>
 
       <div className="toolbar audit-toolbar">
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search actor, action, path or target" aria-label="Search audit log" />
+        <ClearableSearchInput value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear audit log search" wrapperClassName="search-grow" placeholder="Search actor, action, path or target" aria-label="Search audit log" />
         <select value={eventType} onChange={(e) => setEventType(e.target.value)} aria-label="Event type">
           {EVENT_TYPES.map((value) => <option key={value} value={value}>{value ? label(value) : 'All event types'}</option>)}
         </select>

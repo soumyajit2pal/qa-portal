@@ -9,6 +9,7 @@ import {
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, ApprovalActionOut } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
+import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -84,11 +85,13 @@ function TestingRequestIdSearch({ requests, selected, onSelect, onClear }: {
 
   return (
     <div className="searchable-select" ref={boxRef}>
-      <input
+      <ClearableSearchInput
         placeholder="Search Testing Request ID or application..."
         value={query}
         onFocus={() => setOpen(true)}
         onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
+        onClear={() => { setQuery(''); setOpen(true) }}
+        clearLabel="Clear Testing Request search"
       />
       {open && (
         <div className="searchable-select-panel">

@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext'
 import { Modal, ErrorText } from '../components/Common'
 import ConfirmModal from '../components/ConfirmModal'
 import { IconCheckCircle } from '../components/Icons'
-import { QARequestOut } from '../types'
+import { QARequestOut, DraftChecklistEvidenceOut } from '../types'
 import { EMPTY_FORM, QARequestForm, blankSastComponent, blankDastComponent } from './types'
 import { buildSteps } from './buildSteps'
 import { detailsStepError, typeStepError, sastStepError, dastStepError } from './validation'
@@ -129,6 +129,13 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
   const existingPerformance = !!editing?.linked_performance_requests?.length
   const [files, setFiles] = useState<File[]>([])
   const [checklistEvidence, setChecklistEvidence] = useState<Record<string, File[]>>({})
+  // Already-uploaded checklist evidence, keyed the same way as
+  // checklistEvidence above (evidenceKey(kind, itemIndex)) -- one batched
+  // fetch for the whole Draft instead of each ChecklistEvidencePicker
+  // instance firing its own GET on mount (reported directly: "multiple
+  // /documents api is calling on UI load" -- up to ~19 items x 4 modules
+  // each doing its own request). See loadSavedEvidence below.
+  const [savedEvidence, setSavedEvidence] = useState<Record<string, DraftChecklistEvidenceOut[]>>({})
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
@@ -150,6 +157,28 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
     if (stepIndex > steps.length - 1) setStepIndex(steps.length - 1)
     else if (stepIndex < 0) setStepIndex(0)
   }, [steps.length, stepIndex])
+
+  async function loadSavedEvidence() {
+    if (!editing?.id) return
+    try {
+      const rows = await api.get<DraftChecklistEvidenceOut[]>(`/api/qa-requests/${editing.id}/checklist-evidence/documents`)
+      const grouped: Record<string, DraftChecklistEvidenceOut[]> = {}
+      for (const row of rows) {
+        const key = evidenceKey(row.kind as EvidenceKind, row.item_index)
+        ;(grouped[key] ||= []).push(row)
+      }
+      setSavedEvidence(grouped)
+    } catch (err) {
+      setError(err)
+    }
+  }
+  // One batched fetch per time this Draft is opened for editing, instead of
+  // one per checklist item -- see loadSavedEvidence/savedEvidence above.
+  useEffect(() => {
+    loadSavedEvidence()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing?.id])
+
   const step = steps[stepIndex]
   if (!step) return null
 
@@ -159,6 +188,9 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
   }
   function setEvidenceFiles(kind: EvidenceKind, itemIndex: number, nextFiles: File[]) {
     setChecklistEvidence((current) => ({ ...current, [evidenceKey(kind, itemIndex)]: nextFiles }))
+  }
+  function savedEvidenceFor(kind: EvidenceKind, itemIndex: number): DraftChecklistEvidenceOut[] {
+    return savedEvidence[evidenceKey(kind, itemIndex)] || []
   }
 
   async function submit(e: React.FormEvent) {
@@ -349,11 +381,11 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
 
         <form onSubmit={submit}>
           {step.key === 'details' && <DetailsStep form={form} set={set} />}
-          {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} />}
+          {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
           {step.key === 'type' && <TypeStep form={form} set={set} />}
-          {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} />}
-          {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} />}
-          {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} />}
+          {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
+          {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
+          {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
           {step.key === 'documents' && (
             <DocumentsStep form={form} set={set} editing={editing} files={files} setFiles={setFiles} />
           )}

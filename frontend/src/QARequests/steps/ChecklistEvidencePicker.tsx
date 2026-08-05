@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { api } from '../../api'
 import { ErrorText, Modal } from '../../components/Common'
 import { RequestDocumentOut } from '../../types'
@@ -15,6 +15,9 @@ export function ChecklistEvidencePicker({
   draftRequestId,
   files,
   onFilesChange,
+  savedFiles,
+  onReload,
+  checked = false,
   required = false,
 }: {
   kind: EvidenceKind
@@ -22,6 +25,24 @@ export function ChecklistEvidencePicker({
   draftRequestId?: number
   files: File[]
   onFilesChange: (files: File[]) => void
+  // Already-uploaded documents for this one item -- fetched and owned by
+  // the wizard (NewRequestModal.tsx), one batched call for every item across
+  // every module rather than each picker instance fetching its own (see
+  // that component's own loadSavedEvidence for why). Empty until a Draft
+  // with this item's own evidence already saved is reopened.
+  savedFiles: RequestDocumentOut[]
+  // Re-runs that same batched fetch -- called after this picker deletes one
+  // of its own already-saved files, so the parent's shared list picks up
+  // the removal (harmless to re-fetch everything for one delete; it's a
+  // single request either way now, not one per item).
+  onReload: () => void
+  // Whether this checklist item's own checkbox is currently ticked --
+  // reported directly: attaching evidence for an item that isn't even
+  // declared "in place" yet doesn't make sense, so new evidence can't be
+  // attached until it's checked. Already-saved evidence (e.g. attached
+  // while checked, then the box got unticked again) stays visible/
+  // deletable regardless -- only adding NEW evidence is blocked.
+  checked?: boolean
   // Whether this item is mandatory or self-declared checked -- purely a
   // visual hint suggesting evidence would be useful here; nothing enforces
   // it, raising the request works either way (see RequestDetail.tsx's
@@ -30,7 +51,6 @@ export function ChecklistEvidencePicker({
   required?: boolean
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
-  const [savedFiles, setSavedFiles] = useState<RequestDocumentOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<RequestDocumentOut | null>(null)
@@ -39,19 +59,6 @@ export function ChecklistEvidencePicker({
     ? `/api/qa-requests/${draftRequestId}/checklist-evidence/${kind}/${itemIndex}/documents`
     : ''
 
-  const load = useCallback(async () => {
-    if (!endpoint) return
-    try {
-      setSavedFiles(await api.get<RequestDocumentOut[]>(endpoint))
-    } catch (err) {
-      setError(err)
-    }
-  }, [endpoint])
-
-  useEffect(() => {
-    load()
-  }, [load])
-
   async function deleteSavedFile() {
     if (!pendingDelete || !endpoint) return
     setDeleteBusy(true)
@@ -59,7 +66,7 @@ export function ChecklistEvidencePicker({
     try {
       await api.del(`${endpoint}/${pendingDelete.id}`)
       setPendingDelete(null)
-      await load()
+      onReload()
     } catch (err) {
       setError(err)
     } finally {
@@ -70,7 +77,7 @@ export function ChecklistEvidencePicker({
   const totalFiles = savedFiles.length + files.length
 
   return (
-    <div style={{ marginLeft: 'auto', width: 250, minWidth: 210 }}>
+    <div className="checklist-evidence-picker">
       <input
         ref={inputRef}
         type="file"
@@ -81,8 +88,14 @@ export function ChecklistEvidencePicker({
           e.target.value = ''
         }}
       />
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-        <button type="button" className="btn btn-sm" onClick={() => inputRef.current?.click()}>
+      <div className="checklist-evidence-actions">
+        <button
+          type="button"
+          className="btn btn-sm"
+          disabled={!checked}
+          title={checked ? undefined : 'Tick this item as checked before attaching evidence for it'}
+          onClick={() => inputRef.current?.click()}
+        >
           Attach evidence
         </button>
         {totalFiles > 0 && <span className="badge badge-blue">{totalFiles} file{totalFiles !== 1 ? 's' : ''}</span>}
@@ -96,9 +109,9 @@ export function ChecklistEvidencePicker({
         )}
       </div>
       {(savedFiles.length > 0 || files.length > 0) && (
-        <div style={{ display: 'grid', gap: 4, marginTop: 6 }}>
+        <div className="checklist-evidence-files">
           {savedFiles.map((document) => (
-            <div key={document.id} style={{ display: 'flex', gap: 4, alignItems: 'center', minWidth: 0 }}>
+            <div className="checklist-evidence-file" key={document.id}>
               <button
                 type="button"
                 className="btn btn-sm"
@@ -112,7 +125,7 @@ export function ChecklistEvidencePicker({
             </div>
           ))}
           {files.map((file, index) => (
-            <div key={`${file.name}-${index}`} style={{ display: 'flex', gap: 4, alignItems: 'center', minWidth: 0 }}>
+            <div className="checklist-evidence-file" key={`${file.name}-${index}`}>
               <span className="muted small" title={file.name} style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {file.name} · uploads when draft is saved
               </span>

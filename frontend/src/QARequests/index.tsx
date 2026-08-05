@@ -15,6 +15,7 @@ import { QARequestOut, UserOut } from "../types";
 import { classificationSummary, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
 import { RequestDetail } from "./RequestDetail";
+import ClearableSearchInput from "../components/ClearableSearchInput";
 
 // The QA Requests list page -- the intake gateway. "Raise QA Request" opens
 // the wizard (NewRequestModal); clicking a row opens the detail/edit view
@@ -92,6 +93,15 @@ export default function QARequests() {
 
   const canCreate = hasRole(user, "REQUESTER", "BUSINESS_ANALYST");
 
+  function clearSearch() {
+    setSearch("");
+    const params = new URLSearchParams(location.search);
+    params.delete("search");
+    params.delete("application_name");
+    const remaining = params.toString();
+    navigate(`${location.pathname}${remaining ? `?${remaining}` : ""}`, { replace: true });
+  }
+
   return (
     <div>
       <ErrorText error={error} />
@@ -102,10 +112,13 @@ export default function QARequests() {
         // actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ Raise QA Request</button>}
       />
       <div className="toolbar">
-        <input
+        <ClearableSearchInput
           placeholder="Search by request ID, application, or project..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          onClear={clearSearch}
+          clearLabel="Clear QA Request search"
+          wrapperClassName="search-grow"
         />
         <select
           value={statusFilter}

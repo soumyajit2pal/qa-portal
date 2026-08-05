@@ -17,7 +17,6 @@ import {
   ChecklistEvidence,
   applicationNameAwareStatusLabel,
 } from "../../components/Common";
-import { ApplicationNameBanner } from "../../components/ApplicationNameBanner";
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
 import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
@@ -41,7 +40,6 @@ import {
   FunctionalOut,
   UserOut,
   ChecklistItemOut,
-  WalkthroughOut,
   ApprovalActionOut,
   SignOffOut,
 } from "../../types";
@@ -480,7 +478,6 @@ function FunctionalDetail({
   const { user } = useAuth();
   const [tab, setTab] = useState("overview");
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>([]);
-  const [walkthroughs, setWalkthroughs] = useState<WalkthroughOut[]>([]);
   const [history, setHistory] = useState<ApprovalActionOut[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [comments, setComments] = useState("");
@@ -499,19 +496,15 @@ function FunctionalDetail({
 
   const load = useCallback(async () => {
     try {
-      const [cl, wt, hist] = await Promise.all([
+      const [cl, hist] = await Promise.all([
         api.get<ChecklistItemOut[]>(
           `/api/functional-requests/${req.id}/checklist`
-        ),
-        api.get<WalkthroughOut[]>(
-          `/api/functional-requests/${req.id}/walkthroughs`
         ),
         api.get<ApprovalActionOut[]>(
           `/api/functional-requests/${req.id}/history`
         ),
       ]);
       setChecklist(cl);
-      setWalkthroughs(wt);
       setHistory(hist);
     } catch (err) {
       setError(err);
@@ -541,18 +534,6 @@ function FunctionalDetail({
     } finally {
       setBusyAction(null);
     }
-  }
-
-  // After an SM approves/rejects this request's Application Name (see
-  // ApplicationNameBanner below) -- refetches this request specifically
-  // (not a whole separate endpoint) since that's the only thing that
-  // changed; application_master_status flips away from PENDING and the
-  // banner then hides itself on its own.
-  async function reloadAfterApplicationNameDecision() {
-    const fresh = await api.get<FunctionalOut>(
-      `/api/functional-requests/${req.id}`
-    );
-    onChanged(fresh);
   }
 
   // Called once the QA Sign-off Certificate modal has successfully created
@@ -628,16 +609,18 @@ function FunctionalDetail({
     req.application_master_status !== "APPROVED";
   // Reported directly: the SM's own block message used to always say "your
   // decision above" even while the name was still sitting with the
-  // Application Owner (i.e. not the SM's turn at all yet, and no "decision
-  // above" for them to make since the banner only renders for whoever owns
-  // the CURRENT tier) -- misleading. Tier-aware instead: names the actual
-  // holdup and who owns it.
+  // Application Owner (i.e. not the SM's turn at all yet) -- misleading.
+  // Tier-aware instead: names the actual holdup and who owns it. Updated
+  // again when the decision banner itself moved off this page entirely (see
+  // RequestDetail.tsx's own ApplicationNameBanner) -- "above" no longer
+  // means anything here, so the PENDING_SM case now points to where the
+  // decision actually happens.
   const smApplicationNameBlockedMessage =
     req.application_master_status === "PENDING_APP_OWNER"
       ? "This request's Application Name is still pending Application Owner approval -- it needs to be decided there before you can approve this request."
       : req.application_master_status === "REJECTED"
       ? "This request's Application Name was rejected -- the requester needs to pick a different name before this request can be approved."
-      : "Application Name is still pending your decision above -- decide it before approving this request.";
+      : "Application Name is still pending your decision -- decide it from this request's QA Request page before approving this request.";
   // Reported directly: a person who raised this request but also separately
   // holds SM/Department Head for the same department must not be able to
   // approve their own request just because they wear both hats -- someone
@@ -730,7 +713,7 @@ function FunctionalDetail({
       wide
     >
       <div className="tabs">
-        {["overview", "checklist", "walkthroughs", "documents", "history"].map(
+        {["overview", "checklist", "documents", "history"].map(
           (t) => (
             <button
               key={t}
@@ -750,15 +733,6 @@ function FunctionalDetail({
             activeIndex={lifecycleStageIndex(req.status)}
             applicationOwnerPending={req.application_master_status === "PENDING_APP_OWNER"}
           />
-
-          {(sameDept || isAdmin) && (
-            <ApplicationNameBanner
-              applicationMasterId={req.application_master_id}
-              applicationMasterStatus={req.application_master_status}
-              applicationName={req.application_name}
-              onDecided={reloadAfterApplicationNameDecision}
-            />
-          )}
 
           <DetailSection title="Status">
             <DetailField label="Status">
@@ -788,7 +762,7 @@ function FunctionalDetail({
               {req.application_name || "—"}
               {req.application_master_status === "PENDING_APP_OWNER" && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                  Pending Application Owner Approval
+                  Application Owner Approval Pending
                 </span>
               )}
               {req.application_master_status === "PENDING_SM" && (
@@ -1321,31 +1295,6 @@ function FunctionalDetail({
         </div>
       )}
 
-      {tab === "walkthroughs" && (
-        <div>
-          <Table
-            rowKey="id"
-            columns={[
-              {
-                key: "session_date",
-                header: "Date",
-                render: (r) => new Date(r.session_date).toLocaleString(),
-              },
-              { key: "conducted_by", header: "Conducted By" },
-              { key: "participants", header: "Participants" },
-              {
-                key: "qa_acknowledged_at",
-                header: "QA Acknowledged",
-                render: (r) => (r.qa_acknowledged_at ? "Yes" : "No"),
-                filterValue: (r) => (r.qa_acknowledged_at ? "Yes" : "No"),
-              },
-            ]}
-            rows={walkthroughs}
-          />
-          <AddWalkthrough reqId={req.id} onAdded={load} />
-        </div>
-      )}
-
       {tab === "history" && (
         <JiraActivity entityType="FUNCTIONAL_REQUEST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
@@ -1360,63 +1309,6 @@ function FunctionalDetail({
         guidance="Review the Readiness Checklist, complete the listed verification items, and then try “Readiness Passed” again."
       />
     </Modal>
-  );
-}
-
-function AddWalkthrough({
-  reqId,
-  onAdded,
-}: {
-  reqId: number;
-  onAdded: () => void;
-}) {
-  const [conducted_by, setConductedBy] = useState("");
-  const [participants, setParticipants] = useState("");
-  const [notes, setNotes] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      await api.post(`/api/functional-requests/${reqId}/walkthroughs`, {
-        conducted_by,
-        participants,
-        notes,
-      });
-      setConductedBy("");
-      setParticipants("");
-      setNotes("");
-      onAdded();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form
-      onSubmit={submit}
-      style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}
-    >
-      <input
-        placeholder="Conducted by"
-        value={conducted_by}
-        onChange={(e) => setConductedBy(e.target.value)}
-      />
-      <input
-        placeholder="Participants"
-        value={participants}
-        onChange={(e) => setParticipants(e.target.value)}
-      />
-      <input
-        placeholder="Notes"
-        value={notes}
-        onChange={(e) => setNotes(e.target.value)}
-      />
-      <button className="btn btn-sm" disabled={busy}>
-        Log Walkthrough Session
-      </button>
-    </form>
   );
 }
 

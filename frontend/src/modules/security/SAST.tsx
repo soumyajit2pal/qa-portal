@@ -3,12 +3,11 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, applicationNameAwareStatusLabel } from '../../components/Common'
-import { ApplicationNameBanner } from '../../components/ApplicationNameBanner'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, PRIORITIES, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { SASTOut, SASTComponentOut, ChecklistItemOut, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
+import { SASTOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
 
 // One "SAST component" = one repository, with its own branch/commit/tech
 // stack/build number -- the "+" adds a whole new one of these (not just
@@ -219,7 +218,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // the moment of failing readiness instead.
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [walkthroughs, setWalkthroughs] = useState<WalkthroughOut[]>([])
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>(req.checklist_items || [])
   useEffect(() => { setChecklist(req.checklist_items || []) }, [req])
@@ -231,11 +229,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
   const load = useCallback(async () => {
     try {
-      const [wt, hist] = await Promise.all([
-        api.get<WalkthroughOut[]>(`/api/sast-requests/${req.id}/walkthroughs`),
-        api.get<ApprovalActionOut[]>(`/api/sast-requests/${req.id}/history`),
-      ])
-      setWalkthroughs(wt); setHistory(hist)
+      setHistory(await api.get<ApprovalActionOut[]>(`/api/sast-requests/${req.id}/history`))
     } catch (err) { setError(err) }
   }, [req.id])
 
@@ -294,16 +288,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
     } catch (err) { setError(err) }
   }
 
-  // After an SM approves/rejects this request's Application Name (see
-  // ApplicationNameBanner below) -- same "refetch the list, find this one"
-  // pattern as addFinding/resolveFinding above, since there's no single-item
-  // GET endpoint for a SAST request.
-  async function reloadAfterApplicationNameDecision() {
-    const fresh = await api.get<SASTOut[]>('/api/sast-requests')
-    const updated = fresh.find((r) => r.id === req.id)
-    if (updated) onChanged(updated)
-  }
-
   const isAdmin = hasRole(user, 'ADMIN')
   const isRequester = req.requester_id === user?.id || isAdmin
   const status = req.status
@@ -334,18 +318,20 @@ function SASTDetail({ req, onClose, onChanged, users }: {
     || (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   // Blocks Sign/Approve on both the SM and Department Head decision panels
   // below while this request's Application Name is still PENDING/REJECTED
-  // (not yet APPROVED) -- see ApplicationNameBanner.
+  // (not yet APPROVED) -- see RequestDetail.tsx's ApplicationNameBanner
+  // (moved there from this page -- see the "must be at master request
+  // level, not on individual request level of childs" report).
   const applicationNameBlocking = !!req.application_master_status && req.application_master_status !== 'APPROVED'
   // Tier-aware -- names the actual holdup instead of always claiming "your
-  // decision above" even while the name is still sitting with the
-  // Application Owner (not the SM's turn, and no "decision above" for them
-  // since the banner only renders for whoever owns the CURRENT tier).
+  // decision above". The actual decision now happens on the master QA
+  // Request page, not "above" on this page at all -- see
+  // RequestDetail.tsx's ApplicationNameBanner.
   const smApplicationNameBlockedMessage =
     req.application_master_status === 'PENDING_APP_OWNER'
       ? "This request's Application Name is still pending Application Owner approval -- it needs to be decided there before you can approve this request."
       : req.application_master_status === 'REJECTED'
       ? "This request's Application Name was rejected -- the requester needs to pick a different name before this request can be approved."
-      : 'Application Name is still pending your decision above -- decide it before approving this request.'
+      : "Application Name is still pending your decision -- decide it from this request's QA Request page before approving this request."
   const canSubmit = isRequester && status === 'DRAFT'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
   const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Request' : 'Re-submit'
@@ -391,7 +377,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   return (
     <Modal title={`${req.request_id} — ${req.application_name}`} onClose={onClose} wide>
       <div className="tabs">
-        {['overview', 'checklist', 'repository', 'findings', 'walkthroughs', 'documents', 'history'].map((t) => (
+        {['overview', 'checklist', 'repository', 'findings', 'documents', 'history'].map((t) => (
           <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
             {t === 'findings' ? `Findings (${req.findings.length})`
               : t === 'checklist' && pendingChecklistItems.length > 0 ? `Checklist (${pendingChecklistItems.length} pending)`
@@ -403,15 +389,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'overview' && (
         <div>
-          {(sameDept || hasRole(user, 'ADMIN')) && (
-            <ApplicationNameBanner
-              applicationMasterId={req.application_master_id}
-              applicationMasterStatus={req.application_master_status}
-              applicationName={req.application_name}
-              onDecided={reloadAfterApplicationNameDecision}
-            />
-          )}
-
           <DetailSection title="Status">
             <DetailField label="Status">
               <Badge status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status)} />
@@ -438,12 +415,14 @@ function SASTDetail({ req, onClose, onChanged, users }: {
             {/* Reported directly: this was previously only visible in the modal's
                 own title bar, with no field for it in the body -- easy to miss,
                 especially for the App Owner/SM who need to actually review it
-                before deciding the name itself (see ApplicationNameBanner above). */}
+                before deciding the name itself (the decision itself is made from
+                the master QA Request page -- see RequestDetail.tsx's
+                ApplicationNameBanner). */}
             <DetailField label="Application Name">
               {req.application_name || '—'}
               {req.application_master_status === 'PENDING_APP_OWNER' && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                  Pending Application Owner Approval
+                  Application Owner Approval Pending
                 </span>
               )}
               {req.application_master_status === 'PENDING_SM' && (
@@ -727,54 +706,12 @@ function SASTDetail({ req, onClose, onChanged, users }: {
         </div>
       )}
 
-      {tab === 'walkthroughs' && (
-        <div>
-          <Table
-            rowKey="id"
-            columns={[
-              { key: 'session_date', header: 'Date', render: (r) => new Date(r.session_date).toLocaleString() },
-              { key: 'conducted_by', header: 'Conducted By' },
-              { key: 'participants', header: 'Participants' },
-              { key: 'qa_acknowledged_at', header: 'QA Acknowledged', render: (r) => r.qa_acknowledged_at ? 'Yes' : 'No', filterValue: (r) => r.qa_acknowledged_at ? 'Yes' : 'No' },
-            ]}
-            rows={walkthroughs}
-          />
-          <AddWalkthrough reqId={req.id} onAdded={load} />
-        </div>
-      )}
-
       {tab === 'documents' && <RequestDocuments apiBase="/api/sast-requests" reqId={req.id} />}
 
       {tab === 'history' && (
         <JiraActivity entityType="SAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
     </Modal>
-  )
-}
-
-function AddWalkthrough({ reqId, onAdded }: { reqId: number; onAdded: () => void }) {
-  const [conducted_by, setConductedBy] = useState('')
-  const [participants, setParticipants] = useState('')
-  const [notes, setNotes] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault()
-    setBusy(true)
-    try {
-      await api.post(`/api/sast-requests/${reqId}/walkthroughs`, { conducted_by, participants, notes })
-      setConductedBy(''); setParticipants(''); setNotes('')
-      onAdded()
-    } finally { setBusy(false) }
-  }
-
-  return (
-    <form onSubmit={submit} style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-      <input placeholder="Conducted by" value={conducted_by} onChange={(e) => setConductedBy(e.target.value)} />
-      <input placeholder="Participants" value={participants} onChange={(e) => setParticipants(e.target.value)} />
-      <input placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      <button className="btn btn-sm" disabled={busy}>Log Walkthrough Session</button>
-    </form>
   )
 }
 

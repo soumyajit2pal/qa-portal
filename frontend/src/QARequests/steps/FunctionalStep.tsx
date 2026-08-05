@@ -1,9 +1,10 @@
 import React from "react";
 import { Field } from "../../components/Common";
 import { PRIORITIES, RISK_RATINGS } from "../../constants";
+import { DraftChecklistEvidenceOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
-import { ChecklistEvidencePicker, EvidenceKind } from "./ChecklistEvidencePicker";
-import { useChecklistTemplate } from "./useChecklistTemplate";
+import { EvidenceKind } from "./ChecklistEvidencePicker";
+import { ReadinessChecklistSection } from "./ReadinessChecklistSection";
 
 interface Props {
   form: QARequestForm;
@@ -11,6 +12,11 @@ interface Props {
   draftRequestId?: number;
   evidenceFiles: (kind: EvidenceKind, itemIndex: number) => File[];
   setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void;
+  // Already-uploaded evidence for one item -- see NewRequestModal.tsx's
+  // loadSavedEvidence (one batched fetch for the whole Draft instead of
+  // each ChecklistEvidencePicker instance fetching its own).
+  savedEvidenceFor: (kind: EvidenceKind, itemIndex: number) => DraftChecklistEvidenceOut[];
+  onEvidenceChanged: () => void;
 }
 
 // Shown only while a Functional-bucket type (Functional/Sanity/Regression
@@ -20,9 +26,7 @@ interface Props {
 // checklist self-declaration -- folded into this same step (not a separate
 // one) to match how SAST/DAST already self-declare their own Security
 // Readiness checklist within their own step (see SastStep.tsx/DastStep.tsx).
-export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEvidenceFiles }: Props) {
-  const { items: checklistItems, loading: checklistLoading } = useChecklistTemplate("FUNCTIONAL");
-
+export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEvidenceFiles, savedEvidenceFor, onEvidenceChanged }: Props) {
   function toggleChecked(item: string) {
     set(
       "checked_items",
@@ -33,74 +37,45 @@ export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEv
   }
 
   return (
-    <div className="form-section">
-      <div className="form-section-title">Functional QA Classification *</div>
-      <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>
-        Priority and Risk Rating for the combined Functional QA request --
-        independent of whatever Priority/Risk applies to any other request type
-        raised alongside it (see the SAST/DAST/Performance steps, if selected).
-      </p>
-      <div className="form-row">
-        <Field label="Priority *">
-          <select
-            value={form.functional_priority}
-            onChange={(e) => set("functional_priority", e.target.value)}
-          >
-            {PRIORITIES.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Risk Rating *">
-          <select
-            value={form.functional_risk_rating}
-            onChange={(e) => set("functional_risk_rating", e.target.value)}
-          >
-            {RISK_RATINGS.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-        </Field>
+    <div className="security-request-step security-request-step-functional">
+      <div className="security-step-intro">
+        <span>Functional request configuration</span>
+        <h3>Functional QA testing details</h3>
+        <p>Set request classification, confirm readiness, and attach evidence before raising the request.</p>
       </div>
 
-      <div className="form-section-title" style={{ marginTop: 16 }}>
-        Readiness Checklist — Self-Declaration
-      </div>
-      <p className="muted small" style={{ marginTop: -4, marginBottom: 8 }}>
-        Tick what's already in place. This is your own declaration for reference
-        only — the QA Lead will independently verify every item during Readiness
-        Verification (on the linked Functional Testing Request, once raised).
-      </p>
-      {checklistLoading && <p className="muted small">Loading checklist...</p>}
-      {checklistItems.map((ci, itemIndex) => {
-        const checked = form.checked_items.includes(ci.item);
-        return (
-          <div
-            key={ci.item}
-            style={{
-              display: "flex",
-              gap: 8,
-              alignItems: "center",
-              padding: "5px 0",
-            }}
-          >
-            <label style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
-              <input type="checkbox" checked={checked} onChange={() => toggleChecked(ci.item)} />
-              <span>
-                {ci.item} <span className="muted small">({ci.detail})</span>
-                {ci.is_mandatory && <span className="badge badge-red">Mandatory</span>}
-              </span>
-            </label>
-            <ChecklistEvidencePicker kind="functional" itemIndex={itemIndex} draftRequestId={draftRequestId}
-              files={evidenceFiles('functional', itemIndex)} onFilesChange={(files) => setEvidenceFiles('functional', itemIndex, files)}
-              required={ci.is_mandatory || checked} />
+      <section className="security-request-panel">
+        <div className="security-panel-heading">
+          <span className="security-panel-number">01</span>
+          <div>
+            <h4>Classification</h4>
+            <p>Set the operational priority and risk rating for the combined Functional QA request.</p>
           </div>
-        );
-      })}
+        </div>
+        <div className="security-classification-grid">
+          <Field label="Priority *">
+            <select value={form.functional_priority} onChange={(e) => set("functional_priority", e.target.value)}>
+              {PRIORITIES.map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </Field>
+          <Field label="Risk Rating *">
+            <select value={form.functional_risk_rating} onChange={(e) => set("functional_risk_rating", e.target.value)}>
+              {RISK_RATINGS.map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </Field>
+        </div>
+      </section>
+
+      <ReadinessChecklistSection
+        module="FUNCTIONAL" kind="functional" sectionNumber="02"
+        heading="Readiness checklist — self-declaration"
+        description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. The QA Lead will verify every declaration independently."
+        noticeLabel="Before SM approval"
+        noticeText="Every mandatory criterion must be selected. Evidence is recommended for mandatory and selected items."
+        selectedItems={form.checked_items} onToggle={toggleChecked}
+        draftRequestId={draftRequestId} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles}
+        savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={onEvidenceChanged}
+      />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { IconSearch } from './Icons'
 import { computePanelPos, PanelPos } from './panelPosition'
+import ClearableSearchInput from './ClearableSearchInput'
 
 export interface SearchableSelectOption {
   value: string
@@ -132,11 +133,13 @@ export default function SearchableSelect({ value, onChange, options, placeholder
         >
           <div className="searchable-select-search">
             <IconSearch width={13} height={13} />
-            <input
+            <ClearableSearchInput
               ref={inputRef}
               placeholder="Search..."
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onClear={() => setQuery('')}
+              clearLabel="Clear option search"
             />
           </div>
           <div className="searchable-select-list">

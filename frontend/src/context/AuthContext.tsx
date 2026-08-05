@@ -20,6 +20,15 @@ interface AuthContextValue {
   // DepartmentPrompt.tsx) saves a department, so `user.needs_department_
   // selection` flips to false immediately without a full page reload.
   refreshUser: () => Promise<void>
+  // True for the remainder of this browser session right after `login()`
+  // succeeds, false on a page refresh/session-restore (loadMe() below never
+  // sets it) -- lets components/PendingApprovalsNotice.tsx show its "you
+  // have N pending approvals" pop-up only on an actual login, not every time
+  // the app happens to (re)mount with an already-valid token. Cleared by
+  // acknowledgeLogin() once that notice has been shown/dismissed, so it only
+  // ever fires once per sign-in.
+  justLoggedIn: boolean
+  acknowledgeLogin: () => void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -27,6 +36,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserOut | null>(null)
   const [loading, setLoading] = useState(true)
+  const [justLoggedIn, setJustLoggedIn] = useState(false)
 
   const loadMe = useCallback(async () => {
     if (!hasToken()) {
@@ -51,6 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(res.access_token)
     const me = await api.get<UserOut>('/api/auth/me')
     setUser(me)
+    setJustLoggedIn(true)
     return res
   }
 
@@ -62,6 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void api.post('/api/auth/logout').catch(() => undefined)
     setToken(null)
     setUser(null)
+    setJustLoggedIn(false)
   }
 
   const refreshUser = async () => {
@@ -69,8 +81,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(me)
   }
 
+  const acknowledgeLogin = () => setJustLoggedIn(false)
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, refreshUser, justLoggedIn, acknowledgeLogin }}>
       {children}
     </AuthContext.Provider>
   )

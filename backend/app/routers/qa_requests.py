@@ -175,6 +175,37 @@ def _promote_draft_checklist_evidence(db: Session, qa_request: "models.QARequest
                 document.request_id = item.id
 
 
+def _finalize_child_requests(db: Session, obj: "models.QARequest", requester: models.User) -> None:
+    """The actual "create linked children and move the gateway to Raised"
+    step -- factored out of submit_request so it can be called from two
+    places: immediately, inline, when the request's Application Name is
+    already usable (APPROVED, or an existing PENDING_SM/REJECTED name --
+    none of those block raising, only a brand-new PENDING_APP_OWNER name
+    does, see the branch in submit_request below); or later, once an
+    Application Owner approves a brand-new name, from
+    routers/applications.py::decide_app_owner_name. `requester` is always
+    the ORIGINAL requester who raised the gateway (obj.requester), not
+    whoever happens to be calling this -- when this runs from the deferred
+    path it's an Application Owner making the API call, but the "Requester
+    -- Submitted" audit entries logged by _raise_child_to_sm for each child
+    must still be attributed to the person who actually requested the work,
+    not the approver who happened to unblock it."""
+    request_types = obj.request_types.split(",") if obj.request_types else []
+    (checked_items, sast_components, dast_components, performance_details, performance_checked_items,
+     classification_details, sast_checked_items, dast_checked_items) = _unstash_draft_details(obj.draft_child_details)
+    _sync_linked_child_requests(db, obj, request_types, requester, checked_items, sast_components, dast_components,
+                                 performance_details,
+                                 performance_checked_items=performance_checked_items,
+                                 classification=classification_details,
+                                 sast_checked_items=sast_checked_items,
+                                 dast_checked_items=dast_checked_items)
+    _promote_draft_checklist_evidence(db, obj)
+    obj.draft_child_details = None  # consumed -- no longer needed once raised
+    obj.status = GatewayStatus.RAISED
+    _log(db, obj.id, "Requester", requester, "Submitted & Raised",
+         "Linked request(s) raised with their own independent ID(s); workflow now handled on each separately")
+
+
 def _resolve_application_name(db: Session, name: Optional[str], department: Optional[str],
                                requester_id: int, qa_request_id: Optional[int] = None):
     """Called on every create/edit of a QA Request -- uppercases the given
@@ -777,7 +808,41 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     its own SM Approval Pending (or SM Rejected) via _sync_linked_child_requests
     / _raise_child_to_sm -- there is no separate per-module Draft -> Submit
     stopover anymore; raising the gateway is the one and only "submit" action
-    for every linked child."""
+    for every linked child.
+
+    Exception (2026-08): if the request's Application Name is a brand-new
+    "Other" entry still awaiting the FIRST tier of approval
+    (application_master_status == PENDING_APP_OWNER), child creation and SM
+    assignment is deferred entirely -- reported directly: "new name will go
+    for Approval to Application Owner / once approved, then child request
+    will be generated and will assign to SM." The gateway still moves off
+    Draft (so it's no longer editable and gets its real request_id/becomes
+    department-wide visible, same as any other raised request -- see
+    _can_view_gateway) but stops at Submitted instead of Raised, and
+    draft_child_details is deliberately left alone (not yet consumed).
+    _finalize_child_requests (the actual child-creation step, shared by both
+    paths) only runs once an Application Owner approves the name -- see
+    routers/applications.py::decide_app_owner_name -- at which point the
+    gateway moves on to Raised itself. If the Application Owner rejects the
+    name instead, the gateway is reverted straight back to Draft (same
+    file) rather than ever having spun up a single child.
+
+    Reported directly (2026-08): a "sibling" gateway -- a separate QA
+    Request that resolved to this exact same brand-new name (see
+    _resolve_application_name's own docstring: any two requests typing the
+    identical "Other" name share one ApplicationMaster row) but was still
+    sitting in Draft when a DIFFERENT gateway's own Application Owner/SM
+    rejected that name -- could still be raised clean, with its own linked
+    children silently born straight at SM_REJECTED (see _raise_child_to_sm's
+    own REJECTED branch) instead of the raise itself ever being stopped.
+    application_master_status is a live delegated property (see
+    models.QARequest), so this sibling's status already read REJECTED by
+    the time Submit was clicked -- create_request/edit_request re-resolve
+    the name (and silently un-reject it back to PENDING_APP_OWNER, see
+    _resolve_application_name) only when the Application Name field is
+    actually re-saved, which Submit alone never does. Blocked below instead
+    of allowed through: a gateway can never raise while resolved to a
+    REJECTED name, full stop."""
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
@@ -785,6 +850,13 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
         raise HTTPException(403, "Only the requester or an admin can submit this request")
     if obj.status != GatewayStatus.DRAFT:
         raise HTTPException(400, f"'Submit' requires status 'DRAFT' (currently '{obj.status}')")
+    if obj.application_master_status == "REJECTED":
+        raise HTTPException(
+            400,
+            f"Cannot raise -- the Application Name '{obj.application_name}' was rejected. Edit this request "
+            "and either choose a different Application Name, or re-select/re-type this same name to resubmit "
+            "it for fresh approval, before raising.",
+        )
     # The one and only place request_id is ever assigned -- see its column
     # comment on models.QARequest. A Draft that gets cancelled instead of
     # raised never reaches this line, so it never burns a real ID.
@@ -876,19 +948,21 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
                 "-- Performance testing is not performed in Dev or SIT.",
             )
 
-    _sync_linked_child_requests(db, obj, request_types, current_user, checked_items, sast_components, dast_components,
-                                 performance_details,
-                                 performance_checked_items=performance_checked_items,
-                                 classification=classification_details,
-                                 sast_checked_items=sast_checked_items,
-                                 dast_checked_items=dast_checked_items)
-    _promote_draft_checklist_evidence(db, obj)
-    obj.draft_child_details = None  # consumed -- no longer needed once raised
-    obj.status = GatewayStatus.SUBMITTED
-    _log(db, obj.id, "Requester", current_user, "Submitted", None)
-    obj.status = GatewayStatus.RAISED
-    _log(db, obj.id, "Requester", current_user, "Raised",
-         "Linked request(s) raised with their own independent ID(s); workflow now handled on each separately")
+    if obj.application_master_status == "PENDING_APP_OWNER":
+        # Brand-new "Other" name, still awaiting the first approval tier --
+        # stop here. draft_child_details is intentionally left in place;
+        # _finalize_child_requests (called from
+        # routers/applications.py::decide_app_owner_name once the name is
+        # approved) is what actually unstashes it and creates the children.
+        obj.status = GatewayStatus.SUBMITTED
+        _log(db, obj.id, "Requester", current_user, "Submitted",
+             "Awaiting Application Owner approval of the new Application Name before "
+             "linked request(s) are generated and assigned to SM")
+        db.commit()
+        db.refresh(obj)
+        return obj
+
+    _finalize_child_requests(db, obj, current_user)
     db.commit()
     db.refresh(obj)
     return obj
@@ -1004,6 +1078,48 @@ def _draft_request_for_evidence(db: Session, req_id: int, current_user: models.U
         if req.status != GatewayStatus.DRAFT:
             raise HTTPException(400, "Checklist evidence can only be changed while the QA Request is in Draft")
     return req
+
+
+@router.get("/{req_id}/checklist-evidence/documents", response_model=List[schemas.DraftChecklistEvidenceOut])
+def list_all_draft_checklist_evidence(req_id: int, db: Session = Depends(get_db),
+                                      current_user: models.User = Depends(get_current_user)):
+    """Batched counterpart to list_draft_checklist_evidence below -- the QA
+    Request wizard renders one ChecklistEvidencePicker per readiness
+    checklist item (up to ~19 each, across up to 4 modules if Functional/
+    SAST/DAST/Performance are all selected), and each one used to fire its
+    own GET on mount -- reported directly as "multiple /documents api is
+    calling on UI load". One query instead: every draft-evidence document
+    for this request, across every kind/item, tagged with (kind, item_index)
+    parsed back out of its own module key (see _draft_evidence_module/
+    _DRAFT_EVIDENCE_PREFIXES) so the frontend can still regroup this one
+    flat list into the same per-item buckets it always has."""
+    _draft_request_for_evidence(db, req_id, current_user)
+    prefix_to_kind = {prefix: kind for kind, prefix in _DRAFT_EVIDENCE_PREFIXES.items()}
+    rows = (
+        db.query(models.RequestDocument)
+        .filter(
+            models.RequestDocument.request_id == req_id,
+            or_(*[models.RequestDocument.module.like(f"{prefix}_%") for prefix in prefix_to_kind]),
+        )
+        .order_by(models.RequestDocument.uploaded_at)
+        .all()
+    )
+    out = []
+    for doc in rows:
+        # module looks like "DRAFT_FUNCTIONAL_03" or "DRAFT_PERF_11" -- split
+        # off the final _NN and match the remainder against the known prefix
+        # set (can't just rsplit blindly since prefixes themselves contain
+        # underscores).
+        prefix, _, idx_str = doc.module.rpartition("_")
+        kind = prefix_to_kind.get(prefix)
+        if kind is None or not idx_str.isdigit():
+            continue  # not one of ours -- shouldn't happen given the filter above, just defensive
+        out.append(schemas.DraftChecklistEvidenceOut(
+            id=doc.id, file_name=doc.file_name, content_type=doc.content_type,
+            file_size=doc.file_size, uploaded_by_id=doc.uploaded_by_id, uploaded_at=doc.uploaded_at,
+            kind=kind, item_index=int(idx_str),
+        ))
+    return out
 
 
 @router.get("/{req_id}/checklist-evidence/{kind}/{item_index}/documents", response_model=List[schemas.RequestDocumentOut])

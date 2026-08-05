@@ -6,12 +6,14 @@ import {
   PERFORMANCE_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasRole,
 } from '../constants'
 import { api } from '../api'
-import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, SuppressionOut, SignOffOut, UserOut } from '../types'
+import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, SuppressionOut, SignOffOut, UserOut, PendingApprovalItem } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
   IconCertificate, IconApprove, IconChart, IconSearch, IconWorkflow,
-  IconPlus, IconCheckCircle, IconLogout, IconUsers, IconApps, IconPlay,
+  IconPlus, IconCheckCircle, IconLogout, IconUsers, IconApps, IconPlay, IconBell,
+  IconHelp,
 } from './Icons'
+import ClearableSearchInput from './ClearableSearchInput'
 
 interface NavCounts {
   qaRequests: number
@@ -22,6 +24,7 @@ interface NavCounts {
   suppression: number
   signoff: number
   pendingReview: number
+  pendingApprovals: number
 }
 
 interface NavItem {
@@ -86,11 +89,18 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
       label: 'Governance',
       items: [
         { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate, count: counts.signoff },
+        { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell, count: counts.pendingApprovals },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
         ...(hasRole(user, 'ADMIN', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')
           ? [{ to: '/audit-log', label: 'Audit Log', icon: IconSearch }]
           : []),
+      ],
+    },
+    {
+      label: 'Help & Support',
+      items: [
+        { to: '/help', label: 'Help & User Manual', icon: IconHelp },
       ],
     },
   ]
@@ -104,7 +114,7 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
   }
   if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')) {
-    adminItems.push({ to: '/department-admin', label: 'Department Admin', icon: IconUsers })
+    adminItems.push({ to: '/department-admin', label: 'Department Coordinator', icon: IconUsers })
   }
   if (adminItems.length > 0) {
     groups.push({ label: 'Administration', items: adminItems })
@@ -139,6 +149,11 @@ const ID_PREFIX_ROUTES: { prefix: string; path: string }[] = [
   { prefix: 'QA-CERT', path: '/signoff' },
 ]
 
+// Shorthand accepted by Global Search. Suppression deliberately stays out
+// of this list because legacy records already use the real `SUP-*` prefix;
+// rewriting those would make valid historical IDs impossible to open.
+const TQA_ID_SHORTHAND = /^(FUNC|SAST|DAST|PERF|SIGN|PROJ|TC|CYCLE)-/i
+
 function initials(name?: string | null): string {
   if (!name) return '?'
   const parts = name.trim().split(/\s+/)
@@ -151,12 +166,13 @@ export default function Layout({ children }: { children?: ReactNode }) {
   const navigate = useNavigate()
   const [counts, setCounts] = useState<NavCounts>({
     qaRequests: 0, functional: 0, sast: 0, dast: 0, performance: 0, suppression: 0, signoff: 0, pendingReview: 0,
+    pendingApprovals: 0,
   })
   const [search, setSearch] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('qa_nav_collapsed') === 'true')
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set([
-    'Overview', 'Request Management', 'Functional', 'Test Management', 'Security', 'Specialized Testing', 'Governance', 'Administration',
+    'Overview', 'Request Management', 'Functional', 'Test Management', 'Security', 'Specialized Testing', 'Governance', 'Administration', 'Help & Support',
   ]))
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Topbar user menu -- clicking the signed-in name reveals Department +
@@ -271,10 +287,20 @@ export default function Layout({ children }: { children?: ReactNode }) {
           pendingReview = allUsers.filter((u) => u.needs_role_review).length
         } catch (e) { /* ignore */ }
       }
+      // Pending Approvals gets a live badge (unlike every other nav item's
+      // count above, which is rendered but currently switched off -- see the
+      // commented-out <span className="nav-count"> below) since the whole
+      // point of that page is "how many things need me right now" -- a
+      // silent nav entry would defeat that.
+      let pendingApprovals = 0
+      try {
+        const items = await api.get<PendingApprovalItem[]>('/api/pending-approvals')
+        pendingApprovals = items.length
+      } catch (e) { /* ignore */ }
       setCounts({
         qaRequests, functional: functionalCount, sast: sastCount, dast: dastCount,
         performance: performanceCount, suppression: suppressionCount,
-        signoff: signoffCount, pendingReview,
+        signoff: signoffCount, pendingReview, pendingApprovals,
       })
     } catch (e) { /* badges are non-critical; ignore failures */ }
   }, [user])
@@ -299,11 +325,16 @@ export default function Layout({ children }: { children?: ReactNode }) {
     // Request ID itself, or a free-text application name/epic number) still
     // falls through to the QA Request gateway search, unchanged.
     const upper = term.toUpperCase()
-    const idRoute = ID_PREFIX_ROUTES.find((r) => upper.startsWith(r.prefix))
+    const normalizedTerm = !upper.startsWith('TQA-') && TQA_ID_SHORTHAND.test(upper)
+      ? `TQA-${upper}`
+      : term
+    const normalizedUpper = normalizedTerm.toUpperCase()
+    if (normalizedTerm !== term) setSearch(normalizedTerm)
+    const idRoute = ID_PREFIX_ROUTES.find((r) => normalizedUpper.startsWith(r.prefix))
     if (idRoute) {
-      navigate(`${idRoute.path}?open=${encodeURIComponent(term)}`)
+      navigate(`${idRoute.path}?open=${encodeURIComponent(normalizedTerm)}`)
     } else {
-      navigate(`/qa-requests?search=${encodeURIComponent(term)}`)
+      navigate(`/qa-requests?search=${encodeURIComponent(normalizedTerm)}`)
     }
   }
 
@@ -338,7 +369,14 @@ export default function Layout({ children }: { children?: ReactNode }) {
                              className={({ isActive }) => (isActive ? 'active' : '')}>
                       <span className="nav-icon"><Icon /></span>
                       <span className="nav-label">{item.label}</span>
-                      {typeof item.count === 'number' && item.count > 0 && (
+                      {/* Every other nav item's own count is rendered but
+                          switched off (see the disabled block this replaced,
+                          left in git history) -- Pending Approvals is the one
+                          deliberate exception: unlike an in-flight-request
+                          count, which is just descriptive, this number is
+                          the entire point of the page (how many things need
+                          YOU right now), so it stays live. */}
+                      {item.to === '/pending-approvals' && typeof item.count === 'number' && item.count > 0 && (
                         <span className="nav-count">{item.count}</span>
                       )}
                     </NavLink>
@@ -356,11 +394,6 @@ export default function Layout({ children }: { children?: ReactNode }) {
               <div className="title">Governed workspace</div>
               <div className="desc">Actions and approvals are audit logged.</div>
             </div>
-          </div>
-          <div className="portal-credit">
-            <span>Developed by</span>
-            <strong>Soumyajit Pal</strong>
-            <small>Quality Assurance Department - IT</small>
           </div>
           {user && (
             <div className="user-chip">
@@ -387,7 +420,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
           </div>
           <form className="search-box" onSubmit={submitSearch}>
             <IconSearch width={16} height={16} />
-            <input ref={searchInputRef} aria-label="Global search" placeholder="Search request ID or application…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <ClearableSearchInput ref={searchInputRef} aria-label="Global search" placeholder="Search request ID or application…" value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear global search" wrapperClassName="search-grow" />
             <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">
@@ -429,6 +462,20 @@ export default function Layout({ children }: { children?: ReactNode }) {
           </div>
         </div>
         <div className="content">{children}</div>
+        {/* Moved out of the sidebar's own footer (previously .portal-credit,
+            hidden entirely once the sidebar was collapsed -- see index.css)
+            into a real page footer instead, so it's visible on every signed-
+            in page (not just an expanded sidebar) regardless of collapse
+            state. Lives here rather than inside .content so it stays pinned
+            under the scrollable page area (same fixed-shell pattern as
+            .topbar above it) instead of scrolling away with long page
+            content. */}
+        <div className="app-footer">
+          <span>Developed by</span>
+          <strong>Soumyajit Pal</strong>
+          <span>·</span>
+          <span>Quality Assurance Department - IT</span>
+        </div>
       </div>
     </div>
   )

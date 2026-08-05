@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
 import DepartmentPrompt from './components/DepartmentPrompt'
+import PendingApprovalsNotice from './components/PendingApprovalsNotice'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
 // gateway feeds every module, the Dashboard summarizes across all of
@@ -12,6 +13,8 @@ import Login from './Login'
 import Dashboard from './Dashboard'
 import QARequests from './QARequests'
 import ModuleBoundary from './components/ModuleBoundary'
+
+const Help = lazy(() => import('./Help'))
 
 // The 4 domain modules (Functional / Security / Specialised Testing /
 // Governance) live under src/modules/<group>/ as plain local folders in
@@ -28,6 +31,7 @@ const DAST = lazy(() => import('./modules/security/DAST'))
 const Suppression = lazy(() => import('./modules/security/Suppression'))
 const Performance = lazy(() => import('./modules/specialised-testing/Performance'))
 const SignOff = lazy(() => import('./modules/governance/SignOff'))
+const PendingApprovals = lazy(() => import('./modules/governance/PendingApprovals'))
 const Approvals = lazy(() => import('./modules/governance/Approvals'))
 const Reports = lazy(() => import('./modules/governance/Reports'))
 const Admin = lazy(() => import('./modules/governance/Admin'))
@@ -57,6 +61,14 @@ function Protected({ children }: { children?: ReactNode }) {
           on top of the normal page (not instead of it) so it shows up
           immediately after login regardless of which page they land on. */}
       {user.needs_department_selection && <DepartmentPrompt />}
+      {/* Reported directly: "also show one info on login if there are any
+          pending approval pending." Held back while DepartmentPrompt is
+          still up (above) so a first-ever LDAP login never stacks two
+          blocking pop-ups -- PendingApprovalsNotice itself no-ops until
+          AuthContext's justLoggedIn is true, which stays true across that
+          whole exchange, so it still fires right after DepartmentPrompt is
+          dismissed rather than being skipped entirely. */}
+      {!user.needs_department_selection && <PendingApprovalsNotice />}
     </Layout>
   )
 }
@@ -77,6 +89,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Protected><Dashboard /></Protected>} />
         <Route path="/qa-requests" element={<Protected><QARequests /></Protected>} />
+        <Route path="/help" element={<Protected><Help /></Protected>} />
 
         {/* Functional module. Each lazy route is wrapped in its own
             ModuleBoundary instance (not one boundary around the whole
@@ -97,6 +110,7 @@ export default function App() {
 
         {/* Governance module */}
         <Route path="/signoff" element={<Protected><ModuleBoundary moduleName="Governance"><SignOff /></ModuleBoundary></Protected>} />
+        <Route path="/pending-approvals" element={<Protected><ModuleBoundary moduleName="Governance"><PendingApprovals /></ModuleBoundary></Protected>} />
         <Route path="/approvals" element={<Protected><ModuleBoundary moduleName="Governance"><Approvals /></ModuleBoundary></Protected>} />
         <Route path="/reports" element={<Protected><ModuleBoundary moduleName="Governance"><Reports /></ModuleBoundary></Protected>} />
         <Route path="/admin" element={<Protected><ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary></Protected>} />

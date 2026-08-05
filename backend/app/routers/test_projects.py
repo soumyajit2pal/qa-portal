@@ -64,6 +64,15 @@ def get_test_project(project_id: int, db: Session = Depends(get_db), current_use
 @router.patch("/{project_id}", response_model=schemas.TestProjectOut)
 def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db: Session = Depends(get_db),
                          current_user: models.User = Depends(require_roles(*_MANAGE_ROLES))):
+    """Reported directly: "Once Project is created, give option to edit
+    details" (name/application link/department/description all editable by
+    either manage role, same as at creation) and, separately: "Project
+    Activation, deactivation should need approval from QA lead" -- only
+    is_active is gated: a QA Lead (or Admin, via has_role()'s bypass) still
+    flips it immediately, same as before, but a QA Engineer's request only
+    records what they're asking for (pending_is_active) without touching the
+    live is_active at all, until a QA Lead resolves it via
+    review_project_activation below."""
     obj = db.query(models.TestProject).get(project_id)
     if not obj:
         raise HTTPException(404, "Test Project not found")
@@ -72,17 +81,103 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
         data["name"] = data["name"].strip()
         if not data["name"]:
             raise HTTPException(400, "Project name cannot be blank")
-    previous_active = obj.is_active
-    for field in ("name", "department", "description", "is_active"):
+    is_qa_lead_or_admin = current_user.has_role(Role.QA_LEAD)
+    requested_active = data.pop("is_active", None)
+    if "application_master_id" in data:
+        new_app_id = data.pop("application_master_id")
+        if new_app_id is not None:
+            app_master = db.query(models.ApplicationMaster).get(new_app_id)
+            if not app_master:
+                raise HTTPException(404, "Application not found")
+            obj.application_master_id = new_app_id
+            # Same "Application Name is the canonical source of truth for
+            # department" rule create_test_project uses -- only overrides
+            # department here if the caller didn't also explicitly set one in
+            # this same request, so re-linking a project never silently
+            # clobbers a department someone deliberately typed in this edit.
+            if "department" not in data and app_master.department:
+                obj.department = app_master.department
+        else:
+            obj.application_master_id = None
+    for field in ("name", "department", "description"):
         if field in data and data[field] is not None:
             setattr(obj, field, data[field])
-    if "is_active" in data and obj.is_active != previous_active:
-        db.add(models.ApprovalAction(
-            entity_type="TEST_PROJECT", entity_id=obj.id, step_name="Project lifecycle",
-            actor_id=current_user.id, actor_role=current_user.roles_csv,
-            decision="Reactivated" if obj.is_active else "Deactivated",
-            comments="Project reactivated for new test work" if obj.is_active else "Project deactivated; existing test assets retained",
-        ))
+
+    if requested_active is not None:
+        if requested_active == obj.is_active:
+            # Requesting the state the project is already in -- e.g. a second
+            # tab racing a request that was just approved. Quietly clears any
+            # now-stale pending request instead of erroring; not a state
+            # change worth its own audit row.
+            obj.pending_is_active = None
+            obj.pending_requested_by_id = None
+            obj.pending_requested_at = None
+        elif is_qa_lead_or_admin:
+            obj.is_active = requested_active
+            obj.pending_is_active = None
+            obj.pending_requested_by_id = None
+            obj.pending_requested_at = None
+            db.add(models.ApprovalAction(
+                entity_type="TEST_PROJECT", entity_id=obj.id, step_name="Project lifecycle",
+                actor_id=current_user.id, actor_role=current_user.roles_csv,
+                decision="Reactivated" if obj.is_active else "Deactivated",
+                comments="Project reactivated for new test work" if obj.is_active else "Project deactivated; existing test assets retained",
+            ))
+        else:
+            if obj.pending_is_active == requested_active:
+                raise HTTPException(400, "This request is already pending QA Lead approval")
+            obj.pending_is_active = requested_active
+            obj.pending_requested_by_id = current_user.id
+            obj.pending_requested_at = models.now()
+            db.add(models.ApprovalAction(
+                entity_type="TEST_PROJECT", entity_id=obj.id, step_name="Project lifecycle",
+                actor_id=current_user.id, actor_role=current_user.roles_csv,
+                decision="Reactivation requested" if requested_active else "Deactivation requested",
+                comments="Awaiting QA Lead approval before taking effect.",
+            ))
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.post("/{project_id}/activation-review", response_model=schemas.TestProjectOut)
+def review_project_activation(project_id: int, payload: schemas.TestProjectActivationReview,
+                               db: Session = Depends(get_db),
+                               current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+    """QA Lead (or Admin) resolves a pending activate/deactivate request from
+    a QA Engineer -- Approve applies the requested value to is_active,
+    Reject discards the request and leaves is_active untouched. Reported
+    directly alongside update_test_project's gate above."""
+    obj = db.query(models.TestProject).get(project_id)
+    if not obj:
+        raise HTTPException(404, "Test Project not found")
+    if obj.pending_is_active is None:
+        raise HTTPException(400, "This project has no pending activation request")
+    decision = payload.decision.strip().upper()
+    comments = (payload.comments or "").strip()
+    if decision not in {"APPROVE", "REJECT"}:
+        raise HTTPException(400, "Decision must be APPROVE or REJECT")
+    if decision == "REJECT" and not comments:
+        raise HTTPException(400, "A reason is required when rejecting an activation request")
+    requested_active = obj.pending_is_active
+    requested_by_name = obj.pending_requested_by_name
+    if decision == "APPROVE":
+        obj.is_active = requested_active
+        action = "Reactivation approved" if requested_active else "Deactivation approved"
+        comments = comments or (
+            f"{'Reactivation' if requested_active else 'Deactivation'} requested by "
+            f"{requested_by_name or 'a QA Engineer'} was approved."
+        )
+    else:
+        action = "Reactivation request rejected" if requested_active else "Deactivation request rejected"
+    obj.pending_is_active = None
+    obj.pending_requested_by_id = None
+    obj.pending_requested_at = None
+    db.add(models.ApprovalAction(
+        entity_type="TEST_PROJECT", entity_id=obj.id, step_name="Project lifecycle",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision=action, comments=comments,
+    ))
     db.commit()
     db.refresh(obj)
     return obj

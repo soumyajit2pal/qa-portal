@@ -3,7 +3,6 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, applicationNameAwareStatusLabel } from '../../components/Common'
-import { ApplicationNameBanner } from '../../components/ApplicationNameBanner'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import MultiUserAssignSelect from '../../components/MultiUserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -14,7 +13,7 @@ import {
   PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, canManageReadinessEvidence,
   QA_DEPARTMENT, PERFORMANCE_PENDING_WITH,
 } from '../../constants'
-import { PerformanceOut, PerformanceChecklistItemOut, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
+import { PerformanceOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -202,19 +201,14 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   // the moment of failing readiness instead.
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [tab, setTab] = useState<'overview' | 'checklist' | 'walkthroughs' | 'documents' | 'history'>('overview')
+  const [tab, setTab] = useState<'overview' | 'checklist' | 'documents' | 'history'>('overview')
   const [checklist, setChecklist] = useState<PerformanceChecklistItemOut[]>(req.checklist_items || [])
-  const [walkthroughs, setWalkthroughs] = useState<WalkthroughOut[]>([])
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   useEffect(() => { setChecklist(req.checklist_items || []) }, [req])
 
   const loadExtras = useCallback(async () => {
     try {
-      const [wt, hist] = await Promise.all([
-        api.get<WalkthroughOut[]>(`/api/performance-requests/${req.id}/walkthroughs`),
-        api.get<ApprovalActionOut[]>(`/api/performance-requests/${req.id}/history`),
-      ])
-      setWalkthroughs(wt); setHistory(hist)
+      setHistory(await api.get<ApprovalActionOut[]>(`/api/performance-requests/${req.id}/history`))
     } catch (err) { setError(err) }
   }, [req.id])
   useEffect(() => { loadExtras() }, [loadExtras])
@@ -238,16 +232,6 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
       )
       setChecklist((rows) => rows.map((r) => (r.id === saved.id ? saved : r)))
     } catch (err) { setError(err) }
-  }
-
-  // After an SM approves/rejects this request's Application Name (see
-  // ApplicationNameBanner below) -- there's no single-item GET endpoint for
-  // a Performance request, so refetch the list and find this one, same
-  // pattern as SAST.tsx/DAST.tsx use.
-  async function reloadAfterApplicationNameDecision() {
-    const fresh = await api.get<PerformanceOut[]>('/api/performance-requests')
-    const updated = fresh.find((r) => r.id === req.id)
-    if (updated) onChanged(updated)
   }
 
   const pendingChecklistItems = checklist.filter((c) => c.is_mandatory && !c.is_complete)
@@ -277,18 +261,20 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Request' : 'Re-submit'
   // Blocks Sign/Approve on both the SM and Department Head decision panels
   // below while this request's Application Name is still PENDING/REJECTED
-  // (not yet APPROVED) -- see ApplicationNameBanner.
+  // (not yet APPROVED) -- see RequestDetail.tsx's ApplicationNameBanner
+  // (moved there from this page -- see the "must be at master request
+  // level, not on individual request level of childs" report).
   const applicationNameBlocking = !!req.application_master_status && req.application_master_status !== 'APPROVED'
   // Tier-aware -- names the actual holdup instead of always claiming "your
-  // decision above" even while the name is still sitting with the
-  // Application Owner (not the SM's turn, and no "decision above" for them
-  // since the banner only renders for whoever owns the CURRENT tier).
+  // decision above". The actual decision now happens on the master QA
+  // Request page, not "above" on this page at all -- see
+  // RequestDetail.tsx's ApplicationNameBanner.
   const smApplicationNameBlockedMessage =
     req.application_master_status === 'PENDING_APP_OWNER'
       ? "This request's Application Name is still pending Application Owner approval -- it needs to be decided there before you can approve this request."
       : req.application_master_status === 'REJECTED'
       ? "This request's Application Name was rejected -- the requester needs to pick a different name before this request can be approved."
-      : 'Application Name is still pending your decision above -- decide it before approving this request.'
+      : "Application Name is still pending your decision -- decide it from this request's QA Request page before approving this request."
   // Reported directly: a person who raised this request but also separately
   // holds SM/Department Head for the same department must not be able to
   // approve their own request -- someone else holding that role must decide
@@ -321,22 +307,12 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
         <button type="button" className={tab === 'checklist' ? 'active' : ''} onClick={() => setTab('checklist')}>
           Checklist {pendingChecklistItems.length > 0 && `(${pendingChecklistItems.length} pending)`}
         </button>
-        <button type="button" className={tab === 'walkthroughs' ? 'active' : ''} onClick={() => setTab('walkthroughs')}>Walkthroughs</button>
         <button type="button" className={tab === 'documents' ? 'active' : ''} onClick={() => setTab('documents')}>Documents</button>
         <button type="button" className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>Activity</button>
       </div>
 
       {tab === 'overview' && (
         <>
-          {(sameDept || hasRole(user, 'ADMIN')) && (
-            <ApplicationNameBanner
-              applicationMasterId={req.application_master_id}
-              applicationMasterStatus={req.application_master_status}
-              applicationName={req.application_name}
-              onDecided={reloadAfterApplicationNameDecision}
-            />
-          )}
-
           <DetailSection title="Status">
             <DetailField label="Status">
               <Badge status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status)} />
@@ -357,7 +333,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
               {req.application_name || '—'}
               {req.application_master_status === 'PENDING_APP_OWNER' && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                  Pending Application Owner Approval
+                  Application Owner Approval Pending
                 </span>
               )}
               {req.application_master_status === 'PENDING_SM' && (
@@ -584,22 +560,6 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
         </div>
       )}
 
-      {tab === 'walkthroughs' && (
-        <div>
-          <Table
-            rowKey="id"
-            columns={[
-              { key: 'session_date', header: 'Date', render: (r) => new Date(r.session_date).toLocaleString() },
-              { key: 'conducted_by', header: 'Conducted By' },
-              { key: 'participants', header: 'Participants' },
-              { key: 'qa_acknowledged_at', header: 'QA Acknowledged', render: (r) => r.qa_acknowledged_at ? 'Yes' : 'No', filterValue: (r) => r.qa_acknowledged_at ? 'Yes' : 'No' },
-            ]}
-            rows={walkthroughs}
-          />
-          <AddWalkthrough reqId={req.id} onAdded={loadExtras} />
-        </div>
-      )}
-
       {tab === 'history' && (
         <JiraActivity entityType="PERFORMANCE" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
@@ -610,32 +570,6 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
         <PerformanceFormModal editing={req} onClose={() => setEditing(false)} onSaved={(saved) => { setEditing(false); onChanged(saved); setChecklist(saved.checklist_items || []) }} />
       )}
     </Modal>
-  )
-}
-
-function AddWalkthrough({ reqId, onAdded }: { reqId: number; onAdded: () => void }) {
-  const [conducted_by, setConductedBy] = useState('')
-  const [participants, setParticipants] = useState('')
-  const [notes, setNotes] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault()
-    setBusy(true)
-    try {
-      await api.post(`/api/performance-requests/${reqId}/walkthroughs`, { conducted_by, participants, notes })
-      setConductedBy(''); setParticipants(''); setNotes('')
-      onAdded()
-    } finally { setBusy(false) }
-  }
-
-  return (
-    <form onSubmit={submit} style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-      <input placeholder="Conducted by" value={conducted_by} onChange={(e) => setConductedBy(e.target.value)} />
-      <input placeholder="Participants" value={participants} onChange={(e) => setParticipants(e.target.value)} />
-      <input placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      <button className="btn btn-sm" disabled={busy}>Log Walkthrough Session</button>
-    </form>
   )
 }
 

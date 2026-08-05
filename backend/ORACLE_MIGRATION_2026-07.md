@@ -7018,3 +7018,1077 @@ picker) since none of those lists grow over time.
 
 **Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
 re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 157. Collapsed sidebar: re-expand button was getting clipped in half
+
+**Request:** "Left side menu on minimize has UI issue. also logo is not cleared, distorted" -- confirmed
+via a screenshot to be: "collapse menu getting cut."
+
+**Root cause:** `components/Layout.tsx`'s sidebar renders a small circular chevron button
+(`.sidebar-collapse-control`) to re-expand the rail once collapsed. In the collapsed state it's
+deliberately positioned half outside the rail's own box (`position: absolute; right: -12px`, relative to
+`.sidebar`, its nearest positioned ancestor) so it visually sits on the boundary between the collapsed
+rail and the main content, reading as a "pull this out" affordance. The base `.sidebar` rule has
+`overflow: hidden`, added earlier (see the `.app-shell` comment near the top of index.css) so a tall
+page's content can never drag the whole shell into scrolling together instead of just its own internal
+regions -- but that same clipping was cutting this intentionally-overflowing button in half, which read
+as "the logo looks distorted/not cleared" since the clipped teal/gold button sits right next to the logo
+badge.
+
+**Backend changes:** none -- frontend-only.
+
+**Frontend changes (index.css):** added `.navigation-v2 .sidebar.sidebar-collapsed { overflow: visible; }`
+immediately before the existing `.navigation-v2 .sidebar.sidebar-collapsed { width: 76px; }` rule --
+scoped to the collapsed state only (the only state anything is ever meant to overflow the rail's box),
+rather than removing `.sidebar`'s `overflow: hidden` globally. Safe to relax here: the fixed-shell
+scroll-containment behavior that rule protects doesn't actually depend on `.sidebar`'s own overflow at
+all -- it's driven entirely by `.sidebar nav`'s own `overflow-y: auto` + `flex: 1; min-height: 0`, both
+untouched by this change.
+
+**Data notes:** none -- CSS-only change; no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean (CSS-only change, not exercised
+by the TypeScript compiler, but confirms nothing else in the same pass broke); Documents and outputs
+copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers
+differ).
+
+## 158. Modal close button now shows as a "×" instead of a "Close" text button
+
+**Request:** "whereve is close button in top of the modal, show as cross."
+
+**Root cause / starting state:** `components/Modal` (in `components/Common.tsx`) is the one shared
+component every modal in the app renders through -- both its `drawer` variant (right-side slide-over,
+most record detail views) and `dialog` variant (centered, e.g. the QA Request wizard, `ConfirmModal`,
+`InfoModal`) -- and both rendered their top-right header control as a text `<button className="btn
+btn-sm">Close</button>`, not the "×" cross glyph the same small inline remove/unlink/delete controls
+elsewhere in the app already use (e.g. `ChecklistEvidencePicker.tsx`, `TestExecution.tsx`'s defect/runner
+unlink buttons).
+
+**Backend changes:** none -- frontend-only.
+
+**Frontend changes (components/Common.tsx):** both `Modal` variants' header button changed from the text
+"Close" button to `<button type="button" className="modal-close-btn" onClick={onClose}
+aria-label="Close">×</button>` -- `aria-label="Close"` keeps it announced correctly for screen readers
+now that there's no visible text. Being the one shared component, this single change covers every modal
+in the app, including the ones that wrap `Modal` themselves (`ConfirmModal`, `InfoModal`) -- confirmed no
+other page renders its own one-off `drawer-header`/`modal-overlay` markup outside this component.
+
+**Frontend changes (index.css):** new `.modal-close-btn` rule -- a small square icon button (30x30,
+bordered, rounded) replacing the old text-pill "Close" button's styling.
+
+**Data notes:** none -- presentation-only change; no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 159. QA Request overview: "Pending Application Approval" badge showed even while still Draft
+
+**Request:** "Application Name status 'Pending Application Approval', even when it is in draft."
+
+**Root cause:** `_resolve_application_name` (routers/qa_requests.py) runs on every create/edit of a QA
+Request -- including a plain Draft save, not just Submit/Raise -- so typing a brand-new "Other"
+Application Name immediately creates a `models.ApplicationMaster` row in `PENDING_APP_OWNER`, and the
+gateway's `application_master_status` (a live delegated property) picks that up right away, by design
+(this lets an Application Owner/SM start reviewing a proposed name without waiting on the requester to
+actually raise anything). The problem was purely in what `QARequests/RequestDetail.tsx` (the gateway's
+own overview, viewable while still Draft) did with that: it showed the same yellow "Pending Application
+Owner/SM Approval" badge regardless of the gateway's own status. But the actual decision banner
+(`ApplicationNameBanner`) only ever renders on the linked Functional/SAST/DAST/Performance request's own
+page -- and that linked request doesn't exist until this gateway is actually raised (`_sync_linked_child_
+requests` is only ever called from `submit_request`, never from a Draft save). So while still Draft, the
+badge implied the name was already under active review, when nothing -- no App Owner, no SM -- could
+actually see or act on it yet.
+
+**Backend changes:** none -- the live `PENDING_APP_OWNER`/`PENDING_SM` status while still Draft is
+correct and intentional (see above); only how the gateway's own overview displayed it needed to change.
+
+**Frontend changes (QARequests/RequestDetail.tsx):** the Application Name badge logic in the
+"Application & Change" section now branches on `req.status`:
+- While `req.status === "DRAFT"` and the name is `PENDING_APP_OWNER`/`PENDING_SM`, shows a neutral
+  `badge-gray` note instead -- "New name — enters approval once raised" -- accurate to what's actually
+  true at that point, without implying active review is already underway.
+- Once raised (`req.status !== "DRAFT"`), the original yellow `badge-yellow` "Pending Application
+  Owner/SM Approval" badges show exactly as before.
+- `REJECTED` is left unconditional (shown regardless of Draft status) -- unlike "Pending", it's
+  immediately actionable (pick a different name) even before raising, and can genuinely apply to a
+  still-open Draft if another, already-raised request sharing the same name gets it rejected in the
+  meantime (`application_master_status` reads current live state, not a snapshot).
+
+Confirmed no equivalent fix was needed on Functional.tsx/SAST.tsx/DAST.tsx/Performance.tsx's own
+"Pending Application ... Approval" badges -- those pages only ever render for a `FunctionalOut`/
+`SASTOut`/`DASTOut`/`PerformanceOut` row, none of which can exist before the gateway is raised, so their
+own badge is never reachable in a Draft-equivalent state to begin with.
+
+**Data notes:** none -- presentation-only change; no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 160. "Developed by" credit moved from sidebar footer to a page footer
+
+**Request:** "Developed bySoumyajit PalQuality Assurance Department - IT make it in footer once log in."
+
+**Root cause / starting state:** The credit line lived in the sidebar's own footer
+(`.sidebar-bottom > .portal-credit`, `components/Layout.tsx`) -- easy to miss down there, and it
+disappeared entirely once the sidebar was collapsed (`.sidebar.sidebar-collapsed .portal-credit {
+display: none; }`, since there's no room for it in the 76px collapsed rail).
+
+**Backend changes:** none -- frontend-only.
+
+**Frontend changes (components/Layout.tsx):** removed the `.portal-credit` block from `.sidebar-bottom`;
+added a new `.app-footer` as a sibling of `.content`, inside `.main` (same fixed-shell pattern `.topbar`
+above it already uses -- `flex-shrink: 0` within `.main`'s fixed-height flex column) so it's pinned at
+the bottom of every signed-in page regardless of how long that page's own content is, and regardless of
+whether the sidebar is expanded or collapsed.
+
+**Frontend changes (index.css):** new `.app-footer` rule (slim bar, centered text, `border-top`,
+`var(--muted)`/`var(--text)` colors matching the rest of the light-themed main content area, unlike the
+old teal/gold sidebar-themed `.portal-credit` colors it replaces). Removed the now-dead `.portal-credit`
+rules (base styling + the collapsed-sidebar `display: none` override), since the element no longer exists
+in the sidebar.
+
+**Data notes:** none -- presentation-only change; no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 161. QA Request wizard: evidence attach blocked until item is checked, plus batched evidence fetch
+
+**Request:** "if checkbox not checked then 'Attach Evidence' should be blocked. also multiple /documets
+api is calling on UI load, instead of one api can render all the data" -- confirmed against
+`/api/qa-requests/121/checklist-evidence/functional/5/documents` as the exact endpoint being called
+repeatedly.
+
+**Root cause (multiple API calls):** `ChecklistEvidencePicker` (one instance per readiness checklist
+item -- up to ~19 items across up to 4 modules if Functional/SAST/DAST/Performance are all selected on
+one request) fetched its own already-saved documents independently on mount (`GET .../checklist-evidence/
+{kind}/{item_index}/documents`), so opening a Draft with several request types selected could fire dozens
+of parallel requests just to render the wizard.
+
+**Backend changes (schemas.py):** new `DraftChecklistEvidenceOut(RequestDocumentOut)` -- adds `kind: str`
+and `item_index: int` so a flat, batched list of documents can still be regrouped per item client-side.
+
+**Backend changes (routers/qa_requests.py):** new `GET /{req_id}/checklist-evidence/documents` (no
+`{kind}`/`{item_index}` in the path -- distinguishable from the existing per-item route by segment count,
+no routing ambiguity). One query: every `RequestDocument` row for this request whose `module` matches any
+of the four known draft-evidence prefixes (`DRAFT_FUNCTIONAL_`, `DRAFT_SAST_`, `DRAFT_DAST_`,
+`DRAFT_PERF_`), each tagged with `(kind, item_index)` parsed back out of its own module key. The existing
+per-item endpoints (`GET`/`POST`/`DELETE .../{kind}/{item_index}/documents`) are untouched -- upload and
+delete still target one item at a time, only the initial read was batched.
+
+**Frontend changes (QARequests/NewRequestModal.tsx):** new `savedEvidence` state (keyed by the same
+`evidenceKey(kind, itemIndex)` helper already used for not-yet-uploaded pending files) + `loadSavedEvidence()`,
+fetched once via the new batched endpoint whenever a Draft is opened for editing (`useEffect` on
+`editing?.id`). `savedEvidenceFor(kind, itemIndex)` and `loadSavedEvidence` are passed down to each step
+the same way `evidenceFiles`/`setEvidenceFiles` already are.
+
+**Frontend changes (QARequests/steps/ChecklistEvidencePicker.tsx):** no longer fetches its own documents
+-- takes `savedFiles`/`onReload` as props instead (`onReload` re-runs the parent's one batched fetch,
+called after this picker deletes one of its own already-saved files; harmless to refetch everything for
+one delete now that it's a single request either way, not one per item).
+
+**Frontend changes (checkbox-gated evidence, all 4 step files -- FunctionalStep/SastStep/DastStep/
+PerformanceStep.tsx):** `ChecklistEvidencePicker` gained a `checked` prop (the same checklist item's own
+checkbox state, already computed at each call site). The "Attach evidence" button is now `disabled`
+(with an explanatory `title`) whenever `checked` is false -- attaching evidence for an item that isn't
+even self-declared "in place" yet didn't make sense. Already-saved evidence stays visible/downloadable/
+deletable regardless of the current checkbox state (e.g. attached while checked, then the box got
+unticked again) -- only adding NEW evidence is blocked, nothing already attached is hidden or removed.
+
+**Data notes:** none -- no schema/column changes; `RequestDocument`'s existing `module`/`request_id`
+columns already carried everything needed to derive `(kind, item_index)`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean; `npx tsc --noEmit -p .` across
+the entire frontend -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 162. Second per-item evidence-count loop in RequestDetail.tsx missed by section 161
+
+**Request:** "still multiple API calling on UI" -- reported right after section 161 shipped, meaning the
+wizard's own fix wasn't the only offender.
+
+**Root cause:** Section 161 batched the calls `ChecklistEvidencePicker`/`NewRequestModal.tsx` made
+inside the wizard itself, but missed a second, separate offender in `QARequests/RequestDetail.tsx` (the
+Draft's own detail/overview page, rendered *around* the wizard, not inside it):
+`loadDraftEvidenceCounts` -- used to compute the "pending mandatory"/"items without evidence" Raise-time
+nudges -- looped over every mandatory/checked checklist item across every selected module and `await`ed
+one `GET .../checklist-evidence/{kind}/{item_index}/documents` call at a time, *sequentially* (not even
+in parallel like the wizard's old version was), just to get each item's own file count. This ran every
+time RequestDetail loaded for a Draft, independent of whether the "Edit Request" wizard was ever opened.
+
+**Frontend changes (QARequests/RequestDetail.tsx):** `loadDraftEvidenceCounts` rewritten to call the same
+batched endpoint section 161 added (`GET /{req_id}/checklist-evidence/documents`) once, then group the
+flat result into per-item counts (`{kind}:{item_index}` -> count) client-side. Dropped the now-unneeded
+`kindsToLoad`/per-module item-count plumbing entirely, since the batched call no longer needs to know in
+advance how many items each module has. Removed the `EvidenceKind`/`RequestDocumentOut` imports this
+function was the last user of in this file.
+
+**Backend changes:** none -- reuses the endpoint added in section 161 as-is.
+
+**Data notes:** none -- presentation-only change; no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 163. Readiness checklist items could seed as duplicates under concurrent load
+
+**Request:** "readiness checklist item sometime showing multiple in UI while raising request."
+
+**Root cause:** `checklist_config.get_template_items` -- the one shared read path both the QA Request
+wizard (`GET /api/checklist-config/{module}`, hit 4x every time anyone opens the wizard, once per
+module) and `_sync_linked_child_requests`'s own Raise-time seeding read -- lazily bootstraps a module's
+`ChecklistTemplateItem` rows from `constants.DEFAULT_*_CHECKLIST_ITEMS` the first time it's ever read
+with zero rows present. The check was a plain `if count() == 0: seed()`, with nothing at the database
+level stopping two concurrent requests from both seeing zero rows (neither had committed yet) and both
+inserting a full default set -- doubling every item for that module. Since `_sync_linked_child_requests`
+reads from this exact same source when actually seeding a raised request's own checklist rows, a
+duplicated template didn't just show doubled items in the wizard's self-declaration list -- it could seed
+doubled `ReadinessChecklistItem`/`SASTChecklistItem`/`DASTChecklistItem`/`PerformanceChecklistItem` rows
+onto the real, raised request too. Intermittent by nature (only manifests when two requests genuinely
+race for the same not-yet-seeded module), matching "sometime."
+
+**Backend changes (models.py):** new unique constraint on `ChecklistTemplateItem`: `UniqueConstraint
+("module", "item", name="uq_qap_checklist_template_item")` -- the actual fix; makes a second concurrent
+seed attempt fail outright at the database level instead of silently duplicating every item.
+
+**Backend changes (checklist_config.py):** `get_template_items`'s seed attempt now runs inside its own
+`db.begin_nested()` SAVEPOINT, with the surrounding `count() == 0` check's `_seed_defaults` call wrapped
+in `try/except IntegrityError: pass`. If another concurrent request won the race and already committed
+its own seed, this one's INSERTs hit the new unique constraint -- only the SAVEPOINT rolls back (not the
+caller's own still-in-progress transaction, e.g. mid-Raise, which may have other uncommitted work of its
+own), and execution just falls through to read what the other request already seeded. Same "lost a race,
+not an error" idiom already used elsewhere in this codebase (routers/auth.py's JIT LDAP user
+provisioning, `uq_qap_user_roles`).
+
+**Frontend changes:** none -- `useChecklistTemplate.ts` already does a full `setItems(r)` replace on every
+fetch (confirmed not an accumulation bug); it was faithfully rendering whatever the backend actually
+returned.
+
+**Data notes:** run once against an existing Oracle schema, in this order (the cleanup DELETE must run
+*before* the ADD CONSTRAINT below, or the constraint creation will itself fail if any module already has
+duplicated rows from this bug):
+
+```sql
+-- Keep the lowest id per (module, item), drop any duplicates.
+DELETE FROM qap_checklist_template_items t1
+WHERE t1.id NOT IN (
+    SELECT MIN(t2.id)
+    FROM qap_checklist_template_items t2
+    WHERE t2.module = t1.module AND t2.item = t1.item
+);
+
+ALTER TABLE qap_checklist_template_items
+    ADD CONSTRAINT uq_qap_checklist_template_item UNIQUE (module, item);
+```
+
+Known limitation: this only cleans up the shared *template* table. An already-raised request whose own
+checklist rows (`ReadinessChecklistItem` etc.) were seeded from an already-duplicated template keeps
+those duplicated rows as-is -- per this table's own docstring, those rows were copied at seed time and
+never reference this table afterward, so cleaning up the template here can't retroactively fix a
+request already in flight. Deliberately not auto-repaired here (unlike the template table, blindly
+deleting a "duplicate" row on an in-flight request risks breaking checklist-evidence index alignment or
+an already-recorded requester_checked/evidence state) -- if a specific already-raised request is known to
+be affected, it needs a manual, request-specific look before touching its rows.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 164. Folder pickers showed bare names -- same-named folders in different branches were indistinguishable
+
+**Request:** "I SELECTED PARENT FOLDER AS ABC, BUT SUB FOLDER CREATED UNDER ANOTEHR FOLDER."
+
+**Root cause:** Nothing stops creating a folder whose name already exists elsewhere in the same project's
+tree (backend `routers/test_repository.py::create_folder` has no uniqueness check on `name`, only that
+the given `parent_id`, if any, exists). Every folder picker in Test Repository (Parent Folder on New
+Folder, Target Folder on Excel import, Folder on test case create/edit, Folder on bulk-update -- all 4
+converted to `SearchableSelect` in section 156) showed only each folder's own bare `name`. If two folders
+in different branches of the tree happened to share a name (e.g. two separate "ABC" folders), both
+appeared as identical, indistinguishable "ABC" entries in the list -- not a bug in the select itself
+(each option's own `value` was always its correct id), but genuinely ambiguous for the requester picking
+between them, exactly matching "selected ABC, but created under another folder." Pre-existing since the
+folder picker was first built -- not introduced by section 156's conversion to `SearchableSelect` (the
+native `<select>` it replaced had the exact same bare-name ambiguity).
+
+**Backend changes:** none -- frontend-only; deliberately not adding a name-uniqueness constraint either,
+since reusing the same folder name in a different branch is a legitimate, common pattern (e.g. "Smoke
+Tests" nested under several different feature folders) -- the fix is making those distinguishable in the
+UI, not disallowing the structure.
+
+**Frontend changes (modules/test-management/TestRepository.tsx):** new `folderPathLabel(folders, folder)`
+helper -- walks a folder's `parent_id` chain up to the root (using the already-loaded flat `folders` list
+for the project) and joins each ancestor's name into a breadcrumb, e.g. `"XYZ / ABC"` for an "ABC" nested
+under "XYZ", vs. a plain `"ABC"` for a top-level one. All 4 folder pickers now use this as each option's
+label instead of the bare `f.name` -- same-named folders in different branches now read as visibly
+distinct options.
+
+**Data notes:** none -- presentation-only change; no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 165. Sidebar folder tree was a flat list -- expand/collapse glyphs were static, non-functional text
+
+**Request:** Follow-up on section 164, with two more screenshots: "See the discrepency, i created under
+TESTTTTT/NEWWWWW but showing under different folder, also expand and collapse not working."
+
+**Root cause:** Two different bugs both surfaced as "wrong folder" confusion. Section 164 fixed the
+folder-picker *dropdowns* (ambiguous bare names). This is a separate, deeper bug in the Test Repository
+sidebar's own tree view, which never built a real hierarchy at all: `{folders.map((f) => (...))}` rendered
+every folder in whatever flat order the API returned them in (not grouped under its actual `parent_id`),
+with only a binary `0px`/`16px` indent regardless of true depth, and a `{f.parent_id ? '└' : '▸'}` glyph
+that was static text with no `onClick` -- it never expanded or collapsed anything. A sub-folder created
+under `TESTTTTT / NEWWWWW` had the correct `parent_id` all along, but its row could land visually far from
+its real parent's row with nothing connecting them, which reads exactly like "created under X but showing
+under a different folder" even though the underlying data was fine. "Expand and collapse not working" was
+literally true -- those glyphs were never interactive.
+
+**Backend changes:** none -- `parent_id` was always correct; this was a frontend rendering bug only.
+
+**Frontend changes (modules/test-management/TestRepository.tsx):** added `buildFolderTree(folders)`,
+converting the flat `TestFolderOut[]` into a real `FolderTreeNode[]` (`{folder, children}`) by grouping
+each folder under its actual parent's node (root folders, i.e. no `parent_id`, become top-level nodes).
+Added a new recursive `FolderTreeRows` component that renders one node's own row immediately followed by
+its own children (one level deeper), so a sub-folder always renders directly beneath its real parent
+regardless of API response order. The expand/collapse glyph is now a real `<button>` (`.tm-folder-toggle`)
+wired to a new `collapsedFolders` state (`Set<number>`, empty by default so nothing that was previously
+always-visible disappears) and a `toggleCollapsed(id)` handler in the sidebar; leaf folders (no children)
+render a static, non-interactive `└` (`.tm-folder-toggle-leaf`) instead of a button. The old flat
+`{folders.map(...)}` block in the `tm-tree-panel` sidebar was replaced with
+`<FolderTreeRows nodes={folderTree} .../>`, where `folderTree = useMemo(() => buildFolderTree(folders),
+[folders])`. Added `.tm-folder-toggle` / `.tm-folder-toggle-leaf` CSS to `index.css`, styled to match the
+existing muted `.tm-tree-panel .link-btn span` glyph color.
+
+**Data notes:** none -- presentation-only change; no schema/API impact. `folderCounts` (direct test-case
+counts per folder) and `canDeleteFolder`/`projectIsActive` gating are unchanged, just threaded through as
+props to the new recursive component instead of being read as closures inside a flat `.map()`.
+
+**Verified:** `npx tsc --noEmit -p .` across the entire frontend -- clean; Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 166. Test Repository folders had no Copy or Move action
+
+**Request:** "Add functionality of copy the folder and move the folder."
+
+**Root cause:** Not a bug -- the Test Repository's folder tree only ever supported Create and Delete
+(section 165 fixed the tree's own rendering, but never added new actions). Reorganizing an existing tree
+(duplicating a folder as a starting point for a similar set of cases, or re-parenting a folder somewhere
+else) required deleting and manually re-creating everything by hand, since Delete only works on an already
+-empty folder (see `delete_folder`'s `has_children`/`has_cases` guard).
+
+**Backend changes (routers/test_repository.py, schemas.py):** two new endpoints, both gated by the same
+`_AUTHOR_ROLES` (QA Engineer or QA Lead) as `create_folder`, both requiring the project to be active.
+`POST /api/test-repository/folders/{folder_id}/move` (`schemas.TestFolderMove { parent_id }`) re-parents a
+folder in place -- everything already nested beneath it moves along automatically since children only
+reference their parent's id, nothing about them changes. Guarded by a new `_descendant_folder_ids()`
+cycle-check: a folder can never be moved into itself or into one of its own descendants (would disconnect
+it from the tree). `POST /api/test-repository/folders/{folder_id}/copy`
+(`schemas.TestFolderCopy { parent_id, name }`) recursively duplicates a folder's entire subtree via a new
+`_clone_folder_subtree()` helper -- itself, every test case directly inside it (own steps included), and
+every child folder at any depth with its own test cases. Every cloned test case gets a brand-new governed
+`TQA-TC` key (via `models.gen_id`) and its status is forced back to `Draft` regardless of the source case's
+current status, exactly like `create_test_case`/import already do for anything new -- a copy is a new
+definition, not the same already-approved artifact, so it re-enters QA Lead review. Each new case also gets
+its own `ApprovalAction` "Submitted for review" audit row noting which original key it was duplicated from.
+No cycle guard is needed for Copy (unlike Move): the copy always gets brand-new ids, so "copy a folder into
+one of its own sub-folders" is a well-defined destination -- it just nests the new copy under the untouched
+original subtree.
+
+**Frontend changes (modules/test-management/TestRepository.tsx, index.css):** `FolderTreeRows` (added in
+section 165) gained two new per-row icon buttons alongside the existing Delete ("⧉" Copy, "⇄" Move), both
+gated by `canAuthor` (matching the backend's author-role gate) and `projectIsActive`, wrapped together with
+Delete in a new `.tm-folder-actions` flex container so all three sit side by side without overlapping the
+folder name/count. New `FolderMoveCopyModal` component (one modal, `mode: 'move' | 'copy'` prop) shows a
+`SearchableSelect` destination picker built from `folderPathLabel` breadcrumbs (same helper as section 164)
+plus a "Top level" option; Move's picker excludes the folder itself and every one of its own descendants
+client-side (same exclusion the backend enforces, just pre-filtered so the error can't actually happen from
+the UI); Copy shows a required, pre-filled "New Folder Name" field (defaults to `"<name> (Copy)"`) and a
+note that every test case inside re-enters QA Lead review. Both actions call `loadProjectData(projectId)`
+on success to refresh the full folder + test-case list in one shot, same as `ImportModal`'s `onImported`.
+
+**Data notes:** none -- no schema change; the existing `qap_test_folders`/`qap_test_cases`/`qap_test_steps`
+tables and the existing `TQA-TC` id-counter sequence are reused as-is by the new Copy endpoint.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 167. Test cases had no checkout/lock -- two people could edit the same one at once
+
+**Request:** "check in checkout option should be available for testcases, otherwise multiple people can
+edit at once, if checkout, the testcase is locked for editing by that user."
+
+**Root cause:** Not a bug -- `update_test_case` had no concurrency control at all. Two QA Engineers opening
+the same test case at the same time and both saving would silently overwrite each other's edit (last write
+wins), with no warning to either of them. Requested directly as an explicit, SharePoint-style checkout: a
+user locks a test case to themselves before editing, and everyone else is blocked from changing it (not
+just warned) until they check it back in.
+
+**Backend changes (models.py, schemas.py, routers/test_repository.py):** `TestCase` gains two new nullable
+columns, `checked_out_by_id` (FK to `qap_users.id`) and `checked_out_at`, plus a `checked_out_by_name`
+property (same pattern as the existing `created_by_name`). Two new endpoints, both requiring `_AUTHOR_ROLES`
+(QA Engineer or QA Lead) and an active project: `POST /api/test-repository/test-cases/{id}/checkout` sets
+the lock to the caller (rejected with `423 Locked` if someone else already holds it; idempotent -- just
+refreshes the timestamp -- if the caller already holds it), and `POST .../checkin` clears it (a no-op if
+already unlocked). A new `_enforce_checkout_lock()` helper is now called at the top of `update_test_case`,
+`delete_test_case`, `bulk_update_test_cases`, and `bulk_delete_test_cases` -- each raises `423 Locked` if the
+case is checked out by anyone other than the caller. Admin always bypasses the lock (`current_user.has_role()`
+with no arguments is this codebase's existing "is Administrator" check), so an abandoned lock (e.g. its
+holder left the bank, or simply forgot to check back in) can still be broken without touching the database.
+QA Lead's separate review/approve step (`review_test_case` / `bulk_approve_test_cases`) is deliberately NOT
+gated by this lock -- reviewing an already-submitted definition is not the same action as editing its
+content, and gating it would let one engineer's forgotten checkout block the whole team's approval queue.
+`copy_folder` (section 166) does not carry a source case's checkout over to its clone -- every cloned case
+starts unlocked, same as any other brand-new row.
+
+**Data notes:** requires two new nullable columns on `qap_test_cases`:
+```sql
+ALTER TABLE qap_test_cases ADD checked_out_by_id NUMBER;
+ALTER TABLE qap_test_cases ADD checked_out_at TIMESTAMP;
+ALTER TABLE qap_test_cases ADD CONSTRAINT fk_qap_test_cases_checked_out_by
+  FOREIGN KEY (checked_out_by_id) REFERENCES qap_users(id);
+```
+Both are nullable so every existing row is simply "not checked out" with no backfill required.
+
+**Frontend changes (modules/test-management/TestRepository.tsx, types.ts):** the test case table gained a
+new "Lock" column -- a case checked out by someone else shows their name as a yellow badge (read-only); a
+case the current user holds shows a "Check in" button; an unlocked case (that the viewer is allowed to
+author) shows a "Check out" button -- both call the new endpoints directly from the row (`stopPropagation`
+so the click doesn't also open the edit modal, same convention as the existing selection checkbox column).
+`TestCaseModal` gained a matching "Checkout" field with the same badge/button, plus: opening a case someone
+ELSE has checked out now forces the whole form read-only client-side too (not just relying on the backend's
+423 on Save) via a new `lockedByOther` check, with an `info-banner` explaining who holds it. A new
+`onCheckoutChange` callback prop updates the case in both the parent's list and the still-open modal in
+place, so checking out/in from inside the modal doesn't close it.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 168. Test Project activation/deactivation had no QA Lead approval gate
+
+**Request:** "Project Activation, deactivation should need approval from QA lead."
+
+**Root cause:** Not a bug -- `update_test_project` let either QA Engineer or QA Lead flip a project's
+`is_active` immediately, with only an audit-log entry after the fact (no approval step at all). Requested
+directly: a QA Engineer's activate/deactivate should become a request a QA Lead has to approve before it
+takes effect, the same shape as every other requester/approver split already in this app (test case Draft →
+QA Lead review, SAST/DAST readiness → Security Lead, etc.).
+
+**Backend changes (models.py, schemas.py, routers/test_projects.py):** `TestProject` gains three new
+nullable columns -- `pending_is_active` (the *requested* new value while a request is outstanding, `NULL`
+= no pending request), `pending_requested_by_id`, `pending_requested_at` -- plus a `pending_requested_by_name`
+property (same pattern as `created_by_name`). `update_test_project` now branches on
+`current_user.has_role(Role.QA_LEAD)` (True for QA Lead or Admin, same "is at least this role" bypass used
+everywhere else) only for the `is_active` field -- `name`/`department`/`description` still save directly for
+either role, unchanged. A QA Lead/Admin's toggle still applies to `is_active` immediately exactly as before.
+A QA Engineer's toggle instead only sets `pending_is_active` to what they asked for and logs "Reactivation
+requested"/"Deactivation requested" -- `is_active` itself is untouched until resolved. New endpoint
+`POST /api/test-projects/{id}/activation-review` (QA Lead/Admin only, `schemas.TestProjectActivationReview
+{ decision: APPROVE | REJECT, comments }`) resolves it: Approve applies `pending_is_active` to `is_active`
+and logs "Reactivation approved"/"Deactivation approved"; Reject discards the request without touching
+`is_active` and logs "...request rejected" -- a reason is required for Reject, same rule `review_test_case`
+already uses for Return. Requesting a value the project is already in (e.g. a stale request racing an
+already-applied change) is a quiet no-op that just clears the pending fields, not an error.
+
+**Data notes:** requires three new nullable columns on `qap_test_projects`:
+```sql
+ALTER TABLE qap_test_projects ADD pending_is_active NUMBER(1);
+ALTER TABLE qap_test_projects ADD pending_requested_by_id NUMBER;
+ALTER TABLE qap_test_projects ADD pending_requested_at TIMESTAMP;
+ALTER TABLE qap_test_projects ADD CONSTRAINT fk_qap_test_projects_pend_by
+  FOREIGN KEY (pending_requested_by_id) REFERENCES qap_users(id);
+```
+All nullable, no backfill required -- every existing project is simply "no pending request".
+
+**Frontend changes (modules/test-management/TestProjects.tsx, types.ts):** new `canReview` (QA Lead, Admin
+bypasses via `hasRole`) alongside the existing `canManage` (QA Engineer + QA Lead). A project card with a
+pending request shows an `info-banner` naming who asked and for what, and its action row swaps to
+Approve/Reject buttons for `canReview` users (a new confirm modal, comments required only for Reject) --
+everyone else just sees the pending banner, no action buttons, so a second conflicting request can't be
+filed on top of an open one. With no pending request: `canReview` still gets the original direct
+Deactivate/Reactivate button; a QA Engineer (`canManage` but not `canReview`) instead gets "Request
+deactivation"/"Request reactivation", which opens the same confirm modal with copy that makes clear it
+needs QA Lead approval before it takes effect (`changeProjectStatus` itself is unchanged -- it always just
+PATCHes `is_active`; the backend decides whether that applies immediately or becomes a request).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 169. Test Projects page had no search box
+
+**Request:** "Search under project is not working" (reported alongside section 168, both about the
+Projects page).
+
+**Root cause:** Not a bug in existing logic -- the Test Projects (Project Management) page never had a
+free-text search box at all, only the Active/Inactive/All pill-tabs filter. Every other list page in the
+app (QA Requests, Test Repository's case list, Audit Log, Suppression, Sign-Off, the global header search)
+has one; this page was the one gap, so typing anywhere on it predictably did nothing -- indistinguishable
+from a "broken" search to a user expecting the same pattern as everywhere else.
+
+**Frontend changes (modules/test-management/TestProjects.tsx):** new `search` state, a text input added to
+the existing `.toolbar` (reuses the same generic `.toolbar input` styling every other page's search box
+already gets, e.g. QA Requests' "Search by request ID, application, or project..."). `visibleProjects`
+(previously a plain `.filter()` on `projectFilter` only) is now a `useMemo` that also matches the query
+against project name, project key, department, and -- via a new `applicationNameById` lookup map built from
+the already-loaded `applications` list -- the linked Application's name, case-insensitively, substring
+match, same convention as every other search box in this codebase (e.g. Test Repository's case search).
+
+**Data notes:** none -- presentation-only change, no schema/API impact.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed
+identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 170. Test Project details had no edit option after creation
+
+**Request:** "Once Project is created, give option to edit details."
+
+**Root cause:** Not a bug -- `PATCH /api/test-projects/{id}` already accepted `name`/`department`/
+`description`/`is_active`, but nothing in the frontend ever called it for anything except the Activate/
+Deactivate toggle (see section 168). Once a Project was created via `NewProjectModal`, its name, linked
+Application, department, and description were effectively permanent from the UI's point of view -- the only
+way to fix a typo or re-link the wrong Application was a direct database edit.
+
+**Backend changes (schemas.py, routers/test_projects.py):** `TestProjectUpdate` gains
+`application_master_id: Optional[int]`. `update_test_project` now handles it the same way
+`create_test_project` already does: validates the given id is a real Application, and -- only if the same
+request didn't also explicitly set `department` -- syncs `department` from the Application's own, so
+re-linking a Project never silently clobbers a department someone deliberately typed in that same edit. An
+explicit `null` clears the link entirely.
+
+**Data notes:** none -- reuses the existing `application_master_id` column and `PATCH` endpoint; no schema
+change.
+
+**Frontend changes (modules/test-management/TestProjects.tsx):** new `EditProjectModal`, structurally a
+twin of `NewProjectModal` (same Application/Name/Department/Description fields, same auto-fill-on-pick
+behavor) but pre-filled from the existing project and `PATCH`ing instead of `POST`ing. A new "Edit" button
+on every project card (visible to `canManage` -- QA Engineer or QA Lead, same as every other management
+action on this page) opens it; saving merges the updated row back into the project list in place.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 171. Test Repository folders had no rename/edit option after creation
+
+**Request:** "Once folder is created, folder details should be editable" (reported alongside section 170).
+
+**Root cause:** Not a bug -- there was no `PATCH` endpoint for `TestFolder` at all (only `GET`/`POST`/
+`DELETE`, plus the `/move` and `/copy` actions added in section 166). A folder's name was fixed forever
+from the moment it was created; the only way to "fix" a typo'd folder name was delete-and-recreate, which
+`delete_folder` already refuses unless the folder is completely empty (no sub-folders, no test cases) --
+so in practice a populated folder's name could never be corrected at all.
+
+**Backend changes (schemas.py, routers/test_repository.py):** new `schemas.TestFolderUpdate { name,
+parent_id }` and `PATCH /api/test-repository/folders/{id}` (same `_AUTHOR_ROLES` gate as every other folder
+action). Accepts both fields since a general-purpose edit endpoint should be complete on its own, though the
+UI (see below) only exposes `name` -- `parent_id` reassignment already has its own dedicated, faster Move
+action (section 166) and exposing the same picker a second time here would just be a confusing duplicate
+path to the same result. The existing cycle/existence guard from `move_folder` was extracted into a shared
+`_validate_new_parent()` helper so both endpoints enforce the identical rule (can't be its own parent,
+can't move into its own descendant) from one place instead of two copies drifting apart.
+
+**Data notes:** none -- reuses the existing `qap_test_folders` table; no schema change.
+
+**Frontend changes (modules/test-management/TestRepository.tsx, index.css):** new `RenameFolderModal`
+(single Name field, pre-filled) and a 4th icon button in `FolderTreeRows`' per-row actions -- "✎" Rename,
+alongside the existing Copy/Move/Delete, same `canAuthor` gate as Copy/Move. `.tm-folder-row .link-btn`'s
+reserved right-padding grew from 78px to 100px to fit the fourth action icon without crowding the folder
+name/count.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 172. Application Name Approve/Reject moved from each child request to the master QA Request
+
+**Request:** "Request Raised with new application name, so it will go to application owner for
+Approve/Reject name, it must be at master request level. not on individual request level of childs."
+
+**Root cause:** Not a bug in the decision logic itself (Approve/Reject always operated on the
+`ApplicationMaster` row via `application_master_id`, never on any child request) -- it was a placement
+problem. The interactive `ApplicationNameBanner` (Approve/Reject buttons for the Application Owner/SM tier
+currently holding the checkpoint) was rendered separately on each of the linked Functional/SAST/DAST/
+Performance requests' own Overview tab, instead of once on the master QA Request gateway that actually
+introduced the name. Since one QA Request can raise several linked child requests at once (e.g. Functional
++ SAST together), and the same "Other" name can also be reused across separately-raised QA Requests
+(`_log_application_name_decision`'s own docstring already noted this), the same decision UI could show up
+in multiple different places for the same underlying name.
+
+**Backend changes:** none. `routers/applications.py::decide_app_owner_name` / `decide_application_name`
+already took `app_id` (the `ApplicationMaster` row's own id) and were never coupled to any specific child
+request -- moving where the banner renders needed no backend change at all.
+
+**Frontend changes (QARequests/RequestDetail.tsx, modules/functional/Functional.tsx, modules/security/
+SAST.tsx, modules/security/DAST.tsx, modules/specialised-testing/Performance.tsx,
+components/ApplicationNameBanner.tsx):** `ApplicationNameBanner` now renders once, at the top of the master
+QA Request gateway's own Overview tab (`RequestDetail.tsx`, right after `GatewayPreview`), gated the same
+way it always was (`sameDept || isAdmin`) plus a new `req.status !== "DRAFT"` guard -- `application_master_id`
+/`status` get set on every create/edit, even while still a private, freely-editable Draft (see
+`_resolve_application_name`'s own docstring), so without this the banner could let someone decide a name
+before the requester has even raised the request. Removed entirely from all four child request pages,
+along with each page's now-dead `reloadAfterApplicationNameDecision` helper (only ever used by the banner's
+own `onDecided`) and the `ApplicationNameBanner` import. Each child page keeps everything else
+application-name-aware: the read-only "Pending .../Rejected" status badges, the lifecycle stepper's
+`applicationOwnerPending` step, and `applicationNameBlocking` (still blocks the SM/Department Head decision
+panel on that specific child request while the name isn't `APPROVED`) -- only the interactive Approve/
+Reject widget moved. Each page's `smApplicationNameBlockedMessage` (the block reason shown to an SM once
+the name has cleared Application Owner and is sitting at their own tier) was reworded from "decide it
+above" -- no longer true, since nothing to decide is on that page anymore -- to point at the request's own
+QA Request page instead.
+
+**Data notes:** none -- no schema/API impact, presentation-only relocation.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 173. Defer linked child-request creation until a new Application Name clears Application Owner approval
+
+**Request:** "process workflow / user raised request with new application name / new name will go for
+Approval to Application Owner / once approved, then child request will be generated and will assign to SM."
+
+**Root cause:** Not a bug -- a genuine, unrequested-until-now sequencing gap. Before this change,
+`submit_request` created every linked Functional/SAST/DAST/Performance child request (and routed each
+straight to `SM_APPROVAL_PENDING`) the instant the gateway was raised, regardless of whether the request's
+own Application Name was a brand-new "Other" entry still sitting at `PENDING_APP_OWNER` (see section 172 for
+the two-tier `PENDING_APP_OWNER -> PENDING_SM -> APPROVED` chain). So an SM could already be looking at a
+freshly-created child request -- and could already be blocked from approving it via `applicationNameBlocking`
+-- for an application name an Application Owner hadn't even looked at yet. Nothing was technically broken
+(the SM genuinely was blocked), but "child request exists and is sitting in someone's queue" was true well
+before the name had cleared its first approval tier, which is what was actually being asked to change here.
+
+**Backend changes (`routers/qa_requests.py`, `routers/applications.py`):**
+
+- Added `_finalize_child_requests(db, obj, requester)` in `qa_requests.py`, factored out of `submit_request`'s
+  previous inline tail: unstashes `draft_child_details`, calls `_sync_linked_child_requests` (creates
+  whichever linked child request(s) the selected `request_types` call for, each landing straight at
+  `SM_APPROVAL_PENDING`/`SM_REJECTED` via `_raise_child_to_sm` as before), calls
+  `_promote_draft_checklist_evidence`, clears `draft_child_details`, sets the gateway to
+  `GatewayStatus.RAISED`, and logs `"Submitted & Raised"`. `requester` is always the gateway's own original
+  requester (`obj.requester`), never whoever is actually making the API call that triggers it -- matters for
+  the deferred path below, where an Application Owner's Approve action is what ends up calling this, but the
+  child's own "Requester -- Submitted" audit entry must still read as coming from the person who actually
+  requested the work.
+- `submit_request` now branches right after its existing validation gates (mandatory checklist items,
+  DAST/Performance environment) instead of always calling child-creation inline: if
+  `obj.application_master_status == "PENDING_APP_OWNER"` (a brand-new name, first tier not yet decided), the
+  gateway is left at `GatewayStatus.SUBMITTED` -- assigned its real `request_id` same as any raise, logged
+  with an explanatory `"Submitted"` entry ("Awaiting Application Owner approval..."), `draft_child_details`
+  deliberately left untouched -- and the function returns without creating a single child or calling SM
+  assignment. Any other case (name already `APPROVED`, already past `PENDING_APP_OWNER`, or no name at all)
+  calls `_finalize_child_requests` immediately, exactly as before section 172 introduced the two-tier chain --
+  this is not a behaviour change for the common case, only for the specific "just-typed a new name" case.
+  `GatewayStatus.SUBMITTED` already existed in `constants.py` (`GATEWAY_STATUSES`/`GATEWAY_STATUS_LABELS`) but
+  was previously set and instantly overwritten to `RAISED` in the same call, so it never actually persisted;
+  this is the first time it's ever genuinely reached.
+- `routers/applications.py::decide_app_owner_name` (tier 1) now drives the deferred gateway(s) forward as
+  part of the same decision, since by construction only it can ever see a gateway sitting at `SUBMITTED`
+  waiting on this exact `ApplicationMaster` row:
+  - **Approve:** for every `QARequest` with this `application_master_id` still at `GatewayStatus.SUBMITTED`,
+    calls `_finalize_child_requests(db, gw, gw.requester)` right here -- children get created and assigned to
+    SM in the same transaction as the name clearing this tier, attributed to the original requester.
+  - **Reject:** for every such gateway, instead of the existing `_auto_reject_linked_requests` cascade (which
+    only ever had existing children to act on, so was a silent no-op for these), the gateway is reverted
+    straight back to `GatewayStatus.DRAFT` with a new `"Requester" / "Reverted to Draft"` `ApprovalAction`
+    explaining why. Deliberately **keeps** the already-assigned `request_id` rather than nulling it out --
+    the model's own column comment on `QARequest.request_id` says it "stays NULL while Draft," and this is a
+    narrow, intentional exception: the ID was already surfaced to the requester and already appears in this
+    same gateway's own audit log, so nulling it out would just orphan those references without gaining
+    anything. The requester can freely edit and resubmit under a different name from here, same as any other
+    Draft. Gateways whose children already exist (i.e. `status != SUBMITTED`) are untouched by this new
+    branch and keep going through the existing `_auto_reject_linked_requests` cascade exactly as before.
+  - `decide_application_name` (tier 2, SM) needed **no changes** -- by the time a name reaches `PENDING_SM`
+    under this design, any gateway that introduced it has already had its children created at tier 1.
+  - `applications.py` now imports `_finalize_child_requests` from `routers/qa_requests.py` -- the one
+    deliberate cross-router import in this app (confirmed via grep that no other router imports from
+    another); safe/no circular import, since `qa_requests.py` imports nothing from `applications.py`.
+
+**Frontend changes (`QARequests/RequestDetail.tsx`):** Reviewed `GatewayPreview.tsx`'s `gatewayStageIndex`
+(Draft/Submitted/Raised stepper), the `Badge` colour/label maps, and the Application Name badges/
+`ApplicationNameBanner` gating (`req.status !== "DRAFT"`) -- all already correctly anticipated a genuinely-
+persisted `SUBMITTED` gateway state and needed no changes. Two things did need updating, since they'd
+previously never actually seen a `SUBMITTED` gateway with zero linked children in practice:
+
+- The post-Submit `raisedNotice` modal (`act()` sets it from whatever `POST .../submit` returns) now branches
+  on `raisedNotice.status`: the existing "Request Raised... go review each section" copy plus the
+  `linkedSections()` list only shows when status is genuinely `RAISED`. A new "Request Submitted" variant
+  covers `status === "SUBMITTED"`, explaining that the Application Name needs Application Owner approval
+  first, that no linked request has been generated yet, and what happens next (auto-advances to Raised +
+  children generated on approval, or reverts to Draft on rejection) -- avoids showing the old copy against a
+  guaranteed-empty `linkedSections()` list.
+- The "no gateway actions available" status line (shown once a gateway is neither editable, submittable, nor
+  cancellable) gained one extra sentence specifically for `status === "SUBMITTED"`, pointing back at the
+  `ApplicationNameBanner` above and noting no linked request exists yet -- otherwise the line just read "this
+  request has been submitted" with no indication of why nothing else is happening.
+
+Deliberately **not** changed: `GATEWAY_CANCELLABLE_STATUSES` still only allows cancelling from `DRAFT`, so a
+gateway sitting at `SUBMITTED` awaiting Application Owner approval cannot currently be cancelled by the
+requester (only rejected by the Application Owner, which reverts it to Draft, from where it can be
+cancelled). Not part of what was asked; flagging in case the requester should also be able to cancel
+directly out of that waiting state.
+
+**Data notes:** none -- no new columns. Purely a status-timing/branching change reusing the existing
+`GatewayStatus.SUBMITTED` value and existing `ApplicationMaster`/`QARequest` columns.
+
+**Verified:** `python3 -m py_compile app/routers/qa_requests.py app/routers/applications.py app/models.py
+app/constants.py` and `npx tsc --noEmit -p .` -- both clean; Documents and outputs copies re-synced and
+confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 174. Pending Approvals nav section (single feed across every approval checkpoint)
+
+**Request:** "The system shall provide a Pending Approvals section in the navigation bar to display all
+approval requests awaiting action from the logged-in user." Plus a worked example restating the section 173
+Application Owner -> SM flow, describing the exact status wording expected at each step: the master request
+shows "Application Owner Approval Pending" until the Application Owner decides; once approved, child
+requests are generated and each one requiring SM approval shows "SM Approval Pending" and appears in the
+assigned SM's own Pending Approvals section. "Only requests requiring action from the logged-in user shall
+be displayed in that user's Pending Approvals section."
+
+**Root cause:** Not a bug -- a missing feature. Before this change there was no single place to see "what's
+waiting on me" anywhere in the app. Every approval/decision checkpoint (SM, Department Head, QA Lead
+readiness, Security Analyst, Application Owner, Executive COE, QA Lead project-activation) only ever surfaced
+on that specific request's own detail page -- a reviewer had to already know which module/request to open.
+The one existing thing that sounded like it might cover this, `GET /api/approvals/pending-mine`
+(`routers/approvals.py::my_recent_actions`), is misleadingly named: it returns the current user's own PAST
+actions (`ApprovalAction.actor_id == current_user.id`), not items currently awaiting a decision -- left
+untouched here since other things may already depend on its existing behavior/name.
+
+**Backend changes:**
+
+- New `routers/pending_approvals.py` (registered in `main.py`), `GET /api/pending-approvals` -- a single
+  aggregator that inventories every approval/decision checkpoint in the app and, for each one, checks it
+  against the CURRENT user's own roles/department/specific assignment the exact same way that checkpoint's
+  own decision endpoint already gates the real Approve/Reject call, so this feed can never show something the
+  viewer isn't actually allowed to act on and can never hide something they are:
+  - Application Name -- Application Owner tier (`ApplicationMaster.status == PENDING_APP_OWNER`) and SM tier
+    (`PENDING_SM`) -- mirrors `routers/applications.py::decide_app_owner_name`/`decide_application_name`'s own
+    department scoping. Links to whichever QA Request gateway most recently used that name (there's no
+    dedicated decision page -- the Approve/Reject widget lives inline on the gateway's own Overview tab, see
+    section 172's `ApplicationNameBanner`).
+  - Functional/SAST/DAST/Performance -- SM Approval, Department Head Approval (mirrors each module's own
+    `sm_decision`/`department_head_decision`, `require_same_department` + `require_not_requester`), and
+    Readiness Verification / Security Readiness (mirrors `_require_assigned_qa_lead` -- assigned to one
+    SPECIFIC `qa_lead_id`/`security_lead_id`/`engineer_id`, not a department pool). The SM/Department Head
+    queries use an outer join to `QARequest` (not an inner join) specifically so any pre-existing legacy
+    standalone Functional/SAST/DAST/Performance row (from before standalone creation was disabled -- see
+    e.g. `routers/sast_dast.py::create_sast`) with no `qa_request_id` still surfaces instead of silently
+    vanishing, with the same "nothing to compare against, so don't block on it" fallback `deps.py::
+    require_same_department` itself already uses for a `None` department.
+  - Suppression -- SM Approval, Department Head Approval, and Security Team Verification (the last one
+    deliberately has no department filter at all, any `SECURITY_ANALYST` -- mirrors
+    `routers/suppression.py::security_team_decision`'s own "shared pool, cross-department" design).
+  - QA Sign-off -- QA Lead Approval and Executive COE Approval (gated by the REVIEWER's own department being
+    `IT - QA`, not the certificate's requesting department -- mirrors `routers/signoff.py::
+    _require_qa_department`).
+  - Test Project activation/deactivation (`TestProject.pending_is_active is not None`, any `QA_LEAD` --
+    mirrors `routers/test_projects.py::review_project_activation`'s own org-wide, unscoped gate exactly, not
+    invented here).
+  - ADMIN sees every category, org-wide, with no department/assignment filtering at all -- `has_role(...)`
+    already treats ADMIN as satisfying any role check, and every one of the mirrored decision endpoints lets
+    ADMIN bypass `require_same_department`/`require_not_requester`/the specific-assignment checks the same
+    way, so an Admin account already CAN act on every one of these; this feed is just honest about that.
+  - Deliberately **not** covered (flagged as a possible follow-up, not silently folded in): Functional/
+    Performance "Requester Verification" (the requester confirming their own already-approved work, not a
+    peer approving someone else's request) and Test Case review (a QA Lead approving test-case CONTENT, not
+    a request/workflow entity).
+- New `schemas.PendingApprovalItem` -- a flat, non-ORM response shape (`category`, `entity_type`, `entity_id`,
+  `display_id`, `title`, `status`, `status_label`, `department`, `submitted_by`, `submitted_at`, `path`) since
+  results are built up from many different tables with no single row shape to map `from_attributes` onto.
+- **Wording match** (`backend/app/constants.py` + `frontend/src/constants.ts`
+  `APPLICATION_MASTER_STATUS_LABELS`, plus every hardcoded copy of the same badge text in
+  `components/Common.tsx::applicationNameAwareStatusLabel`, `QARequests/RequestDetail.tsx`, and each of
+  `Functional.tsx`/`SAST.tsx`/`DAST.tsx`/`Performance.tsx`): reworded `PENDING_APP_OWNER`'s label from
+  "Pending Application Owner Approval" to **"Application Owner Approval Pending"** to match the requirement's
+  exact quoted wording. `PENDING_SM`'s Application-Name-tier label ("Pending SM Approval") was left as-is --
+  the requirement's "SM Approval Pending" wording refers to a CHILD request's own `SM_APPROVAL_PENDING`
+  status (already labelled "SM Approval Pending" verbatim in `QA_REQUEST_STATUS_LABELS`/
+  `SAST_DAST_STATUS_LABELS`/`PERFORMANCE_STATUS_LABELS`, unchanged), not the two-tier Application Name
+  approval chain's own second tier, which is a different thing.
+
+**Frontend changes:**
+
+- New `types.ts::PendingApprovalItem` (mirrors the backend schema) and new
+  `modules/governance/PendingApprovals.tsx` -- a plain list page (same `Card`/`Table`/`PageHeader` pattern as
+  `Approvals.tsx`'s existing Approval Workflow Log), grouped by a `Checkpoint` category column with an
+  optional category filter dropdown built from whatever categories are actually present for this user (varies
+  a lot person to person). Clicking a row navigates to that item's own `path` -- there's no separate decision
+  UI on this page itself; the Approve/Reject action always lives on the item's own page (the
+  `ApplicationNameBanner`, an SM/Department Head decision panel, etc.), same as before this feed existed.
+  Shows an empty state ("Nothing is currently awaiting your action...") rather than a bare empty table when
+  there's genuinely nothing pending.
+- New route `/pending-approvals` (`App.tsx`) and new nav item "Pending Approvals" in the Governance group
+  (`components/Layout.tsx`, between "QA Sign-off" and "Approval Workflow Log"), with a live count badge --
+  the one deliberate exception to every other nav item's own count, which is computed but currently switched
+  off (commented out) in the sidebar; since the whole point of this page is "how many things need me right
+  now," a silent nav entry would defeat it.
+- `modules/test-management/TestProjects.tsx` gained `?open=<project_key>` deep-link support (same pattern as
+  `Functional.tsx`/`SAST.tsx`/`DAST.tsx`/`Performance.tsx`/`Suppression.tsx`/`SignOff.tsx` already had, which
+  this page never did) -- there's no separate single-project detail view to jump into here (the
+  pending-activation banner is shown inline per row), so "opening" a project means pre-filling the existing
+  search box with that `project_key` instead, surfacing the specific project a QA Lead's Pending Approvals
+  item points at.
+
+**Data notes:** none -- no new columns or tables. Purely a new read-only aggregation endpoint over existing
+data, plus display-wording changes to two existing string constants.
+
+**Verified:** `python3 -m py_compile app/main.py app/schemas.py app/constants.py app/routers/pending_approvals.py`
+and `npx tsc --noEmit -p .` -- both clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 175. Application Name banner stayed stale and multi-clickable after an Application Owner reject
+
+**Request:** "currently while application owner rejected the name, as modal opened it's not updating and user
+can click approve or reject button multiple time. we can show some message and close the drawer else suggest
+how to handle."
+
+**Root cause:** `ApplicationNameBanner`'s `decide()` awaited its own `onDecided()` callback
+(`RequestDetail.tsx::reloadAfterApplicationNameDecision`, a plain `GET /api/qa-requests/{id}` refetch) inside
+the SAME try/catch as the actual Approve/Reject POST. Rejecting a brand-new name at the Application Owner
+tier reverts that gateway straight back to `GatewayStatus.DRAFT` (see section 173's
+`decide_app_owner_name`) -- and Draft is requester/admin-only (`_can_view_gateway`), so the Application Owner
+who just rejected it immediately loses the ability to even re-fetch the same request. That reload's 403 was
+caught by the banner's own catch block and shown as if the DECISION itself had failed, even though the POST
+had already succeeded server-side. Worse, since the reload never completed, `onChanged` was never called, so
+`applicationMasterStatus` stayed stuck at its stale pre-decision value (`PENDING_APP_OWNER`) -- the banner
+kept re-rendering with `canDecideHere` still true and the buttons re-enabled (`busy` resets to `null` in
+`finally` regardless), letting the same reviewer click Approve/Reject again against a name that had already
+moved on, and the surrounding modal never visibly updated or closed.
+
+**Frontend changes:**
+
+- `components/ApplicationNameBanner.tsx`: added a local `decided` state, set the instant the Approve/Reject
+  POST itself succeeds -- independent of whatever the parent's reload does or doesn't manage to do
+  afterward. Once `decided` is set, the interactive Approve/Reject buttons are replaced with a small
+  confirmation ("Application Name approved/rejected...") and the component's own early-return guard
+  (`!canDecideHere`) no longer hides it, so the confirmation stays visible even after
+  `applicationMasterStatus` would otherwise make `canDecideHere` false. `onDecided(decision)` is now called
+  without being awaited inside the POST's own try/catch, so a reload failure downstream can never again be
+  misattributed to the decision itself. `onDecided`'s signature changed from `() => void` to
+  `(decision: 'Approved' | 'Rejected') => void` so the parent knows which decision just happened.
+- `QARequests/RequestDetail.tsx::reloadAfterApplicationNameDecision`: now takes the `decision` and wraps its
+  own `GET` in a try/catch instead of letting it throw back into the banner. On success, `onChanged(fresh)`
+  exactly as before. On failure (the reviewer lost visibility), sets a new `appNameDecisionNotice` message
+  instead -- worded specifically for the Reject-at-Application-Owner-tier case ("...it has been returned to
+  the requester as a Draft and is no longer visible to you here"), with a generic fallback for any other
+  reload failure. A new `InfoModal` (same pattern as the existing `draftNotice`/`raisedNotice` pop-ups)
+  renders that message; dismissing it both clears the notice and calls `onClose()`, closing this whole
+  request-detail modal, since there is nothing left in it for that viewer to look at -- directly implements
+  "we can show some message and close the drawer."
+
+**Data notes:** none -- purely frontend state/UX handling around an already-correct backend decision endpoint
+(section 173's `decide_app_owner_name` itself was never buggy; only the reviewer's OWN client-side view of
+the outcome was).
+
+**Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 176. Pending Approvals notice on login
+
+**Request:** "also show one info on login if there are any pending approval pending."
+
+**Root cause:** Not a bug -- a new notification. Section 174 added the Pending Approvals nav item/page/live
+badge, but all of it is pull-only -- a person has to think to open the sidebar and notice the badge. Nothing
+proactively told anyone, at the one moment they're most likely to act on it (right after signing in), that
+something is waiting on them.
+
+**Frontend changes:**
+
+- `context/AuthContext.tsx`: added `justLoggedIn` (boolean) and `acknowledgeLogin()` to the context value.
+  `login()` sets `justLoggedIn = true` right after a successful sign-in; `logout()` clears it.
+  Deliberately NOT set by `loadMe()` (the session-restore path a page refresh/new tab takes) -- so this only
+  ever fires on an actual login, not on every reload of an already-signed-in session, mirroring how
+  `DepartmentPrompt` is scoped to a real state flag (`needs_department_selection`) rather than "every time
+  Protected happens to mount."
+- New `components/PendingApprovalsNotice.tsx`: while `justLoggedIn` is true, fetches
+  `GET /api/pending-approvals` (the same feed behind the Pending Approvals page, see section 174) once. If
+  the count is 0 or the fetch fails, it silently calls `acknowledgeLogin()` -- no pop-up, no error shown, so
+  a person with nothing pending (the common case) sees nothing extra at all. If there's at least one item, it
+  shows a single `InfoModal` ("Pending Approvals") with the count and a link straight to `/pending-approvals`;
+  dismissing it (either the link or the modal's own "Got it") calls `acknowledgeLogin()`, so it can't reappear
+  again this session (until the next actual login).
+- `App.tsx`'s `Protected` wrapper renders `<PendingApprovalsNotice />` alongside the existing
+  `<DepartmentPrompt />`, gated on `!user.needs_department_selection` so a first-ever LDAP login (which
+  already shows a blocking, `preventBackdropClose` department-selection dialog) never stacks a second pop-up
+  on top of it -- `justLoggedIn` stays true across that whole exchange, so `PendingApprovalsNotice` still
+  fires the moment `DepartmentPrompt` is dismissed, rather than being skipped for that login entirely.
+
+**Data notes:** none -- reuses the existing `GET /api/pending-approvals` endpoint (section 174) as-is.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 177. Application Name reject flow: skip the doomed reload instead of firing-then-catching
+
+**Request:** Follow-up to section 175, reported directly with screenshots: an Application Owner rejecting a
+brand-new name still saw a raw "Action could not be completed" pop-up (`Reason: This request was never raised
+(still Draft, or Cancelled before being raised) and is only visible to its requester`), and the
+Approve/Reject buttons were still showing afterward in the request-detail drawer.
+
+**Root cause:** Section 175 fixed this by catching the post-decision reload's failure and converting it into
+a friendly notice, but still ATTEMPTED the reload first and only reacted after the fact -- `ErrorText` (see
+`components/Common.tsx`) renders as a full blocking `Modal`, not inline text, so ANY code path that still
+left a raw error sitting in a local `error` state (including, before section 175, `ApplicationNameBanner`'s
+own `error` state, since the reload used to be awaited inside the SAME try/catch as the decision POST) shows
+up exactly as this "Action could not be completed" dialog. Since rejecting a brand-new name at the
+Application Owner tier reverting the gateway straight to `Draft` (requester/admin-only, `_can_view_gateway`)
+is entirely predictable from information already available client-side the moment Reject is clicked
+(`req.application_master_status` was `PENDING_APP_OWNER`, and this reviewer is neither the requester nor an
+Admin), there was no need to ever fire that reload in the first place for this specific, common case.
+
+**Frontend changes (`QARequests/RequestDetail.tsx::reloadAfterApplicationNameDecision`):** now checks, before
+attempting anything, whether `decision === "Rejected"` AND the gateway was at the Application Owner tier
+(`req.application_master_status === "PENDING_APP_OWNER"`, captured from the still-current `req` prop, read
+before this decision) AND the current viewer is neither the requester nor an Admin (`isRequester`/`isAdmin`,
+both already computed earlier in this component). When all three hold, it shows the "returned to the
+requester as a Draft" notice immediately and returns -- no network call, so there's nothing left that could
+ever surface a raw backend error for this case, and no timing window during which the banner (see section
+175's own `decided` local state, already correct) could be left showing stale, re-enabled buttons. Every
+other case (Approve at either tier, Reject at the SM tier, or a Reject by the requester/an Admin who can
+still view the reverted Draft) is untouched -- still attempts the normal reload, with the section 175 catch
+kept in place as a fallback for any other way it could fail (e.g. someone else cancelled the request in the
+meantime).
+
+**Data notes:** none -- client-side only, reusing fields already present on `QARequestOut`.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 178. Block raising a QA Request while its resolved Application Name is REJECTED (sibling-gateway bug)
+
+**Request:** Reported directly: "though application name rejected, still allow to raise sibling request."
+
+**Root cause:** `_resolve_application_name` (see its own docstring) makes any two QA Requests that type the
+identical brand-new "Other" Application Name share one `ApplicationMaster` row -- so a "sibling" gateway
+still sitting in Draft, never itself submitted, could resolve to the exact same name as another gateway whose
+Application Owner (or SM) later rejected that name. `application_master_status` is a live delegated property
+(see `models.QARequest`), so the sibling's status already read `REJECTED` the moment the other gateway's
+rejection was recorded -- but nothing about that sibling changes automatically, because
+`_resolve_application_name` only re-resolves (and un-rejects a matching row back to `PENDING_APP_OWNER`) when
+the Application Name field is actually re-saved via create/edit. Clicking Submit alone never re-saves that
+field. `submit_request` only special-cased `application_master_status == "PENDING_APP_OWNER"` (to defer child
+creation, section 173) -- every other status, including `REJECTED`, fell through to the immediate-raise path,
+so the sibling raised clean and its own linked children were born silently pre-rejected
+(`_raise_child_to_sm`'s own `REJECTED` branch sends new children straight to `SM_REJECTED`) instead of the
+raise itself ever being stopped.
+
+**Backend changes (`routers/qa_requests.py::submit_request`):** added a guard immediately after the existing
+DRAFT-status check, before `request_id` is assigned -- if `obj.application_master_status == "REJECTED"`,
+raise `HTTPException(400, ...)` telling the requester to edit the request and either choose a different
+Application Name or re-select/re-type the same name to resubmit it for fresh approval before raising. A
+gateway can now never raise while resolved to a rejected name, regardless of how it got into that state
+(rejected directly, or rejected via a sibling sharing the same name).
+
+**Frontend changes (`QARequests/RequestDetail.tsx`):** added `applicationNameRejected =
+req.application_master_status === "REJECTED"`. When `canSubmit && applicationNameRejected`, a new red warning
+box replaces the existing yellow "mandatory checklist pending" box (only one of the two shows at a time) with
+the same edit-or-resubmit guidance as the backend error. The Submit/Raise button's `disabled` now also
+includes `applicationNameRejected`, with a matching `title` tooltip, so the block is visible and pre-empted
+client-side rather than only surfacing as a 400 after the click.
+
+**Data notes:** none -- no schema changes; reuses the existing `application_master_status` delegated property.
+
+**Verified:** `python3 -m py_compile app/routers/qa_requests.py` -- clean; `npx tsc --noEmit -p .` -- clean;
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`uploads/` leftovers differ).
+
+## 179. ApplicationNameBanner: resync on a FAILED decision too, not just a successful one
+
+**Request:** Reported directly, again, after sections 175/177: "STILL IN DRAWER SHWOING FOR APPROVE/REJECT. on
+button click it should refresh if rejected."
+
+**Root cause:** Sections 175/177 correctly fixed the success path -- `decide()`'s local `decided` state is set
+the instant the decision POST itself succeeds, so the banner switches to its read-only confirmation
+regardless of anything that happens afterward. What neither section addressed: if that POST *fails*, `decided`
+never gets set, and the banner keeps rendering its live Approve/Reject buttons -- exactly this report. The
+most likely real-world way this happens with the code already working correctly everywhere else: two
+reviewers with the same checkpoint (e.g. two Application Owners, or an Application Owner and someone acting
+as SM) both have this same drawer open, and the second one to click gets a 400 from
+`decide_app_owner_name`/`decide_application_name`'s own `if obj.status != "PENDING_..."` guard, because the
+first reviewer's decision already landed. That 400 shows correctly as the `ErrorText` dialog (`"This
+application name is not awaiting Application Owner decision -- its current status is 'REJECTED'"` or
+similar), but once dismissed, the buttons underneath were still sitting there completely unchanged --
+untouched local state, and nothing had ever told the banner to go check what actually happened.
+
+**Frontend changes:**
+- `components/ApplicationNameBanner.tsx`: added a new required prop, `onRefresh: () => void`, distinct from
+  the existing `onDecided`. `decide()`'s `catch` branch now calls `onRefresh()` (previously did nothing beyond
+  `setError`). Deliberately NOT `onDecided` here -- that callback assumes the decision succeeded and would
+  incorrectly fire the "rejected, returned to requester" notice (closing the whole drawer) over a click that
+  never actually went through. The success path also now `await`s `onDecided(decision)` (previously
+  fire-and-forget) so the parent's own refresh/notice has actually finished before the click's lifecycle ends,
+  with its own error swallowed locally (the parent already turns any of its own reload failures into a
+  user-facing notice; must not double up on that in this banner too).
+- `QARequests/RequestDetail.tsx`: added `silentRefreshRequest()` -- a plain, honest, best-effort `GET
+  /api/qa-requests/{req.id}` -> `onChanged(fresh)`, swallowing any failure silently (if this reviewer can no
+  longer even view it, the `ErrorText` dialog already shown is the explanation; nothing more to add). Passed
+  as the new `onRefresh` prop on `<ApplicationNameBanner>`. Once the fresh data lands, `canDecideHere`
+  naturally recomputes false if someone else's decision already moved the name past this reviewer's tier, and
+  the banner hides its buttons on its own -- same outcome as a normal successful decision, without ever
+  claiming this reviewer's own attempt had succeeded.
+
+**Data notes:** none -- client-side only, reuses the existing `GET /api/qa-requests/{id}` endpoint.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 180. Application Name approval: single-tier (Application Owner only), no separate SM decision
+
+**Request:** Reported directly: "only application owner approval required, no SM involvment. if application
+owner approved then automatically come to SM for readiness verification and all."
+
+**Root cause / context:** The 2026-08 two-tier chain (sections 173-179) had an Application Owner decide first
+(PENDING_APP_OWNER), and only once they approved did the name move to a SECOND, separate SM decision
+(PENDING_SM, `decide_application_name`) before finally becoming APPROVED and unblocking the request's own
+downstream SM readiness-verification checkpoint (`application_name_block_message` in constants.py blocks SM/
+Department Head Approve on the request itself while the name is anything other than APPROVED). This meant an
+SM effectively had to clear the name TWICE conceptually: once via the Application-Name-specific decision, then
+again via the request's own normal readiness-verification approval -- exactly the redundant "SM involvement"
+this report asks to remove. Only the Application Owner's decision on the name itself should exist; once they
+approve, the linked child request(s) should land directly on the SM's normal queue with nothing
+name-specific left for the SM to separately decide.
+
+**Backend changes:**
+- `routers/applications.py::decide_app_owner_name`: Approve is now immediately terminal -- sets
+  `obj.status = "APPROVED"` directly (was `"PENDING_SM"`), and now also populates `decided_by_id`/
+  `decided_at`/`comments` (the SM-tier-named fields) on Approve, mirroring what Reject already did on this
+  tier ("the decision that made this terminal"). Child-request finalization for any gateway still sitting at
+  `SUBMITTED` (see section 173's deferred-creation branch) is unchanged -- still happens right here, still
+  attributed to the original requester -- so those children now go straight to their assigned SM's own normal
+  readiness-verification queue the moment the Application Owner approves, with no separate name decision left
+  for that SM to make.
+- `routers/applications.py::decide_application_name` (the old second-tier `/decision` endpoint): left in place,
+  unremoved, but now documented as LEGACY-ONLY -- no NEW `ApplicationMaster` row can ever reach `PENDING_SM`
+  again, so this endpoint can only ever act on a row that predates this change. Kept purely as a safety net for
+  any such row the one-time data fix-up below might miss, rather than leaving it permanently stuck.
+- `models.py::ApplicationMaster` docstring and the `app_owner_decided_by_id`/`app_owner_comments` field
+  comments rewritten for the single-tier model; `constants.py::APPLICATION_MASTER_STATUSES`/
+  `APPLICATION_MASTER_STATUS_LABELS` comments updated the same way. `PENDING_SM` is kept as a valid status
+  value in both places (not removed) -- purely so any legacy row still round-trips correctly through the API
+  and existing display code while it's cleaned up.
+
+**Frontend changes (`components/ApplicationNameBanner.tsx`):** updated the pending-decision banner copy and
+the post-decision confirmation copy to stop saying an Application Owner Approve "moves the name on to SM for
+final approval" -- it now says the name becomes selectable immediately and the linked request has moved on to
+SM for readiness verification. `isSmTier`/`PENDING_SM` branch in the component is unchanged code-wise (still
+present for any legacy row) but is now documented as unreachable for any name created after this change.
+
+**Data notes:** one-time fix-up for any `ApplicationMaster` row already sitting at `PENDING_SM` from before
+this change (i.e. an Application Owner had already approved it under the old two-tier flow, and it's just
+waiting on an SM who, per this request, should no longer need to act) -- promote it straight to `APPROVED`,
+reusing its own already-recorded Application Owner decision as the terminal one:
+```sql
+UPDATE qap_application_master
+SET status = 'APPROVED',
+    decided_by_id = app_owner_decided_by_id,
+    decided_at = app_owner_decided_at,
+    comments = app_owner_comments
+WHERE status = 'PENDING_SM';
+```
+No column/table DDL changes -- `PENDING_SM` and every column already existed; this is a data-only fix-up, not
+executed against any live database from this sandbox (no DB connection available here, per this doc's own
+standing convention -- to be run by whoever has Oracle access when this change is deployed).
+
+**Verified:** `python3 -m py_compile app/routers/applications.py app/models.py app/constants.py` -- clean;
+`npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical via
+`diff -rq` (only the standard `.env`/`uploads/` leftovers differ).

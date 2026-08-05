@@ -6,7 +6,8 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisi
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
-import { SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, WalkthroughOut, ApprovalActionOut } from '../../types'
+import { SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut } from '../../types'
+import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -73,11 +74,13 @@ function RequestIdSearch({ requests, selected, onSelect, onClear }: {
 
   return (
     <div className="searchable-select" ref={boxRef}>
-      <input
+      <ClearableSearchInput
         placeholder="Search SAST or DAST Request ID or application..."
         value={query}
         onFocus={() => setOpen(true)}
         onChange={(e) => { setQuery(e.target.value); setOpen(true) }}
+        onClear={() => { setQuery(''); setOpen(true) }}
+        clearLabel="Clear security request search"
       />
       {open && (
         <div className="searchable-select-panel">
@@ -275,8 +278,7 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
 
 function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: SuppressionOut; onClose: () => void; onChanged: (s: SuppressionOut) => void; users: UserOut[] }) {
   const { user } = useAuth()
-  const [tab, setTab] = useState<'overview' | 'walkthroughs' | 'documents' | 'history'>('overview')
-  const [walkthroughs, setWalkthroughs] = useState<WalkthroughOut[]>([])
+  const [tab, setTab] = useState<'overview' | 'documents' | 'history'>('overview')
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [comments, setComments] = useState('')
@@ -289,11 +291,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
 
   const loadExtras = useCallback(async () => {
     try {
-      const [wt, hist] = await Promise.all([
-        api.get<WalkthroughOut[]>(`/api/suppressions/${sup.id}/walkthroughs`),
-        api.get<ApprovalActionOut[]>(`/api/suppressions/${sup.id}/history`),
-      ])
-      setWalkthroughs(wt); setHistory(hist)
+      setHistory(await api.get<ApprovalActionOut[]>(`/api/suppressions/${sup.id}/history`))
     } catch (err) { setError(err) }
   }, [sup.id])
   useEffect(() => { loadExtras() }, [loadExtras])
@@ -333,7 +331,6 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
     <Modal title={`${sup.suppression_id} — ${sup.application_name}`} onClose={onClose} wide>
       <div className="tabs">
         <button type="button" className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>Overview</button>
-        <button type="button" className={tab === 'walkthroughs' ? 'active' : ''} onClick={() => setTab('walkthroughs')}>Walkthroughs</button>
         <button type="button" className={tab === 'documents' ? 'active' : ''} onClick={() => setTab('documents')}>Documents</button>
         <button type="button" className={tab === 'history' ? 'active' : ''} onClick={() => setTab('history')}>Activity</button>
       </div>
@@ -426,54 +423,12 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
         </div>
       )}
 
-      {tab === 'walkthroughs' && (
-        <div>
-          <Table
-            rowKey="id"
-            columns={[
-              { key: 'session_date', header: 'Date', render: (r) => new Date(r.session_date).toLocaleString() },
-              { key: 'conducted_by', header: 'Conducted By' },
-              { key: 'participants', header: 'Participants' },
-              { key: 'qa_acknowledged_at', header: 'QA Acknowledged', render: (r) => r.qa_acknowledged_at ? 'Yes' : 'No', filterValue: (r) => r.qa_acknowledged_at ? 'Yes' : 'No' },
-            ]}
-            rows={walkthroughs}
-          />
-          <AddWalkthrough reqId={sup.id} onAdded={loadExtras} />
-        </div>
-      )}
-
       {tab === 'history' && (
         <JiraActivity entityType="SUPPRESSION" entityId={sup.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
       {tab === 'documents' && <RequestDocuments apiBase="/api/suppressions" reqId={sup.id} />}
     </Modal>
-  )
-}
-
-function AddWalkthrough({ reqId, onAdded }: { reqId: number; onAdded: () => void }) {
-  const [conducted_by, setConductedBy] = useState('')
-  const [participants, setParticipants] = useState('')
-  const [notes, setNotes] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault()
-    setBusy(true)
-    try {
-      await api.post(`/api/suppressions/${reqId}/walkthroughs`, { conducted_by, participants, notes })
-      setConductedBy(''); setParticipants(''); setNotes('')
-      onAdded()
-    } finally { setBusy(false) }
-  }
-
-  return (
-    <form onSubmit={submit} style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-      <input placeholder="Conducted by" value={conducted_by} onChange={(e) => setConductedBy(e.target.value)} />
-      <input placeholder="Participants" value={participants} onChange={(e) => setParticipants(e.target.value)} />
-      <input placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
-      <button className="btn btn-sm" disabled={busy}>Log Walkthrough Session</button>
-    </form>
   )
 }
 

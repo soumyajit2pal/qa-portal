@@ -8,7 +8,15 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department
-from ..constants import Role
+from ..constants import Role, GatewayStatus
+# _finalize_child_requests is the same child-creation step submit_request
+# uses for the immediate (no approval needed) case -- reused here for the
+# deferred case, once a brand-new Application Name clears this tier. No
+# other router imports from another router anywhere else in this app; this
+# is the one deliberate exception, since "once approved, then child request
+# will be generated and will assign to SM" is squarely an Application Name
+# decision triggering QA Request behaviour, not the other way around.
+from .qa_requests import _finalize_child_requests
 
 router = APIRouter(prefix="/api/application-names", tags=["application-names"])
 
@@ -39,11 +47,19 @@ def _log_application_name_decision(db: Session, obj: "models.ApplicationMaster",
             actor_id=current_user.id, actor_role=current_user.roles_csv,
             decision=decision, comments=comments,
         ))
+        # Query children directly instead of reading the ORM relationship
+        # collections. During an Application Owner approval,
+        # _finalize_child_requests() may have created these children moments
+        # earlier after _sync_linked_child_requests() already loaded the
+        # relationship collections as empty. Those cached empty collections
+        # then made the activity fan-out silently skip every new child even
+        # though the rows existed. Direct queries see both newly flushed and
+        # pre-existing children consistently.
         groups = [
-            (gw.linked_functional_requests, "FUNCTIONAL_REQUEST"),
-            (gw.linked_sast_requests, "SAST"),
-            (gw.linked_dast_requests, "DAST"),
-            (gw.linked_performance_requests, "PERFORMANCE"),
+            (db.query(models.FunctionalRequest).filter_by(qa_request_id=gw.id).all(), "FUNCTIONAL_REQUEST"),
+            (db.query(models.SASTRequest).filter_by(qa_request_id=gw.id).all(), "SAST"),
+            (db.query(models.DASTRequest).filter_by(qa_request_id=gw.id).all(), "DAST"),
+            (db.query(models.PerformanceRequest).filter_by(qa_request_id=gw.id).all(), "PERFORMANCE"),
         ]
         for children, entity_type in groups:
             for child in children:
@@ -134,17 +150,41 @@ def list_pending_application_names(db: Session = Depends(get_db),
 @router.post("/{app_id}/app-owner-decision", response_model=schemas.ApplicationMasterOut)
 def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecision, db: Session = Depends(get_db),
                            current_user: models.User = Depends(require_roles(Role.APPLICATION_OWNER))):
-    """First tier of the two-tier Application Name approval chain. Approving
-    moves the name on to PENDING_SM -- it does NOT approve the name outright;
-    SM still has the final say, same as before this tier was inserted.
-    Rejecting is terminal, same as an SM rejection: it also force-rejects any
-    linked request still sitting at its own SM Approval checkpoint (see
-    _auto_reject_linked_requests above), and -- since a Reject here IS the
-    final decision on this name -- also populates the SM-tier decided_by_id/
-    decided_at/comments fields (not just this tier's own app_owner_* fields),
-    so anything reading those as "the decision that made this terminal"
-    keeps working regardless of which tier actually made the call. Same
-    same-department scoping as every other approval checkpoint in the app."""
+    """Single-tier Application Name approval (2026-08 v2). Reported directly:
+    "only application owner approval required, no SM involvement. if
+    application owner approved then automatically come to SM for readiness
+    verification and all" -- an Application Owner from the same department
+    is now the ONLY decision this name ever needs; Approve is immediately
+    terminal (moves straight to APPROVED, not PENDING_SM), and Reject is
+    terminal too, same as before. This replaces the short-lived 2026-08
+    two-tier chain (Application Owner, then a separate SM decision on the
+    NAME itself) -- see models.ApplicationMaster's own docstring and
+    decide_application_name below, which is now legacy-only (kept working
+    for any pre-existing PENDING_SM row from before this change, but no new
+    row can ever reach that status again; see the migration notes for the
+    one-time data fix-up). Since Approve is now terminal, it also populates
+    the SM-tier decided_by_id/decided_at/comments fields (not just this
+    tier's own app_owner_* fields) -- same reasoning Reject already used
+    ("the decision that made this terminal"), now true for both outcomes,
+    not just Reject. Same same-department scoping as every other approval
+    checkpoint in the app.
+
+    2026-08: a brand-new name introduced on a QA Request gateway defers that
+    gateway's own child-request creation until it clears THIS tier (see
+    routers/qa_requests.py::submit_request) -- the gateway sits at Submitted,
+    not yet Raised, with no linked Functional/SAST/DAST/Performance request
+    of its own yet. So this decision has to drive that gateway forward too,
+    not just the ApplicationMaster row itself: Approve finalizes every such
+    gateway right here (children get created and assigned to SM for their
+    own normal readiness verification -- "automatically come to SM for
+    readiness verification and all", exactly as reported -- same as an
+    immediate raise, see _finalize_child_requests), attributed to the
+    ORIGINAL requester, not this Application Owner. Reject sends any such
+    gateway all the way back to Draft instead -- since it never got as far as
+    creating a single child, there's nothing for _auto_reject_linked_requests
+    to do for it, and "awaiting approval forever with nothing to show for it"
+    isn't a real state; the requester can simply edit and resubmit under a
+    different name."""
     obj = db.query(models.ApplicationMaster).get(app_id)
     if not obj:
         raise HTTPException(404, "Application name not found")
@@ -162,7 +202,27 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
     obj.app_owner_decided_at = now
     obj.app_owner_comments = payload.comments
     if payload.decision == "Approved":
-        obj.status = "PENDING_SM"
+        # Terminal here now -- no more PENDING_SM tier for a NEW decision
+        # (see docstring above). Mirrored into the SM-tier fields too, same
+        # as Reject already did, so anything reading decided_by_id/
+        # decided_at/comments as "the decision that made this terminal"
+        # keeps working regardless of which outcome it was.
+        obj.status = "APPROVED"
+        obj.decided_by_id = current_user.id
+        obj.decided_at = now
+        obj.comments = payload.comments
+        # Deferred child-request creation (2026-08): any gateway that
+        # introduced this name and stopped at Submitted (see submit_request's
+        # PENDING_APP_OWNER branch) can now go all the way to Raised --
+        # attributed to its own original requester, not this Application
+        # Owner (see _finalize_child_requests' own docstring). Their children
+        # land on the assigned SM's own normal readiness-verification queue
+        # exactly like any other Raised request -- no separate Application
+        # Name decision from that SM is needed or possible anymore.
+        for gw in db.query(models.QARequest).filter(
+                models.QARequest.application_master_id == obj.id,
+                models.QARequest.status == GatewayStatus.SUBMITTED).all():
+            _finalize_child_requests(db, gw, gw.requester)
     else:
         obj.status = "REJECTED"
         # Reject at this tier IS the final decision -- mirror it into the
@@ -174,7 +234,27 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
         if payload.comments:
             reason += f": {payload.comments}"
         for gw in db.query(models.QARequest).filter(models.QARequest.application_master_id == obj.id).all():
-            _auto_reject_linked_requests(db, gw, current_user, reason)
+            if gw.status == GatewayStatus.SUBMITTED:
+                # Never got as far as creating a single child request --
+                # back to Draft outright rather than force-rejecting
+                # requests that don't exist yet (there's nothing for
+                # _auto_reject_linked_requests to do here). request_id
+                # (already assigned at Submit) is deliberately KEPT, not
+                # nulled out, for traceability -- a narrow, documented
+                # exception to its column comment's usual "stays NULL while
+                # Draft" rule on models.QARequest.
+                gw.status = GatewayStatus.DRAFT
+                db.add(models.ApprovalAction(
+                    entity_type="QA_REQUEST", entity_id=gw.id, step_name="Requester",
+                    actor_id=current_user.id, actor_role=current_user.roles_csv,
+                    decision="Reverted to Draft",
+                    comments=(
+                        f"Application Name '{obj.name}' was rejected by Application Owner before any "
+                        "linked request was generated -- edit and resubmit under a different name."
+                    ),
+                ))
+            else:
+                _auto_reject_linked_requests(db, gw, current_user, reason)
     _log_application_name_decision(db, obj, "Application Owner", payload.decision, current_user, payload.comments)
     db.commit()
     db.refresh(obj)
@@ -184,15 +264,23 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
 @router.post("/{app_id}/decision", response_model=schemas.ApplicationMasterOut)
 def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecision, db: Session = Depends(get_db),
                              current_user: models.User = Depends(require_roles(Role.SM))):
-    """Second and final tier. Approve/reject a name that's already cleared
-    Application Owner and is now PENDING_SM. Approving never changes the
-    linked request's own status -- an approved name simply becomes a
-    standard dropdown option going forward. Rejecting is different: it also
-    force-rejects any linked request still sitting at its own SM Approval
-    checkpoint (see _auto_reject_linked_requests above) -- a request can't be
-    allowed to proceed to Department Head under an application name the SM
-    just rejected. Same same-department scoping as every other SM approval
-    checkpoint in the app."""
+    """LEGACY-ONLY as of 2026-08 v2 (see decide_app_owner_name's own
+    docstring -- reported directly: "only application owner approval
+    required, no SM involvement"). Application Owner approval is now
+    terminal on its own; no NEW ApplicationMaster row can ever reach
+    PENDING_SM again, so this endpoint can only ever act on a row that was
+    already sitting at PENDING_SM from before this change shipped (see the
+    migration notes' one-time data fix-up, which converts any such row
+    straight to APPROVED so this code path shouldn't normally be reachable
+    at all post-migration; left in place, unremoved, purely as a safety net
+    for any row the fix-up missed rather than leaving it permanently stuck).
+    Approving never changes the linked request's own status -- an approved
+    name simply becomes a standard dropdown option going forward. Rejecting
+    is different: it also force-rejects any linked request still sitting at
+    its own SM Approval checkpoint (see _auto_reject_linked_requests above)
+    -- a request can't be allowed to proceed to Department Head under an
+    application name the SM just rejected. Same same-department scoping as
+    every other SM approval checkpoint in the app."""
     obj = db.query(models.ApplicationMaster).get(app_id)
     if not obj:
         raise HTTPException(404, "Application name not found")

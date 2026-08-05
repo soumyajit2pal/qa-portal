@@ -170,7 +170,7 @@ export function applicationNameAwareStatusLabel(
   applicationMasterStatus?: string | null
 ): string | undefined {
   if (status === "SM_APPROVAL_PENDING" && applicationMasterStatus === "PENDING_APP_OWNER") {
-    return "Pending Application Owner Approval";
+    return "Application Owner Approval Pending";
   }
   return undefined;
 }
@@ -345,8 +345,8 @@ export function Modal({
         >
           <div className="drawer-header">
             <h3>{title}</h3>
-            <button className="btn btn-sm" onClick={onClose}>
-              Close
+            <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
+              ×
             </button>
           </div>
           <div className="drawer-body">{children}</div>
@@ -364,8 +364,8 @@ export function Modal({
       >
         <div className="drawer-header">
           <h3>{title}</h3>
-          <button className="btn btn-sm" onClick={onClose}>
-            Close
+          <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
+            ×
           </button>
         </div>
         <div className="drawer-body">{children}</div>

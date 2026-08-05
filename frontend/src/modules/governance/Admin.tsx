@@ -1,9 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useMemo } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
-import { IconPlus, IconLock, IconWarning, IconCheckCircle } from '../../components/Icons'
+import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch } from '../../components/Icons'
 import SearchableSelect from '../../components/SearchableSelect'
 import { UserOut, DepartmentOut } from '../../types'
 
@@ -247,6 +247,9 @@ export default function Admin() {
   const [showCreate, setShowCreate] = useState(false)
   const [resetTarget, setResetTarget] = useState<UserOut | null>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
+  const [userSearch, setUserSearch] = useState('')
+  const [accountFilter, setAccountFilter] = useState<'ALL' | 'ACTIVE' | 'DISABLED' | 'REVIEW'>('ALL')
+  const [loginFilter, setLoginFilter] = useState<'ALL' | 'STANDARD' | 'LDAP'>('ALL')
 
   const load = useCallback(async () => {
     try {
@@ -268,7 +271,28 @@ export default function Admin() {
   }, [])
 
   const reviewCount = users.filter((u) => u.needs_role_review).length
+  const activeCount = users.filter((u) => u.is_active).length
+  const ldapCount = users.filter((u) => u.login_type === 'LDAP').length
   const departmentOptions = departments.filter((d) => d.is_active).map((d) => d.name)
+  const filteredUsers = useMemo(() => {
+    const query = userSearch.trim().toLowerCase()
+    return users.filter((account) => {
+      const matchesQuery = !query || [
+        account.full_name,
+        account.username,
+        account.email,
+        account.department,
+        ...(account.roles || []).map((role) => ROLE_LABELS[role] || role),
+      ].some((value) => String(value || '').toLowerCase().includes(query))
+      const matchesAccount = accountFilter === 'ALL'
+        || (accountFilter === 'ACTIVE' && account.is_active)
+        || (accountFilter === 'DISABLED' && !account.is_active)
+        || (accountFilter === 'REVIEW' && account.needs_role_review)
+      const matchesLogin = loginFilter === 'ALL' || account.login_type === loginFilter
+      return matchesQuery && matchesAccount && matchesLogin
+    })
+  }, [users, userSearch, accountFilter, loginFilter])
+  const hasUserFilters = !!userSearch.trim() || accountFilter !== 'ALL' || loginFilter !== 'ALL'
 
   useEffect(() => { load(); loadDepartments() }, [load, loadDepartments])
 
@@ -294,7 +318,7 @@ export default function Admin() {
   }
 
   return (
-    <div>
+    <div className="access-page">
       <ErrorText error={error} />
       {reviewCount > 0 && (
         <div className="alert-banner">
@@ -310,11 +334,7 @@ export default function Admin() {
       )}
       <PageHeader
         title="Users & Access" count={users.length}
-        subtitle={
-          'Create Standard (local password) or LDAP-backed accounts, and assign roles. Set ' +
-          '"Managed by Admin Only" to Yes to keep a user off Department Admin rosters entirely -- ' +
-          'only a System Admin will then be able to assign their role(s) or change their status.'
-        }
+        subtitle="Create accounts, control role and department access, and manage Standard or LDAP authentication from one workspace."
         actions={(
           <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
             <IconPlus width={14} height={14} /> Create User
@@ -322,17 +342,56 @@ export default function Admin() {
         )}
       />
 
-      <Card>
+      <div className="access-summary" aria-label="User account summary">
+        <div><small>Total accounts</small><strong>{users.length}</strong><span>All provisioned users</span></div>
+        <div><small>Active accounts</small><strong>{activeCount}</strong><span>Can access the portal</span></div>
+        <div><small>LDAP accounts</small><strong>{ldapCount}</strong><span>Directory authenticated</span></div>
+        <div className={reviewCount ? 'needs-attention' : ''}><small>Needs review</small><strong>{reviewCount}</strong><span>Role assignment required</span></div>
+      </div>
+
+      <div className="card access-users-card">
+        <div className="access-card-heading">
+          <div><span>Access directory</span><h3>User accounts</h3><p>Search a user, then update their department, roles, access ownership, or account status directly.</p></div>
+          <strong>{filteredUsers.length} shown</strong>
+        </div>
+        <div className="access-user-toolbar">
+          <label className="access-user-search">
+            <IconSearch width={16} height={16} />
+            <input
+              aria-label="Search users by name, username, or email"
+              value={userSearch}
+              onChange={(event) => setUserSearch(event.target.value)}
+              placeholder="Search by user name, username, email, department, or role…"
+            />
+            {userSearch && <button type="button" aria-label="Clear user search" onClick={() => setUserSearch('')}>×</button>}
+          </label>
+          <select aria-label="Filter by account status" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as typeof accountFilter)}>
+            <option value="ALL">All account statuses</option>
+            <option value="ACTIVE">Active accounts</option>
+            <option value="DISABLED">Disabled accounts</option>
+            <option value="REVIEW">Needs role review</option>
+          </select>
+          <select aria-label="Filter by login type" value={loginFilter} onChange={(event) => setLoginFilter(event.target.value as typeof loginFilter)}>
+            <option value="ALL">All login types</option>
+            <option value="STANDARD">Standard</option>
+            <option value="LDAP">LDAP</option>
+          </select>
+          {hasUserFilters && <button type="button" className="btn btn-sm" onClick={() => { setUserSearch(''); setAccountFilter('ALL'); setLoginFilter('ALL') }}>Clear filters</button>}
+        </div>
         <Table
           rowKey="id"
           columns={[
             { key: 'full_name', header: 'Name', render: (u) => (
-              <div>
+              <div className="access-user-identity">
+                <span className="access-user-avatar" aria-hidden="true">{u.full_name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || u.username.slice(0, 2).toUpperCase()}</span>
                 <div>
-                  {u.full_name}
-                  {u.needs_role_review && <span className="badge badge-yellow" style={{ marginLeft: 6 }}>Needs Review</span>}
+                  <strong>
+                    {u.full_name}
+                    {u.needs_role_review && <span className="badge badge-yellow">Needs Review</span>}
+                  </strong>
+                  <span>@{u.username}</span>
+                  {u.email && <small>{u.email}</small>}
                 </div>
-                <div className="muted small">{u.username}{u.email ? ` · ${u.email}` : ''}</div>
               </div>
             ), filterValue: (u) => `${u.full_name} ${u.username} ${u.email || ''}` },
             { key: 'department', header: 'Department', render: (u) => (
@@ -364,7 +423,7 @@ export default function Admin() {
               <button
                 className={`btn btn-sm ${u.admin_managed_only ? 'btn-primary' : ''}`}
                 disabled={savingId === u.id}
-                title="When set to Yes, this user is hidden from Department Admin / Executive COE rosters -- only a System Admin can assign their role(s) or change their status."
+                title="When set to Yes, this user is hidden from Department Coordinator / Executive COE rosters -- only a System Admin can assign their role(s) or change their status."
                 onClick={() => patchUser(u.id, { admin_managed_only: !u.admin_managed_only })}
               >
                 {u.admin_managed_only ? 'Yes' : 'No'}
@@ -388,11 +447,18 @@ export default function Admin() {
               ) : <span className="muted small">Managed via LDAP</span>
             ) },
           ]}
-          rows={users}
+          rows={filteredUsers}
         />
-      </Card>
+        {filteredUsers.length === 0 && (
+          <div className="access-empty-search">
+            <strong>No users match these filters</strong>
+            <span>Try another name, username, email, department, role, or account status.</span>
+            <button type="button" className="btn" onClick={() => { setUserSearch(''); setAccountFilter('ALL'); setLoginFilter('ALL') }}>Clear filters</button>
+          </div>
+        )}
+      </div>
 
-      <div style={{ marginTop: 24 }}>
+      <div className="access-departments-section">
         <DepartmentManagerCard departments={departments} onChanged={loadDepartments} />
       </div>
 

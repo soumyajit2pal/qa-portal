@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { IconSearch } from './Icons'
 import { UserOut } from '../types'
 import { computePanelPos, PanelPos } from './panelPosition'
+import ClearableSearchInput from './ClearableSearchInput'
 
 interface UserAssignSelectProps {
   value: string
@@ -109,11 +110,13 @@ export default function UserAssignSelect({ value, onChange, users, placeholder, 
         >
           <div className="searchable-select-search">
             <IconSearch width={13} height={13} />
-            <input
+            <ClearableSearchInput
               ref={inputRef}
               placeholder="Search by name or department..."
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onClear={() => setQuery('')}
+              clearLabel="Clear user search"
             />
           </div>
           <div className="searchable-select-list">
