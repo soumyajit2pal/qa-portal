@@ -875,6 +875,9 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .demo-access select { width: 100%; height: 34px; border: 1px solid #d9dce6; border-radius: 8px; padding: 0 27px 0 9px; background: #fff; color: #40475a; font-size: 11px; cursor: pointer; }
 .demo-access select:focus { outline: 2px solid rgba(79,70,229,.2); border-color: var(--navy); }
 .login-help { margin: 21px 0 0; text-align: center; color: #969cab; font-size: 10.5px; }
+.login-help + .login-help { margin-top: 6px; }
+.login-help a { color: #0d6678; font-weight: 650; text-decoration: none; }
+.login-help a:hover { text-decoration: underline; }
 .login-page-footer { position: absolute; bottom: 13px; color: #798196; font-size: 10px; letter-spacing: .03em; }
 .login-page-footer span { margin: 0 6px; color: #b3b8c4; }
 @media (max-width: 900px) {
@@ -2430,6 +2433,33 @@ td { padding: 12px; }
   .access-user-search, .access-user-toolbar > select { width: 100%; min-width: 0; }
   .access-user-toolbar > .btn { width: 100%; }
   .access-users-card .table-wrap { margin: 10px; }
+}
+
+/* Standalone shell for the signed-out /help view (see App.tsx's PublicHelp)
+   -- reported directly: "Help & user Manual should come on login page as
+   well, without login atleast user can read". Just a slim brand bar + a way
+   back to /login around the exact same <Help/> content the signed-in route
+   uses; .content's own 24px padding (provided by Layout for every other
+   page) doesn't apply here since there's no Layout in this path, so it's
+   reproduced on .public-help-shell itself. */
+.public-help-shell { padding: 24px; max-width: 1500px; margin: 0 auto; }
+.public-help-topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid #e2e6ef;
+}
+.public-help-brand { display: flex; align-items: center; gap: 11px; text-decoration: none; color: inherit; }
+.public-help-brand .bank-logo { width: 34px; height: 34px; }
+.public-help-brand div { display: flex; flex-direction: column; line-height: 1.25; }
+.public-help-brand strong { font-size: 15px; color: #141827; }
+.public-help-brand span { font-size: 10.5px; color: #8b93a7; text-transform: uppercase; letter-spacing: .08em; }
+.public-help-back {
+  font-size: 12.5px; font-weight: 650; color: #0d6678; text-decoration: none;
+  padding: 7px 13px; border-radius: 8px; background: #e5f2f3; white-space: nowrap;
+}
+.public-help-back:hover { background: #d7ebec; }
+@media print {
+  .public-help-topbar { display: none !important; }
+  .public-help-shell { padding: 0; }
 }
 
 /* Help & User Manual — searchable SOP library with a sticky contents rail,

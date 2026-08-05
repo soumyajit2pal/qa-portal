@@ -8,7 +8,7 @@ from .. import models
 from ..database import get_db
 from ..deps import get_current_user
 from ..constants import (
-    Role, QAStatus, QA_REQUEST_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
+    Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
     QA_DEPARTMENT,
 )
 

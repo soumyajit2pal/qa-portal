@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react'
+import React, { useEffect, useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from './api'
 import { useAuth } from './context/AuthContext'
@@ -231,7 +231,7 @@ function Donut({ data, size = 128 }: { data?: Record<string, number> | null; siz
   const entries = Object.entries(data || {}).filter(([, v]) => v > 0)
   const total = entries.reduce((s, [, v]) => s + v, 0)
   let acc = 0
-  const stops = entries.map(([label, v], i) => {
+  const stops = entries.map(([, v], i) => {
     const start = (acc / (total || 1)) * 360
     acc += v
     const end = (acc / (total || 1)) * 360
@@ -336,7 +336,6 @@ function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
 }
 
 function CommandCentre({ range }: { range: RaisedRange }) {
-  const navigate = useNavigate()
   const [proj, setProj] = useState<ProjectWiseOut | null>(null)
   const [threeW, setThreeW] = useState<ThreeWOut | null>(null)
   const [requests, setRequests] = useState<QARequestOut[]>([])

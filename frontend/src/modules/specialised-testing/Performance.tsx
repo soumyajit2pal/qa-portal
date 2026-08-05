@@ -9,7 +9,7 @@ import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { IconCheckCircle } from '../../components/Icons'
 import {
-  PRIORITIES, RISK_RATINGS, ENVIRONMENTS, PERFORMANCE_EDITABLE_STATUSES,
+  PRIORITIES, RISK_RATINGS, ENVIRONMENTS,
   PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, canManageReadinessEvidence,
   QA_DEPARTMENT, PERFORMANCE_PENDING_WITH,
 } from '../../constants'

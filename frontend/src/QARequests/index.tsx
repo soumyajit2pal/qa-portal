@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { useAuth } from "../context/AuthContext";
 import {
   Badge,
   Card,
@@ -10,7 +9,7 @@ import {
   Table,
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
-import { GATEWAY_STATUSES, GATEWAY_STATUS_LABELS, GATEWAY_PENDING_WITH, hasRole } from "../constants";
+import { GATEWAY_STATUSES, GATEWAY_STATUS_LABELS, GATEWAY_PENDING_WITH } from "../constants";
 import { QARequestOut, UserOut } from "../types";
 import { classificationSummary, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
@@ -22,7 +21,6 @@ import ClearableSearchInput from "../components/ClearableSearchInput";
 // (RequestDetail). See ./buildSteps.ts, ./validation.ts and ./steps/* for how
 // the wizard itself is put together.
 export default function QARequests() {
-  const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
@@ -91,8 +89,6 @@ export default function QARequests() {
     load();
   }, [load]);
 
-  const canCreate = hasRole(user, "REQUESTER", "BUSINESS_ANALYST");
-
   function clearSearch() {
     setSearch("");
     const params = new URLSearchParams(location.search);
@@ -105,11 +101,13 @@ export default function QARequests() {
   return (
     <div>
       <ErrorText error={error} />
+      {/* "Raise QA Request" lives in the topbar instead (see
+          components/Layout.tsx's "New QA request" button, gated on the same
+          REQUESTER/BUSINESS_ANALYST roles) -- not duplicated here. */}
       <PageHeader
         title="QA Requests"
         count={requests.length}
         subtitle="The intake gateway — raise a request here, then track progress on each linked Functional/SAST/DAST/Performance request from its own page."
-        // actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ Raise QA Request</button>}
       />
       <div className="toolbar">
         <ClearableSearchInput

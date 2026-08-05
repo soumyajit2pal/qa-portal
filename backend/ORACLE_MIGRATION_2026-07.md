@@ -8092,3 +8092,97 @@ standing convention -- to be run by whoever has Oracle access when this change i
 **Verified:** `python3 -m py_compile app/routers/applications.py app/models.py app/constants.py` -- clean;
 `npx tsc --noEmit -p .` -- clean; Documents and outputs copies re-synced and confirmed identical via
 `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 181. Codebase audit: unused imports/variables and one dead-code cleanup
+
+**Request:** Reported directly: "check any bug, or wiring issue, or unused code. fix it."
+
+**Method:** No linter (pyflakes/flake8) was installable in this sandbox (no network access), so unused Python
+imports were found with a small one-off `ast`-based script (flags an imported name that never appears as a
+bare identifier reference anywhere else in the same file). Unused TypeScript locals/imports were found by
+running `npx tsc --noEmit -p . --noUnusedLocals --noUnusedParameters` (the project's own `tsconfig.json` keeps
+both OFF for normal builds -- not changed, just passed as one-off CLI flags for this audit). Also swept for
+`TODO`/`FIXME`/`XXX`/`HACK` markers, `console.log`/`debugger` leftovers, bare `except:` clauses, and checked
+that every backend router is registered in `main.py` and every frontend sidebar nav path (`components/
+Layout.tsx`) resolves to a route actually defined in `App.tsx` -- none of those turned up anything.
+
+**Backend fixes:**
+- `auth.py`: removed unused `JWTError` import from the `jose` import line -- `decode_access_token` doesn't
+  catch it itself; `deps.py::get_current_user` already imports its own `JWTError` and handles it correctly, so
+  this one was a genuine leftover, not a missing error-handling bug.
+- `routers/dashboard.py`: removed unused `QA_REQUEST_TERMINAL_STATUSES` from the `constants` import line.
+
+**Frontend fixes:**
+- `Dashboard.tsx`: removed unused `useCallback` import; removed the unused destructured `label` in `Donut`'s
+  `entries.map(([label, v], i) => ...)` (only `v` was ever used); removed an unused local `const navigate =
+  useNavigate()` in `CommandCentre` (a same-named, actually-used `navigate` already exists independently in
+  `MyRequestsTab` further down the same file -- these are two different components, not a shared/broken
+  reference).
+- `modules/functional/Functional.tsx`, `modules/security/SAST.tsx`, `modules/security/DAST.tsx`, `modules/
+  specialised-testing/Performance.tsx`: removed unused `FUNCTIONAL_EDITABLE_STATUSES`/
+  `SAST_DAST_EDITABLE_STATUSES` (x2)/`PERFORMANCE_EDITABLE_STATUSES` imports from `constants.ts`. Checked each
+  page's own `canEditDetails` logic first, since an unused "editable statuses" constant sitting next to
+  hand-rolled permission logic is exactly the shape a real permission bug would take -- confirmed each page's
+  inline status list is a correct, intentional decomposition of the same constant (some of those statuses are
+  requester-editable, others are the current reviewer's own pending-decision stage, gated by role +
+  same-department instead of a flat list), not a drifted duplicate. The exported constants themselves are left
+  in `constants.ts` -- still documented there as mirroring the equivalent backend constant, still meaningful
+  as a parity reference even though nothing currently imports them.
+- `modules/test-management/TestExecution.tsx`: removed unused `TEST_CYCLE_STATUSES` import.
+- `QARequests/index.tsx`: removed a dead `const canCreate = hasRole(user, "REQUESTER", "BUSINESS_ANALYST")`
+  and the commented-out `+ Raise QA Request` button it was written for (`actions={canCreate && <button
+  ...>}`, disabled as a JSX comment, not deleted). Confirmed this wasn't an accidentally-hidden feature: the
+  topbar's own "New QA request" button (`components/Layout.tsx`, `hasRole(user, 'REQUESTER',
+  'BUSINESS_ANALYST')`) already provides the exact same action with the exact same role gate and is the
+  real, working entry point (it navigates to `/qa-requests` with `{ state: { openNew: true } }`, which this
+  page's own `useEffect` already listens for). Left a plain comment explaining where the button actually lives
+  instead of resurrecting a duplicate. Removing `canCreate` also left `hasRole` and the destructured `user`
+  (from `useAuth()`) unused in this file -- removed both, and the now-unnecessary `useAuth` import, rather than
+  leaving a second layer of newly-dead code behind.
+
+**Data notes:** none -- no schema/behavioural changes, pure dead-code removal plus one JSX-placement fix (the
+"Raise QA Request" explanatory comment had to move outside `<PageHeader ... />`'s own attribute list, since
+`{/* ... */}` between JSX attributes isn't valid there -- confirmed via `tsc`).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean; `npx tsc --noEmit -p .` (normal) --
+clean; `npx tsc --noEmit -p . --noUnusedLocals --noUnusedParameters` -- clean except the pre-existing,
+harmless `'React' is declared but its value is never read` on every file's default React import (expected
+under the `jsx: "react-jsx"` transform, not a real issue, left as-is). Documents and outputs copies re-synced
+and confirmed identical via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).
+
+## 182. Help & User Manual readable without logging in
+
+**Request:** Reported directly: "Help & user Manual should come on login page as well, without login atleast
+user can read."
+
+**Root cause / context:** `/help` was wrapped in `Protected` (`App.tsx`), same as every other page, so an
+unauthenticated visitor hitting it was bounced straight to `/login`. `Help.tsx` itself, though, is entirely
+static content -- no `useAuth()`, no `api.get`/`api.post` calls anywhere in it (checked directly) -- so nothing
+about it actually needs a signed-in session; the login requirement was just inherited from the same blanket
+`Protected` wrapper every other, genuinely data-driven page uses.
+
+**Frontend changes:**
+- `App.tsx`: the `/help` route now renders a new `HelpRoute` component instead of `<Protected><Help
+  /></Protected>` directly. `HelpRoute` checks auth state itself: while still loading, shows the same
+  plain-text loading state `Protected` already uses; once resolved, a signed-in user gets exactly the same
+  `<Protected><Help /></Protected>` as before (sidebar, `DepartmentPrompt`, pending-approvals notice --
+  nothing changed for the signed-in path); a signed-out visitor gets a new `PublicHelp` component instead --
+  a minimal standalone shell (a slim top bar with the bank/QualityHub brand mark and a "← Back to sign in"
+  link) wrapped around the exact same `<Help />` content, rather than maintaining a second copy of the manual.
+  The manual's own internal "quick link" tiles (Raise a QA Request, My Pending Approvals, etc.) still point at
+  genuinely protected pages -- clicking one while signed out lands on `/login` same as navigating there
+  directly, which is correct (reading the manual doesn't imply access to act on anything in it).
+- `Login.tsx`: added a second `Help & User Manual` link (`<Link to="/help">`) right under the existing "Need
+  access? Contact your QualityHub administrator." line, so the manual is discoverable straight from the sign-in
+  screen, not just reachable by guessing the URL.
+- `index.css`: new `.public-help-shell`/`.public-help-topbar`/`.public-help-brand`/`.public-help-back` rules
+  for the standalone shell (reproduces the 24px page padding `Layout`'s own `.content` normally provides,
+  since there's no `Layout` in this path; hidden entirely under `@media print`, matching how the signed-in
+  Help page already hides its own chrome when printed/saved as PDF); `.login-help a`/`.login-help +
+  .login-help` for the new link's colour and spacing on the login page.
+
+**Data notes:** none -- purely a routing/presentation change, no backend involvement (Help.tsx never called
+the backend to begin with).
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/`uploads/` leftovers differ).

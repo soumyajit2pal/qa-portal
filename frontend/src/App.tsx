@@ -1,5 +1,5 @@
 import React, { ReactNode, Suspense, lazy } from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, Link } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
 import DepartmentPrompt from './components/DepartmentPrompt'
@@ -73,6 +73,41 @@ function Protected({ children }: { children?: ReactNode }) {
   )
 }
 
+// Reported directly: "Help & user Manual should come on login page as well,
+// without login atleast user can read" -- Help.tsx is entirely static
+// content (no API calls, no auth-scoped data, see its own file), so there's
+// nothing that actually requires being signed in to view it. Routes to this
+// same /help path either way: signed-in users still get the normal
+// Protected/Layout experience (sidebar, DepartmentPrompt, pending-approvals
+// notice -- unchanged from before); a signed-out visitor instead gets
+// PublicHelp below, a minimal standalone shell (brand mark + a way back to
+// the login page) around the exact same <Help /> content, rather than a
+// second copy of the manual to keep in sync.
+function HelpRoute() {
+  const { user, loading } = useAuth()
+  if (loading) return <div style={{ padding: 40 }}>Loading...</div>
+  if (user) return <Protected><Help /></Protected>
+  return <PublicHelp />
+}
+
+function PublicHelp() {
+  return (
+    <div className="public-help-shell">
+      <div className="public-help-topbar">
+        <Link to="/help" className="public-help-brand">
+          <span className="bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
+          <div>
+            <strong>QualityHub</strong>
+            <span>Bank of Maharashtra</span>
+          </div>
+        </Link>
+        <Link to="/login" className="public-help-back">← Back to sign in</Link>
+      </div>
+      <Help />
+    </div>
+  )
+}
+
 // Fallback shown while a lazy-loaded module's chunk is still downloading
 // (typically instant on a warm cache, briefly visible on first visit to a
 // module or right after a fresh deploy) -- matches Protected's own
@@ -89,7 +124,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<Protected><Dashboard /></Protected>} />
         <Route path="/qa-requests" element={<Protected><QARequests /></Protected>} />
-        <Route path="/help" element={<Protected><Help /></Protected>} />
+        <Route path="/help" element={<HelpRoute />} />
 
         {/* Functional module. Each lazy route is wrapped in its own
             ModuleBoundary instance (not one boundary around the whole

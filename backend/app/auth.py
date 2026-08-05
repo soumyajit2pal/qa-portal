@@ -3,7 +3,7 @@ import datetime
 from zoneinfo import ZoneInfo
 
 import bcrypt
-from jose import jwt, JWTError
+from jose import jwt
 from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE
 from ldap3.core.exceptions import LDAPException
 

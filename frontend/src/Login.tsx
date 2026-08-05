@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import { IconApprove, IconCertificate, IconEyeOff, IconLock, IconShield, IconUsers, IconWorkflow } from './components/Icons'
 import { ErrorText } from './components/Common'
@@ -130,6 +130,11 @@ export default function Login() {
           </div>
 
           <p className="login-help">Need access? Contact your QualityHub administrator.</p>
+          {/* Reported directly: "Help & user Manual should come on login page
+              as well, without login atleast user can read" -- links to the
+              same /help route signed-in users use, which now also works
+              signed out (see App.tsx's HelpRoute/PublicHelp). */}
+          <p className="login-help"><Link to="/help">Help &amp; User Manual</Link></p>
         </div>
       </section>
 

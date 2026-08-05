@@ -29,7 +29,6 @@ import {
   RISK_RATINGS,
   ENVIRONMENTS,
   CHANGE_TYPES,
-  FUNCTIONAL_EDITABLE_STATUSES,
   hasRole,
   validTargetPromotionOptions,
   validEnvironmentPromotion,
