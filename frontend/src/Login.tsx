@@ -4,14 +4,12 @@ import { useAuth } from './context/AuthContext'
 import { IconApprove, IconCertificate, IconEyeOff, IconLock, IconShield, IconUsers, IconWorkflow } from './components/Icons'
 import { ErrorText } from './components/Common'
 
-// Mirrors backend app/seed.py DEMO_USERS -- one demo account per role.
 const DEMO_ACCOUNTS: [string, string][] = [
-  ['requester1', 'Requester (Developer) / Others'], ['ba1', 'Business Analyst'], ['qa1', 'QA Engineer (QA)'],
-  ['qalead1', 'QA Lead'], ['exec1', 'Executive COE (AGM-QA)'], ['security1', 'Security Analyst (QA)'],
-  ['appowner1', 'Application Owner'], ['depthead1', 'Department Head - CM/AGM'],
-  ['sm1', 'SM'], ['admin', 'Administrator'],
+  ['requester1', 'Requester 1 (Developer) / Others'], ['requester1', 'Requester 2 (Developer) / Others'],['ba1', 'Business Analyst'], ['qa1', 'QA Engineer (QA 1)'],['qa2', 'QA Engineer (QA 2)']
+  ,['qalead1', 'QA Lead'], ['cm1', 'Executive COE (CM-QA)'],['agm1', 'Executive COE (AGM-QA)'], ['security1', 'Security Analyst (QA)'],
+  ['appowner1', 'Application Owner'], ['depthead1', 'Department Head - CM'],['depthead2', 'Department Head - AGM'],
+  ['sm1', 'SM'], ['sm2', 'SM With App Owner'], ['admin', 'Administrator'],
 ]
-
 export default function Login() {
   const [username, setUsername] = useState('requester1')
   const [password, setPassword] = useState('Password@123')
