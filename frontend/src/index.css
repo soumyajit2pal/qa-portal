@@ -2132,7 +2132,38 @@ tbody tr:hover { background: #f2f8f8; }
 .security-request-step .checklist-evidence-actions { justify-content: flex-start; }
 .security-request-step .checklist-evidence-actions .btn { min-height: 30px; padding: 5px 9px; font-size: 9px; }
 .security-request-step .checklist-evidence-actions .badge { font-size: 8px; }
+
+/* ChecklistEvidence (components/Common.tsx) -- the post-raise counterpart to
+   ChecklistEvidencePicker above, used on a request's own Edit/detail pages
+   rather than the intake wizard. Plain 230/200px box by default (every
+   existing call site before this); reported directly: "Attach Evidence is
+   not uniform everywhere. On edit details it should be like while creating
+   the request" -- so inside the same .security-checklist-row grid table
+   (now reused for the 4 modules' edit-mode checklists, see Functional/SAST/
+   DAST/Performance.tsx) it gets the identical treatment
+   .security-request-step gives .checklist-evidence-picker above: stretches
+   to the row instead of a fixed box, vertically centered, with the same
+   left divider separating it from the criterion column. */
+.checklist-evidence-cell { width: 230px; min-width: 200px; }
+.security-checklist-row .checklist-evidence-cell {
+  width: auto; min-width: 0; padding: 10px 11px; display: flex; flex-direction: column; justify-content: center;
+  border-left: 1px solid #e5edef;
+}
+/* ChecklistEvidence now reuses the same .checklist-evidence-actions/-files/
+   -file classes as ChecklistEvidencePicker (Common.tsx) instead of its own
+   inline styles. This base rule keeps it centered -- its original,
+   unchanged look -- everywhere it's NOT inside the new grid table (i.e. the
+   read-only Checklist tab, out of scope for this request); the
+   .security-checklist-row-scoped rule below then matches
+   ChecklistEvidencePicker's own .security-request-step treatment exactly
+   (left-aligned, same smaller button/badge sizing) -- reported directly:
+   "Font style and all should be same as qa request readiness checklist." */
+.checklist-evidence-cell .checklist-evidence-actions { justify-content: center; }
+.security-checklist-row .checklist-evidence-cell .checklist-evidence-actions { justify-content: flex-start; }
+.security-checklist-row .checklist-evidence-cell .checklist-evidence-actions .btn { min-height: 30px; padding: 5px 9px; font-size: 9px; }
+.security-checklist-row .checklist-evidence-cell .checklist-evidence-actions .badge { font-size: 8px; }
 .security-request-step .checklist-evidence-file .btn:first-child { min-width: 0; }
+.security-checklist-row .checklist-evidence-file .btn:first-child { min-width: 0; }
 
 @media (max-width: 850px) {
   .security-performance-classification { grid-template-columns: repeat(2,minmax(0,1fr)); }

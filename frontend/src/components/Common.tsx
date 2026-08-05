@@ -1411,6 +1411,7 @@ export function ChecklistEvidence({
   onCountChange,
   documents,
   onReload,
+  checked = true,
 }: {
   apiBase: string;
   reqId: number;
@@ -1434,6 +1435,17 @@ export function ChecklistEvidence({
   // deletes evidence, so every other instance on the page (and this one)
   // picks up the change too.
   onReload: () => Promise<void> | void;
+  // Whether this checklist item's own checkbox is currently ticked --
+  // reported directly, matching the pre-raise wizard's
+  // ChecklistEvidencePicker (see that component's own `checked` prop):
+  // attaching evidence for an item that isn't declared "in place" yet
+  // doesn't make sense, so new evidence can't be attached until it's
+  // checked. Already-saved evidence (e.g. attached while checked, then the
+  // box got unticked again) stays visible/deletable regardless -- only
+  // adding NEW evidence is blocked. Defaults to true so every pre-existing
+  // call site that hasn't been updated to pass it keeps working exactly as
+  // before (never blocked on this).
+  checked?: boolean;
 }) {
   const { user } = useAuth();
   const isAdmin = !!user?.roles?.includes("ADMIN");
@@ -1482,8 +1494,25 @@ export function ChecklistEvidence({
   }
 
   return (
-    <div style={{ width: 230, minWidth: 200 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, flexWrap: "wrap" }}>
+    // Plain 230/200px box by default (matches every existing call site);
+    // inside the wizard-style .security-checklist-row grid table (see the 4
+    // modules' edit-mode checklists in Functional/SAST/DAST/Performance.tsx,
+    // and QARequests/steps/ReadinessChecklistSection.tsx's own
+    // .checklist-evidence-picker, same idea) a scoped override in index.css
+    // instead stretches/centers this to match that row's "Supporting
+    // evidence" column exactly -- reported directly: "On edit details it
+    // should be like while creating the request."
+    <div className="checklist-evidence-cell">
+      {/* Same checklist-evidence-actions/-files/-file classes
+          ChecklistEvidencePicker.tsx uses (index.css) instead of inline
+          styles -- reported directly: "Font style and all should be same as
+          qa request readiness checklist." A base rule keeps this row
+          centered (matching every existing call site, e.g. the read-only
+          Checklist tab, unchanged); the .security-checklist-row-scoped
+          override below matches the wizard's own left-aligned, smaller
+          button/badge sizing exactly, same as
+          ChecklistEvidencePicker gets from .security-request-step. */}
+      <div className="checklist-evidence-actions">
         <input
           ref={inputRef}
           type="file"
@@ -1495,7 +1524,8 @@ export function ChecklistEvidence({
           <button
             type="button"
             className="btn btn-sm"
-            disabled={busy}
+            disabled={busy || !checked}
+            title={checked ? undefined : "Tick this item as checked before attaching evidence for it"}
             onClick={() => inputRef.current?.click()}
           >
             {busy ? "Uploading…" : "Attach evidence"}
@@ -1522,9 +1552,9 @@ export function ChecklistEvidence({
         )}
       </div>
       {expanded && documents.length > 0 && (
-        <div style={{ marginTop: 6, display: "grid", gap: 4 }}>
+        <div className="checklist-evidence-files">
           {documents.map((document) => (
-            <div key={document.id} style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+            <div key={document.id} className="checklist-evidence-file">
               <button
                 type="button"
                 className="btn btn-sm"

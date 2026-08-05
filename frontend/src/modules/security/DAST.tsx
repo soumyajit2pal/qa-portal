@@ -201,23 +201,42 @@ function DASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
               Update what's already in place. This is your own declaration for reference only -- Security
               independently verifies every item during Security Readiness.
             </p>
-            {editing.checklist_items.map((c) => (
-              <div key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
-                <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
-                  <input type="checkbox" checked={checkedItems.includes(c.item)} onChange={() => toggleChecked(c.item)} />
-                  <span>
-                    {c.item} {c.owner && <span className="muted small">({c.owner})</span>}{' '}
-                    {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
-                  </span>
-                </label>
-                {c.is_complete && <span className="badge badge-green">Verified</span>}
-                <ChecklistEvidence apiBase="/api/dast-requests" reqId={editing.id} itemId={c.id}
-                  canManage={canManageReadinessEvidence(editing.status)}
-                  required={c.is_mandatory || c.requester_checked}
-                  documents={documentsByItem[c.id] || []}
-                  onReload={reloadEvidence} />
+            {/* Reported directly: "Attach Evidence is not uniform
+                everywhere. On edit details it should be like while creating
+                the request." -- reuses the same grid-table layout as the QA
+                Request wizard's ReadinessChecklistSection.tsx. */}
+            <div className="security-checklist-table" role="group" aria-label="DAST readiness checklist">
+              <div className="security-checklist-header" aria-hidden="true">
+                <span>Ready</span>
+                <span>Readiness criterion</span>
+                <span>Supporting evidence</span>
               </div>
-            ))}
+              {editing.checklist_items.map((c) => {
+                const checked = checkedItems.includes(c.item)
+                const checkboxId = `dast-edit-checklist-${c.id}`
+                return (
+                  <div className={`security-checklist-row ${checked ? 'is-checked' : ''}`} key={c.id}>
+                    <div className="security-checklist-check">
+                      <input id={checkboxId} type="checkbox" checked={checked} onChange={() => toggleChecked(c.item)} />
+                    </div>
+                    <label className="security-checklist-criterion" htmlFor={checkboxId}>
+                      <span>
+                        <strong>{c.item}</strong>
+                        {c.owner && <span className="muted small">({c.owner})</span>}
+                        {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
+                        {c.is_complete && <span className="badge badge-green">Verified</span>}
+                      </span>
+                    </label>
+                    <ChecklistEvidence apiBase="/api/dast-requests" reqId={editing.id} itemId={c.id}
+                      canManage={canManageReadinessEvidence(editing.status)}
+                      required={c.is_mandatory || c.requester_checked}
+                      documents={documentsByItem[c.id] || []}
+                      onReload={reloadEvidence}
+                      checked={checked} />
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
 
@@ -480,6 +499,23 @@ function DASTDetail({ req, onClose, onChanged, users }: {
             <p className="muted small">Linked from QA Request {req.qa_request.request_id}.</p>
           )}
 
+          {/* Reported directly: canEditDetails above lets the SM/Department
+              Head themselves open Edit Details while the request sits at
+              their own decision -- if they untick a mandatory Security
+              Readiness checklist item there, Sign/Approve must be blocked
+              the exact same way the QA Request wizard already blocks
+              Submit/Raise for the same reason (see
+              QARequests/RequestDetail.tsx's own pendingMandatory). */}
+          {(canSMDecide || canDeptHeadDecide) && pendingSelfDeclare.length > 0 && (
+            <div style={{ marginTop: 8, marginBottom: 8, background: '#fffaeb', border: '1px solid #fde68a', borderRadius: 10, padding: '10px 14px', color: '#92400e', fontSize: 13 }}>
+              <strong>Cannot Sign/Approve yet</strong> — the following mandatory Security Readiness checklist item(s)
+              must be self-declared ready first (Edit Details):
+              <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+                {pendingSelfDeclare.map((c) => <li key={c.item}>{c.item}</li>)}
+              </ul>
+            </div>
+          )}
+
           <div className="section-title">Workflow Actions</div>
           <div className="actions-panel">
             <Field label="Action note (optional)">
@@ -521,8 +557,14 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                   userName={user?.full_name}
                   comments={comments}
                   busy={busy}
-                  signBlocked={applicationNameBlocking}
-                  signBlockedMessage={smApplicationNameBlockedMessage}
+                  signBlocked={applicationNameBlocking || pendingSelfDeclare.length > 0}
+                  signBlockedMessage={
+                    applicationNameBlocking
+                      ? smApplicationNameBlockedMessage
+                      : pendingSelfDeclare.length > 0
+                      ? 'Mandatory Security Readiness checklist item(s) are not self-declared ready -- see the notice above.'
+                      : undefined
+                  }
                   onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
                   onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
                   onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
@@ -533,8 +575,14 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                   userName={user?.full_name}
                   comments={comments}
                   busy={busy}
-                  signBlocked={applicationNameBlocking}
-                  signBlockedMessage="This request's Application Name is not yet approved by SM."
+                  signBlocked={applicationNameBlocking || pendingSelfDeclare.length > 0}
+                  signBlockedMessage={
+                    applicationNameBlocking
+                      ? "This request's Application Name is not yet approved by SM."
+                      : pendingSelfDeclare.length > 0
+                      ? 'Mandatory Security Readiness checklist item(s) are not self-declared ready -- see the notice above.'
+                      : undefined
+                  }
                   extraControlLabel="Assign IT-QA QA Lead"
                   extraControl={
                     <UserAssignSelect
@@ -692,7 +740,8 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                 canManage={canManageReadinessEvidence(req.status)}
                 required={c.is_mandatory || c.requester_checked}
                 documents={documentsByItem[c.id] || []}
-                onReload={reloadEvidence} />
+                onReload={reloadEvidence}
+                checked={c.requester_checked} />
             </div>
           ))}
         </div>

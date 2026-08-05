@@ -8479,3 +8479,244 @@ that were never decided and are provably unreferenced by any other QA Request at
 **Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. No frontend changes were needed for
 any of the 5 reports (all backend query/resolve logic). Documents and outputs copies re-synced and confirmed
 identical via `diff -rq` (only the standard `.env` leftover differs).
+
+## 189. "Attach Evidence" layout not uniform -- fixed-width column for the verified badge
+
+**Request:** "Atach Evidence layout is not uniform everywhere." Confirmed with the reporter: in the checklist
+Self-Declaration (edit) view, the Evidence control landed at a different horizontal position on different
+rows, unlike the read-only Checklist tab where it's already a clean, aligned column.
+
+**Root cause:** the read-only Checklist tab (all 4 modules) lays each row out as fixed-width columns (`Item`
+flex:1, `Requester declared` 130px, `Verified`/`QA verified` 130px, `Evidence` 230px) so `ChecklistEvidence`'s
+own 230px-wide box always starts at the same x-position row to row. The Self-Declaration (edit) checklist has
+no such column layout -- each row is just `label (flex:1)` followed directly by an OPTIONAL
+`{c.is_complete && <badge>}` and then `ChecklistEvidence`, with no width reserved for that badge when it
+doesn't render. So on a row where the item is already verified, `ChecklistEvidence` starts further right (after
+the badge's width); on a row where it isn't, it starts right after the label -- the "Attach evidence" button
+visibly drifts left/right depending on which rows happen to already be verified.
+
+**Frontend changes:** wrapped that optional badge in a fixed-width `<span style={{ width: 110, textAlign:
+'center' }}>` (verified or not, the column is always reserved) in all 4 modules' edit-mode checklist rows --
+`modules/functional/Functional.tsx` (`FunctionalFormModal`, "QA verified"), `modules/security/SAST.tsx`
+(`SASTFormModal`, "Verified"), `modules/security/DAST.tsx` (`DASTFormModal`, "Verified"),
+`modules/specialised-testing/Performance.tsx` (`PerformanceFormModal`, "QA verified") -- so `ChecklistEvidence`
+now starts at the same x-position on every row, matching the already-aligned read-only Checklist tab.
+
+**Data notes:** none -- purely a client-side layout fix, no backend/schema/endpoint changes.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).
+
+## 190. "Attach Evidence" in Edit Details now reuses the request-creation wizard's own layout
+
+**Request:** Follow-up to section 189: "Attach Evidence is not uniform everywhere. On edit details it should
+be like while creating the request." Section 189's fixed-width badge column made the Evidence control line up
+row to row, but the reporter wanted more than alignment parity -- the whole checklist section in a request's
+Edit Details modal (Self-Declaration) should visually match the QA Request wizard's own readiness-checklist
+step, not just avoid drifting.
+
+**What "while creating the request" looks like:** the wizard's `QARequests/steps/ReadinessChecklistSection.tsx`
+renders each module's checklist as a bordered grid-table (`security-checklist-table`/`-header`/`-row`/`-check`/
+`-criterion` CSS classes, `index.css`) -- a `Ready`/`Readiness criterion`/`Supporting evidence` header, one row
+per item with a centered checkbox column, a criterion column (item text + Mandatory badge), and a right-hand
+evidence column with a left divider, consistent row height, and a subtle highlight when checked. The 4
+modules' Edit Details checklist (`FunctionalFormModal`/`SASTFormModal`/`DASTFormModal`/`PerformanceFormModal`)
+instead used an ad-hoc flex row with no header and no real column structure (patched in section 189, not
+redesigned).
+
+**Frontend changes:**
+- `modules/functional/Functional.tsx`, `modules/security/SAST.tsx`, `modules/security/DAST.tsx`,
+  `modules/specialised-testing/Performance.tsx`: each module's edit-mode checklist now renders the exact same
+  `security-checklist-table`/`-header`/`-row`/`-check`/`-criterion` structure the wizard uses -- same header
+  labels ("Ready" / "Readiness criterion" / "Supporting evidence"), same per-row shape (checkbox cell, item
+  text + Mandatory badge + this module's own "Verified"/"QA verified" badge in the criterion cell, then
+  `ChecklistEvidence`), and the same `is-checked` row highlight. Section 189's now-redundant fixed-width badge
+  `<span>` column was removed -- the grid's own column widths make it unnecessary.
+- `components/Common.tsx`: `ChecklistEvidence`'s root `<div>` switched from an inline `style={{width:230,
+  minWidth:200}}` to a `checklist-evidence-cell` class, so `index.css` can restyle it per context the same way
+  `ChecklistEvidencePicker`'s own `.checklist-evidence-picker` already does -- unchanged (still a plain
+  230/200px box) everywhere it's used outside a `.security-checklist-row` (i.e. the read-only Checklist tab,
+  left as-is, not part of this request), and given the wizard's exact `.security-request-step
+  .checklist-evidence-picker` treatment (stretch to the row, vertically centered, left divider) when nested
+  inside the new `.security-checklist-row` grid rows via a matching `.security-checklist-row
+  .checklist-evidence-cell` override.
+- `index.css`: added `.checklist-evidence-cell` (base) and `.security-checklist-row .checklist-evidence-cell`
+  (scoped override), mirroring the existing `.checklist-evidence-picker` / `.security-request-step
+  .checklist-evidence-picker` pair one-for-one.
+
+**Data notes:** none -- purely a client-side layout/CSS change, no backend/schema/endpoint changes.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).
+
+## 191. Attach Evidence: disabled until checked, and full font/style parity with the wizard
+
+**Request:** Direct follow-up to section 190: "also replicate the behaviour, if checklist not checked then
+upload evidence should be disabled. Font style and all should be same as qa request readiness checklist. why
+this is not common functionality which is reusing either during request creation or edit details after
+request create."
+
+**Behaviour parity (disabled until checked):** the wizard's `ChecklistEvidencePicker` has always disabled its
+"Attach evidence" button until that item's own checkbox is ticked (`disabled={!checked}`, with a
+"Tick this item as checked before attaching evidence for it" tooltip) -- `ChecklistEvidence`
+(`components/Common.tsx`), the post-raise equivalent used on Edit Details / the read-only Checklist tab, never
+had this gate at all; evidence could be attached to an item regardless of whether it was self-declared ready.
+Added a `checked` prop (defaults to `true`, so any call site not explicitly passing it keeps working exactly
+as before) and the identical `disabled={busy || !checked}` + tooltip on the Attach evidence button. Wired at
+all 8 call sites: the 4 modules' edit-mode rows pass the row's own live `checked` (the in-progress
+self-declaration state, same value now driving the grid row's `is-checked` highlight from section 190), the 4
+read-only Checklist-tab rows pass `c.requester_checked` (the saved self-declaration).
+
+**Font/style parity:** `ChecklistEvidence`'s button row and file list were still built from one-off inline
+styles rather than the shared classes `ChecklistEvidencePicker` already uses. Switched both to reuse the exact
+same `checklist-evidence-actions` / `checklist-evidence-files` / `checklist-evidence-file` classes
+(`index.css`) instead. A base rule (`.checklist-evidence-cell .checklist-evidence-actions { justify-content:
+center }`) preserves the original, centered look everywhere this isn't inside the new grid table (the
+read-only Checklist tab, intentionally left alone); a `.security-checklist-row`-scoped override then gives it
+the exact same left-aligned layout and smaller button/badge font sizes (`font-size: 9px`/`8px`,
+`min-height: 30px`) that `ChecklistEvidencePicker` already gets from `.security-request-step` -- so Edit
+Details now matches the wizard pixel-for-pixel, not just structurally.
+
+**"Why isn't this one shared component?"** `ChecklistEvidencePicker` (wizard, pre-raise) and `ChecklistEvidence`
+(post-raise) stay two components because they sit on genuinely different data paths, not because of an
+oversight: the wizard has no real checklist-item row yet (the QA Request is still Draft, nothing's been raised
+into Functional/SAST/DAST/Performance), so its evidence is just `File[]` held in memory client-side and
+uploaded, keyed by a positional `(kind, item_index)`, only once the whole form is saved (see
+`ChecklistEvidencePicker`'s own `draftRequestId`/`files`/`onFilesChange` props and
+`routers/qa_requests.py`'s `checklist-evidence/{kind}/{item_index}/documents` endpoints). `ChecklistEvidence`
+instead uploads immediately to a real, already-existing checklist item's own id
+(`.../checklist/{item_id}/documents`, `routers/functional.py` and its SAST/DAST/Performance equivalents) --
+there's no "pending file, upload on save" state to manage at all. Reconciling those two upload models into one
+shared component is possible but a materially bigger refactor than a styling pass (it would mean either
+teaching `ChecklistEvidencePicker` to also do immediate uploads against real ids, or teaching
+`ChecklistEvidence` to hold pending files in memory) -- out of scope here since neither of the two requests in
+this conversation is asking for that data-layer merge. What IS now shared, as of sections 189-191, is every
+class name and CSS rule governing how they look and behave (column layout, disabled-until-checked, colors,
+font sizes) -- the two are visually and behaviourally identical, just backed by two different upload
+mechanisms suited to Draft-vs-raised state. Happy to do the deeper component merge too if wanted -- flagging
+it here as a follow-up rather than doing it silently, since it would touch the wizard's own file-staging logic
+that already works correctly today.
+
+**Data notes:** none -- purely a client-side behaviour/CSS change, no backend/schema/endpoint changes.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).
+
+## 192. Block Sign/Approve when an approver unchecks a mandatory Readiness item via Edit Details
+
+**Request:** "requester raised the request, then while in approval, if approver edit details and unchecked the
+mandatory readiness checklist, then sign button should disabled, and behavior should be like while raising new
+request" -- quoting the exact wizard-time message as the target: "Cannot Submit / Raise yet -- the following
+mandatory Readiness checklist item(s) must be self-declared ready first (Edit Request): ...".
+
+**Root cause:** `canEditDetails` (all 4 modules) already lets the SM/Department Head themselves open Edit
+Details while a request sits at their own decision (`SM_APPROVAL_PENDING`/`DEPARTMENT_HEAD_APPROVAL_PENDING`)
+-- "fix something, then decide" (see that variable's own comment). If they untick a mandatory Readiness
+checklist item there instead of fixing it, nothing previously stopped them from still clicking Sign/Approve
+right after -- the exact same gate the QA Request wizard already enforces on Submit/Raise
+(`QARequests/RequestDetail.tsx`'s own `pendingMandatory`) didn't exist at all on the post-raise Sign/Approve
+side.
+
+**Frontend changes:** all 4 modules (`modules/functional/Functional.tsx`, `modules/security/SAST.tsx`,
+`modules/security/DAST.tsx`, `modules/specialised-testing/Performance.tsx`) now compute a `pendingSelfDeclare`
+list (mandatory checklist items where `!requester_checked`) in their own Detail component -- SAST/DAST already
+had this exact computation for gating Submit/Resubmit; added the equivalent to Functional and Performance for
+consistency, and reused the same name/shape everywhere. Wherever `canSMDecide || canDeptHeadDecide` is true and
+`pendingSelfDeclare.length > 0`, a warning box appears right above Workflow Actions -- same yellow box, same
+"Cannot Sign/Approve yet -- the following mandatory Readiness checklist item(s) must be self-declared ready
+first (Edit Details): <bullet list>" wording as the wizard's own pre-raise notice, just re-titled for the
+post-raise Edit Details flow. Both the SM and Department Head `<ApprovalDecisionButtons>` panels now pass
+`signBlocked={applicationNameBlocking || pendingSelfDeclare.length > 0}` -- reusing the same `signBlocked` prop
+`ApprovalDecisionButtons` already had for the Application Name gate (`components/Common.tsx`, unchanged) -- so
+the Sign field and Approve button are disabled the same way an unapproved Application Name already disables
+them, with `signBlockedMessage` explaining whichever of the two is actually the current holdup.
+
+**Data notes:** none -- purely a client-side gate, mirroring logic the backend doesn't need to duplicate since
+nothing here bypasses the frontend (Return/Reject remain unblocked, same as the Application Name gate --
+only Sign/Approve is held back).
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).
+
+## 193. Functional child's own "Request Type(s)" showed the whole gateway's list, not just its own
+
+**Request:** "after child request raised for functional it should Request Type(s) Functional Testing only, for
+SAST -> SAST only like that but why Request Type(s) Functional Testing,SAST etc for parent request id this is
+okay to show but for independent checklist request type should be for that which is raised."
+
+**Root cause:** `models.FunctionalRequest.request_types` is a delegated (read-only) property --
+`return self.qa_request.request_types if self.qa_request else None` -- returning the QA Request gateway's
+ENTIRE comma-joined list verbatim (e.g. "Functional Testing,SAST" when both were selected at intake and raised
+into two separate children). `Functional.tsx`'s own detail page (`DetailField label="Request Type(s)"`) reads
+this straight through, so it showed every sibling module's type too, not just this Functional request's own.
+Showing the full combined list is correct on the QA Request gateway's own page
+(`QARequests/RequestDetail.tsx`, unaffected -- reads `qa_request.request_types` directly off the gateway's own
+real column, not through this delegated property) -- wrong on this specific, already-raised child's own
+"independent" detail page.
+
+**Backend changes (`models.py`):** `FunctionalRequest.request_types` now filters the gateway's full list down
+to just the entries in `FUNCTIONAL_BUCKET_TYPES` (`constants.py`: `["Functional Testing", "Sanity Testing",
+"Regression Testing", "UAT Support"]` -- the 4 intake-time checkboxes that all share this one `FunctionalRequest`
+entity, see that model's own class docstring) -- e.g. a gateway selected as "Functional Testing,Sanity
+Testing,SAST" now shows "Functional Testing,Sanity Testing" here (both bucket types this request actually
+represents), not "SAST" (a sibling `SASTRequest`'s own type, raised as a separate child from the same
+gateway). SAST/DAST/Performance models have no equivalent `request_types` property at all (confirmed via
+grep) and their own detail pages don't render any such field, so they were never affected by this bug and
+needed no change.
+
+**Data notes:** none -- purely a Python property computation change, no new column, no data migration.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean (also confirms no circular import
+introduced by importing `FUNCTIONAL_BUCKET_TYPES` into `models.py`). Documents and outputs copies re-synced
+and confirmed identical via `diff -rq` (only the standard `.env` leftover differs).
+
+## 194. Dashboard "My Requests" showed extra/duplicate rows after paging away and back
+
+**Request:** "Page count shows '1–10 of 12', but when navigate from Page 1 to Page 2, and then return to Page
+1 again, 15-20 records are shown." -- confirmed via follow-up to be the Dashboard's "My Requests / Command
+Centre" area, narrowed to the "My Requests" tab specifically (`MyRequestsTab` in `Dashboard.tsx`).
+
+**Root cause:** `MyRequestsTab` merges five independent request tables (QA Request gateway, Functional,
+SAST, DAST, Performance) into one `unifiedRequests` list and renders it with the shared `<Table rowKey="id">`
+component. Each source table has its own auto-increment primary key, so `id` is only unique *within* one
+table -- a `QARequest#5`, a `SASTRequest#5` and a `DASTRequest#5` can all exist at once and all show up in the
+merged list as `id: 5`. React requires list keys to be unique among siblings; with the merged, date-sorted
+list frequently placing two same-numbered rows from different source tables next to each other (and
+sometimes split across a page boundary), duplicate `key="5"` values left React's reconciliation unable to
+tell those rows apart between renders, which is what produced stale/duplicated `<tr>`s reappearing after
+paging Page 1 → Page 2 → Page 1. The Command Centre's own tables were not affected -- they already key off
+`project_id` (3W governance data), not this merged request list.
+
+**Frontend changes (`Dashboard.tsx`):** added a `uid: string` field to `UnifiedRequestRow`, computed as
+`` `${type}-${id}` `` (e.g. `"SAST-5"` vs `"DAST-5"`) in both `toUnified` and `toUnifiedDast`, guaranteeing a
+globally-unique value across all five merged source types regardless of any shared numeric id. `id` itself is
+kept unchanged for display/back-compat. `MyRequestsTab`'s `<Table rowKey="id">` call is now `rowKey="uid"`.
+
+**Data notes:** none -- purely a frontend key-derivation change, no backend or schema changes.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).
+
+## 195. QA Request list's "Pending With" showed "Requester" instead of "Application Owner" for a Submitted gateway
+
+**Request:** "Pending with should be application owner instead of requester, when draft submitted for name
+approval."
+
+**Root cause:** `constants.ts`'s `GATEWAY_PENDING_WITH` map (the only place the QA Requests list's "Pending
+With" column reads from, `QARequests/index.tsx`) hardcoded `SUBMITTED: 'Requester'`. But per
+`routers/qa_requests.py::submit_request`'s own 2026-08 docstring, the gateway's `status` column is only ever
+set to `SUBMITTED` in one place (line ~1014) -- the deferred-approval branch, taken when the request's
+Application Name is a brand-new "Other" entry still awaiting the Application Owner's decision
+(`application_master_status == "PENDING_APP_OWNER"`). Every other case skips straight from Draft to Raised
+in the same Submit click. So a gateway sitting at Submitted is, without exception, waiting on the
+Application Owner, never the requester.
+
+**Frontend changes (`constants.ts`):** `GATEWAY_PENDING_WITH.SUBMITTED` changed from `'Requester'` to
+`'Application Owner'`; updated the map's comment to describe this exception explicitly instead of the
+now-outdated "Draft -> Submitted -> Raised happens in one step" wording. Single usage site
+(`QARequests/index.tsx`'s "Pending With" column) picks up the fix automatically.
+
+**Data notes:** none -- purely a frontend label change, no backend or schema changes.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).

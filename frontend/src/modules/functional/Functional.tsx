@@ -315,40 +315,51 @@ function FunctionalFormModal({
               reference only -- QA independently verifies every mandatory item
               during Readiness Verification.
             </p>
-            {editing.checklist_items.map((c) => (
-              <div
-                key={c.id}
-                style={{
-                  display: "flex",
-                  gap: 8,
-                  alignItems: "center",
-                  padding: "5px 0",
-                }}
-              >
-                <label style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
-                  <input
-                    type="checkbox"
-                    checked={checkedItems.includes(c.item)}
-                    onChange={() => toggleChecked(c.item)}
-                  />
-                  <span>
-                    {c.item}{" "}
-                    {c.owner && <span className="muted small">({c.owner})</span>}{" "}
-                    {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
-                  </span>
-                </label>
-                {c.is_complete && (
-                  <span className="badge badge-green">
-                    QA verified
-                  </span>
-                )}
-                <ChecklistEvidence apiBase="/api/functional-requests" reqId={editing.id} itemId={c.id}
-                  canManage={canManageReadinessEvidence(editing.status)}
-                  required={c.is_mandatory || c.requester_checked}
-                  documents={documentsByItem[c.id] || []}
-                  onReload={reloadEvidence} />
+            {/* Reported directly: "Attach Evidence is not uniform everywhere.
+                On edit details it should be like while creating the
+                request." -- reuses the exact same grid-table layout
+                (security-checklist-table/-header/-row/-check/-criterion)
+                as the QA Request wizard's ReadinessChecklistSection.tsx,
+                instead of the ad-hoc flex row this used to be, so the
+                Evidence column lines up identically here and at intake
+                time. */}
+            <div className="security-checklist-table" role="group" aria-label="Functional readiness checklist">
+              <div className="security-checklist-header" aria-hidden="true">
+                <span>Ready</span>
+                <span>Readiness criterion</span>
+                <span>Supporting evidence</span>
               </div>
-            ))}
+              {editing.checklist_items.map((c) => {
+                const checked = checkedItems.includes(c.item)
+                const checkboxId = `functional-edit-checklist-${c.id}`
+                return (
+                  <div className={`security-checklist-row ${checked ? "is-checked" : ""}`} key={c.id}>
+                    <div className="security-checklist-check">
+                      <input
+                        id={checkboxId}
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleChecked(c.item)}
+                      />
+                    </div>
+                    <label className="security-checklist-criterion" htmlFor={checkboxId}>
+                      <span>
+                        <strong>{c.item}</strong>
+                        {c.owner && <span className="muted small">({c.owner})</span>}
+                        {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
+                        {c.is_complete && <span className="badge badge-green">QA verified</span>}
+                      </span>
+                    </label>
+                    <ChecklistEvidence apiBase="/api/functional-requests" reqId={editing.id} itemId={c.id}
+                      canManage={canManageReadinessEvidence(editing.status)}
+                      required={c.is_mandatory || c.requester_checked}
+                      documents={documentsByItem[c.id] || []}
+                      onReload={reloadEvidence}
+                      checked={checked} />
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
 
@@ -617,6 +628,16 @@ function FunctionalDetail({
   const applicationNameBlocking =
     !!req.application_master_status &&
     req.application_master_status !== "APPROVED";
+  // Reported directly: canEditDetails above lets the SM/Department Head
+  // themselves open Edit Details while the request is sitting at their own
+  // decision -- if they untick a mandatory Readiness checklist item there
+  // (fix something, then decide), Sign/Approve must be blocked the exact
+  // same way the QA Request wizard already blocks Submit/Raise for the same
+  // reason (see QARequests/RequestDetail.tsx's own pendingMandatory), not
+  // silently let through just because this is post-raise now.
+  const pendingSelfDeclare = checklist
+    .filter((c) => c.is_mandatory && !c.requester_checked)
+    .map((c) => c.item);
   // Reported directly: the SM's own block message used to always say "your
   // decision above" even while the name was still sitting with the
   // Application Owner (i.e. not the SM's turn at all yet) -- misleading.
@@ -850,6 +871,31 @@ function FunctionalDetail({
             </p>
           )}
 
+          {(canSMDecide || canDepartmentHeadDecide) &&
+            pendingSelfDeclare.length > 0 && (
+              <div
+                style={{
+                  marginTop: 8,
+                  marginBottom: 8,
+                  background: "#fffaeb",
+                  border: "1px solid #fde68a",
+                  borderRadius: 10,
+                  padding: "10px 14px",
+                  color: "#92400e",
+                  fontSize: 13,
+                }}
+              >
+                <strong>Cannot Sign/Approve yet</strong> — the following
+                mandatory Readiness checklist item(s) must be self-declared
+                ready first (Edit Details):
+                <ul style={{ margin: "6px 0 0", paddingLeft: 20 }}>
+                  {pendingSelfDeclare.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
           <div className="section-title">Workflow Actions</div>
           <div className="actions-panel">
             <div
@@ -904,8 +950,14 @@ function FunctionalDetail({
                   userName={user?.full_name}
                   comments={comments}
                   busy={!!busyAction}
-                  signBlocked={applicationNameBlocking}
-                  signBlockedMessage={smApplicationNameBlockedMessage}
+                  signBlocked={applicationNameBlocking || pendingSelfDeclare.length > 0}
+                  signBlockedMessage={
+                    applicationNameBlocking
+                      ? smApplicationNameBlockedMessage
+                      : pendingSelfDeclare.length > 0
+                      ? "Mandatory Readiness checklist item(s) are not self-declared ready -- see the notice above."
+                      : undefined
+                  }
                   onApprove={(signed) =>
                     act("sm-decision", {
                       decision: "Approved",
@@ -926,8 +978,14 @@ function FunctionalDetail({
                   userName={user?.full_name}
                   comments={comments}
                   busy={!!busyAction}
-                  signBlocked={applicationNameBlocking}
-                  signBlockedMessage="This request's Application Name is not yet approved by SM."
+                  signBlocked={applicationNameBlocking || pendingSelfDeclare.length > 0}
+                  signBlockedMessage={
+                    applicationNameBlocking
+                      ? "This request's Application Name is not yet approved by SM."
+                      : pendingSelfDeclare.length > 0
+                      ? "Mandatory Readiness checklist item(s) are not self-declared ready -- see the notice above."
+                      : undefined
+                  }
                   extraControlLabel="Assign IT-QA QA Lead"
                   extraControl={
                     <UserAssignSelect
@@ -1301,7 +1359,8 @@ function FunctionalDetail({
                 canManage={canManageReadinessEvidence(req.status)}
                 required={c.is_mandatory || c.requester_checked}
                 documents={documentsByItem[c.id] || []}
-                onReload={reloadEvidence} />
+                onReload={reloadEvidence}
+                checked={c.requester_checked} />
             </div>
           ))}
         </div>

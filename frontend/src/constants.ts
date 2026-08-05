@@ -105,13 +105,19 @@ export const GATEWAY_EDITABLE_STATUSES: string[] = ['DRAFT']
 export const GATEWAY_TERMINAL_STATUSES: string[] = ['RAISED', 'CANCELLED']
 export const GATEWAY_CANCELLABLE_STATUSES: string[] = ['DRAFT']
 // "Pending With" -- who needs to act next, for the list table column of the
-// same name. The gateway itself has no approval chain of its own (Draft ->
-// Submitted -> Raised happens in one step -- see routers/qa_requests.py); once
-// Raised, the real workflow lives on the linked Functional/SAST/DAST/
-// Performance request(s), so this deliberately points there rather than
-// naming a role that has nothing further to do on the gateway record itself.
+// same name. The gateway itself has no approval chain of its own for the
+// common case (Draft -> Raised happens in one step, skipping Submitted
+// entirely -- see routers/qa_requests.py::submit_request); once Raised, the
+// real workflow lives on the linked Functional/SAST/DAST/Performance
+// request(s), so this deliberately points there rather than naming a role
+// that has nothing further to do on the gateway record itself. The one
+// exception: a gateway only ever sits at Submitted (see submit_request's own
+// 2026-08 docstring) when its Application Name is a brand-new "Other" entry
+// still awaiting the Application Owner's approval -- child creation and SM
+// assignment are deferred until then -- so Submitted is pending with the
+// Application Owner, not the requester.
 export const GATEWAY_PENDING_WITH: Record<string, string> = {
-  DRAFT: 'Requester', SUBMITTED: 'Requester',
+  DRAFT: 'Requester', SUBMITTED: 'Application Owner',
   RAISED: 'See linked requests', CANCELLED: '—',
 }
 

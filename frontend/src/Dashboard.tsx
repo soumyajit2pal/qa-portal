@@ -24,6 +24,14 @@ import {
 // child request type instead of six separate tables.
 interface UnifiedRequestRow {
   id: number
+  // `id` is each row's raw primary key from its OWN source table (QARequest,
+  // FunctionalRequest, SASTRequest, DASTRequest, PerformanceRequest) -- those
+  // are five independent auto-increment sequences, so the same numeric id
+  // can (and does) show up in more than one of them at once. `uid` below is
+  // the value actually handed to <Table rowKey> so React always has a
+  // globally-unique key across the merged list; `id` is kept only for
+  // display/back-compat, not for keying.
+  uid: string
   request_id: string
   type: string
   application_name: string
@@ -41,7 +49,7 @@ function toUnified(type: string, rows: {
     // A still-Draft QA Request gateway has no request_id yet -- see the
     // backend's matching column comment -- so fall back to a stable
     // placeholder rather than showing a blank/undefined cell here.
-    id: r.id, request_id: r.request_id || `Draft #${r.id}`, type, application_name: r.application_name || '—',
+    id: r.id, uid: `${type}-${r.id}`, request_id: r.request_id || `Draft #${r.id}`, type, application_name: r.application_name || '—',
     department: r.department, status: r.status, requester_id: r.requester_id, created_at: r.created_at,
   }))
 }
@@ -53,7 +61,7 @@ function toUnified(type: string, rows: {
 // above.
 function toUnifiedDast(rows: DASTOut[]): UnifiedRequestRow[] {
   return rows.map((r) => ({
-    id: r.id, request_id: r.request_id, type: 'DAST',
+    id: r.id, uid: `DAST-${r.id}`, request_id: r.request_id, type: 'DAST',
     application_name: r.application_name || r.targets?.[0]?.application_url || '—',
     department: r.department, status: r.status, requester_id: r.requester_id, created_at: r.created_at,
   }))
@@ -845,7 +853,7 @@ function MyRequestsTab({ range, requests, functionalRequests, sastRequests, dast
 
         <div style={{ marginTop: 18 }}>
           <Table
-            rowKey="id"
+            rowKey="uid"
             onRowClick={(r) => navigate(TYPE_TO_PATH[r.type] || '/qa-requests')}
             columns={[
               { key: 'type', header: 'Type' },

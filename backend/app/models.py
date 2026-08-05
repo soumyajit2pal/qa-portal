@@ -8,7 +8,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from .database import Base
-from .constants import QAStatus, LoginType, GatewayStatus
+from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES
 
 # Unlike SQLite/PostgreSQL/MySQL, SQLAlchemy does NOT automatically make a
 # bare `Column(Integer, primary_key=True)` self-generating on Oracle -- Oracle
@@ -525,7 +525,24 @@ class FunctionalRequest(Base):
 
     @property
     def request_types(self):
-        return self.qa_request.request_types if self.qa_request else None
+        """Reported directly: a Functional child request's own "Request
+        Type(s)" field showed the gateway's ENTIRE request_types list --
+        e.g. "Functional Testing,SAST" -- even though this specific,
+        already-raised Functional request only ever represents whichever of
+        the 4 Functional-bucket types (FUNCTIONAL_BUCKET_TYPES: Functional/
+        Sanity/Regression Testing, UAT Support -- see this class's own
+        docstring for why they share one entity) were actually selected;
+        "SAST" etc. belong to a SIBLING child request, not this one. Showing
+        the gateway's full combined list is correct on the QA Request
+        gateway's own page (RequestDetail.tsx, unaffected -- reads
+        qa_request.request_types directly, not through this property) --
+        wrong here, on this "independent" child's own detail page. Filtered
+        down to just the bucket types this request actually represents."""
+        if not self.qa_request or not self.qa_request.request_types:
+            return None
+        selected = [t.strip() for t in self.qa_request.request_types.split(",")]
+        own = [t for t in selected if t in FUNCTIONAL_BUCKET_TYPES]
+        return ",".join(own) if own else None
 
     @property
     def target_release_date(self):

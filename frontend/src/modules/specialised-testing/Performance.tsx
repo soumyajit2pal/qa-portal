@@ -159,23 +159,42 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
               Update what's already in place. This is your own declaration for reference only -- QA
               independently verifies every mandatory item during Readiness.
             </p>
-            {editing.checklist_items.map((c) => (
-              <div key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 0' }}>
-                <label style={{ display: 'flex', gap: 8, alignItems: 'center', flex: 1 }}>
-                  <input type="checkbox" checked={checkedItems.includes(c.item)} onChange={() => toggleChecked(c.item)} />
-                  <span>
-                    {c.item} {c.data_required && <span className="muted small">({c.data_required})</span>}{' '}
-                    {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
-                  </span>
-                </label>
-                {c.is_complete && <span className="badge badge-green">QA verified</span>}
-                <ChecklistEvidence apiBase="/api/performance-requests" reqId={editing.id} itemId={c.id}
-                  canManage={canManageReadinessEvidence(editing.status)}
-                  required={c.is_mandatory || c.requester_checked}
-                  documents={documentsByItem[c.id] || []}
-                  onReload={reloadEvidence} />
+            {/* Reported directly: "Attach Evidence is not uniform
+                everywhere. On edit details it should be like while creating
+                the request." -- reuses the same grid-table layout as the QA
+                Request wizard's ReadinessChecklistSection.tsx. */}
+            <div className="security-checklist-table" role="group" aria-label="Performance readiness checklist">
+              <div className="security-checklist-header" aria-hidden="true">
+                <span>Ready</span>
+                <span>Readiness criterion</span>
+                <span>Supporting evidence</span>
               </div>
-            ))}
+              {editing.checklist_items.map((c) => {
+                const checked = checkedItems.includes(c.item)
+                const checkboxId = `performance-edit-checklist-${c.id}`
+                return (
+                  <div className={`security-checklist-row ${checked ? 'is-checked' : ''}`} key={c.id}>
+                    <div className="security-checklist-check">
+                      <input id={checkboxId} type="checkbox" checked={checked} onChange={() => toggleChecked(c.item)} />
+                    </div>
+                    <label className="security-checklist-criterion" htmlFor={checkboxId}>
+                      <span>
+                        <strong>{c.item}</strong>
+                        {c.data_required && <span className="muted small">({c.data_required})</span>}
+                        {c.is_mandatory && <span className="badge badge-gray">Mandatory</span>}
+                        {c.is_complete && <span className="badge badge-green">QA verified</span>}
+                      </span>
+                    </label>
+                    <ChecklistEvidence apiBase="/api/performance-requests" reqId={editing.id} itemId={c.id}
+                      canManage={canManageReadinessEvidence(editing.status)}
+                      required={c.is_mandatory || c.requester_checked}
+                      documents={documentsByItem[c.id] || []}
+                      onReload={reloadEvidence}
+                      checked={checked} />
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
 
@@ -287,6 +306,15 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const isSelfApproval = req.requester_id === user?.id && !hasRole(user, 'ADMIN')
   const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
   const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
+  // Reported directly: canEditDetails below lets the SM/Department Head
+  // themselves open Edit Details while the request sits at their own
+  // decision -- if they untick a mandatory Readiness checklist item there,
+  // Sign/Approve must be blocked the exact same way the QA Request wizard
+  // already blocks Submit/Raise for the same reason (see
+  // QARequests/RequestDetail.tsx's own pendingMandatory, and the matching
+  // pendingSelfDeclare already used for Submit/Resubmit in SAST.tsx/
+  // DAST.tsx -- same name/shape here for consistency).
+  const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
   const canStartReadiness = isAssignedQALead && status === 'ENGINEER_ASSIGNED'
   const canCompleteReadiness = isAssignedQALead && status === 'READINESS'
   const canCompleteFeasibility = isAssignedQALead && status === 'FEASIBILITY'
@@ -383,6 +411,23 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 
           {req.qa_request && <p className="muted small">Linked from QA Request {req.qa_request.request_id}.</p>}
 
+          {/* Reported directly: canEditDetails below lets the SM/Department
+              Head themselves open Edit Details while the request sits at
+              their own decision -- if they untick a mandatory Pre-Testing
+              Readiness checklist item there, Sign/Approve must be blocked
+              the exact same way the QA Request wizard already blocks
+              Submit/Raise for the same reason (see
+              QARequests/RequestDetail.tsx's own pendingMandatory). */}
+          {(canSMDecide || canDeptHeadDecide) && pendingSelfDeclare.length > 0 && (
+            <div style={{ marginTop: 8, marginBottom: 8, background: '#fffaeb', border: '1px solid #fde68a', borderRadius: 10, padding: '10px 14px', color: '#92400e', fontSize: 13 }}>
+              <strong>Cannot Sign/Approve yet</strong> — the following mandatory Pre-Testing Readiness checklist item(s)
+              must be self-declared ready first (Edit Details):
+              <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+                {pendingSelfDeclare.map((c) => <li key={c.item}>{c.item}</li>)}
+              </ul>
+            </div>
+          )}
+
           <div className="actions-panel">
           <Field label="Action note (optional)">
             <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
@@ -405,8 +450,14 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                 userName={user?.full_name}
                 comments={comments}
                 busy={busy}
-                signBlocked={applicationNameBlocking}
-                signBlockedMessage={smApplicationNameBlockedMessage}
+                signBlocked={applicationNameBlocking || pendingSelfDeclare.length > 0}
+                signBlockedMessage={
+                  applicationNameBlocking
+                    ? smApplicationNameBlockedMessage
+                    : pendingSelfDeclare.length > 0
+                    ? 'Mandatory Pre-Testing Readiness checklist item(s) are not self-declared ready -- see the notice above.'
+                    : undefined
+                }
                 onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
                 onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
                 onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
@@ -417,8 +468,14 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                 userName={user?.full_name}
                 comments={comments}
                 busy={busy}
-                signBlocked={applicationNameBlocking}
-                signBlockedMessage="This request's Application Name is not yet approved by SM."
+                signBlocked={applicationNameBlocking || pendingSelfDeclare.length > 0}
+                signBlockedMessage={
+                  applicationNameBlocking
+                    ? "This request's Application Name is not yet approved by SM."
+                    : pendingSelfDeclare.length > 0
+                    ? 'Mandatory Pre-Testing Readiness checklist item(s) are not self-declared ready -- see the notice above.'
+                    : undefined
+                }
                 extraControlLabel="Assign IT-QA QA Lead"
                 extraControl={
                   <UserAssignSelect
@@ -560,7 +617,8 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                 canManage={canManageReadinessEvidence(req.status)}
                 required={c.is_mandatory || c.requester_checked}
                 documents={documentsByItem[c.id] || []}
-                onReload={reloadEvidence} />
+                onReload={reloadEvidence}
+                checked={c.requester_checked} />
             </div>
           ))}
         </div>
