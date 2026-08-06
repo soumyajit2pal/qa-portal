@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department, require_not_requester
+from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
 from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
+from .. import application_names as app_names
 
 router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
 
@@ -78,7 +79,17 @@ def _require_assigned_tester(obj: "models.FunctionalRequest", user: models.User)
 
 @router.get("", response_model=List[schemas.FunctionalOut])
 def list_functional(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.FunctionalRequest).order_by(models.FunctionalRequest.created_at.desc()).all()
+    q = db.query(models.FunctionalRequest)
+    # Reported directly, then extended to "everywhere" (see list_requests'
+    # matching comment in routers/qa_requests.py) -- applied unconditionally.
+    # department is a delegated property (see models.FunctionalRequest.
+    # department), not a real column, so this needs a join to the parent
+    # QARequest rather than a plain .filter().
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.join(models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id) \
+             .filter(models.QARequest.department == scope)
+    return q.order_by(models.FunctionalRequest.created_at.desc()).all()
 
 
 @router.get("/{req_id}", response_model=schemas.FunctionalOut)
@@ -167,6 +178,31 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
             validate_target_release_date(data["target_release_date"])
         except ValueError as e:
             raise HTTPException(400, str(e))
+    # Reported directly ("Duplicate Application Name Validation Across All
+    # Request Actions"): application_name used to fall straight into the
+    # generic setattr(obj.qa_request, k, v) branch below -- a bare string
+    # write with zero case/whitespace normalization and no dedup check
+    # against models.ApplicationMaster, and obj.qa_request.application_master_id
+    # was never updated to match, leaving the gateway's own approval-status
+    # tracking stale. Popped out and routed through the same
+    # resolve_application_name/cleanup_orphaned_application_master pair
+    # routers/qa_requests.py::edit_request already uses for this exact field
+    # on this exact same underlying QARequest row, so an Admin correcting a
+    # typo here reuses an existing name (any case/spacing variant) instead of
+    # silently creating a near-duplicate ApplicationMaster entry, same as
+    # every other Application Name entry point in the app. Only re-resolved
+    # when genuinely different from what's already saved (case/whitespace-
+    # insensitive) -- same guard edit_request uses, so a plain re-save of an
+    # unrelated field never re-touches it.
+    application_name_in = data.pop("application_name", None)
+    if application_name_in is not None and obj.qa_request:
+        incoming_upper = (application_name_in or "").strip().upper()
+        if incoming_upper != (obj.qa_request.application_name or "").strip().upper():
+            old_master_id = obj.qa_request.application_master_id
+            obj.qa_request.application_name, obj.qa_request.application_master_id = app_names.resolve_application_name(
+                db, application_name_in, obj.qa_request.department, current_user.id, qa_request_id=obj.qa_request.id,
+            )
+            app_names.cleanup_orphaned_application_master(db, old_master_id, obj.qa_request.id)
     for k, v in data.items():
         if k in _FUNCTIONAL_OWN_FIELDS:
             setattr(obj, k, v)
@@ -754,39 +790,36 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
 # ---- Supporting documents (multiple files, uploaded any time after the
 # request has been raised) -- see documents.py for the shared implementation. ----
 def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) -> bool:
-    """Reported bug: upload had no restriction at all -- any logged-in user
-    could attach documents to any Functional Testing Request, regardless of
-    role or involvement. Scoped to exactly whoever currently "owns" this
-    request: the original requester (always, they may need to attach more
-    evidence at any point), plus whichever actor the request's *current*
-    status is actually sitting with -- the same requester/role/department
-    match already enforced by that stage's own decision endpoint above (SM
-    during SM_APPROVAL_PENDING, Department Head during
-    DEPARTMENT_HEAD_APPROVAL_PENDING), or a central QA Lead/assigned tester for
-    every QA-activity status from QA_LEAD_ASSIGNED through QA_SIGNOFF_PENDING.
-    Admin always bypasses, same convention as every other permission check in
-    this file."""
+    """Reported directly (Document and Evidence Access Control Based on
+    Workflow Stage): access follows exactly 3 stages, then locks hard --
+    (1) the requester, while the request is genuinely in their own hands
+    (Draft/Submitted, Returned-by-*, Rejected, or back for their own final
+    verification) may upload any number of files; (2) the SM, and only the
+    SM, may upload while SM_APPROVAL_PENDING; (3) the Department Head, and
+    only the Department Head, may upload while
+    DEPARTMENT_HEAD_APPROVAL_PENDING. After Department Head approval, EVERY
+    status is locked -- no QA Lead, tester, or anyone else may upload here
+    -- until the request is returned to the requester (a RETURNED_BY_*
+    status), which re-opens stage (1). This intentionally removes the prior
+    QA-activity-status upload window (QA_LEAD_ASSIGNED through
+    QA_SIGNOFF_PENDING) -- any evidence QA generates during actual execution
+    belongs in Test Execution's own attempt-artifact system (TEST_EXEC_IMAGE
+    in documents.py), not this readiness-facing Documents/Checklist
+    Evidence store. Admin always bypasses, same convention as every other
+    permission check in this file."""
     if user.has_role(Role.ADMIN):
         return True
-    if obj.requester_id == user.id:
-        return True
     status = obj.status
+    if status in (QAStatus.DRAFT, QAStatus.SUBMITTED, QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
+                  QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD,
+                  QAStatus.REQUESTER_VERIFICATION):
+        return obj.requester_id == user.id
     if status == QAStatus.SM_APPROVAL_PENDING:
         return user.has_role(Role.SM) and user.department == obj.department
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
         return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
-    if status in (QAStatus.QA_LEAD_ASSIGNED, QAStatus.READINESS_VERIFICATION,
-                   QAStatus.QA_ACTIVITY_INITIATED, QAStatus.PLANNING):
-        return obj.qa_lead_id == user.id
-    if status in (QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN, QAStatus.EXECUTION_IN_PROGRESS,
-                   QAStatus.DEFECT_RAISED, QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
-                   QAStatus.QA_COMPLETED, QAStatus.QA_SIGNOFF_PENDING):
-        if obj.qa_lead_id == user.id:
-            return True
-        assigned = {int(i) for i in (obj.assigned_tester_ids or "").split(",") if i}
-        return user.id in assigned
-    # DRAFT/SUBMITTED/RETURNED_BY_*/REQUESTER_VERIFICATION/terminal statuses --
-    # nothing pending on anyone but the requester (already covered above).
+    # Every QA-activity/post-approval/terminal status -- locked for everyone
+    # but Admin until the request is returned to the requester above.
     return False
 
 
@@ -835,7 +868,8 @@ def upload_functional_documents(req_id: int, files: List[UploadFile] = File(...)
     obj = _get_or_404(db, req_id)
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester, central QA team, assigned tester, or the SM/Department Head currently reviewing the request can upload documents")
-    return doc_store.save_documents(db, "FUNCTIONAL", req_id, obj.request_id, files, current_user.id)
+    return doc_store.save_documents(db, "FUNCTIONAL", req_id, obj.request_id, files, current_user.id,
+                                    log_entity_type="FUNCTIONAL_REQUEST", log_entity_id=obj.id, log_actor=current_user)
 
 
 @router.get("/{req_id}/documents/{doc_id}/download")
@@ -851,10 +885,11 @@ def download_functional_document(req_id: int, doc_id: int, db: Session = Depends
 @router.delete("/{req_id}/documents/{doc_id}")
 def delete_functional_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                                 current_user: models.User = Depends(get_current_user)):
+    obj = _get_or_404(db, req_id)
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL", req_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="FUNCTIONAL_REQUEST", log_entity_id=req_id, log_actor=current_user)
     return {"ok": True}
 
 
@@ -896,13 +931,15 @@ def upload_functional_checklist_documents(req_id: int, item_id: int, files: List
                                            db: Session = Depends(get_db),
                                            current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
-    _functional_checklist_item_or_404(db, req_id, item_id)
+    item = _functional_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester or this request's current stage owner can attach checklist evidence")
     return doc_store.save_documents(db, "FUNCTIONAL_ITEM", item_id,
-                                    f"{obj.request_id}/checklist-{item_id}", files, current_user.id)
+                                    f"{obj.request_id}/checklist-{item_id}", files, current_user.id,
+                                    log_entity_type="FUNCTIONAL_REQUEST", log_entity_id=obj.id, log_actor=current_user,
+                                    log_label=f"checklist item '{item.item}'")
 
 
 @router.get("/{req_id}/checklist/{item_id}/documents/{doc_id}/download")
@@ -923,11 +960,12 @@ def delete_functional_checklist_document(req_id: int, item_id: int, doc_id: int,
                                           db: Session = Depends(get_db),
                                           current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
-    _functional_checklist_item_or_404(db, req_id, item_id)
+    item = _functional_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL_ITEM", item_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="FUNCTIONAL_REQUEST", log_entity_id=obj.id,
+                              log_actor=current_user, log_label=f"checklist item '{item.item}'")
     return {"ok": True}

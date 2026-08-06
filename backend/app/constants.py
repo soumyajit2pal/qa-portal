@@ -37,12 +37,35 @@ class Role:
     # full name like "Senior Manager"/"Section Manager") since that's what was
     # specified; rename ROLE_LABELS[Role.SM] below if you want a fuller label.
     SM = "SM"
+    # Reported directly: a super-access role, assignable ONLY by a System
+    # Admin (see ALL_ROLES vs. DEPARTMENT_ADMIN_ASSIGNABLE_ROLES/
+    # QA_ADMIN_ASSIGNABLE_ROLES below -- deliberately absent from both, so
+    # neither kind of local admin can ever assign or even see it -- enforced
+    # server-side in update_local_admin_user, not just by the assignable
+    # list), and "not visible to noone except admin" -- see
+    # CONFIDENTIAL_ROLES below and routers/auth.py's _redact_confidential_roles,
+    # which strips this role out of any user's `roles` list before it's ever
+    # sent to a non-Admin viewer (the general active-users picker used
+    # throughout the app, and the Department Coordinator / local-admin
+    # roster), and _require_own_department_target, which additionally hides
+    # -- not just relabels -- any user holding it from local admins entirely,
+    # the same treatment ADMIN accounts already get there. A user holding
+    # this role sees data across every department, same as the QA/Security/
+    # Executive-COE roles (see deps.DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES),
+    # regardless of their own department mapping.
+    SCALE_6_PLUS = "SCALE_6_PLUS"
 
 ALL_ROLES = [
     Role.REQUESTER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD,
     Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM, Role.SECURITY_ANALYST,
     Role.APPLICATION_OWNER, Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM, Role.SM, Role.ADMIN,
+    Role.SCALE_6_PLUS,
 ]
+
+# Roles that must never be exposed to a non-Admin viewer -- see Role.SCALE_6_PLUS's
+# own comment above. A set rather than a single constant so a future addition
+# doesn't require touching every call site that checks this.
+CONFIDENTIAL_ROLES = {Role.SCALE_6_PLUS}
 
 # "Local admin" -- a Department Head or an Executive COE may assign
 # working-level roles to users within their own department (see
@@ -108,6 +131,7 @@ ROLE_LABELS = {
     Role.DEPARTMENT_HEAD_AGM: "Assistant General Manager - Department",
     Role.SM: "SM",
     Role.ADMIN: "Administrator",
+    Role.SCALE_6_PLUS: "Scale 6+",
 }
 
 # ---- Departments (Admin section: user mapping = department + role(s)) ----

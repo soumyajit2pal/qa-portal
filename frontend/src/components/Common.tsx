@@ -310,6 +310,16 @@ interface ModalProps {
   // A brief shake on the panel gives feedback that the click did register,
   // rather than the modal just feeling unresponsive.
   preventBackdropClose?: boolean;
+  // Reported directly: "cross button and close duplicate -- wherever on
+  // confirmation modal will be close then cross button should be removed."
+  // The header's own × always just calls onClose -- on a plain confirmation/
+  // acknowledgement pop-up (see ConfirmModal/InfoModal) that's already
+  // exactly what the panel's own Yes/No/Cancel/"Got it" button does, so the
+  // × was a second control doing the identical thing. Set true only by
+  // callers that already render their own unambiguous close action; left
+  // false (× shown) everywhere else, e.g. drawer-style detail/edit panels
+  // with no other single-click way to dismiss them.
+  hideCloseButton?: boolean;
 }
 
 export function Modal({
@@ -319,6 +329,7 @@ export function Modal({
   wide,
   variant = "drawer",
   preventBackdropClose,
+  hideCloseButton,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
 
@@ -345,9 +356,11 @@ export function Modal({
         >
           <div className="drawer-header">
             <h3>{title}</h3>
-            <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
-              ×
-            </button>
+            {!hideCloseButton && (
+              <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
+                ×
+              </button>
+            )}
           </div>
           <div className="drawer-body">{children}</div>
         </div>
@@ -364,9 +377,11 @@ export function Modal({
       >
         <div className="drawer-header">
           <h3>{title}</h3>
-          <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
-            ×
-          </button>
+          {!hideCloseButton && (
+            <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
+              ×
+            </button>
+          )}
         </div>
         <div className="drawer-body">{children}</div>
       </div>
@@ -545,6 +560,7 @@ export function ApprovalDecisionButtons({
           onClose={() => setAssignModalOpen(false)}
           variant="dialog"
           preventBackdropClose
+          hideCloseButton
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div>
@@ -836,7 +852,7 @@ export function ErrorText({ error, title = "Action could not be completed", guid
   if (!error || !visible) return null;
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose hideCloseButton>
       <div className="action-error-dialog" role="alert">
         <div className="action-error-dialog-icon">!</div>
         <div>
@@ -1166,9 +1182,19 @@ export function Table<T extends Record<string, any>>({
 export function RequestDocuments({
   apiBase,
   reqId,
+  canManage = true,
 }: {
   apiBase: string;
   reqId: number;
+  // Reported directly: "uploading document should be non editable if not
+  // assigned, or in other person's bucket. only the assigned person can
+  // update" -- this Documents tab used to render its Upload form (and every
+  // row's Delete button, beyond the existing uploaded-by-me/admin check) to
+  // any viewer regardless of whether the backend's own _can_upload_documents
+  // would actually accept the upload, matching the same gap
+  // ChecklistEvidence had before it gained its own `canManage`. Defaults to
+  // `true` so any not-yet-updated call site keeps its old behavior.
+  canManage?: boolean;
 }) {
   const { user } = useAuth();
   const isAdmin = !!user?.roles?.includes("ADMIN");
@@ -1259,7 +1285,7 @@ export function RequestDocuments({
                 >
                   Download
                 </button>
-                {(isAdmin || d.uploaded_by_id === user?.id) && (
+                {(isAdmin || (canManage && d.uploaded_by_id === user?.id)) && (
                   <button
                     className="btn btn-sm btn-danger"
                     onClick={() => setPendingDelete(d)}
@@ -1273,6 +1299,7 @@ export function RequestDocuments({
         ]}
         rows={documents}
       />
+      {canManage ? (
       <form onSubmit={submit} style={{ marginTop: 14 }}>
         <div
           style={{
@@ -1326,12 +1353,18 @@ export function RequestDocuments({
           </ul>
         )}
       </form>
+      ) : (
+        <p className="muted small" style={{ marginTop: 14 }} title="Only whoever this request is currently assigned to can upload documents">
+          Only the current assignee can upload documents at this stage.
+        </p>
+      )}
       {pendingDelete && (
         <Modal
           title="Delete document?"
           onClose={() => setPendingDelete(null)}
           variant="dialog"
           preventBackdropClose
+          hideCloseButton
         >
           <div style={{ fontSize: 13.5 }}>
             Delete <strong>{pendingDelete.file_name}</strong>? This cannot be undone.
@@ -1397,6 +1430,74 @@ export function useChecklistDocuments(apiBase: string, reqId: number | undefined
   }, [reload]);
 
   return { documentsByItem, reload };
+}
+
+// Shared building block for one already-uploaded evidence document's row --
+// a download button (filename, ellipsised) plus an optional delete "×"
+// button. Used by both ChecklistEvidence below (post-raise, backed by a
+// real per-item documents endpoint) and the pre-raise wizard's own
+// ChecklistEvidencePicker (QARequests/steps/ChecklistEvidencePicker.tsx) --
+// reported directly: "checklist UI still not uniformed like QA request
+// checklist UI, Edit UI, why duplicate code, make consistent UI." The two
+// components' underlying data still differs too much to merge outright
+// (this one talks to a real REST endpoint; the wizard's operates on a
+// draft's local File[] state until the whole form is saved), but the
+// per-saved-file row markup was identical in both and is now defined once.
+export function ChecklistEvidenceFileRow({
+  fileName,
+  onDownload,
+  onDelete,
+}: {
+  fileName: string;
+  onDownload: () => void;
+  onDelete?: () => void;
+}) {
+  return (
+    <div className="checklist-evidence-file">
+      <button
+        type="button"
+        className="btn btn-sm"
+        style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+        title={`Download ${fileName}`}
+        onClick={onDownload}
+      >
+        {fileName}
+      </button>
+      {onDelete && (
+        <button type="button" className="btn btn-sm btn-danger" aria-label={`Delete ${fileName}`} onClick={onDelete}>×</button>
+      )}
+    </div>
+  );
+}
+
+// Shared delete-confirmation dialog for one evidence document -- same
+// markup/behavior in both ChecklistEvidence and ChecklistEvidencePicker,
+// just an optional trailing phrase on the body copy (e.g. "from this
+// checklist item").
+export function ChecklistEvidenceDeleteModal({
+  fileName,
+  itemLabel,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  fileName: string;
+  itemLabel?: string;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <Modal title="Delete checklist evidence?" onClose={onCancel} variant="dialog" preventBackdropClose hideCloseButton>
+      <p>Delete <strong>{fileName}</strong>{itemLabel ? ` ${itemLabel}` : ""}? This cannot be undone.</p>
+      <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+        <button type="button" className="btn btn-danger" disabled={busy} onClick={onConfirm}>
+          {busy ? "Deleting…" : "Delete"}
+        </button>
+        <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </Modal>
+  );
 }
 
 // Compact evidence uploader rendered beside one readiness-checklist item.
@@ -1554,41 +1655,28 @@ export function ChecklistEvidence({
       {expanded && documents.length > 0 && (
         <div className="checklist-evidence-files">
           {documents.map((document) => (
-            <div key={document.id} className="checklist-evidence-file">
-              <button
-                type="button"
-                className="btn btn-sm"
-                title={`Download ${document.file_name}`}
-                style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}
-                onClick={() => api.downloadFile(`${endpoint}/${document.id}/download`, document.file_name)}
-              >
-                {document.file_name}
-              </button>
-              {canManage && (isAdmin || document.uploaded_by_id === user?.id) && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-danger"
-                  aria-label={`Delete ${document.file_name}`}
-                  onClick={() => setPendingDelete(document)}
-                >
-                  ×
-                </button>
-              )}
-            </div>
+            <ChecklistEvidenceFileRow
+              key={document.id}
+              fileName={document.file_name}
+              onDownload={() => api.downloadFile(`${endpoint}/${document.id}/download`, document.file_name)}
+              onDelete={
+                canManage && (isAdmin || document.uploaded_by_id === user?.id)
+                  ? () => setPendingDelete(document)
+                  : undefined
+              }
+            />
           ))}
         </div>
       )}
       <ErrorText error={error} />
       {pendingDelete && (
-        <Modal title="Delete checklist evidence?" onClose={() => setPendingDelete(null)} variant="dialog" preventBackdropClose>
-          <p>Delete <strong>{pendingDelete.file_name}</strong> from this checklist item? This cannot be undone.</p>
-          <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-            <button type="button" className="btn btn-danger" disabled={busy} onClick={deleteDocument}>
-              {busy ? "Deleting…" : "Delete"}
-            </button>
-            <button type="button" className="btn" disabled={busy} onClick={() => setPendingDelete(null)}>Cancel</button>
-          </div>
-        </Modal>
+        <ChecklistEvidenceDeleteModal
+          fileName={pendingDelete.file_name}
+          itemLabel="from this checklist item"
+          busy={busy}
+          onConfirm={deleteDocument}
+          onCancel={() => setPendingDelete(null)}
+        />
       )}
     </div>
   );

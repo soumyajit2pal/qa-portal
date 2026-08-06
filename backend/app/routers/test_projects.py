@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles
+from ..deps import get_current_user, require_roles, dashboard_department_scope
 from ..constants import Role
 
 router = APIRouter(prefix="/api/test-projects", tags=["test-management"])
@@ -19,9 +19,22 @@ _MANAGE_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD)
 @router.get("", response_model=List[schemas.TestProjectOut])
 def list_test_projects(include_inactive: bool = Query(False), db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
+    # Reported directly: "Test Management also restrict to Department only" --
+    # same dashboard_department_scope rule as every other list endpoint
+    # (TestProject.department is a real column, so a direct .filter() is
+    # enough). This is the single entry point every Test Management screen
+    # (Projects, Repository, Execution) picks a project from, so scoping it
+    # here keeps a scoped user from ever reaching another department's
+    # folders/test cases/cycles/executions through the normal UI -- same
+    # convention as everywhere else: individual get-by-id endpoints (e.g.
+    # get_test_project) are left unscoped, matching every other module's
+    # own get-by-id endpoints (e.g. functional.py::get_functional).
     query = db.query(models.TestProject)
     if not include_inactive:
         query = query.filter(models.TestProject.is_active == True)  # noqa: E712
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        query = query.filter(models.TestProject.department == scope)
     return query.order_by(models.TestProject.is_active.desc(), models.TestProject.name).all()
 
 

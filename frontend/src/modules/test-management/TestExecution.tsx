@@ -580,7 +580,7 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
   const preview = selectedExecutions.slice(0, 6).map((execution) => execution.test_case?.test_case_key || `#${execution.test_case_id}`)
 
   return (
-    <Modal title={title} onClose={stage === 'executing' ? () => undefined : onClose} variant="dialog" preventBackdropClose wide>
+    <Modal title={title} onClose={stage === 'executing' ? () => undefined : onClose} variant="dialog" preventBackdropClose wide hideCloseButton>
       {stage === 'edit' && (
         <form onSubmit={review}>
           <div className="tm-bulk-confirm-count"><strong>{selectedExecutions.length}</strong><span>assigned testcase{selectedExecutions.length !== 1 ? 's' : ''} selected for a new attempt</span></div>
@@ -721,7 +721,7 @@ function BulkRemoveModal({ cycleId, cycleKey, executions, onClose, onRemoved }: 
         : `Remove ${selectedExecutions.length} testcase${selectedExecutions.length !== 1 ? 's' : ''} from ${cycleKey}?`
 
   return (
-    <Modal title={title} onClose={stage === 'removing' ? () => undefined : onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={stage === 'removing' ? () => undefined : onClose} variant="dialog" preventBackdropClose hideCloseButton>
       {stage === 'confirm' && (
         <div className="tm-bulk-confirm">
           <div className="tm-bulk-confirm-count"><strong>{selectedExecutions.length}</strong><span>testcase{selectedExecutions.length !== 1 ? 's' : ''} will leave this test cycle</span></div>

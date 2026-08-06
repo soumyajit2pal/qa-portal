@@ -326,6 +326,20 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
   const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
   const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
   const canSecurityDecide = hasRole(user, 'SECURITY_ANALYST') && status === 'SECURITY_TEAM_VERIFICATION'
+  // Document and Evidence Access Control Based on Workflow Stage: exactly 3
+  // upload stages, then a hard lock -- (1) the requester while it's Draft/
+  // Returned-by-*, (2) the SM only while SM_APPROVAL_PENDING, (3) the
+  // Department Head only while DEPARTMENT_HEAD_APPROVAL_PENDING. Every
+  // status after Department Head approval (including
+  // SECURITY_TEAM_VERIFICATION, previously a Security-Analyst upload
+  // window) is locked for everyone but Admin -- mirrors the backend's own
+  // (now-simplified) _can_upload_documents exactly.
+  const canManageDocuments = hasRole(user, 'ADMIN') || (
+    ['Draft', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status) ? isRequester :
+    status === 'SM_APPROVAL_PENDING' ? canSMDecide :
+    status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecide :
+    false
+  )
 
   return (
     <Modal title={`${sup.suppression_id} — ${sup.application_name}`} onClose={onClose} wide>
@@ -427,7 +441,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
         <JiraActivity entityType="SUPPRESSION" entityId={sup.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
 
-      {tab === 'documents' && <RequestDocuments apiBase="/api/suppressions" reqId={sup.id} />}
+      {tab === 'documents' && <RequestDocuments apiBase="/api/suppressions" reqId={sup.id} canManage={canManageDocuments} />}
     </Modal>
   )
 }

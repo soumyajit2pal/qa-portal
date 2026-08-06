@@ -5,7 +5,7 @@ import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../componen
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
 import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch } from '../../components/Icons'
 import SearchableSelect from '../../components/SearchableSelect'
-import { UserOut, DepartmentOut } from '../../types'
+import { UserOut, DepartmentOut, ApplicationSeedResult } from '../../types'
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -239,6 +239,99 @@ function DepartmentManagerCard({ departments, onChanged }: { departments: Depart
   )
 }
 
+// Admin section: "add one functionality on admin section to upload excel
+// and based on data present on excel Application name will be seed" -- lets
+// an Admin bulk-load a spreadsheet of known-good Application Names straight
+// into ApplicationMaster at APPROVED (see routers/applications.py::
+// bulk_seed_application_names for exactly how existing pending/approved/
+// rejected rows are each handled), instead of every name only ever entering
+// the master list one at a time via a requester typing "Other" on the QA
+// Request wizard and waiting on Application Owner review.
+function ApplicationSeedCard() {
+  const [file, setFile] = useState<File | null>(null)
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [result, setResult] = useState<ApplicationSeedResult | null>(null)
+
+  async function downloadTemplate() {
+    setDownloadingTemplate(true)
+    setError(null)
+    try {
+      await api.downloadFile('/api/application-names/bulk-seed-template', 'application_names_seed_template.xlsx')
+    } catch (err) { setError(err) } finally { setDownloadingTemplate(false) }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!file) { setError(new Error('Choose an .xlsx file first')); return }
+    setBusy(true)
+    setError(null)
+    setResult(null)
+    try {
+      const res = await api.uploadForm<ApplicationSeedResult>('/api/application-names/bulk-seed', { file })
+      setResult(res)
+      setFile(null)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card title="Application Names — Bulk Seed from Excel">
+      <p className="muted small" style={{ marginTop: -4, marginBottom: 12 }}>
+        Upload a spreadsheet of known-good Application Names to seed them straight into the master list at
+        Approved — skips the usual Application Owner review, since an Admin bulk upload is asserting these are
+        already valid. Expects an "Application Name" column (an optional "Department" column is also read).
+        A name already awaiting approval elsewhere is approved outright; an already-Approved name is left
+        untouched; a Rejected name is left untouched too — reinstate that one from its own request instead.
+      </p>
+      <form onSubmit={submit} style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button type="button" className="btn btn-sm" onClick={downloadTemplate} disabled={downloadingTemplate}>
+          {downloadingTemplate ? 'Downloading…' : 'Download Template'}
+        </button>
+        <input
+          type="file"
+          accept=".xlsx"
+          onChange={(e) => setFile(e.target.files?.[0] || null)}
+          disabled={busy}
+        />
+        <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !file}>
+          {busy ? 'Seeding…' : 'Upload & Seed'}
+        </button>
+      </form>
+      <ErrorText error={error} />
+      {result && (
+        <div className="access-summary" aria-label="Application name seed result" style={{ marginBottom: 12 }}>
+          <div><small>Created</small><strong>{result.created}</strong><span>New Approved names</span></div>
+          <div><small>Approved existing</small><strong>{result.approved_existing}</strong><span>Cleared from a pending queue</span></div>
+          <div><small>Already Approved</small><strong>{result.skipped_duplicate}</strong><span>Left untouched</span></div>
+          <div className={result.skipped_rejected ? 'needs-attention' : ''}>
+            <small>Previously Rejected</small><strong>{result.skipped_rejected}</strong><span>Left untouched</span>
+          </div>
+        </div>
+      )}
+      {result && result.skipped_invalid > 0 && (
+        <p className="muted small">{result.skipped_invalid} row{result.skipped_invalid !== 1 ? 's' : ''} had no Application Name value and were skipped.</p>
+      )}
+      {result && result.created === 0 && result.approved_existing === 0 && result.failure_reason && (
+        <div className="import-primary-reason" role="alert">
+          <strong>Reason</strong>
+          <p>{result.failure_reason}</p>
+        </div>
+      )}
+      {result && result.errors.length > 0 && (
+        <div className="import-issues" role="alert">
+          <strong>Row-level detail</strong>
+          <ul>{result.errors.map((message, idx) => <li key={idx}>{message}</li>)}</ul>
+        </div>
+      )}
+    </Card>
+  )
+}
+
 export default function Admin() {
   const { user } = useAuth()
   const [users, setUsers] = useState<UserOut[]>([])
@@ -460,6 +553,10 @@ export default function Admin() {
 
       <div className="access-departments-section">
         <DepartmentManagerCard departments={departments} onChanged={loadDepartments} />
+      </div>
+
+      <div className="access-departments-section">
+        <ApplicationSeedCard />
       </div>
 
       {showCreate && (

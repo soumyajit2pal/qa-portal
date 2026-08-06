@@ -24,6 +24,16 @@ export const ROLE_LABELS: Record<string, string> = {
   // "SM" per how it was specified -- rename to a fuller name here any time.
   SM: 'SM',
   ADMIN: 'Administrator',
+  // Confidential, System-Admin-only super-access role (see Role.SCALE_6_PLUS
+  // in backend/app/constants.py) -- only ever appears in a role picker on
+  // Admin.tsx, which is itself gated to Admin accounts only; DepartmentAdmin.tsx's
+  // own picker is built from DEPARTMENT_ADMIN_ASSIGNABLE_ROLES/
+  // QA_ADMIN_ASSIGNABLE_ROLES below, neither of which includes it, so a local
+  // admin never sees this label or option. The backend additionally never
+  // sends this role to a non-Admin viewer at all (see auth.py's
+  // _redact_confidential_roles), so this label being present here doesn't by
+  // itself expose anything to anyone who isn't already an Admin.
+  SCALE_6_PLUS: 'Scale 6+',
 }
 
 export const ALL_ROLES = Object.keys(ROLE_LABELS)
@@ -50,6 +60,35 @@ export const QA_ADMIN_ASSIGNABLE_ROLES: string[] = [
 // QA Sign-off is an IT - QA-owned workflow even when its linked testing
 // request came from another business department.
 export const QA_DEPARTMENT = 'IT - QA'
+
+// Mirrors backend/app/deps.py's DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES
+// exactly -- roles whose own department mapping is ignored for department-
+// scoped data (see that file's own docstring for the full reasoning: the
+// QA/Security/Executive-COE roles review every business department's
+// requests as their actual job, and Role.SCALE_6_PLUS is a confidential,
+// System-Admin-only role granted the same org-wide view on request). Used
+// here purely for frontend nav/page-gating decisions (e.g. hiding QA
+// Sign-off's nav item for someone who'd see an empty page there) -- the real
+// enforcement is always the backend's own query scoping; this just avoids
+// showing a guaranteed-empty page or a nav link to one. Checked directly
+// against user.roles (NOT hasRole(), which treats ADMIN as satisfying any
+// role check -- Admin is deliberately NOT in this set, same as the backend).
+export const DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES: string[] = [
+  'QA_LEAD', 'QA_ENGINEER', 'SECURITY_ANALYST',
+  'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM',
+  'SCALE_6_PLUS',
+]
+
+// Whether `user` would see any data on a page scoped the same way as QA
+// Sign-off (see dashboard_department_scope in deps.py): unrestricted by
+// role, has no department set at all (nothing meaningful to scope by, same
+// fallback the backend uses), or is actually mapped to QA_DEPARTMENT.
+export function canSeeQaDepartmentOnlyData(user?: { roles?: string[]; department?: string | null } | null): boolean {
+  if (!user) return false
+  if ((user.roles || []).some((r) => DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES.includes(r))) return true
+  if (!user.department) return true
+  return user.department === QA_DEPARTMENT
+}
 
 // Mirrors backend/app/constants.py's APPLICATION_MASTER_STATUS_LABELS
 // exactly -- a brand-new Application Name goes through two approval tiers
@@ -215,8 +254,22 @@ export const READINESS_EVIDENCE_EDITABLE_STATUSES: string[] = [
   'DRAFT', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM', 'SM_REJECTED',
   'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD',
 ]
-export function canManageReadinessEvidence(status?: string | null): boolean {
-  return !!status && (
+// Reported directly: "uploading document should be non editable if not
+// assigned, or in other person's bucket. only the assigned person can
+// update." -- this used to be status-only, so the Attach/Remove controls
+// looked clickable to *any* logged-in user viewing the request as long as
+// the status matched, even though the backend's own _can_upload_documents
+// (functional.py/sast_dast.py/performance.py) already rejected anyone who
+// isn't the requester or that status's current stage owner with a 403.
+// `isOwner` closes that gap -- callers pass whether *this* viewer is the
+// requester or the SM/Department Head currently sitting with the request
+// (the same identity check each module already computes for its own
+// Approve/Return buttons, e.g. Functional.tsx's isRequester/canSMDecide/
+// canDepartmentHeadDecide), so the controls only render as usable for
+// whoever the backend would actually let through. Defaults to true so any
+// not-yet-updated call site keeps its old (status-only) behavior.
+export function canManageReadinessEvidence(status?: string | null, isOwner: boolean = true): boolean {
+  return !!isOwner && !!status && (
     READINESS_EVIDENCE_EDITABLE_STATUSES.includes(status)
     || status.startsWith('RETURNED_BY_')
   )

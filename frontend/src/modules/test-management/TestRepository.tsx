@@ -564,7 +564,7 @@ function TestCaseReviewModal({ testCase, decision, onClose, onReviewed }: {
   }
 
   return (
-    <Modal title={approving ? 'Approve test case?' : 'Return test case for changes?'} onClose={onClose} variant="dialog" preventBackdropClose>
+    <Modal title={approving ? 'Approve test case?' : 'Return test case for changes?'} onClose={onClose} variant="dialog" preventBackdropClose hideCloseButton>
       <form onSubmit={submit}>
         <div className="tm-review-summary">
           <strong>{testCase.test_case_key}</strong>
@@ -646,7 +646,7 @@ function BulkApproveModal({ projectId, selectedIds, onClose, onApproved }: {
         : `Approve ${approvalIds.length} pending testcase${approvalIds.length !== 1 ? 's' : ''}?`
 
   return (
-    <Modal title={title} onClose={stage === 'approving' ? () => undefined : onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={stage === 'approving' ? () => undefined : onClose} variant="dialog" preventBackdropClose hideCloseButton>
       {stage === 'confirm' && (
         <form onSubmit={approve}>
           <div className="tm-bulk-confirm-count"><strong>{approvalIds.length}</strong><span>pending testcase{approvalIds.length !== 1 ? 's' : ''} will be approved</span></div>
@@ -1005,7 +1005,7 @@ function BulkUpdateModal({ projectId, selectedIds, folders, onClose, onUpdated }
           : `Update ${totalSelected} test case${totalSelected !== 1 ? 's' : ''}`
 
   return (
-    <Modal title={title} onClose={stage === 'updating' ? () => undefined : onClose} variant="dialog" preventBackdropClose>
+    <Modal title={title} onClose={stage === 'updating' ? () => undefined : onClose} variant="dialog" preventBackdropClose hideCloseButton>
       {stage === 'edit' && <form onSubmit={review}>
         <p className="muted small">Only the fields changed below will be applied. Existing test steps and other details will remain unchanged.</p>
         <Field label="Folder">

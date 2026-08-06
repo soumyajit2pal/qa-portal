@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, dashboard_department_scope, resolve_entity_department
 from .. import documents as doc_store
 from ..constants import GatewayStatus, Role
 
@@ -64,7 +64,8 @@ def _to_out(db: Session, row: models.ApprovalAction) -> dict:
 
 
 @router.get("", response_model=List[schemas.ApprovalActionOut])
-def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] = None, db: Session = Depends(get_db),
+def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] = None,
+                    db: Session = Depends(get_db),
                     current_user: models.User = Depends(get_current_user)):
     """Module 7: cross-entity approval/audit feed (QA_REQUEST, TEST_CASE, SAST_DAST, SUPPRESSION, SIGNOFF).
 
@@ -77,7 +78,16 @@ def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] =
     entry whose underlying gateway is Draft or Cancelled (Cancelled can only
     ever be reached FROM Draft -- there's no cancel path from Raised, so it's
     always an abandoned Draft too) and isn't the caller's own, before
-    trimming to the usual 500."""
+    trimming to the usual 500.
+
+    Department scoping (see dashboard_department_scope) is applied
+    unconditionally -- previously an opt-in `dashboard_scope` flag limited
+    this to the Dashboard's own "Recent Activity" fetch and deliberately left
+    the standalone Approval Workflow Log page (modules/governance/
+    Approvals.tsx) showing every department; reported directly that this
+    page should also be department-scoped like everything else, so the flag
+    was removed and this now always applies the same restriction, whichever
+    page calls it."""
     q = db.query(models.ApprovalAction)
     if entity_type:
         q = q.filter(models.ApprovalAction.entity_type == entity_type)
@@ -96,6 +106,9 @@ def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] =
             }
             if hidden_ids:
                 rows = [r for r in rows if not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) == scope]
     rows = rows[:500]
     return [_to_out(db, r) for r in rows]
 

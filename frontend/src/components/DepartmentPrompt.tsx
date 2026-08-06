@@ -44,11 +44,13 @@ export default function DepartmentPrompt() {
   }
 
   return (
-    // The header's own "Close" button (rendered unconditionally by Modal) is
-    // wired to the same action as "Log out instead" below, rather than a
-    // no-op -- there's no "just dismiss without deciding" option here, so
-    // closing this any way other than Save means abandoning this login.
-    <Modal title="Welcome — one more step" onClose={logout} preventBackdropClose variant="dialog">
+    // Reported directly ("cross button and close duplicate -- wherever on
+    // confirmation modal will be close then cross button should be removed"):
+    // the header's own × used to be wired to the same action as "Log out
+    // instead" below -- an exact duplicate of that explicit button -- so it's
+    // hidden now via hideCloseButton. There's still no "just dismiss without
+    // deciding" option here; only Save or "Log out instead" can close this.
+    <Modal title="Welcome — one more step" onClose={logout} preventBackdropClose variant="dialog" hideCloseButton>
       <p className="muted small" style={{ marginTop: -4, marginBottom: 16 }}>
         Hi {user?.full_name || 'there'} — this is your first time signing in. Pick your department below so
         the right people (your SM, Department Head) can review requests you raise. You can always ask an

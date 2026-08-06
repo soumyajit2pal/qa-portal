@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
@@ -75,6 +77,91 @@ def require_same_department(current_user: models.User, entity_department) -> Non
                 f"'{entity_department}', but your profile is mapped to '{current_user.department or 'no department'}'."
             ),
         )
+
+
+# Reported directly: "In dashboard, every-where show data from which
+# department user belong to only," then extended to every standalone request
+# list, then extended once more (reported directly): "Department head also
+# restricted / bind to Department. the department where they belong to only
+# details render to them." A business Department Head (DEPARTMENT_HEAD_CM/
+# AGM) was the last unrestricted business-side role -- now removed from this
+# set, so it's confined to its own department the same as Requester/
+# Business Analyst/SM/Application Owner/Admin.
+#
+# Still unrestricted: the QA/Security/Executive-COE roles that review
+# requests raised by every business department as their actual job
+# (QA_LEAD, QA_ENGINEER, SECURITY_ANALYST, DEPARTMENT_HEAD_COE_CM/AGM) --
+# these four are all mapped to the fixed QA_DEPARTMENT ("IT - QA"), never the
+# business department of the request they're reviewing, so scoping them the
+# same way as a Requester/SM would show them nothing rather than something
+# narrower (confirmed directly). Also unrestricted: Role.SCALE_6_PLUS -- a
+# System-Admin-only, confidential super-access role added per request ("that
+# user can see all data like IT-QA has") specifically so it can be granted to
+# someone outside the QA department who still needs the same org-wide view.
+DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES = {
+    Role.QA_LEAD, Role.QA_ENGINEER, Role.SECURITY_ANALYST,
+    Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM,
+    Role.SCALE_6_PLUS,
+}
+
+
+def dashboard_department_scope(current_user: models.User) -> Optional[str]:
+    """Returns the single department a Dashboard query should be confined to,
+    or None for "no restriction, show every department." Checked directly
+    against the raw roles list (models.User.roles), NOT has_role() --
+    has_role() treats ADMIN as satisfying any role check, which would
+    incorrectly also exempt an Admin account from this scoping even though
+    Admin is one of the roles that IS meant to be scoped here (confirmed
+    directly).
+
+    A user with no department set on their own profile is treated the same
+    as require_same_department treats a None entity_department: there's
+    nothing meaningful to scope by, so this returns None (unrestricted)
+    rather than filtering down to "department IS NULL" rows only."""
+    if set(current_user.roles) & DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES:
+        return None
+    return current_user.department or None
+
+
+def resolve_entity_department(db: Session, entity_type: str, entity_id: int) -> Optional[str]:
+    """Given an ApprovalAction-style entity_type/entity_id pair, returns the
+    underlying record's department -- shared by list_approvals (approvals.py)
+    and the audit-evidence report (routers/reports.py), both of which need to
+    apply dashboard_department_scope to the same cross-entity approval/audit
+    feed. Lives here rather than in either router since no router imports
+    from another router anywhere else in this app (one narrow, documented
+    exception aside). TEST_PROJECT/TEST_CASE/TEST_CYCLE and any other
+    entity_type not handled here fall through to None, which a scoped
+    caller's filter treats as "excluded" -- fail closed (hide anything we
+    can't positively confirm is in-scope) rather than fail open."""
+    if entity_type == "QA_REQUEST":
+        obj = db.query(models.QARequest).get(entity_id)
+        return obj.department if obj else None
+    if entity_type == "FUNCTIONAL_REQUEST":
+        obj = db.query(models.FunctionalRequest).get(entity_id)
+        return obj.department if obj else None
+    if entity_type == "SAST":
+        obj = db.query(models.SASTRequest).get(entity_id)
+        return obj.department if obj else None
+    if entity_type == "DAST":
+        obj = db.query(models.DASTRequest).get(entity_id)
+        return obj.department if obj else None
+    if entity_type == "SAST_DAST":
+        sast = db.query(models.SASTRequest).get(entity_id)
+        if sast:
+            return sast.department
+        dast = db.query(models.DASTRequest).get(entity_id)
+        return dast.department if dast else None
+    if entity_type == "PERFORMANCE":
+        obj = db.query(models.PerformanceRequest).get(entity_id)
+        return obj.department if obj else None
+    if entity_type == "SUPPRESSION":
+        obj = db.query(models.SuppressionRequest).get(entity_id)
+        return obj.department if obj else None
+    if entity_type == "SIGNOFF":
+        obj = db.query(models.QASignOff).get(entity_id)
+        return obj.department if obj else None
+    return None
 
 
 def require_not_requester(current_user: models.User, requester_id) -> None:

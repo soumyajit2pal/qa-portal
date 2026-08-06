@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department, require_not_requester
+from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
 from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
+from .. import application_names as app_names
 
 router = APIRouter(tags=["sast-dast"])
 
@@ -175,37 +176,36 @@ def _require_assigned_security_analyst(obj, user: models.User) -> None:
         raise HTTPException(403, "Only the Security Analyst assigned by the QA Lead can perform this action")
 
 
-# Post-readiness-claim statuses (own lifecycle, same set of values
-# for both SASTRequest and DASTRequest -- see constants.SAST_DAST_STATUSES).
-_SECURITY_OWNED_STATUSES = (
-    "SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS", "PLANNING", "CONFIGURATION", "SCANNING",
-    "FINDING_VALIDATION", "REMEDIATION", "ASSIGNED_TO_REQUESTER", "WAITING_FOR_FIX",
-    "ASSIGNED_TO_LEAD", "RESCAN", "SECURITY_COMPLETE",
-)
-
-
 def _can_upload_documents(obj, user: models.User) -> bool:
-    """Reported bug: upload had no restriction at all -- any logged-in user
-    could attach documents to any SAST/DAST request. Scoped to the original
-    requester (always) plus whoever the request's *current* status is
-    actually sitting with: SM during SM_APPROVAL_PENDING, Department Head
-    during DEPARTMENT_HEAD_APPROVAL_PENDING (both same-department-scoped,
-    matching those stages' own decision endpoints above), or a qualified
-    central Security/QA user for every post-readiness status. Admin always
+    """Reported directly (Document and Evidence Access Control Based on
+    Workflow Stage): access follows exactly 3 stages, then locks hard --
+    (1) the requester, while the request is genuinely in their own hands
+    (Draft/Submitted, Returned-by-*, Rejected) may upload any number of
+    files; (2) the SM, and only the SM, may upload while
+    SM_APPROVAL_PENDING; (3) the Department Head, and only the Department
+    Head, may upload while DEPARTMENT_HEAD_APPROVAL_PENDING. After
+    Department Head approval, EVERY status is locked -- including
+    WAITING_FOR_FIX, previously a dual requester/security-analyst window --
+    no Security Lead, Analyst, or requester may upload here until the
+    request is returned to the requester (a RETURNED_BY_* status), which
+    re-opens stage (1). This intentionally removes the prior post-readiness
+    upload window (every status from SECURITY_LEAD_ASSIGNED through
+    SECURITY_COMPLETE) -- any evidence Security generates during actual
+    scanning/remediation belongs in that finding's own record, not this
+    readiness-facing Documents/Checklist Evidence store. Admin always
     bypasses, same convention as every other permission check."""
     if user.has_role(Role.ADMIN):
         return True
-    if obj.requester_id == user.id:
-        return True
     status = obj.status
+    if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED",
+                  "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
+        return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
         return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
-    if status in _SECURITY_OWNED_STATUSES:
-        if status in ("SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS", "PLANNING"):
-            return obj.security_lead_id == user.id
-        return obj.security_analyst_id == user.id
+    # Every post-readiness/terminal status -- locked for everyone but Admin
+    # until the request is returned to the requester above.
     return False
 
 
@@ -644,7 +644,18 @@ def _add_finding(db: Session, obj, payload, current_user):
 # ---------------- Module 4: SAST ----------------
 @router.get("/api/sast-requests", response_model=List[schemas.SASTOut])
 def list_sast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.SASTRequest).order_by(models.SASTRequest.created_at.desc()).all()
+    q = db.query(models.SASTRequest)
+    # See list_functional's matching comment in routers/functional.py -- same
+    # reasoning, applied unconditionally (reported directly, then extended to
+    # "everywhere"). department is a delegated property (models.SASTRequest.
+    # department), not a real column, hence the join rather than a plain
+    # .filter(); standalone SAST requests (no qa_request_id) are excluded by
+    # this inner join, same as they already resolve to department=None today.
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
+             .filter(models.QARequest.department == scope)
+    return q.order_by(models.SASTRequest.created_at.desc()).all()
 
 
 # Standalone SAST request creation is DISABLED per request -- SAST requests
@@ -685,6 +696,31 @@ def update_sast(req_id: int, payload: schemas.SASTUpdate, db: Session = Depends(
     # SASTRequest.components cleans up the rows being replaced).
     components = data.pop("components", None)
     checked_items = data.pop("checked_items", None)
+    # Reported directly ("Duplicate Application Name Validation Across All
+    # Request Actions"): application_name used to fall straight into the
+    # generic setattr(obj, k, v) loop below -- a bare string write over
+    # SASTRequest's own disconnected application_name column (it has no
+    # application_master_id FK, unlike QARequest/FunctionalRequest), with
+    # zero case/whitespace normalization and no dedup check against
+    # models.ApplicationMaster. Popped out and routed through the same
+    # resolve_application_name every other Application Name entry point
+    # uses, so an Admin correcting a typo here reuses an existing name (any
+    # case/spacing variant) instead of silently creating a near-duplicate
+    # ApplicationMaster entry. Only the normalized NAME is kept -- the
+    # returned application_master_id is discarded since this column has
+    # nothing to link it to, and cleanup_orphaned_application_master is
+    # deliberately not called here for the same reason (no old_master_id was
+    # ever tracked for this disconnected column to begin with). Re-resolved
+    # only when genuinely different (case/whitespace-insensitive) from
+    # what's already saved, so a plain re-save of an unrelated field never
+    # re-touches it.
+    application_name_in = data.pop("application_name", None)
+    if application_name_in is not None:
+        incoming_upper = (application_name_in or "").strip().upper()
+        if incoming_upper != (obj.application_name or "").strip().upper():
+            obj.application_name, _ = app_names.resolve_application_name(
+                db, application_name_in, obj.department, current_user.id, qa_request_id=obj.qa_request_id,
+            )
     for k, v in data.items():
         setattr(obj, k, v)
     if components is not None:
@@ -887,7 +923,8 @@ def upload_sast_documents(req_id: int, files: List[UploadFile] = File(...), db: 
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester, central Security/QA team, or the SM/Department Head currently reviewing the request can upload documents")
-    return doc_store.save_documents(db, "SAST", req_id, obj.request_id, files, current_user.id)
+    return doc_store.save_documents(db, "SAST", req_id, obj.request_id, files, current_user.id,
+                                    log_entity_type="SAST", log_entity_id=obj.id, log_actor=current_user)
 
 
 @router.get("/api/sast-requests/{req_id}/documents/{doc_id}/download")
@@ -903,10 +940,11 @@ def download_sast_document(req_id: int, doc_id: int, db: Session = Depends(get_d
 @router.delete("/api/sast-requests/{req_id}/documents/{doc_id}")
 def delete_sast_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
+    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
     doc = doc_store.get_document_or_404(db, "SAST", req_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="SAST", log_entity_id=req_id, log_actor=current_user)
     return {"ok": True}
 
 
@@ -943,13 +981,15 @@ def list_sast_checklist_documents(req_id: int, item_id: int, db: Session = Depen
 def upload_sast_checklist_documents(req_id: int, item_id: int, files: List[UploadFile] = File(...),
                                     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
-    _sast_checklist_item_or_404(db, req_id, item_id)
+    item = _sast_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester or this request's current stage owner can attach checklist evidence")
     return doc_store.save_documents(db, "SAST_ITEM", item_id,
-                                    f"{obj.request_id}/checklist-{item_id}", files, current_user.id)
+                                    f"{obj.request_id}/checklist-{item_id}", files, current_user.id,
+                                    log_entity_type="SAST", log_entity_id=obj.id, log_actor=current_user,
+                                    log_label=f"checklist item '{item.item}'")
 
 
 @router.get("/api/sast-requests/{req_id}/checklist/{item_id}/documents/{doc_id}/download")
@@ -967,13 +1007,14 @@ def download_sast_checklist_document(req_id: int, item_id: int, doc_id: int,
 def delete_sast_checklist_document(req_id: int, item_id: int, doc_id: int,
                                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
-    _sast_checklist_item_or_404(db, req_id, item_id)
+    item = _sast_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     doc = doc_store.get_document_or_404(db, "SAST_ITEM", item_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="SAST", log_entity_id=obj.id,
+                              log_actor=current_user, log_label=f"checklist item '{item.item}'")
     return {"ok": True}
 
 
@@ -1079,7 +1120,14 @@ def _dast_out(obj: models.DASTRequest, current_user: models.User) -> schemas.DAS
 
 @router.get("/api/dast-requests", response_model=List[schemas.DASTOut])
 def list_dast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    rows = db.query(models.DASTRequest).order_by(models.DASTRequest.created_at.desc()).all()
+    q = db.query(models.DASTRequest)
+    # See list_sast's matching comment just above -- identical reasoning,
+    # applied unconditionally.
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
+             .filter(models.QARequest.department == scope)
+    rows = q.order_by(models.DASTRequest.created_at.desc()).all()
     return [_dast_out(r, current_user) for r in rows]
 
 
@@ -1329,7 +1377,8 @@ def upload_dast_documents(req_id: int, files: List[UploadFile] = File(...), db: 
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester, central Security/QA team, or the SM/Department Head currently reviewing the request can upload documents")
-    return doc_store.save_documents(db, "DAST", req_id, obj.request_id, files, current_user.id)
+    return doc_store.save_documents(db, "DAST", req_id, obj.request_id, files, current_user.id,
+                                    log_entity_type="DAST", log_entity_id=obj.id, log_actor=current_user)
 
 
 @router.get("/api/dast-requests/{req_id}/documents/{doc_id}/download")
@@ -1345,10 +1394,11 @@ def download_dast_document(req_id: int, doc_id: int, db: Session = Depends(get_d
 @router.delete("/api/dast-requests/{req_id}/documents/{doc_id}")
 def delete_dast_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
+    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
     doc = doc_store.get_document_or_404(db, "DAST", req_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="DAST", log_entity_id=req_id, log_actor=current_user)
     return {"ok": True}
 
 
@@ -1385,13 +1435,15 @@ def list_dast_checklist_documents(req_id: int, item_id: int, db: Session = Depen
 def upload_dast_checklist_documents(req_id: int, item_id: int, files: List[UploadFile] = File(...),
                                     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
-    _dast_checklist_item_or_404(db, req_id, item_id)
+    item = _dast_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester or this request's current stage owner can attach checklist evidence")
     return doc_store.save_documents(db, "DAST_ITEM", item_id,
-                                    f"{obj.request_id}/checklist-{item_id}", files, current_user.id)
+                                    f"{obj.request_id}/checklist-{item_id}", files, current_user.id,
+                                    log_entity_type="DAST", log_entity_id=obj.id, log_actor=current_user,
+                                    log_label=f"checklist item '{item.item}'")
 
 
 @router.get("/api/dast-requests/{req_id}/checklist/{item_id}/documents/{doc_id}/download")
@@ -1409,13 +1461,14 @@ def download_dast_checklist_document(req_id: int, item_id: int, doc_id: int,
 def delete_dast_checklist_document(req_id: int, item_id: int, doc_id: int,
                                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
-    _dast_checklist_item_or_404(db, req_id, item_id)
+    item = _dast_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     doc = doc_store.get_document_or_404(db, "DAST_ITEM", item_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="DAST", log_entity_id=obj.id,
+                              log_actor=current_user, log_label=f"checklist item '{item.item}'")
     return {"ok": True}
 
 

@@ -831,6 +831,7 @@ export function RequestDetail({
           onClose={() => setPendingDeleteDoc(null)}
           variant="dialog"
           preventBackdropClose
+          hideCloseButton
         >
           <div style={{ fontSize: 13.5 }}>
             Delete <strong>{pendingDeleteDoc.file_name}</strong>? This cannot be undone.

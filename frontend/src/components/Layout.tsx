@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS, hasRole } from '../constants'
+import { ROLE_LABELS, hasRole, canSeeQaDepartmentOnlyData } from '../constants'
 import { api } from '../api'
 import { UserOut, PendingApprovalItem } from '../types'
 import {
@@ -89,7 +89,13 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
     {
       label: 'Governance',
       items: [
-        { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate },
+        // Reported directly: "Hide QA Sign Off except IT-QA" -- every
+        // certificate's own department is hardcoded to QA_DEPARTMENT ("IT -
+        // QA") at creation (see routers/signoff.py::create_signoff), and the
+        // list endpoint now scopes to that (see ORACLE_MIGRATION_2026-07.md
+        // section 201), so anyone outside canSeeQaDepartmentOnlyData would
+        // only ever land on a guaranteed-empty page -- hidden here instead.
+        ...(canSeeQaDepartmentOnlyData(user) ? [{ to: '/signoff', label: 'QA Sign-off', icon: IconCertificate }] : []),
         { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell, count: counts.pendingApprovals },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },

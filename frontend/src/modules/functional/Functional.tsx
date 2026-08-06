@@ -106,6 +106,23 @@ function FunctionalFormModal({
     "/api/functional-requests",
     editing.id
   );
+  // Mirrors the identity check the detail view computes for canEditDetails/
+  // canSMDecide/canDepartmentHeadDecide -- this modal only ever opens via
+  // that same canEditDetails gate, but the checklist evidence controls
+  // inside it need their own explicit identity+status check (see
+  // canManageReadinessEvidence's isOwner param) rather than assuming the
+  // status alone means this particular viewer may attach/remove evidence.
+  const isRequesterModal = editing.requester_id === user?.id || isAdmin;
+  const sameDeptModal = !!user?.department && user.department === editing.department;
+  const canSMDecideModal = hasRole(user, "SM") && editing.status === "SM_APPROVAL_PENDING" && sameDeptModal;
+  const canDeptHeadDecideModal =
+    hasRole(user, "DEPARTMENT_HEAD_CM", "DEPARTMENT_HEAD_AGM") &&
+    editing.status === "DEPARTMENT_HEAD_APPROVAL_PENDING" && sameDeptModal;
+  const canManageEvidenceModal =
+    isAdmin ||
+    (editing.status === "SM_APPROVAL_PENDING" ? canSMDecideModal :
+    editing.status === "DEPARTMENT_HEAD_APPROVAL_PENDING" ? canDeptHeadDecideModal :
+    isRequesterModal);
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) {
     setForm((f) => ({ ...f, [k]: v }));
   }
@@ -351,7 +368,7 @@ function FunctionalFormModal({
                       </span>
                     </label>
                     <ChecklistEvidence apiBase="/api/functional-requests" reqId={editing.id} itemId={c.id}
-                      canManage={canManageReadinessEvidence(editing.status)}
+                      canManage={canManageReadinessEvidence(editing.status, canManageEvidenceModal)}
                       required={c.is_mandatory || c.requester_checked}
                       documents={documentsByItem[c.id] || []}
                       onReload={reloadEvidence}
@@ -669,6 +686,37 @@ function FunctionalDetail({
     status === "DEPARTMENT_HEAD_APPROVAL_PENDING" &&
     (sameDept || isAdmin) &&
     !isSelfApproval;
+  // Reported directly: "only the assigned person can update" -- once the
+  // request has moved past the requester (e.g. to SM_APPROVAL_PENDING), the
+  // requester is no longer the current assignee, so evidence control passes
+  // exclusively to whoever it's actually sitting with now, matching the
+  // backend's own (now-exclusive) _can_upload_documents exactly. Combined
+  // with canManageReadinessEvidence's own status gate below, this only ever
+  // matters for the pre-QA-lead-assignment statuses it covers.
+  const evidenceOwner =
+    isAdmin ||
+    (status === "SM_APPROVAL_PENDING" ? canSMDecide :
+    status === "DEPARTMENT_HEAD_APPROVAL_PENDING" ? canDepartmentHeadDecide :
+    isRequester);
+  // Document and Evidence Access Control Based on Workflow Stage: exactly 3
+  // upload stages, then a hard lock -- (1) the requester while it's Draft/
+  // Submitted/Returned-by-*/Rejected/back for final verification, (2) the
+  // SM only while SM_APPROVAL_PENDING, (3) the Department Head only while
+  // DEPARTMENT_HEAD_APPROVAL_PENDING. Every QA-activity status after
+  // Department Head approval is locked for everyone but Admin -- mirrors
+  // the backend's own (now-simplified) _can_upload_documents exactly. Used
+  // for the general Documents tab; evidenceOwner above covers the same 3
+  // stages for checklist evidence.
+  const canManageDocuments =
+    isAdmin ||
+    (["DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD",
+      "RETURNED_BY_QA_LEAD", "REQUESTER_VERIFICATION"].includes(status)
+      ? isRequester
+      : status === "SM_APPROVAL_PENDING"
+      ? canSMDecide
+      : status === "DEPARTMENT_HEAD_APPROVAL_PENDING"
+      ? canDepartmentHeadDecide
+      : false);
   const canStartReadiness =
     isAssignedQALead && status === "QA_LEAD_ASSIGNED";
   const canReadinessDecide =
@@ -1356,7 +1404,7 @@ function FunctionalDetail({
                 />
               </span>
               <ChecklistEvidence apiBase="/api/functional-requests" reqId={req.id} itemId={c.id}
-                canManage={canManageReadinessEvidence(req.status)}
+                canManage={canManageReadinessEvidence(req.status, evidenceOwner)}
                 required={c.is_mandatory || c.requester_checked}
                 documents={documentsByItem[c.id] || []}
                 onReload={reloadEvidence}
@@ -1371,7 +1419,7 @@ function FunctionalDetail({
       )}
 
       {tab === "documents" && (
-        <RequestDocuments apiBase="/api/functional-requests" reqId={req.id} />
+        <RequestDocuments apiBase="/api/functional-requests" reqId={req.id} canManage={canManageDocuments} />
       )}
 
       <ErrorText

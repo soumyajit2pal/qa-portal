@@ -12,10 +12,30 @@ from ..auth import (
 from ..deps import get_current_user, require_roles
 from ..constants import (
     Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES, DEFAULT_LDAP_PROVISION_ROLE,
-    DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES,
+    DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES, CONFIDENTIAL_ROLES,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+def _redact_confidential_roles(user: "models.User", viewer: "models.User") -> "schemas.UserOut":
+    """Strips CONFIDENTIAL_ROLES (currently just SCALE_6_PLUS -- see its own
+    comment in constants.py) out of a user's `roles` before it's serialized
+    for a non-Admin viewer. Reported directly: this role must be "not visible
+    to noone except admin" -- without this, list_users (the general active-
+    users picker fetched by every logged-in user throughout the app, e.g.
+    "assign tester") and list_local_admin_users would both include it in the
+    plain JSON response, visible to anyone with browser devtools open even if
+    no current UI happens to render it. Builds a real schemas.UserOut (rather
+    than mutating the ORM row's computed `roles` property, which reads
+    directly from the role_assignments relationship and isn't safely
+    overridable per-response) so this can be dropped straight into a
+    response_model=UserOut/list[UserOut] return without any other change.
+    A viewer who IS Admin gets the untouched, full role list."""
+    out = schemas.UserOut.model_validate(user)
+    if not viewer.has_role(Role.ADMIN):
+        out.roles = [r for r in out.roles if r not in CONFIDENTIAL_ROLES]
+    return out
 
 
 @router.post("/login", response_model=schemas.Token)
@@ -146,8 +166,11 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
 
 @router.get("/users", response_model=list[schemas.UserOut])
 def list_users(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """Active users only -- used throughout the app for pickers (assign tester, etc.)."""
-    return db.query(models.User).filter(models.User.is_active == True).order_by(models.User.full_name).all()  # noqa: E712
+    """Active users only -- used throughout the app for pickers (assign tester, etc.).
+    Reachable by any logged-in user, so CONFIDENTIAL_ROLES are redacted from
+    every row unless the caller is an Admin -- see _redact_confidential_roles."""
+    rows = db.query(models.User).filter(models.User.is_active == True).order_by(models.User.full_name).all()  # noqa: E712
+    return [_redact_confidential_roles(u, current_user) for u in rows]
 
 
 @router.get("/users/all", response_model=list[schemas.UserOut])
@@ -313,6 +336,13 @@ def _require_own_department_target(current_user: models.User, target: models.Use
         raise HTTPException(status_code=403, detail="You cannot manage your own account here")
     if "ADMIN" in target.roles:
         raise HTTPException(status_code=403, detail="Administrator accounts cannot be managed from here")
+    # See Role.SCALE_6_PLUS's own comment in constants.py -- a confidential,
+    # System-Admin-only role. Given the SAME "cannot be managed/seen from
+    # here" treatment as an ADMIN account itself, not merely a redacted
+    # label, so a local admin can't even discover this role exists by probing
+    # a user ID directly.
+    if any(r in target.roles for r in CONFIDENTIAL_ROLES):
+        raise HTTPException(status_code=403, detail="This account cannot be managed from here")
     if target.admin_managed_only:
         raise HTTPException(status_code=403,
                              detail="This account is managed by a System Admin only")
@@ -348,8 +378,9 @@ def list_local_admin_users(db: Session = Depends(get_db),
                                 Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
     """Every user mapped to the local admin's own department (any status,
     so a previously-disabled account can be re-activated too), excluding
-    their own account, any Administrator accounts, and any account flagged
-    admin_managed_only -- mirrors the guard rails in
+    their own account, any Administrator accounts, any account flagged
+    admin_managed_only, and any account holding a CONFIDENTIAL_ROLES role
+    (see Role.SCALE_6_PLUS's own comment) -- mirrors the guard rails in
     _require_own_department_target/update_local_admin_user below."""
     if not current_user.department:
         raise HTTPException(status_code=400, detail="Your own profile has no department set")
@@ -359,7 +390,11 @@ def list_local_admin_users(db: Session = Depends(get_db),
         .order_by(models.User.full_name)
         .all()
     )
-    return [u for u in rows if "ADMIN" not in u.roles and not u.admin_managed_only]
+    return [
+        u for u in rows
+        if "ADMIN" not in u.roles and not u.admin_managed_only
+        and not any(r in u.roles for r in CONFIDENTIAL_ROLES)
+    ]
 
 
 @router.patch("/local-admin/users/{user_id}", response_model=schemas.UserOut)

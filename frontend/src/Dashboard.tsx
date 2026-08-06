@@ -77,8 +77,17 @@ const TERMINAL_STATUSES_BY_TYPE: Record<string, string[]> = {
   DAST: SAST_DAST_TERMINAL_STATUSES,
   Performance: PERFORMANCE_TERMINAL_STATUSES,
 }
+// Reported directly: "Draft should not be seen in Active" -- a Draft is not
+// yet even submitted for review, so it shouldn't count as "in progress"
+// alongside genuinely in-flight requests, even though DRAFT was never in any
+// type's own terminal-status list (it isn't terminal either -- it just
+// hasn't started).
 function isActiveRequest(row: UnifiedRequestRow): boolean {
+  if (row.status === 'DRAFT') return false
   return !(TERMINAL_STATUSES_BY_TYPE[row.type] || []).includes(row.status)
+}
+function isTerminalRequest(row: UnifiedRequestRow): boolean {
+  return (TERMINAL_STATUSES_BY_TYPE[row.type] || []).includes(row.status)
 }
 
 const TYPE_TO_PATH: Record<string, string> = {
@@ -382,9 +391,17 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
   useEffect(() => {
     const query = rangeQuery(range)
     Promise.all([
+      // project-wise/3w are only ever fetched by this Command Centre tab, so
+      // their own department scoping (see backend dashboard_department_scope)
+      // is applied unconditionally server-side -- no flag needed here.
       api.get<ProjectWiseOut>(`/api/dashboard/project-wise${query}`),
       api.get<ThreeWOut>(`/api/dashboard/3w${query}`),
-      api.get<ApprovalActionOut[]>('/api/approvals'),
+      // /api/approvals also feeds the separate Approval Workflow Log page
+      // (see modules/governance/Approvals.tsx) -- both now apply the same
+      // department scoping unconditionally server-side (reported directly:
+      // "Approval Workflow log ... everything also by department only"), so
+      // no flag is needed here any more.
+      api.get<ApprovalActionOut[]>(`/api/approvals${query}`),
     ]).then(([p, w, a]) => {
       setProj(p); setThreeW(w); setActivity(a)
     }).catch(setError)
@@ -823,6 +840,12 @@ function MyRequestsTab({ range, requests, functionalRequests, sastRequests, dast
   const filteredDepartmentRequests = departmentRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
   const scopedRequests = reqScope === 'mine' ? filteredMyRequests : filteredDepartmentRequests
   const scopedActiveCount = scopedRequests.filter(isActiveRequest).length
+  // Computed the same way as isActiveRequest's own terminal-status check
+  // (not just "total minus active") so a Draft request -- neither active nor
+  // terminal now that Draft is excluded from Active above -- isn't
+  // miscounted as "Closed / cancelled" either; it still counts toward Total
+  // requests, just not toward either of the other two cards.
+  const scopedTerminalCount = scopedRequests.filter(isTerminalRequest).length
 
   if (error) return <ErrorText error={error} />
   if (!loaded) return <p className="muted">Loading...</p>
@@ -848,7 +871,7 @@ function MyRequestsTab({ range, requests, functionalRequests, sastRequests, dast
         <div className="grid grid-3">
           <StatCard icon={IconGrid} iconClass="blue" value={scopedRequests.length} label="Total requests" />
           <StatCard icon={IconWorkflow} iconClass="purple" value={scopedActiveCount} label="Active / in progress" />
-          <StatCard icon={IconCheckCircle} iconClass="amber" value={scopedRequests.length - scopedActiveCount} label="Closed / cancelled" />
+          <StatCard icon={IconCheckCircle} iconClass="amber" value={scopedTerminalCount} label="Closed / cancelled" />
         </div>
 
         <div style={{ marginTop: 18 }}>
@@ -1028,6 +1051,14 @@ export default function Dashboard() {
   const [requestsError, setRequestsError] = useState<unknown>(null)
 
   useEffect(() => {
+    // These 5 endpoints now apply department scoping unconditionally on the
+    // backend (see dashboard_department_scope in deps.py) -- originally
+    // opt-in here via a dashboard_scope=true flag while this was believed to
+    // be Dashboard-only, then extended (reported directly) to "QA Requests,
+    // Functional Requests, SAST, DAST, Suppression, Performance everywhere
+    // ... it also be by department only", so the flag is gone and every
+    // caller of these endpoints -- this fetch included -- gets the same
+    // scoping with no query param needed.
     Promise.all([
       api.get<QARequestOut[]>('/api/qa-requests'),
       api.get<FunctionalOut[]>('/api/functional-requests'),

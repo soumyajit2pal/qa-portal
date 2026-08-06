@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from .. import documents as doc_store
+from .. import application_names as app_names
 from ..database import get_db
-from ..deps import get_current_user, require_roles
+from ..deps import get_current_user, require_roles, dashboard_department_scope
 from ..constants import (
     Role,
     FUNCTIONAL_BUCKET_TYPES, GatewayStatus, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
@@ -206,89 +207,15 @@ def _finalize_child_requests(db: Session, obj: "models.QARequest", requester: mo
          "Linked request(s) raised with their own independent ID(s); workflow now handled on each separately")
 
 
-def _resolve_application_name(db: Session, name: Optional[str], department: Optional[str],
-                               requester_id: int, qa_request_id: Optional[int] = None):
-    """Called on every create/edit of a QA Request -- uppercases the given
-    Application Name (minimises case-sensitivity duplicates, e.g. "sbi" vs
-    "SBI") and resolves it against models.ApplicationMaster:
-      - an existing APPROVED, still-PENDING_APP_OWNER, or still-PENDING_SM
-        row for that exact name is just reused as-is;
-      - a REJECTED row is flipped back to PENDING_APP_OWNER and re-attributed
-        to this requester/department/request, treating this as a fresh
-        proposal that re-enters the two-tier approval chain from the start
-        (whatever earlier issue got it rejected may no longer apply, and
-        either tier should get to look at it again);
-      - otherwise a brand-new PENDING_APP_OWNER row is created.
-    This never blocks the caller -- see the class docstring on
-    models.ApplicationMaster for why Draft save and Submit/Raise both
-    proceed regardless of the name's current approval status (approving/
-    rejecting a name is handled independently by an Application Owner then
-    an SM, see routers/applications.py). Returns (uppercased_name,
-    application_master_id).
-
-    Note: if a requester changes their mind mid-Draft and swaps one brand-new
-    (still-pending) name for a different brand-new name, the first name's
-    ApplicationMaster row is simply left behind, still pending and still
-    linked via qa_request_id to this same request even though the request no
-    longer uses that name -- a minor, rare bit of queue clutter for an
-    Application Owner/SM to reject/ignore, not worth extra bookkeeping to
-    prevent."""
-    name_upper = (name or "").strip().upper()
-    existing = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.name == name_upper).first()
-    if existing:
-        if existing.status == "REJECTED":
-            existing.status = "PENDING_APP_OWNER"
-            existing.requested_by_id = requester_id
-            existing.department = department
-            existing.qa_request_id = qa_request_id
-            existing.app_owner_decided_by_id = None
-            existing.app_owner_decided_at = None
-            existing.app_owner_comments = None
-            existing.decided_by_id = None
-            existing.decided_at = None
-            existing.comments = None
-        return name_upper, existing.id
-    new_entry = models.ApplicationMaster(
-        name=name_upper, status="PENDING_APP_OWNER", department=department,
-        requested_by_id=requester_id, qa_request_id=qa_request_id,
-    )
-    db.add(new_entry)
-    db.flush()  # need new_entry.id to link it below
-    return name_upper, new_entry.id
-
-
-def _cleanup_orphaned_application_master(db: Session, old_master_id: Optional[int], qa_request_id: int) -> None:
-    """Called right after edit_request resolves a QA Request's Application
-    Name to a genuinely DIFFERENT ApplicationMaster row -- reported directly:
-    "the original application name should not remain as a separate pending
-    approval entry" / "only the latest application name should be displayed
-    for approval." Previously the name this request used to point at was
-    just left behind still PENDING_APP_OWNER/PENDING_SM (see
-    _resolve_application_name's own docstring, "a minor, rare bit of queue
-    clutter... not worth extra bookkeeping to prevent") -- Pending Approvals
-    would then show both the old, abandoned name AND the new one for what
-    looks like the same request. If nothing else still resolves to that old
-    row and it was never actually decided (still pending either tier), it's
-    deleted outright here -- there's no audit trail pointing at the
-    ApplicationMaster row itself (ApprovalAction entries key off the QA
-    Request/child request's own id, not this one), and no other request
-    needs it. A row that's already APPROVED or REJECTED (a real decision was
-    made) is left untouched regardless -- only un-decided, abandoned rows are
-    cleaned up."""
-    if not old_master_id:
-        return
-    old = db.query(models.ApplicationMaster).get(old_master_id)
-    if not old or old.status not in ("PENDING_APP_OWNER", "PENDING_SM"):
-        return
-    still_used = (
-        db.query(models.QARequest.id)
-        .filter(models.QARequest.application_master_id == old_master_id,
-                models.QARequest.id != qa_request_id)
-        .first()
-    )
-    if still_used:
-        return
-    db.delete(old)
+# _resolve_application_name/_cleanup_orphaned_application_master used to
+# live here -- moved to app/application_names.py (see that module's own
+# docstring) so functional.py/sast_dast.py/performance.py can share the
+# exact same normalize-and-reuse-or-create logic for their own Admin-only
+# Application Name edits, instead of each bypassing the registry with a bare
+# setattr. Aliased back to their original names here purely so every
+# existing call site below reads unchanged.
+_resolve_application_name = app_names.resolve_application_name
+_cleanup_orphaned_application_master = app_names.cleanup_orphaned_application_master
 
 
 def _stash_draft_details(checked_items: Optional[set], sast_components: list, dast_components: list,
@@ -353,6 +280,20 @@ def list_requests(status_filter: Optional[str] = None, department: Optional[str]
         q = q.filter(models.QARequest.department == department)
     if application_name:
         q = q.filter(models.QARequest.application_name.ilike(f"%{application_name}%"))
+    # Reported directly: "In dashboard, every-where show data from which
+    # department user belong to only" -- then, immediately after, extended to
+    # "QA Requests, Functional Requests, SAST, DAST, Suppression, Performance
+    # everywhere ... it also be by department only." Applied unconditionally
+    # now (was briefly opt-in via a dashboard_scope flag while this was
+    # believed to be Dashboard-only) -- every list of these request types,
+    # wherever it's shown, is scoped the same way. See
+    # dashboard_department_scope's own docstring in deps.py for exactly which
+    # roles this does and doesn't apply to (the QA/Security/Executive-COE
+    # roles stay unrestricted; every other role, Admin and Department Head
+    # included, is confined to their own department).
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.filter(models.QARequest.department == scope)
     if search:
         # Broad "requests or IDs" search (topbar search box and the
         # QA Requests list's own search field) -- matches Request ID,

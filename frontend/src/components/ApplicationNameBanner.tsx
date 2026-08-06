@@ -58,6 +58,15 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
   // update that may never come."
   const [decided, setDecided] = useState<'Approved' | 'Rejected' | null>(null)
   const [error, setError] = useState<unknown>(null)
+  // Reported directly: rejecting a name gave no way to say why -- the
+  // backend has always accepted/stored payload.comments (see
+  // decide_app_owner_name/decide_application_name, both logged onto every
+  // affected request's own Activity tab via _log_application_name_decision),
+  // but this banner never collected or sent anything. One free-text field
+  // for both outcomes, same "optional note attached to this action" pattern
+  // used everywhere else in the app (e.g. Functional/SAST/DAST/Performance's
+  // own "Action note" input) rather than a separate Reject-only control.
+  const [comments, setComments] = useState('')
 
   const isAppOwnerTier = applicationMasterStatus === 'PENDING_APP_OWNER'
   const isSmTier = applicationMasterStatus === 'PENDING_SM'
@@ -73,7 +82,7 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
     setBusy(decision)
     setError(null)
     try {
-      await api.post(`/api/application-names/${applicationMasterId}/${endpoint}`, { decision })
+      await api.post(`/api/application-names/${applicationMasterId}/${endpoint}`, { decision, comments })
       setDecided(decision)
       // Reported directly (again, after section 175/177): buttons were still
       // showing after a click. AWAITED now (was fire-and-forget) so the
@@ -134,6 +143,17 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
           ? ' before it becomes a selectable option for everyone else and the linked request can move on to SM for readiness verification.'
           : ' before it becomes a selectable option for everyone else.'}
       </span>
+      <input
+        type="text"
+        placeholder="Remarks (optional -- e.g. why you're rejecting this name)"
+        value={comments}
+        disabled={!!busy}
+        onChange={(e) => setComments(e.target.value)}
+        style={{
+          width: '100%', padding: 7, border: '1px solid #bfdbfe', borderRadius: 6,
+          fontSize: 13, background: '#fff', color: '#1e293b',
+        }}
+      />
       <div style={{ display: 'flex', gap: 8 }}>
         <button type="button" className="btn btn-sm btn-primary" disabled={!!busy} onClick={() => decide('Approved')}>
           {busy === 'Approved' ? 'Approving...' : 'Approve Name'}

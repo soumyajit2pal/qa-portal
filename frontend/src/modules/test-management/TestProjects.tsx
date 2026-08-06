@@ -405,6 +405,7 @@ export default function TestProjects() {
           onClose={() => setStatusProject(null)}
           variant="dialog"
           preventBackdropClose
+          hideCloseButton
         >
           <p>
             {canReview ? (
@@ -431,6 +432,7 @@ export default function TestProjects() {
           onClose={() => { setActivationReview(null); setReviewComments('') }}
           variant="dialog"
           preventBackdropClose
+          hideCloseButton
         >
           <p>
             {activationReview.project.pending_requested_by_name || 'A QA Engineer'} requested{' '}

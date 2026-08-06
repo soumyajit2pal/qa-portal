@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, dashboard_department_scope, resolve_entity_department
 from ..constants import SUPPRESSION_TERMINAL_STATUSES, QAStatus, GatewayStatus, Role
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -24,13 +24,23 @@ def _visible_qa_requests(db: Session, current_user: models.User):
     only ever be reached FROM Draft -- there is no cancel path from Raised --
     so it's always an abandoned Draft, never a real workflow) are only
     visible to their own requester (or an Admin); once genuinely Raised it's
-    fair game for reporting like everything else."""
+    fair game for reporting like everything else.
+
+    Also applies dashboard_department_scope (reported directly: "Report &
+    Export Centre ... everything also by department only. other department
+    data can not be shown") -- QARequest.department is a real column, so a
+    direct .filter() is enough; every report/export below either calls this
+    helper directly or applies the equivalent join/filter for its own model,
+    so no report can surface another department's data."""
     q = db.query(models.QARequest)
     if not current_user.has_role(Role.ADMIN):
         q = q.filter(or_(
             models.QARequest.status.notin_(_GATEWAY_PRIVATE_STATUSES),
             models.QARequest.requester_id == current_user.id,
         ))
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.filter(models.QARequest.department == scope)
     return q
 
 
@@ -73,7 +83,17 @@ def qa_request_summary(db: Session = Depends(get_db), current_user: models.User 
 # ---------------- 4.10.2 Security Reports ----------------
 @router.get("/sast-scan")
 def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    rows = db.query(models.SASTRequest).all()
+    # department is a delegated property (models.SASTRequest.department reads
+    # through .qa_request), not a real column, so scoping needs a join same
+    # as list_sast in routers/sast_dast.py -- standalone SAST requests (no
+    # qa_request_id) are excluded by this inner join for a scoped user, same
+    # as they already resolve to department=None today.
+    q = db.query(models.SASTRequest)
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
+             .filter(models.QARequest.department == scope)
+    rows = q.all()
     return [{
         "Request ID": r.request_id, "Application": r.application_name, "Build": r.build_number,
         "Status": r.status, "Findings": len(r.findings),
@@ -82,7 +102,13 @@ def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
 
 @router.get("/dast-scan")
 def dast_scan_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    rows = db.query(models.DASTRequest).all()
+    # See sast_scan_report's matching comment just above -- identical reasoning.
+    q = db.query(models.DASTRequest)
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
+             .filter(models.QARequest.department == scope)
+    rows = q.all()
     return [{
         "Request ID": r.request_id, "Application URL": r.application_url, "Environment": r.environment,
         "Status": r.status, "Findings": len(r.findings),
@@ -91,7 +117,20 @@ def dast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
 
 @router.get("/vulnerability-trend")
 def vulnerability_trend(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    findings = db.query(models.SASTFinding).all() + db.query(models.DASTFinding).all()
+    # SASTFinding/DASTFinding have no department of their own -- scope via
+    # their parent SAST/DAST request's own department, same join pattern as
+    # sast_scan_report/dast_scan_report above.
+    sast_q = db.query(models.SASTFinding)
+    dast_q = db.query(models.DASTFinding)
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        sast_q = sast_q.join(models.SASTRequest, models.SASTFinding.sast_request_id == models.SASTRequest.id) \
+                        .join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
+                        .filter(models.QARequest.department == scope)
+        dast_q = dast_q.join(models.DASTRequest, models.DASTFinding.dast_request_id == models.DASTRequest.id) \
+                        .join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
+                        .filter(models.QARequest.department == scope)
+    findings = sast_q.all() + dast_q.all()
     from collections import Counter
     return dict(Counter(f.severity for f in findings))
 
@@ -106,7 +145,13 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
     # One suppression request can now cover several findings (see
     # models.SuppressionItem) -- the register lists one row per finding,
     # same pattern as test-case-execution/defect-summary used to.
-    rows = db.query(models.SuppressionRequest).all()
+    # SuppressionRequest.department is a real column, so a direct .filter()
+    # is enough, same as list_suppressions in routers/suppression.py.
+    q = db.query(models.SuppressionRequest)
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.filter(models.SuppressionRequest.department == scope)
+    rows = q.all()
     out = []
     for s in rows:
         items = s.items or [None]
@@ -126,21 +171,39 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
 @router.get("/monthly-qa-kpi")
 def monthly_kpi(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     total_requests = _visible_qa_requests(db, current_user).count()
+    scope = dashboard_department_scope(current_user)
     # "Completed" is measured on the linked Functional Testing Request (the
     # QA Request gateway's own status is just Draft/Submitted/Raised/Cancelled
-    # -- see constants.GatewayStatus).
-    completed = db.query(models.FunctionalRequest).filter(models.FunctionalRequest.status == QAStatus.CLOSED).count()
+    # -- see constants.GatewayStatus). department is a delegated property
+    # here (reads through .qa_request), so scoping needs a join, same as
+    # list_functional in routers/functional.py.
+    completed_q = db.query(models.FunctionalRequest).filter(models.FunctionalRequest.status == QAStatus.CLOSED)
+    if scope:
+        completed_q = completed_q.join(
+            models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id
+        ).filter(models.QARequest.department == scope)
+    open_suppressions_q = db.query(models.SuppressionRequest).filter(
+        models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
+    if scope:
+        # SuppressionRequest.department is a real column -- direct filter.
+        open_suppressions_q = open_suppressions_q.filter(models.SuppressionRequest.department == scope)
     return [{
-        "Total QA Requests": total_requests, "Completed Requests": completed,
-        "Open Suppressions": db.query(models.SuppressionRequest).filter(
-            models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES)).count(),
+        "Total QA Requests": total_requests, "Completed Requests": completed_q.count(),
+        "Open Suppressions": open_suppressions_q.count(),
     }]
 
 
 @router.get("/application-quality-scorecard")
 def quality_scorecard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # apps is already confined to the caller's department via
+    # _visible_qa_requests' own scoping above -- the per-app SAST count below
+    # is additionally scoped too (rather than relying on "same app name
+    # implies same department"), since a standalone SAST request raised
+    # directly (no linked QA Request) could otherwise share an application
+    # name across departments and leak another department's scan count.
     visible = _visible_qa_requests(db, current_user).all()
     apps = {r.application_name for r in visible if r.application_name}
+    scope = dashboard_department_scope(current_user)
     out = []
     for app in apps:
         reqs = [r for r in visible if r.application_name == app]
@@ -149,18 +212,30 @@ def quality_scorecard(db: Session = Depends(get_db), current_user: models.User =
             functional = next(iter(r.linked_functional_requests), None)
             if functional and functional.status == QAStatus.CLOSED:
                 completed += 1
-        sast = db.query(models.SASTRequest).filter(models.SASTRequest.application_name == app).count()
+        sast_q = db.query(models.SASTRequest).filter(models.SASTRequest.application_name == app)
+        if scope:
+            sast_q = sast_q.join(
+                models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id
+            ).filter(models.QARequest.department == scope)
         out.append({
             "Application": app, "QA Requests": len(reqs),
             "Completed": completed,
-            "SAST Requests": sast,
+            "SAST Requests": sast_q.count(),
         })
     return out
 
 
 @router.get("/audit-evidence")
 def audit_evidence(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # Same cross-entity feed as list_approvals (routers/approvals.py) -- uses
+    # the same shared resolve_entity_department helper (deps.py) so this
+    # export can't surface another department's approval/audit history
+    # either (reported directly: "Report & Export Centre ... other
+    # department data can not be shown").
     rows = db.query(models.ApprovalAction).order_by(models.ApprovalAction.created_at.desc()).limit(1000).all()
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) == scope]
     out = []
     for a in rows:
         u = db.query(models.User).get(a.actor_id) if a.actor_id else None

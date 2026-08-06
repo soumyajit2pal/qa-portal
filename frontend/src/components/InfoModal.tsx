@@ -13,7 +13,7 @@ interface InfoModalProps {
 // be dismissed by clicking outside, same as every other read-only modal.
 export default function InfoModal({ title, onClose, children }: InfoModalProps) {
   return (
-    <Modal title={title} onClose={onClose} variant="dialog">
+    <Modal title={title} onClose={onClose} variant="dialog" hideCloseButton>
       {children}
       <div style={{ marginTop: 18 }}>
         <button type="button" className="btn btn-primary" onClick={onClose}>Got it</button>

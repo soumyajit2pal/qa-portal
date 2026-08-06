@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department, require_not_requester
+from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
 from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -92,7 +92,16 @@ def _require_linked_request(db: Session, data: dict):
 
 @router.get("", response_model=List[schemas.SuppressionOut])
 def list_suppressions(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.SuppressionRequest).order_by(models.SuppressionRequest.created_at.desc()).all()
+    # Reported directly, then extended to "everywhere" (see list_requests'
+    # matching comment in routers/qa_requests.py) -- applied unconditionally.
+    # SuppressionRequest.department is a real column (auto-populated at
+    # creation time, see its own column comment in models.py), so this is a
+    # plain filter, no join needed.
+    q = db.query(models.SuppressionRequest)
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.filter(models.SuppressionRequest.department == scope)
+    return q.order_by(models.SuppressionRequest.created_at.desc()).all()
 
 
 @router.post("", response_model=schemas.SuppressionOut)
@@ -355,29 +364,29 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
 
 
 def _can_upload_documents(obj: "models.SuppressionRequest", user: models.User) -> bool:
-    """Reported bug: upload had no restriction at all -- any logged-in user
-    could attach documents to any Suppression request. Scoped to the
-    original requester (always) plus whoever the request's *current* status
-    is actually sitting with: SM during SM_APPROVAL_PENDING, Department Head
-    during DEPARTMENT_HEAD_APPROVAL_PENDING (both same-department-scoped,
-    matching those stages' own decision endpoints above), or any Security
-    Analyst during SECURITY_TEAM_VERIFICATION -- matching security_team_
-    decision's own role gate, which (unlike SM/Department Head) isn't
-    department-scoped and has no per-request individual assignment to check
-    against, since the Security Team reviews across departments. Admin
-    always bypasses, same convention as every other permission check in this
-    file."""
+    """Reported directly (Document and Evidence Access Control Based on
+    Workflow Stage): access follows exactly 3 stages, then locks hard --
+    (1) the requester, while the request is genuinely in their own hands
+    (Draft or Returned-by-*) may upload any number of files; (2) the SM,
+    and only the SM, may upload while SM_APPROVAL_PENDING; (3) the
+    Department Head, and only the Department Head, may upload while
+    DEPARTMENT_HEAD_APPROVAL_PENDING. After Department Head approval, EVERY
+    status is locked -- including SECURITY_TEAM_VERIFICATION, previously a
+    Security-Analyst upload window -- no Security Analyst may upload here
+    until the request is returned to the requester (a RETURNED_BY_*
+    status), which re-opens stage (1). Admin always bypasses, same
+    convention as every other permission check in this file."""
     if user.has_role(Role.ADMIN):
         return True
-    if obj.created_by_id == user.id:
-        return True
     status = obj.status
+    if status in ("Draft", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_TEAM"):
+        return obj.created_by_id == user.id
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
         return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
-    if status == "SECURITY_TEAM_VERIFICATION":
-        return user.has_role(Role.SECURITY_ANALYST)
+    # SECURITY_TEAM_VERIFICATION/Done/Rejected -- locked for everyone but
+    # Admin until the request is returned to the requester above.
     return False
 
 
@@ -396,7 +405,8 @@ def upload_suppression_documents(sup_id: int, files: List[UploadFile] = File(...
         raise HTTPException(404, "Suppression request not found")
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester or this request's current stage owner (Security Team, or the SM/Department Head currently reviewing it) can upload documents")
-    return doc_store.save_documents(db, "SUPPRESSION", sup_id, obj.suppression_id, files, current_user.id)
+    return doc_store.save_documents(db, "SUPPRESSION", sup_id, obj.suppression_id, files, current_user.id,
+                                     log_entity_type="SUPPRESSION", log_entity_id=obj.id, log_actor=current_user)
 
 
 @router.get("/{sup_id}/documents/{doc_id}/download")
@@ -412,10 +422,13 @@ def download_suppression_document(sup_id: int, doc_id: int, db: Session = Depend
 @router.delete("/{sup_id}/documents/{doc_id}")
 def delete_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(get_db),
                                  current_user: models.User = Depends(get_current_user)):
+    obj = db.query(models.SuppressionRequest).get(sup_id)
+    if not obj:
+        raise HTTPException(404, "Suppression request not found")
     doc = doc_store.get_document_or_404(db, "SUPPRESSION", sup_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="SUPPRESSION", log_entity_id=sup_id, log_actor=current_user)
     return {"ok": True}
 
 

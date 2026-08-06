@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_not_requester
+from ..deps import get_current_user, require_roles, require_not_requester, dashboard_department_scope
 from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, QA_DEPARTMENT
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -90,7 +90,21 @@ def _require_qa_department(user: models.User) -> None:
 
 @router.get("", response_model=List[schemas.SignOffOut])
 def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.QASignOff).order_by(models.QASignOff.created_at.desc()).all()
+    # Reported directly: department scoping (see list_requests' matching
+    # comment in routers/qa_requests.py, and dashboard_department_scope's own
+    # docstring in deps.py) was missed here. Every QASignOff row's own
+    # `department` is hardcoded to QA_DEPARTMENT ("IT - QA") at creation time
+    # (see create_signoff below -- "never trust the linked business request's
+    # department... the sign-off certificate is an IT - QA-owned record"), so
+    # applying the same scope naturally means only someone actually mapped to
+    # IT - QA (or one of the unrestricted roles, which already includes every
+    # QA/Security/Executive-COE role -- i.e. everyone who'd ever legitimately
+    # work this workflow) ever sees a row here; no separate rule needed.
+    q = db.query(models.QASignOff)
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.filter(models.QASignOff.department == scope)
+    return q.order_by(models.QASignOff.created_at.desc()).all()
 
 
 @router.get("/{signoff_id}", response_model=schemas.SignOffOut)
@@ -327,17 +341,24 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
 
 
 def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.User) -> bool:
-    """Reported bug: upload had no restriction at all -- any logged-in user
-    could attach documents to any QA Sign-off certificate. Scoped to the
-    original QA requester plus the IT - QA stage owner: QA Lead during
-    QA Lead approval (legacy status SM_APPROVAL_PENDING) or Executive COE
-    during final approval. Admin always
+    """Reported directly: "uploading document should be non editable if not
+    assigned, or in other person's bucket. only the assigned person can
+    update" -- the original requester used to always pass here regardless of
+    status, so once the certificate moved on to QA Lead/Executive COE, the
+    requester could still upload/remove documents alongside whoever it
+    actually currently sat with. Reworked to be exclusive, matching
+    update_signoff's own editable-status window above: the requester only
+    while the certificate is genuinely in their own hands (Draft or
+    Returned-by-*/Rejected -- see SIGNOFF_EDITABLE_STATUSES), and exclusively
+    whichever single actor the certificate's *current* status is actually
+    sitting with otherwise -- QA Lead during QA Lead approval (legacy status
+    SM_APPROVAL_PENDING) or Executive COE during final approval. Admin always
     bypasses, same convention as every other permission check."""
     if user.has_role(Role.ADMIN):
         return True
-    if obj.requester_id == user.id:
-        return True
     status = obj.status
+    if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"):
+        return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.QA_LEAD) and user.department == QA_DEPARTMENT
     if status == "DEPT_HEAD_COE_APPROVAL_PENDING":
@@ -358,7 +379,8 @@ def upload_signoff_documents(signoff_id: int, files: List[UploadFile] = File(...
     obj = _get_or_404(db, signoff_id)
     if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the QA requester, QA Lead, or Executive COE currently reviewing this certificate can upload documents")
-    return doc_store.save_documents(db, "SIGNOFF", signoff_id, obj.certificate_id, files, current_user.id)
+    return doc_store.save_documents(db, "SIGNOFF", signoff_id, obj.certificate_id, files, current_user.id,
+                                     log_entity_type="SIGNOFF", log_entity_id=obj.id, log_actor=current_user)
 
 
 @router.get("/{signoff_id}/documents/{doc_id}/download")
@@ -374,8 +396,9 @@ def download_signoff_document(signoff_id: int, doc_id: int, db: Session = Depend
 @router.delete("/{signoff_id}/documents/{doc_id}")
 def delete_signoff_document(signoff_id: int, doc_id: int, db: Session = Depends(get_db),
                              current_user: models.User = Depends(get_current_user)):
+    obj = _get_or_404(db, signoff_id)
     doc = doc_store.get_document_or_404(db, "SIGNOFF", signoff_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(db, obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="SIGNOFF", log_entity_id=signoff_id, log_actor=current_user)
     return {"ok": True}

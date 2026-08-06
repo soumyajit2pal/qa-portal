@@ -1204,6 +1204,24 @@ class ApplicationMasterDecision(BaseModel):
     comments: Optional[str] = None
 
 
+class ApplicationSeedResult(ORMModel):
+    """Result of an Admin bulk-seeding an xlsx of known-good Application
+    Names into ApplicationMaster (see routers/applications.py::
+    bulk_seed_application_names) -- same result-summary shape as
+    TestCaseImportResult (created/skipped counts + a row-level errors list),
+    with the extra buckets this operation can land a row in: an existing
+    still-pending name gets approved outright rather than created again, and
+    an existing already-approved/rejected name is left untouched and simply
+    counted as skipped."""
+    created: int
+    approved_existing: int
+    skipped_duplicate: int
+    skipped_rejected: int
+    skipped_invalid: int
+    errors: List[str] = []
+    failure_reason: Optional[str] = None
+
+
 # ---------------- Module 11: Test Management (Project Management / Test Repository / Test Execution) ----------------
 class TestProjectCreate(BaseModel):
     name: str

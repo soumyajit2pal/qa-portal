@@ -6,6 +6,7 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocumen
 import {
   CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, hasRole,
   SIGNOFF_EDITABLE_STATUSES, QA_DEPARTMENT, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
+  canSeeQaDepartmentOnlyData,
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, ApprovalActionOut } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
@@ -427,6 +428,16 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   const isSelfApproval = item.requester_id === user?.id && !isAdmin
   const canQALeadDecide = hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
   const canExecutiveCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
+  // Reported directly: "only the assigned person can update" -- once the
+  // certificate has moved past the requester, document control passes
+  // exclusively to whoever it's actually sitting with now, matching the
+  // backend's own (now-exclusive) _can_upload_documents (signoff.py).
+  const canManageDocuments = isAdmin || (
+    ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status) ? isRequester :
+    status === 'SM_APPROVAL_PENDING' ? canQALeadDecide :
+    status === 'DEPT_HEAD_COE_APPROVAL_PENDING' ? canExecutiveCoeDecide :
+    false
+  )
   // Requester's own editable statuses, or a QA Lead editing during approval.
   // routers/signoff.py::update_signoff.
   const canEditDetails = (isRequester && SIGNOFF_EDITABLE_STATUSES.includes(status))
@@ -506,7 +517,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
       )}
 
       <div className="section-title">Documents</div>
-      <RequestDocuments apiBase="/api/signoffs" reqId={item.id} />
+      <RequestDocuments apiBase="/api/signoffs" reqId={item.id} canManage={canManageDocuments} />
 
       <JiraActivity entityType="SIGNOFF" entityId={item.id} items={history} onPosted={(entry) => setHistory((prev) => [...prev, entry])} />
 
@@ -549,6 +560,22 @@ export default function SignOff() {
     if (match) setSelected(match)
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
   }, [rows, searchParams, setSearchParams])
+
+  // Reported directly: "Hide QA Sign Off except IT-QA." Every certificate's
+  // own department is hardcoded to QA_DEPARTMENT at creation (see
+  // routers/signoff.py::create_signoff), and the list endpoint now scopes to
+  // that (see ORACLE_MIGRATION_2026-07.md section 201) -- so anyone outside
+  // canSeeQaDepartmentOnlyData would only ever land on a guaranteed-empty
+  // page. The nav link is already hidden for them (see Layout.tsx); this is
+  // the matching direct-URL guard, same "Access Restricted" pattern already
+  // used by Admin.tsx/DepartmentAdmin.tsx.
+  if (!canSeeQaDepartmentOnlyData(user)) {
+    return (
+      <Card title="Access Restricted">
+        <p className="muted">QA Sign-off is only available to the {QA_DEPARTMENT} department.</p>
+      </Card>
+    )
+  }
 
   const canCreate = hasRole(user, 'ADMIN')
     || (hasRole(user, 'QA_ENGINEER') && user?.department === QA_DEPARTMENT)

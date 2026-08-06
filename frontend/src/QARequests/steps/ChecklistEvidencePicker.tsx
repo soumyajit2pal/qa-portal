@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react'
 import { api } from '../../api'
-import { ErrorText, Modal } from '../../components/Common'
+import { ErrorText, ChecklistEvidenceFileRow, ChecklistEvidenceDeleteModal } from '../../components/Common'
 import { RequestDocumentOut } from '../../types'
 
 export type EvidenceKind = 'functional' | 'sast' | 'dast' | 'performance'
@@ -111,18 +111,12 @@ export function ChecklistEvidencePicker({
       {(savedFiles.length > 0 || files.length > 0) && (
         <div className="checklist-evidence-files">
           {savedFiles.map((document) => (
-            <div className="checklist-evidence-file" key={document.id}>
-              <button
-                type="button"
-                className="btn btn-sm"
-                style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                title={`Download ${document.file_name}`}
-                onClick={() => api.downloadFile(`${endpoint}/${document.id}/download`, document.file_name)}
-              >
-                {document.file_name}
-              </button>
-              <button type="button" className="btn btn-sm btn-danger" aria-label={`Delete ${document.file_name}`} onClick={() => setPendingDelete(document)}>×</button>
-            </div>
+            <ChecklistEvidenceFileRow
+              key={document.id}
+              fileName={document.file_name}
+              onDownload={() => api.downloadFile(`${endpoint}/${document.id}/download`, document.file_name)}
+              onDelete={() => setPendingDelete(document)}
+            />
           ))}
           {files.map((file, index) => (
             <div className="checklist-evidence-file" key={`${file.name}-${index}`}>
@@ -136,13 +130,12 @@ export function ChecklistEvidencePicker({
       )}
       <ErrorText error={error} />
       {pendingDelete && (
-        <Modal title="Delete checklist evidence?" variant="dialog" preventBackdropClose onClose={() => setPendingDelete(null)}>
-          <p>Delete <strong>{pendingDelete.file_name}</strong>? This cannot be undone.</p>
-          <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
-            <button type="button" className="btn btn-danger" disabled={deleteBusy} onClick={deleteSavedFile}>{deleteBusy ? 'Deleting…' : 'Delete'}</button>
-            <button type="button" className="btn" disabled={deleteBusy} onClick={() => setPendingDelete(null)}>Cancel</button>
-          </div>
-        </Modal>
+        <ChecklistEvidenceDeleteModal
+          fileName={pendingDelete.file_name}
+          busy={deleteBusy}
+          onConfirm={deleteSavedFile}
+          onCancel={() => setPendingDelete(null)}
+        />
       )}
     </div>
   )

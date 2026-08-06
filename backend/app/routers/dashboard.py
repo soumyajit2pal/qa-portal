@@ -6,13 +6,37 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, dashboard_department_scope
 from ..constants import (
     Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
     QA_DEPARTMENT,
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
+
+
+# Every endpoint in this file is only ever called by the Dashboard (see
+# Dashboard.tsx -- nothing else in the frontend fetches /api/dashboard/*), so
+# department scoping is applied here unconditionally rather than behind an
+# opt-in flag like the shared request-list endpoints (list_requests/
+# list_functional/list_sast/list_dast/list_performance) use, since there's no
+# other consumer whose existing behaviour needs preserving.
+def _join_qa_department(query, model, scope):
+    """Joins `model` (FunctionalRequest/SASTRequest/DASTRequest/
+    PerformanceRequest -- whichever the query's base/most-recently-joined
+    entity already is) to its parent QARequest and filters to `scope`, if
+    scope is given. All four of those models' own `department` is a
+    delegated (read-only property) lookup through their qa_request, not a
+    real column (see each model's own docstring in models.py) -- hence the
+    join, rather than a plain .filter(model.department == scope), which
+    SQLAlchemy cannot translate to SQL. A standalone request with no
+    qa_request_id (already department=None today) is naturally excluded by
+    this inner join, same as it already reads as unscoped/departmentless
+    everywhere else in the app."""
+    if not scope:
+        return query
+    return query.join(models.QARequest, model.qa_request_id == models.QARequest.id) \
+                .filter(models.QARequest.department == scope)
 
 
 def _date_bounds(date_from: str | None, date_to: str | None):
@@ -315,14 +339,21 @@ def _ageing_bucket(days: int) -> str:
 @router.get("/project-wise")
 def project_wise(date_from: str | None = Query(None), date_to: str | None = Query(None),
                  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    scope = dashboard_department_scope(current_user)
     # The QA Request is now just an intake gateway (see constants.GatewayStatus)
     # -- the actual QAStatus workflow being measured here lives on the linked
     # Functional Testing Request (see models.FunctionalRequest).
-    requests = _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at, date_from, date_to).all()
+    requests = _join_qa_department(
+        _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at, date_from, date_to),
+        models.FunctionalRequest, scope).all()
     active_projects = len({r.epic_number for r in requests if r.status in ACTIVE_QA_STATUSES and r.epic_number})
 
-    sast_findings = _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).count()
-    dast_findings = _in_period(db.query(models.DASTFinding).join(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).count()
+    sast_findings = _join_qa_department(
+        _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
+        models.SASTRequest, scope).count()
+    dast_findings = _join_qa_department(
+        _in_period(db.query(models.DASTFinding).join(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
+        models.DASTRequest, scope).count()
 
     # Was QA-Request-only, which disagreed with the "approvals needing
     # attention" count shown elsewhere in the app (e.g. the old Approval
@@ -331,14 +362,18 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
     # so the Dashboard banner looked stuck even after it was cleared.
     # Now counts the same things everywhere: QA Requests awaiting a decision,
     # plus SAST/DAST requests still "Requested", plus open Suppressions.
+    _pending_suppressions_q = _in_period(
+        db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to
+    ).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
+    if scope:
+        _pending_suppressions_q = _pending_suppressions_q.filter(models.SuppressionRequest.department == scope)
     pending_approvals = (
         len([r for r in requests if r.status in PENDING_APPROVAL_STATUSES])
-        + _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).filter(
-            models.SASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)).count()
-        + _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).filter(
-            models.DASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)).count()
-        + _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to).filter(
-            models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES)).count()
+        + _join_qa_department(_in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).filter(
+            models.SASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)), models.SASTRequest, scope).count()
+        + _join_qa_department(_in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).filter(
+            models.DASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)), models.DASTRequest, scope).count()
+        + _pending_suppressions_q.count()
     )
 
     risk_counts = Counter(r.risk_rating for r in requests if r.risk_rating)
@@ -359,8 +394,12 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------
 @router.get("/security/sast")
 def security_sast(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    reqs = _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).all()
-    findings = _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).all()
+    scope = dashboard_department_scope(current_user)
+    reqs = _join_qa_department(
+        _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to), models.SASTRequest, scope).all()
+    findings = _join_qa_department(
+        _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
+        models.SASTRequest, scope).all()
     return {
         # Every SAST request ever raised, any status -- distinct from
         # applications_scanned below (only those that actually finished
@@ -376,8 +415,12 @@ def security_sast(date_from: str | None = Query(None), date_to: str | None = Que
 
 @router.get("/security/dast")
 def security_dast(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    reqs = _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).all()
-    findings = _in_period(db.query(models.DASTFinding).join(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).all()
+    scope = dashboard_department_scope(current_user)
+    reqs = _join_qa_department(
+        _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to), models.DASTRequest, scope).all()
+    findings = _join_qa_department(
+        _in_period(db.query(models.DASTFinding).join(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
+        models.DASTRequest, scope).all()
     # scan_coverage used to count every DAST request's application_url
     # regardless of status -- including ones still sitting in Draft/SM
     # Approval/Configuration that have never actually been scanned. Scoped
@@ -398,7 +441,14 @@ def security_dast(date_from: str | None = Query(None), date_to: str | None = Que
 # ---------------- 4.9.7 Suppression Dashboard ----------------
 @router.get("/suppression")
 def suppression_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    sups = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to).all()
+    scope = dashboard_department_scope(current_user)
+    q = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to)
+    # SuppressionRequest.department is a real column (auto-populated at
+    # creation time, see its own column comment in models.py) -- unlike
+    # Functional/SAST/DAST/Performance, no join needed here.
+    if scope:
+        q = q.filter(models.SuppressionRequest.department == scope)
+    sups = q.all()
     open_sups = [s for s in sups if s.status not in SUPPRESSION_TERMINAL_STATUSES]
     # A suppression request can cover several findings (models.SuppressionItem)
     # -- count it as critical/high risk if ANY of its findings are.
@@ -474,8 +524,12 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     requests with ageing, responsible team/owner, and priority.
     """
     items = []
+    scope = dashboard_department_scope(current_user)
 
-    for r in _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.updated_at, date_from, date_to).filter(models.FunctionalRequest.status.in_(list(STAGE_LABELS.keys()))).all():
+    for r in _join_qa_department(
+            _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.updated_at, date_from, date_to)
+            .filter(models.FunctionalRequest.status.in_(list(STAGE_LABELS.keys()))),
+            models.FunctionalRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
@@ -486,8 +540,10 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             "priority": r.priority, "status": r.status, "source": "Functional Testing Request",
         })
 
-    for r in _in_period(db.query(models.SASTRequest), models.SASTRequest.updated_at, date_from, date_to).filter(
-            models.SASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)).all():
+    for r in _join_qa_department(
+            _in_period(db.query(models.SASTRequest), models.SASTRequest.updated_at, date_from, date_to).filter(
+                models.SASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)),
+            models.SASTRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
@@ -498,8 +554,10 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             "priority": r.risk_category, "status": r.status, "source": "SAST Request",
         })
 
-    for r in _in_period(db.query(models.DASTRequest), models.DASTRequest.updated_at, date_from, date_to).filter(
-            models.DASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)).all():
+    for r in _join_qa_department(
+            _in_period(db.query(models.DASTRequest), models.DASTRequest.updated_at, date_from, date_to).filter(
+                models.DASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)),
+            models.DASTRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.application_url,
@@ -517,8 +575,11 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
         "SECURITY_TEAM_VERIFICATION": "Security Team",
     }
-    for s in _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to).filter(
-            models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES)).all():
+    _suppression_q = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to).filter(
+        models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
+    if scope:
+        _suppression_q = _suppression_q.filter(models.SuppressionRequest.department == scope)
+    for s in _suppression_q.all():
         age = _age_days(s.updated_at)
         team = _SUPPRESSION_STAGE_TEAM.get(s.status, "Requester")
         items.append({
@@ -551,6 +612,17 @@ def three_w_project_detail(project_id: str, db: Session = Depends(get_db),
     """Drill-down: selecting a Project ID shows its full lifecycle + audit trail."""
     req = db.query(models.FunctionalRequest).filter(models.FunctionalRequest.request_id == project_id).first()
     if not req:
+        return {"detail": "Project not found"}
+    scope = dashboard_department_scope(current_user)
+    if scope and req.department != scope:
+        # Same department scoping as the 3W list above (see
+        # dashboard_department_scope) -- without this, a scoped user could
+        # still drill into an out-of-department project's own lifecycle/audit
+        # trail directly by its request_id even though the list itself
+        # already hides it. Reuses the same "not found" shape as a genuinely
+        # missing project rather than a 403, so this isn't distinguishable
+        # from "this project ID doesn't exist" -- consistent with how the
+        # list simply omits it instead of showing a blocked placeholder.
         return {"detail": "Project not found"}
     history = (db.query(models.ApprovalAction)
                .filter_by(entity_type="FUNCTIONAL_REQUEST", entity_id=req.id)

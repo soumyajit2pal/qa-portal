@@ -77,6 +77,20 @@ function DASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/dast-requests', editing.id)
+  // Same identity check as the detail view's isRequester/canSMDecide/
+  // canDeptHeadDecide -- this modal only opens via canEditDetails, but the
+  // checklist evidence controls inside it need their own explicit check.
+  const { user: modalUser } = useAuth()
+  const isAdminModal = hasRole(modalUser, 'ADMIN')
+  const isRequesterModal = editing.requester_id === modalUser?.id || isAdminModal
+  const sameDeptModal = !!modalUser?.department && modalUser.department === editing.department
+  const canSMDecideModal = hasRole(modalUser, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
+  const canDeptHeadDecideModal = hasRole(modalUser, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
+  const canManageEvidenceModal = isAdminModal || (
+    editing.status === 'SM_APPROVAL_PENDING' ? canSMDecideModal :
+    editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecideModal :
+    isRequesterModal
+  )
   function toggleChecked(item: string) {
     setCheckedItems((items) => (items.includes(item) ? items.filter((i) => i !== item) : [...items, item]))
   }
@@ -228,7 +242,7 @@ function DASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
                       </span>
                     </label>
                     <ChecklistEvidence apiBase="/api/dast-requests" reqId={editing.id} itemId={c.id}
-                      canManage={canManageReadinessEvidence(editing.status)}
+                      canManage={canManageReadinessEvidence(editing.status, canManageEvidenceModal)}
                       required={c.is_mandatory || c.requester_checked}
                       documents={documentsByItem[c.id] || []}
                       onReload={reloadEvidence}
@@ -383,6 +397,30 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   const isSelfApproval = req.requester_id === user?.id && !hasRole(user, 'ADMIN')
   const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
   const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
+  // Reported directly: "only the assigned person can update" -- once the
+  // request has moved past the requester, evidence control passes
+  // exclusively to whoever it's actually sitting with now, matching the
+  // backend's own (now-exclusive) _can_upload_documents.
+  const evidenceOwner = isAdmin || (
+    status === 'SM_APPROVAL_PENDING' ? canSMDecide :
+    status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecide :
+    isRequester
+  )
+  // Document and Evidence Access Control Based on Workflow Stage: exactly 3
+  // upload stages, then a hard lock -- (1) the requester while it's Draft/
+  // Submitted/Returned-by-*/Rejected, (2) the SM only while
+  // SM_APPROVAL_PENDING, (3) the Department Head only while
+  // DEPARTMENT_HEAD_APPROVAL_PENDING. Every post-readiness Security status
+  // after Department Head approval (including WAITING_FOR_FIX) is locked
+  // for everyone but Admin -- mirrors the backend's own (now-simplified)
+  // _can_upload_documents exactly. Used for the general Documents tab;
+  // evidenceOwner above covers the same 3 stages for checklist evidence.
+  const canManageDocuments = isAdmin || (
+    ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status) ? isRequester :
+    status === 'SM_APPROVAL_PENDING' ? canSMDecide :
+    status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecide :
+    false
+  )
   const canStartReadiness = isAssignedQALead && status === 'SECURITY_LEAD_ASSIGNED'
   const canReadinessDecide = isAssignedQALead && status === 'SECURITY_READINESS'
   const canVerifyChecklist = isAssignedQALead && status === 'SECURITY_READINESS'
@@ -420,7 +458,6 @@ function DASTDetail({ req, onClose, onChanged, users }: {
         {['overview', 'checklist', 'targets', 'findings', 'documents', 'history'].map((t) => (
           <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
             {t === 'findings' ? `Findings (${req.findings.length})`
-              : t === 'checklist' && pendingChecklistItems.length > 0 ? `Checklist (${pendingChecklistItems.length} pending)`
               : t === 'history' ? 'Activity' : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}
@@ -737,7 +774,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                 />
               </span>
               <ChecklistEvidence apiBase="/api/dast-requests" reqId={req.id} itemId={c.id}
-                canManage={canManageReadinessEvidence(req.status)}
+                canManage={canManageReadinessEvidence(req.status, evidenceOwner)}
                 required={c.is_mandatory || c.requester_checked}
                 documents={documentsByItem[c.id] || []}
                 onReload={reloadEvidence}
@@ -779,7 +816,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
         </div>
       )}
 
-      {tab === 'documents' && <RequestDocuments apiBase="/api/dast-requests" reqId={req.id} />}
+      {tab === 'documents' && <RequestDocuments apiBase="/api/dast-requests" reqId={req.id} canManage={canManageDocuments} />}
 
       {tab === 'history' && (
         <JiraActivity entityType="DAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />

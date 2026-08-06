@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department, require_not_requester
+from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
 from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
+from .. import application_names as app_names
 
 router = APIRouter(prefix="/api/performance-requests", tags=["performance"])
 
@@ -86,7 +87,14 @@ def _require_performance_execution_owner(obj: "models.PerformanceRequest", user:
 
 @router.get("", response_model=List[schemas.PerformanceOut])
 def list_performance(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.PerformanceRequest).order_by(models.PerformanceRequest.created_at.desc()).all()
+    q = db.query(models.PerformanceRequest)
+    # See list_functional's matching comment in routers/functional.py -- same
+    # reasoning, applied unconditionally.
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.join(models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id) \
+             .filter(models.QARequest.department == scope)
+    return q.order_by(models.PerformanceRequest.created_at.desc()).all()
 
 
 # Standalone creation is DISABLED -- Performance requests can only originate
@@ -118,6 +126,32 @@ def update_performance(req_id: int, payload: schemas.PerformanceUpdate, db: Sess
             if f in data and data[f] != getattr(obj, f):
                 raise HTTPException(403, f"Only an Administrator can change {f.replace('_', ' ').title()}")
     checked_items = data.pop("checked_items", None)
+    # Reported directly ("Duplicate Application Name Validation Across All
+    # Request Actions"): application_name used to fall straight into the
+    # generic setattr(obj, k, v) loop below -- a bare string write over
+    # PerformanceRequest's own disconnected application_name column (it has
+    # no application_master_id FK, unlike QARequest/FunctionalRequest), with
+    # zero case/whitespace normalization and no dedup check against
+    # models.ApplicationMaster. Popped out and routed through the same
+    # resolve_application_name every other Application Name entry point
+    # uses (see routers/sast_dast.py::update_sast for the identical
+    # disconnected-column fix), so an Admin correcting a typo here reuses an
+    # existing name (any case/spacing variant) instead of silently creating
+    # a near-duplicate ApplicationMaster entry. Only the normalized NAME is
+    # kept -- the returned application_master_id is discarded since this
+    # column has nothing to link it to, and cleanup_orphaned_application_master
+    # is deliberately not called here for the same reason (no old_master_id
+    # was ever tracked for this disconnected column to begin with).
+    # Re-resolved only when genuinely different (case/whitespace-insensitive)
+    # from what's already saved, so a plain re-save of an unrelated field
+    # never re-touches it.
+    application_name_in = data.pop("application_name", None)
+    if application_name_in is not None:
+        incoming_upper = (application_name_in or "").strip().upper()
+        if incoming_upper != (obj.application_name or "").strip().upper():
+            obj.application_name, _ = app_names.resolve_application_name(
+                db, application_name_in, obj.department, current_user.id, qa_request_id=obj.qa_request_id,
+            )
     for k, v in data.items():
         setattr(obj, k, v)
     if checked_items is not None:
@@ -621,36 +655,35 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
     )
 
 
-# Post-Engineer-assignment statuses (own lifecycle -- see constants.PERFORMANCE_STATUSES).
-_ENGINEER_OWNED_STATUSES = (
-    "ENGINEER_ASSIGNED", "READINESS", "FEASIBILITY", "PLANNING", "ENVIRONMENT_SETUP",
-    "SCRIPT_DEVELOPMENT", "BASELINE", "LOAD_TEST_EXECUTION", "RESULT_ANALYSIS",
-    "DEFECT_FIX_RETEST", "REPORT", "SIGNOFF_PENDING",
-)
-
-
 def _can_upload_documents(obj: "models.PerformanceRequest", user: models.User) -> bool:
-    """Reported bug: upload had no restriction at all -- any logged-in user
-    could attach documents to any Performance Testing request. Scoped to the
-    original requester (always) plus whoever the request's *current* status
-    is actually sitting with: SM during SM_APPROVAL_PENDING, Department Head
-    during DEPARTMENT_HEAD_APPROVAL_PENDING (both same-department-scoped), or
-    a qualified central QA user for every post-readiness status.
-    Admin always bypasses, same convention as every other permission check."""
+    """Reported directly (Document and Evidence Access Control Based on
+    Workflow Stage): access follows exactly 3 stages, then locks hard --
+    (1) the requester, while the request is genuinely in their own hands
+    (Draft/Submitted, Returned-by-*, Rejected, or back for their own final
+    verification) may upload any number of files; (2) the SM, and only the
+    SM, may upload while SM_APPROVAL_PENDING; (3) the Department Head, and
+    only the Department Head, may upload while
+    DEPARTMENT_HEAD_APPROVAL_PENDING. After Department Head approval, EVERY
+    status is locked -- no engineer, tester, or anyone else may upload here
+    -- until the request is returned to the requester (a RETURNED_BY_*
+    status), which re-opens stage (1). This intentionally removes the prior
+    post-readiness upload window (every status from ENGINEER_ASSIGNED
+    through SIGNOFF_PENDING) -- any evidence generated during actual
+    load-test execution belongs in that run's own record, not this
+    readiness-facing Documents/Checklist Evidence store. Admin always
+    bypasses, same convention as every other permission check."""
     if user.has_role(Role.ADMIN):
         return True
-    if obj.requester_id == user.id:
-        return True
     status = obj.status
+    if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED",
+                  "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER", "REQUESTER_VERIFICATION"):
+        return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.department == obj.department
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
         return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
-    if status in _ENGINEER_OWNED_STATUSES:
-        if obj.engineer_id == user.id:
-            return True
-        return status not in ("ENGINEER_ASSIGNED", "READINESS", "FEASIBILITY", "PLANNING", "RESULT_ANALYSIS", "REPORT", "SIGNOFF_PENDING") \
-            and user.id in _performance_tester_ids(obj)
+    # Every post-readiness/terminal status -- locked for everyone but Admin
+    # until the request is returned to the requester above.
     return False
 
 
@@ -700,7 +733,8 @@ def upload_performance_documents(req_id: int, files: List[UploadFile] = File(...
     obj = _get_or_404(db, req_id)
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester, central QA team, or the SM/Department Head currently reviewing the request can upload documents")
-    return doc_store.save_documents(db, "PERFORMANCE", req_id, obj.request_id, files, current_user.id)
+    return doc_store.save_documents(db, "PERFORMANCE", req_id, obj.request_id, files, current_user.id,
+                                     log_entity_type="PERFORMANCE", log_entity_id=obj.id, log_actor=current_user)
 
 
 @router.get("/{req_id}/documents/{doc_id}/download")
@@ -716,10 +750,11 @@ def download_performance_document(req_id: int, doc_id: int, db: Session = Depend
 @router.delete("/{req_id}/documents/{doc_id}")
 def delete_performance_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                                  current_user: models.User = Depends(get_current_user)):
+    obj = _get_or_404(db, req_id)
     doc = doc_store.get_document_or_404(db, "PERFORMANCE", req_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="PERFORMANCE", log_entity_id=req_id, log_actor=current_user)
     return {"ok": True}
 
 
@@ -758,13 +793,15 @@ def upload_performance_checklist_documents(req_id: int, item_id: int, files: Lis
                                             db: Session = Depends(get_db),
                                             current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
-    _performance_checklist_item_or_404(db, req_id, item_id)
+    item = _performance_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     if not _can_upload_documents(obj, current_user):
         raise HTTPException(403, "Only the requester or this request's current stage owner can attach checklist evidence")
     return doc_store.save_documents(db, "PERFORMANCE_ITEM", item_id,
-                                    f"{obj.request_id}/checklist-{item_id}", files, current_user.id)
+                                    f"{obj.request_id}/checklist-{item_id}", files, current_user.id,
+                                    log_entity_type="PERFORMANCE", log_entity_id=obj.id, log_actor=current_user,
+                                    log_label=f"checklist item '{item.item}'")
 
 
 @router.get("/{req_id}/checklist/{item_id}/documents/{doc_id}/download")
@@ -785,11 +822,12 @@ def delete_performance_checklist_document(req_id: int, item_id: int, doc_id: int
                                            db: Session = Depends(get_db),
                                            current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
-    _performance_checklist_item_or_404(db, req_id, item_id)
+    item = _performance_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     doc = doc_store.get_document_or_404(db, "PERFORMANCE_ITEM", item_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user):
-        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it")
-    doc_store.delete_document(db, doc)
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+        raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it -- and only while it's still your stage")
+    doc_store.delete_document(db, doc, log_entity_type="PERFORMANCE", log_entity_id=obj.id, log_actor=current_user,
+                               log_label=f"checklist item '{item.item}'")
     return {"ok": True}

@@ -1,9 +1,12 @@
 import datetime
-from typing import List
+import io
+from typing import List, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+import openpyxl
 
 from .. import models, schemas
 from ..database import get_db
@@ -98,6 +101,37 @@ def _auto_reject_linked_requests(db: Session, qa_request, current_user: models.U
                     actor_id=current_user.id, actor_role=current_user.roles_csv,
                     decision="Rejected", comments=comments,
                 ))
+
+
+def _approve_pending_application_name(db: Session, obj: "models.ApplicationMaster",
+                                       current_user: models.User, comments: Optional[str]) -> None:
+    """Shared "make this PENDING_APP_OWNER/PENDING_SM row terminal as
+    Approved" state change -- used by decide_app_owner_name's own Approved
+    branch (an Application Owner deciding one specific name) and by
+    bulk_seed_application_names below (an Admin's Excel upload asserting a
+    name is valid should also clear out that same name's own pending
+    decision instead of leaving a stale duplicate queue entry sitting there
+    once the name is already usable). Mirrors decide_app_owner_name's
+    Approved branch exactly: terminal on both tiers' fields, and finalizes
+    (creates linked children for) any QA Request gateway that introduced
+    this name and is still sitting at Submitted, same as an Application
+    Owner's own Approve would. Deliberately does NOT call
+    _log_application_name_decision itself -- callers log it themselves,
+    since decide_app_owner_name already does so unconditionally after this
+    runs (for both Approve and Reject) and bulk-seeding wants its own
+    distinct comment text on that activity entry."""
+    now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.app_owner_decided_by_id = current_user.id
+    obj.app_owner_decided_at = now
+    obj.app_owner_comments = comments
+    obj.status = "APPROVED"
+    obj.decided_by_id = current_user.id
+    obj.decided_at = now
+    obj.comments = comments
+    for gw in db.query(models.QARequest).filter(
+            models.QARequest.application_master_id == obj.id,
+            models.QARequest.status == GatewayStatus.SUBMITTED).all():
+        _finalize_child_requests(db, gw, gw.requester)
 
 
 @router.get("", response_model=List[schemas.ApplicationMasterOut])
@@ -197,33 +231,21 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
         )
     if payload.decision not in ("Approved", "Rejected"):
         raise HTTPException(400, "decision must be one of: Approved, Rejected")
-    now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
-    obj.app_owner_decided_by_id = current_user.id
-    obj.app_owner_decided_at = now
-    obj.app_owner_comments = payload.comments
     if payload.decision == "Approved":
         # Terminal here now -- no more PENDING_SM tier for a NEW decision
         # (see docstring above). Mirrored into the SM-tier fields too, same
         # as Reject already did, so anything reading decided_by_id/
         # decided_at/comments as "the decision that made this terminal"
-        # keeps working regardless of which outcome it was.
-        obj.status = "APPROVED"
-        obj.decided_by_id = current_user.id
-        obj.decided_at = now
-        obj.comments = payload.comments
-        # Deferred child-request creation (2026-08): any gateway that
-        # introduced this name and stopped at Submitted (see submit_request's
-        # PENDING_APP_OWNER branch) can now go all the way to Raised --
-        # attributed to its own original requester, not this Application
-        # Owner (see _finalize_child_requests' own docstring). Their children
-        # land on the assigned SM's own normal readiness-verification queue
-        # exactly like any other Raised request -- no separate Application
-        # Name decision from that SM is needed or possible anymore.
-        for gw in db.query(models.QARequest).filter(
-                models.QARequest.application_master_id == obj.id,
-                models.QARequest.status == GatewayStatus.SUBMITTED).all():
-            _finalize_child_requests(db, gw, gw.requester)
+        # keeps working regardless of which outcome it was. Deferred
+        # child-request creation (2026-08) for any gateway that introduced
+        # this name and stopped at Submitted is handled inside the shared
+        # helper -- see its own docstring.
+        _approve_pending_application_name(db, obj, current_user, payload.comments)
     else:
+        now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        obj.app_owner_decided_by_id = current_user.id
+        obj.app_owner_decided_at = now
+        obj.app_owner_comments = payload.comments
         obj.status = "REJECTED"
         # Reject at this tier IS the final decision -- mirror it into the
         # SM-tier fields too, same reasoning as the docstring above.
@@ -315,3 +337,163 @@ def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecis
     db.commit()
     db.refresh(obj)
     return obj
+
+
+# ---- Admin bulk-seed from Excel ----
+# Reported directly: "add one functionality on admin section to upload excel
+# and based on data present on excel Application name will be seed."
+
+def _normalize_seed_header(h) -> str:
+    return str(h or "").strip().lower()
+
+
+_SEED_HEADER_MAP = {
+    "application name": "name",
+    "app name": "name",
+    "name": "name",
+    "department": "department",
+}
+
+
+@router.get("/bulk-seed-template")
+def download_bulk_seed_template(current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    """Minimal xlsx template for bulk_seed_application_names below, built on
+    the fly with openpyxl rather than a bundled static asset (contrast with
+    test_repository.py's own /import-template, which serves a real static
+    file since that template is a much larger fixed layout) -- this one is
+    just a two-column header plus one example row."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Application Names"
+    ws.append(["Application Name", "Department"])
+    ws.append(["EXAMPLE APPLICATION", "IT - Software"])
+    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["B"].width = 24
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="application_names_seed_template.xlsx"'},
+    )
+
+
+@router.post("/bulk-seed", response_model=schemas.ApplicationSeedResult)
+async def bulk_seed_application_names(file: UploadFile = File(...), db: Session = Depends(get_db),
+                                       current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    """Admin-only bulk import: seeds ApplicationMaster directly from an xlsx
+    of known-good application names.
+
+    Unlike the normal path (a requester typing "Other" on the QA Request
+    wizard -- see _resolve_application_name in qa_requests.py), a brand-new
+    name seeded here is created straight at APPROVED. An Admin bulk-uploading
+    a spreadsheet of already-known-valid application names is asserting
+    they're valid, not proposing them for the usual Application Owner review
+    -- there's nothing to route through that queue for a row with no
+    originating QA Request at all (qa_request_id stays NULL, same as any
+    other row with nothing to trace back to).
+
+    An existing row still sitting at PENDING_APP_OWNER/PENDING_SM is instead
+    approved outright (see _approve_pending_application_name, which also
+    finalizes/creates linked children for any gateway request still waiting
+    on this exact name) rather than creating a duplicate -- so re-running the
+    same file after some of its names were separately proposed elsewhere
+    clears those out too instead of erroring or duplicating. An existing
+    APPROVED row is left untouched and counted as a duplicate. An existing
+    REJECTED row is also left untouched (counted separately) rather than
+    silently overridden -- a real Reject decision may have already
+    force-rejected other linked requests (see _auto_reject_linked_requests),
+    so reinstating one is left to the normal decision endpoints, not a bulk
+    upload.
+
+    Expects a header row with an "Application Name" column (case/whitespace
+    tolerant, same convention as test_repository.py's own xlsx import) and an
+    optional "Department" column; any other columns are ignored. See
+    download_bulk_seed_template above for the expected shape."""
+    raw = await file.read()
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+    except Exception:
+        raise HTTPException(400, "Could not read this file as an Excel (.xlsx) workbook")
+    ws = wb.worksheets[0]
+
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    if not header_row:
+        raise HTTPException(400, "Sheet has no header row")
+    col_fields: dict = {}
+    for idx, header in enumerate(header_row):
+        field = _normalize_seed_header(header)
+        field = _SEED_HEADER_MAP.get(field)
+        if field and field not in col_fields.values():
+            col_fields[idx] = field
+    if "name" not in col_fields.values():
+        raise HTTPException(400, "Could not find an 'Application Name' column -- is this the right template?")
+
+    created = 0
+    approved_existing = 0
+    skipped_duplicate = 0
+    skipped_rejected = 0
+    skipped_invalid = 0
+    errors: List[str] = []
+    seen_in_file: set = set()
+    seed_comment = f"Seeded via Admin bulk Excel upload by {current_user.full_name}"
+
+    for row_number, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if row is None or all(c is None for c in row):
+            continue
+        parsed: dict = {}
+        for idx, field in col_fields.items():
+            if idx < len(row):
+                value = row[idx]
+                parsed[field] = str(value).strip() if value is not None else ""
+        name = (parsed.get("name") or "").strip()
+        if not name:
+            skipped_invalid += 1
+            errors.append(f"Row {row_number}: no Application Name value -- skipped.")
+            continue
+        name_upper = name.upper()
+        department = (parsed.get("department") or "").strip() or None
+        if name_upper in seen_in_file:
+            skipped_duplicate += 1
+            errors.append(f"Row {row_number}: '{name}' occurs more than once in this workbook -- later occurrence skipped.")
+            continue
+        seen_in_file.add(name_upper)
+
+        existing = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.name == name_upper).first()
+        if existing:
+            if existing.status == "APPROVED":
+                skipped_duplicate += 1
+            elif existing.status == "REJECTED":
+                skipped_rejected += 1
+                errors.append(
+                    f"Row {row_number}: '{name}' was previously rejected and was left untouched -- "
+                    "use the normal Application Name decision screen to reinstate it if that's intended."
+                )
+            else:
+                _approve_pending_application_name(db, existing, current_user, seed_comment)
+                _log_application_name_decision(db, existing, "Application Owner", "Approved", current_user, seed_comment)
+                approved_existing += 1
+            continue
+
+        obj = models.ApplicationMaster(
+            name=name_upper, status="APPROVED", department=department,
+            requested_by_id=current_user.id, qa_request_id=None,
+            app_owner_decided_by_id=current_user.id, app_owner_decided_at=models.now(),
+            app_owner_comments=seed_comment,
+            decided_by_id=current_user.id, decided_at=models.now(), comments=seed_comment,
+        )
+        db.add(obj)
+        created += 1
+
+    db.commit()
+    failure_reason = None
+    if created == 0 and approved_existing == 0:
+        failure_reason = errors[0] if errors else (
+            "No application names were created or approved. Confirm the workbook has an 'Application Name' "
+            "column with data below the header row."
+        )
+    return schemas.ApplicationSeedResult(
+        created=created, approved_existing=approved_existing, skipped_duplicate=skipped_duplicate,
+        skipped_rejected=skipped_rejected, skipped_invalid=skipped_invalid, errors=errors,
+        failure_reason=failure_reason,
+    )

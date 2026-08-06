@@ -8720,3 +8720,851 @@ now-outdated "Draft -> Submitted -> Raised happens in one step" wording. Single 
 
 **Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
 via `diff -rq` (only the standard `.env` leftover differs).
+
+## 196. Application Name Approve/Reject had no way to enter remarks
+
+**Request:** "Rejection Remarks/Comments can be provided while rejecting application name."
+
+**Root cause:** the backend has always accepted and stored a `comments` field on this decision
+(`schemas.ApplicationMasterDecision.comments`, written to `ApplicationMaster.app_owner_comments`/`comments`
+and logged onto every affected request's own Activity tab via `_log_application_name_decision` in
+`routers/applications.py`) -- but the frontend's `ApplicationNameBanner.tsx` (the only place this decision is
+ever made, see its own docstring on why it was centralized here) called `decide()` with just `{ decision }`,
+never collecting or sending anything. So there was no way to actually type a reason before clicking Approve
+or, especially, Reject.
+
+**Frontend changes (`ApplicationNameBanner.tsx`):** added a local `comments` state and a "Remarks (optional)"
+text input, rendered between the description and the Approve/Reject buttons (same "optional note attached to
+this action" pattern already used for Approve/Return/Reject elsewhere in the app, e.g. Functional/SAST/DAST/
+Performance's own "Action note" input) -- disabled while `busy`, cleared implicitly once the banner switches
+to its post-decision view. `decide()`'s POST body now sends `{ decision, comments }` for both outcomes
+(matching every other approval checkpoint, which also lets an Approve carry an optional note, not just
+Reject).
+
+**Data notes:** none -- purely a frontend change; the backend column/logging already existed.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).
+
+## 197. Dashboard scoped to the viewing user's own department, with confirmed exceptions
+
+**Request:** "In dashboard, every-where show data from which department user belong to only." Two follow-up
+clarifications were needed and confirmed directly before implementing, since the literal request would have
+broken existing, deliberate design elsewhere in the app: (1) a business Department Head (DEPARTMENT_HEAD_CM/
+AGM) keeps seeing every department, "except Department Head"; (2) QA_LEAD/QA_ENGINEER/SECURITY_ANALYST/
+DEPARTMENT_HEAD_COE_CM/AGM are ALSO left unrestricted -- these four are all mapped to the fixed QA_DEPARTMENT
+("IT - QA"), never the business department of the request they're reviewing, so scoping them the same way as
+a Requester/SM would show them nothing (zero requests, zero findings) rather than something narrower; their
+whole role is reviewing every business department's requests. Every OTHER role -- ADMIN included, confirmed
+directly -- is now confined to their own department on the Dashboard.
+
+**Backend changes (`deps.py`):** added `DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES` (the 7 roles above) and
+`dashboard_department_scope(current_user)`, returning `None` ("show every department") for those roles or a
+user with no department set on their own profile (mirrors `require_same_department`'s own "nothing meaningful
+to compare against" precedent), otherwise `current_user.department`. Checked directly against the raw
+`current_user.roles` list, NOT `has_role()` -- `has_role()` treats ADMIN as satisfying any role check, which
+would have incorrectly also exempted Admin from this scoping.
+
+Applied in two different ways depending on whether an endpoint is Dashboard-exclusive:
+- `routers/dashboard.py` (`project-wise`, `security/sast`, `security/dast`, `suppression`, `3w`, `3w/{project_id}`)
+  is only ever called by Dashboard.tsx, so scoping is unconditional, no flag needed. Added a shared
+  `_join_qa_department(query, model, scope)` helper, since `FunctionalRequest`/`SASTRequest`/`DASTRequest`/
+  `PerformanceRequest`'s own `department` is a delegated (read-only) property through their parent
+  `qa_request`, not a real column -- SQLAlchemy can't `.filter()` on that directly, so this joins to
+  `QARequest` instead. `SuppressionRequest.department` (a real column) filters directly, no join. A standalone
+  security request with no `qa_request_id` is naturally excluded by the inner join, same as it already reads
+  as departmentless everywhere else. `3w/{project_id}`'s own drill-down now also 404s (as "Project not found",
+  same shape as a genuinely missing one) if the resolved project's department doesn't match the caller's
+  scope, closing a direct-URL route around the list's own scoping.
+- `list_requests` (`qa_requests.py`), `list_functional` (`functional.py`), `list_sast`/`list_dast`
+  (`sast_dast.py`), `list_performance` (`performance.py`), and `list_approvals` (`approvals.py`) are each also
+  used by other, unrelated pages (the standalone QA Requests/Functional/SAST/DAST/Performance list pages, and
+  the separate Approval Workflow Log page for `list_approvals`) -- scoping a shared endpoint unconditionally
+  would have silently changed those other pages' behaviour too, which wasn't asked for. Each gained a new
+  opt-in `dashboard_scope: bool = False` query parameter instead; only the Dashboard's own fetch calls pass
+  it, so every other consumer is completely unaffected. `list_approvals` additionally gained
+  `_resolve_entity_department()` (mirroring the existing `_resolve_request_ref()` lookup pattern) to resolve
+  each audit-feed row's underlying department per entity_type, since `ApprovalAction` itself has no department
+  column -- an entity_type this can't resolve (e.g. TEST_PROJECT/TEST_CASE/TEST_CYCLE) is excluded under
+  scoping rather than shown, failing closed.
+
+**Frontend changes (`Dashboard.tsx`):** the shared 5-list fetch in `Dashboard()` (used by both Command Centre
+and the Requests tab) and Command Centre's own `/api/approvals` fetch now append `dashboard_scope=true`.
+`project-wise`/`3w`/`security/sast`/`security/dast`/`suppression` calls needed no change, since those
+endpoints scope unconditionally server-side. `qa-tester-workload` (QA Tester Overview tab) also needed no
+change -- it's already restricted to the QA team roles, all of which are in the unrestricted set above.
+
+**Data notes:** none -- purely query-scoping logic, no new column, no data migration.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. `npx tsc --noEmit -p .` -- clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`
+leftover differs).
+
+## 198. Department scoping extended from the Dashboard to every standalone request list
+
+**Request:** immediate follow-up to section 197: "Dashboard only working, but QA Requests, Functional
+Requests, SAST, DAST, Suppression, Performance everywhere no filter? it also be by department only."
+
+**Root cause / change:** section 197 deliberately made the shared request-list endpoints (`list_requests`,
+`list_functional`, `list_sast`, `list_dast`, `list_performance`) apply department scoping only when an opt-in
+`dashboard_scope=true` flag was passed, reasoning that the Dashboard was the only place scoping had been
+asked for and these same endpoints also feed their own standalone list pages (QA Requests, Functional,
+SAST, DAST, Performance). This request confirms scoping should actually apply everywhere those endpoints are
+used, not just from the Dashboard -- so the flag has been removed and `dashboard_department_scope(current_user)`
+(see deps.py, unchanged from section 197 -- same roles/exceptions: Department Head and the QA/Security/
+Executive-COE roles stay unrestricted, every other role including Admin is confined to their own department)
+is now applied unconditionally in all five of those endpoints.
+
+Also added to `list_suppressions` (`routers/suppression.py`), which the user named directly and which had no
+scoping at all before this (not even opt-in) -- `SuppressionRequest.department` is a real column, so this is
+a plain `.filter()`, no join needed (unlike Functional/SAST/DAST/Performance, whose own `department` is a
+delegated property through their parent QARequest).
+
+`list_approvals` (`routers/approvals.py`, the Recent Activity feed / Approval Workflow Log) was NOT changed
+in this pass -- the user's list named the six request-type pages specifically, not the separate audit-log
+page, so its `dashboard_scope` opt-in flag (added in section 197, still used only by the Dashboard's own
+"Recent Activity" fetch) is left as-is.
+
+**Frontend changes (`Dashboard.tsx`):** the shared 5-list fetch's `?dashboard_scope=true` query params were
+removed (dead weight now that scoping is unconditional server-side) -- behaviour is unchanged, since the
+backend applies the same scoping regardless of the query string.
+
+**Data notes:** none -- purely query-scoping logic, no new column, no data migration.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. `npx tsc --noEmit -p .` -- clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`
+leftover differs).
+
+## 199. Department Head is no longer an exception to department scoping
+
+**Request:** immediate follow-up to sections 197/198: "also one more change Department head also restricted
+/ bind to Department. the department where they belong to only details render render to them."
+
+**Root cause / change:** section 197 kept a business Department Head (DEPARTMENT_HEAD_CM/AGM) unrestricted,
+confirmed directly at the time as "except Department Head." This request reverses that -- Department Head is
+now removed from `DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES` (`deps.py`), so it's confined to its own
+department everywhere this scoping already applies (Dashboard's Command Centre/Requests/Security/
+Suppression/3W tabs, plus the standalone QA Requests/Functional/SAST/DAST/Suppression/Performance list
+pages), the same as Requester/Business Analyst/SM/Application Owner/Admin. No other code changed --
+`dashboard_department_scope()` itself, and every endpoint that calls it, already worked purely off this set
+membership, so removing Department Head from the set is the entire fix. Only the QA/Security/Executive-COE
+roles (QA_LEAD, QA_ENGINEER, SECURITY_ANALYST, DEPARTMENT_HEAD_COE_CM/AGM) remain unrestricted, unchanged
+from section 197 -- these are mapped to the fixed QA_DEPARTMENT ("IT - QA"), never the business department of
+the request they're reviewing, so scoping them the same way would show them nothing rather than something
+narrower.
+
+Also corrected an outdated comment in `routers/qa_requests.py::list_requests` that still described Department
+Head as unrestricted.
+
+**Data notes:** none -- a one-line change to a role set, no new column, no data migration.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env` leftover differs).
+
+## 200. New confidential super-access role: Scale 6+
+
+**Request:** "i want to create one role Scale 6 +, which can be assigned by Administaror only, and not visible
+to noone except admin. if this role assigned to any user that user can see all data like IT-QA has."
+
+**Implementation, three parts:**
+
+1. **Admin-only assignable.** Added `Role.SCALE_6_PLUS` to `ALL_ROLES` (`constants.py`) but deliberately left
+   it OUT of `DEPARTMENT_ADMIN_ASSIGNABLE_ROLES`/`QA_ADMIN_ASSIGNABLE_ROLES` -- the only two role subsets a
+   local admin (business Department Head / Executive COE) may assign via `PATCH /api/auth/local-admin/users/
+   {id}`. That endpoint (`update_local_admin_user`) already 403s on any role outside the acting local admin's
+   own assignable subset, so it can never be granted except through the regular Admin-only `POST /api/auth/
+   users` / `PATCH /api/auth/users/{id}` (both already gated `require_roles(Role.ADMIN)`).
+
+2. **Sees all data, like IT-QA.** Added `Role.SCALE_6_PLUS` to `DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES`
+   (`deps.py`, see sections 197-199) -- same set the QA/Security/Executive-COE roles already sit in, so a
+   Scale 6+ holder's own department mapping is ignored entirely and they see every department's data across
+   the Dashboard and every scoped list endpoint (QA Requests, Functional, SAST, DAST, Suppression,
+   Performance), the same as an IT-QA role today.
+
+3. **Invisible to everyone except Admin.** New `CONFIDENTIAL_ROLES = {Role.SCALE_6_PLUS}` set in
+   `constants.py` (a set, not a single check, so a future confidential role doesn't need new call sites).
+   Enforced in three places in `routers/auth.py`:
+   - `_redact_confidential_roles(user, viewer)` builds a `schemas.UserOut` and strips any `CONFIDENTIAL_ROLES`
+     entry from `.roles` unless the viewer holds ADMIN -- applied in `list_users` (`GET /api/auth/users`, the
+     general active-users picker fetched by literally every logged-in user for things like "assign tester"),
+     so a Scale 6+ holder still appears normally in every picker, just without this role ever showing in the
+     raw JSON to a non-Admin, even via browser devtools.
+   - `_require_own_department_target` (guards every local-admin action) now 403s "This account cannot be
+     managed from here" if the target holds any `CONFIDENTIAL_ROLES` role -- the SAME full-account protection
+     an ADMIN account already gets there, not just a redacted label, so a local admin can't discover this
+     role exists by probing a user ID directly via `PATCH /api/auth/local-admin/users/{id}`.
+   - `list_local_admin_users` (`GET /api/auth/local-admin/users`, the Department Coordinator roster) now
+     excludes any row holding a `CONFIDENTIAL_ROLES` role entirely, mirroring its existing ADMIN/
+     `admin_managed_only` exclusions -- a Department Head/Executive COE never sees that user as a row at all
+     on that page.
+
+   `GET /api/auth/me` (a user's own profile) is deliberately left unredacted -- a Scale 6+ holder can see their
+   own role in their own topbar (Layout.tsx), which isn't "visible to someone else." `GET /api/auth/users/all`,
+   `POST /api/auth/users`, `PATCH /api/auth/users/{id}`, and `POST /api/auth/users/{id}/reset-password` are all
+   already Admin-only endpoints, so no redaction was needed there.
+
+**Frontend changes (`constants.ts`):** added `SCALE_6_PLUS: 'Scale 6+'` to `ROLE_LABELS` (and therefore
+`ALL_ROLES`, which is derived from it) so Admin.tsx's role picker (`RoleChipSelect`, defaulting to
+`ALL_ROLES`) can offer it -- that page is itself gated to Admin accounts only (`hasRole(user, 'ADMIN')`).
+`DepartmentAdmin.tsx`'s own picker passes an explicit `roles={assignableRoles}` (`DEPARTMENT_ADMIN_ASSIGNABLE_ROLES`/
+`QA_ADMIN_ASSIGNABLE_ROLES`), neither of which includes it, so it never appears there -- and the backend
+redaction above means it wouldn't be present in that page's fetched data even if it did.
+
+**Not touched:** `ApprovalAction.actor_role` (the CSV role snapshot logged against every workflow decision,
+rendered as a last-resort fallback in `JiraActivity.tsx`'s `actorLabel()` only when `actor_name` is blank) is
+a permanent audit-trail record, not a "who currently holds elevated access" listing, and was left as-is --
+consistent with why real actor names are always shown there too.
+
+**Data notes:** none -- purely a new role code and query-scoping/redaction logic, no new column, no data
+migration. A brand-new role also needs no seeding: it simply doesn't exist on any user until an Admin assigns
+it via the existing Admin.tsx UI.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. `npx tsc --noEmit -p .` -- clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`
+leftover differs).
+
+## 201. QA Sign-off list was missed from department scoping
+
+**Request:** "you missed QA-Sign-Off, this also visible to IT-QA only."
+
+**Root cause:** `list_signoffs` (`routers/signoff.py`) was never included in the sections 197/198 sweep --
+`GET /api/signoffs` had zero filtering, returning every certificate to any logged-in user regardless of role
+or department.
+
+**Change:** applied the same `dashboard_department_scope(current_user)` filter used everywhere else. Unlike
+Functional/SAST/DAST/Performance, `QASignOff.department` is a real column (not delegated) and is always
+hardcoded to `QA_DEPARTMENT` ("IT - QA") at creation time (see `create_signoff`'s own comment: "never trust
+the linked business request's department for approval routing -- the sign-off certificate is an IT - QA-owned
+record"), so this needed a plain `.filter()`, no join. The practical effect matches exactly what was asked --
+since every row's department is "IT - QA," a scoped viewer only ever sees these certificates if their own
+department is "IT - QA" or they hold one of the already-unrestricted QA/Security/Executive-COE roles (i.e.
+everyone who legitimately works this workflow); every other department-scoped role (Requester, SM, Department
+Head, Business Analyst, Application Owner, Admin without an IT - QA mapping) now sees none, same as they
+already see for every other now-scoped request type. No special-casing needed -- this is the existing helper
+applied consistently, not a new rule.
+
+**Data notes:** none -- purely a query-scoping change, no new column, no data migration.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env` leftover differs).
+
+## 202. QA Sign-off hidden from the nav and blocked by direct URL for anyone outside IT - QA
+
+**Request:** "Hide QA Sign Off except IT-QA."
+
+**Change:** section 201 already made `GET /api/signoffs` return nothing to anyone who wouldn't see IT - QA's
+own data (every certificate's own department is hardcoded to `QA_DEPARTMENT` at creation, so this only ever
+returns rows to someone actually mapped to `QA_DEPARTMENT`, or one of the already-unrestricted QA/Security/
+Executive-COE/`SCALE_6_PLUS` roles) -- but the "QA Sign-off" nav link and the `/signoff` route itself were
+still shown/reachable for everyone else, landing them on a guaranteed-empty page instead of hiding the
+feature outright.
+
+**Frontend changes:**
+- `constants.ts`: added `DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES` (mirrors `deps.py`'s set of the same name
+  exactly -- QA_LEAD/QA_ENGINEER/SECURITY_ANALYST/DEPARTMENT_HEAD_COE_CM/AGM/SCALE_6_PLUS) and
+  `canSeeQaDepartmentOnlyData(user)`, which returns true for those roles, for a user with no department set
+  (mirrors the backend's own "nothing meaningful to scope by" fallback), or for `user.department ===
+  QA_DEPARTMENT`. Checked directly against `user.roles`, not `hasRole()` -- `hasRole()` treats ADMIN as
+  satisfying any role check, which would incorrectly show this to every Admin regardless of department, not
+  matching how the backend actually scopes Admin (see sections 197/199).
+- `Layout.tsx`: the `/signoff` nav item is now only included when `canSeeQaDepartmentOnlyData(user)` is true.
+- `SignOff.tsx`: added the same check as an early return rendering an "Access Restricted" card (same pattern
+  already used by `Admin.tsx`/`DepartmentAdmin.tsx`) -- covers direct URL navigation/bookmarks/the topbar
+  search's `TQA-SIGN-*`/`QA-CERT-*` deep-link, none of which go through the nav item.
+
+**Data notes:** none -- purely frontend nav/page gating; the actual enforcement is the backend's own query
+scoping from section 201, unchanged here.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).
+
+## 203. Approval Workflow Log and Report & Export Centre now department-scoped too
+
+**Request:** "Approval Workflow log, Report & Export Centre everything also by department only. other
+department data can not be shown and report also does not contain other department data."
+
+**Context:** section 197 deliberately left `GET /api/approvals` (`list_approvals`) scoping opt-in behind a
+`dashboard_scope` query flag, reasoning it also feeds the separate, standalone Approval Workflow Log page
+(`modules/governance/Approvals.tsx`) and only the Dashboard's own "Recent Activity" fetch should be
+restricted. The Reports & Export Centre (`modules/governance/Reports.tsx`, backed by `/api/reports/*` and
+streamed out via `/api/export/{report_key}`) was never touched by any earlier department-scoping change at
+all. This request explicitly extends scoping to both.
+
+**Backend changes:**
+- `deps.py`: the `_resolve_entity_department` helper (previously private to `approvals.py`) is now a shared
+  `resolve_entity_department(db, entity_type, entity_id)`, since both `list_approvals` and the new
+  `audit-evidence` report need the identical entity_type -> department lookup for the same
+  `ApprovalAction`-backed feed. No router imports this from another router; both import it from `deps.py`,
+  same as every other shared helper.
+- `approvals.py`: `list_approvals` dropped the `dashboard_scope` opt-in flag entirely and now always applies
+  `dashboard_department_scope` + `resolve_entity_department`, exactly like every list endpoint already
+  converted in section 198. The Approval Workflow Log page now only shows the caller's own department's
+  approval/audit history (or every department, for the unrestricted QA/Security/Executive-COE/`SCALE_6_PLUS`
+  roles per sections 197/199/200).
+- `reports.py`: every report in `REPORT_REGISTRY` now applies the same scoping as its data source's
+  equivalent list endpoint:
+  - `_visible_qa_requests` (feeds `qa-request-summary`, and indirectly `monthly-qa-kpi`'s/
+    `application-quality-scorecard`'s "Total QA Requests"/app list) now also filters `QARequest.department`
+    directly (real column), on top of its existing Draft/Cancelled-hiding logic.
+  - `sast-scan`/`dast-scan` join to `QARequest` via `qa_request_id` and filter on department, same as
+    `list_sast`/`list_dast`.
+  - `vulnerability-trend`/`severity-distribution` (the latter just calls the former) now join
+    `SASTFinding`/`DASTFinding` through their parent SAST/DAST request to `QARequest`, since findings have no
+    department of their own.
+  - `suppression-register` filters `SuppressionRequest.department` directly (real column), same as
+    `list_suppressions`.
+  - `monthly-qa-kpi`'s "Completed Requests" (FunctionalRequest count) now joins to `QARequest` for scoping;
+    "Open Suppressions" filters `SuppressionRequest.department` directly.
+  - `application-quality-scorecard`'s per-app SAST count is now also scoped (joined to `QARequest`), not just
+    the app list itself -- otherwise a standalone SAST request sharing an application name across departments
+    could still leak another department's scan count into an otherwise properly-scoped app row.
+  - `audit-evidence` (previously completely unscoped) now filters using the same shared
+    `resolve_entity_department` helper as `list_approvals`.
+  All of the above resolve to "no restriction" (every department, unfiltered) for the same unrestricted roles
+  as everywhere else, and for a user with no department set on their own profile -- identical fallback rules
+  to `dashboard_department_scope` everywhere it's already used.
+- Since every report function underlying `/api/export/{report_key}` (`export.py`) is scoped at its own query
+  level, the exported xlsx/pdf/csv files inherit the same restriction automatically -- no changes were needed
+  in `export.py` itself.
+
+**Frontend changes:**
+- `Dashboard.tsx`: the Command Centre's `/api/approvals` fetch no longer appends `dashboard_scope=true` (dead
+  weight now that scoping is unconditional server-side) -- simplified to match the same plain `${query}`
+  pattern already used by the `project-wise`/`3w` fetches next to it.
+- `Reports.tsx` needed no changes -- it has no department filter UI of its own; the restriction is enforced
+  entirely server-side per report.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`
+leftover differs).
+
+## 204. Dashboard: Draft requests were counted as "Active"
+
+**Request:** "DASHBOARD 1. Draft should not be seen in Active."
+
+**Root cause:** `Dashboard.tsx`'s `isActiveRequest(row)` treated a request as active whenever its status wasn't
+in that request type's own terminal-status list (`GATEWAY_TERMINAL_STATUSES` for QA Request, `QA_TERMINAL_STATUSES`
+for Functional, `SAST_DAST_TERMINAL_STATUSES` for SAST/DAST, `PERFORMANCE_TERMINAL_STATUSES` for Performance).
+DRAFT was never in any of those lists (it isn't terminal -- it just hasn't started), so a request still sitting
+in Draft, never even submitted for review, counted as "in progress" alongside genuinely in-flight requests, in
+both the "Active requests (org-wide)" stat card (Command Centre tab) and the "Active / in progress" stat card
+(My Requests tab).
+
+**Change (`Dashboard.tsx`):**
+- `isActiveRequest` now returns `false` immediately for any row with `status === 'DRAFT'`, before falling back
+  to its existing per-type terminal-status check. Fixes both stat cards at once, since they share this one
+  function.
+- Added a companion `isTerminalRequest(row)` (the genuine per-type terminal check, extracted rather than
+  inferred) and changed the My Requests tab's "Closed / cancelled" card from `scopedRequests.length -
+  scopedActiveCount` to `scopedRequests.filter(isTerminalRequest).length` -- with the complement-based formula,
+  excluding Draft from "Active" would have silently reassigned every Draft request into "Closed / cancelled"
+  instead, which is equally wrong. A Draft request now counts toward "Total requests" only, not toward either
+  of the other two cards.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean.
+
+## 205. Test Management restricted to the caller's own department
+
+**Request:** "Test Management also restrict to Department only."
+
+**Change:** `list_test_projects` (`test_projects.py`) now applies the same `dashboard_department_scope` rule as
+every other list endpoint (sections 197/198) -- `TestProject.department` is a real column, so a direct
+`.filter()` is enough. This is the single entry point every Test Management screen (Test Projects, Test
+Repository, Test Execution) picks a project from -- their own project-scoped endpoints (`list_folders`,
+`list_test_cases`, `list_cycles`, `list_executions`, etc., all under `test_repository.py`/`test_execution.py`)
+already take an explicit `project_id` and only ever return rows belonging to that one project, so once the
+project picker itself only shows the caller's own department's projects, a scoped user has no path through the
+normal UI to another department's folders, test cases, cycles, or executions. Resolves to unrestricted (every
+department) for the same roles as everywhere else (QA_LEAD/QA_ENGINEER/SECURITY_ANALYST/
+DEPARTMENT_HEAD_COE_CM/AGM/SCALE_6_PLUS), which matters here in particular since Test Management is IT-QA's
+own home module.
+
+Individual get-by-id endpoints (`get_test_project`, and everything reached via an explicit `project_id`/
+`cycle_id`/`execution_id` path param) were deliberately left unscoped, consistent with every other module's own
+get-by-id endpoints (e.g. `functional.py::get_functional`) -- scoping has only ever been applied at the list
+level throughout this app; a single-record fetch by an id the caller doesn't already have from a properly
+scoped list is out of scope for this change, same as it is everywhere else.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`
+leftover differs).
+
+## 206. Global: removed the duplicate × close button from confirmation-style modals
+
+**Request:** "Global level -- cross button and close duplicate -- wherever on confirmation modal will be close
+then cross button should be removed."
+
+**Root cause:** the shared `Modal` component (`components/Common.tsx`) always renders a × in its header,
+wired directly to whatever `onClose` the caller passes in. Every plain confirmation/acknowledgement/delete
+pop-up in the app already renders its own explicit button (Yes/No, Cancel, Delete/Cancel, Got it, Done, Close,
+Log out instead, …) that calls that exact same `onClose` handler -- so on those modals the × was a second
+control doing the identical thing, not a distinct "just dismiss" affordance.
+
+**Change:**
+- `Modal` (`components/Common.tsx`) gained an optional `hideCloseButton` prop -- when true, the header ×
+  is not rendered at all (both the `drawer` and `dialog` variants). Defaults to `false` (unchanged behavior)
+  everywhere it isn't explicitly passed.
+- Set `hideCloseButton` on every plain confirmation-style modal already backed by its own explicit close
+  action:
+  - `ConfirmModal` and `InfoModal` (the two shared Yes/No and "Got it" pop-ups used throughout the app).
+  - `Common.tsx`'s `ErrorText` ("Action could not be completed" pop-up shown on nearly every page), its
+    `ApprovalActions` approve/assign modal, and its two "Delete document?" / "Delete checklist evidence?"
+    confirms.
+  - `DepartmentPrompt` (first-login department picker) -- its × used to be wired to the exact same action as
+    "Log out instead".
+  - `RequestDetail.tsx`'s "Delete document?" and `ChecklistEvidencePicker.tsx`'s "Delete checklist evidence?".
+  - Test Management's status-change/activation-review confirms (`TestProjects.tsx`), test-case review confirm
+    (`TestRepository.tsx`), and all four multi-stage bulk-operation modals (bulk approve/update in
+    `TestRepository.tsx`, bulk execute/remove in `TestExecution.tsx`) -- every stage of each (confirm/edit,
+    success, error) already has its own Cancel/Back/Done/Close/Try again button wired to the same close
+    action; the one in-progress stage that disables closing entirely (`onClose={() => undefined}`) is
+    unaffected either way since the × was already inert there.
+- Left untouched: the QA Request wizard (`NewRequestModal.tsx`) and any other large multi-step form/detail
+  drawer with no equivalent explicit close button of its own -- those still show the × as their only
+  single-click way to dismiss, same as before.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env` leftover differs).
+
+## 207. Admin: bulk-seed Application Names from an Excel upload
+
+**Request:** "add one functionality on admin section to upload excel and based on data present on excel
+Application name will be seed."
+
+**Context:** previously the only way an Application Name entered `ApplicationMaster` was one at a time --
+a requester typing "Other" on the QA Request wizard (`_resolve_application_name` in `qa_requests.py`), which
+creates it at `PENDING_APP_OWNER` and sends it through the normal Application Owner review. There was no way
+for an Admin to pre-populate the master list in bulk (e.g. from an existing spreadsheet of known-valid
+application names during setup).
+
+**Backend changes (`routers/applications.py`):**
+- `_approve_pending_application_name(db, obj, current_user, comments)`: extracted from `decide_app_owner_name`'s
+  own Approved branch (state mutation only, no activity logging) -- terminal on both tiers' fields and
+  finalizes (creates linked children for) any QA Request gateway that introduced this name and is still
+  sitting at Submitted, same as before. `decide_app_owner_name`'s Approved branch now just calls this helper;
+  its Rejected branch and the rest of the function are unchanged. This is shared with the new bulk-seed
+  endpoint below so an Admin's seed doesn't leave a duplicate pending row behind for a name that was
+  separately proposed elsewhere.
+- `GET /api/application-names/bulk-seed-template` (Admin-only): generates a minimal two-column
+  ("Application Name", "Department") xlsx template on the fly with `openpyxl`, one example row included.
+- `POST /api/application-names/bulk-seed` (Admin-only, `multipart/form-data`, field `file`): parses an
+  uploaded xlsx (same case/whitespace-tolerant header matching convention as `test_repository.py`'s own
+  import) and, per row:
+  - No name value -> counted as `skipped_invalid`.
+  - Name repeats within the same workbook -> counted as `skipped_duplicate` (later occurrence skipped).
+  - No existing `ApplicationMaster` row for that (uppercased) name -> created directly at `APPROVED`
+    (`qa_request_id` stays NULL, since a seeded name has no originating request) -- counted as `created`.
+  - An existing row still at `PENDING_APP_OWNER`/`PENDING_SM` -> approved outright via
+    `_approve_pending_application_name` -- counted as `approved_existing`.
+  - An existing `APPROVED` row -> left untouched, counted as `skipped_duplicate`.
+  - An existing `REJECTED` row -> left untouched, counted as `skipped_rejected` -- a real Reject decision may
+    have already force-rejected other linked requests (`_auto_reject_linked_requests`), so a bulk upload never
+    silently overrides one; reinstating it is left to the normal decision endpoints.
+  Returns `ApplicationSeedResult` (`schemas.py`): `created`/`approved_existing`/`skipped_duplicate`/
+  `skipped_rejected`/`skipped_invalid` counts, a row-level `errors` list, and `failure_reason` (populated only
+  when nothing was created or approved) -- same result-summary shape as `TestCaseImportResult`.
+
+**Frontend changes:**
+- `types.ts`: added `ApplicationSeedResult`, mirroring the new backend schema.
+- `modules/governance/Admin.tsx`: new `ApplicationSeedCard` component ("Application Names — Bulk Seed from
+  Excel") rendered on the Admin page below the Departments manager -- a "Download Template" button
+  (`api.downloadFile`), a file picker, an "Upload & Seed" submit (`api.uploadForm`), and a result summary
+  (reusing the existing `.access-summary`/`.import-primary-reason`/`.import-issues` styles already used
+  elsewhere in the app for this exact result-then-errors shape, rather than introducing new CSS).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`
+leftover differs).
+
+## 208. Document upload/removal now logged to Activity; checklist evidence controls are identity-aware, not just status-aware
+
+**Request:** "Checklist, Attachment, uploading document should be non editable if not assigned, or in other
+person's bucket. only the assigned person can update. also any upload of document, remove should be log in
+activity."
+
+**Part 1 -- Activity logging (`documents.py` + all 6 module routers):**
+- `_log_document_action(db, entity_type, entity_id, actor, decision, comments)`: new helper in
+  `documents.py`, appends an `ApprovalAction` row (`step_name="Document"`, decision `"Uploaded"`/`"Removed"`)
+  against the PARENT request's own Activity-tab identity -- same `entity_type` string convention already used
+  everywhere else (`"FUNCTIONAL_REQUEST"`/`"SAST"`/`"DAST"`/`"PERFORMANCE"`/`"SIGNOFF"`/`"SUPPRESSION"`, per
+  `approvals.py`'s `_COMMENT_ENTITY_MODELS`).
+- `save_documents`/`delete_document`: extended with optional `log_entity_type`/`log_entity_id`/`log_actor`/
+  `log_label` kwargs, all defaulting to `None` (no-op) so any call site that doesn't pass them keeps its
+  exact prior behavior. `log_label`, when given, is folded into the log message (e.g. "Uploaded 2 files to
+  checklist item 'Test Data Prepared': a.pdf, b.pdf") so item-level evidence reads distinctly from a
+  top-level Documents-tab upload.
+- Wired into every general-docs and checklist-item-docs upload/delete endpoint in `functional.py`,
+  `sast_dast.py` (SAST + DAST), `performance.py`, `signoff.py`, and `suppression.py` -- 22 call sites total.
+  Checklist-item endpoints additionally now capture the already-existing `_..._checklist_item_or_404(...)`
+  helper's return value (previously called and discarded) to get the item's own `.item` text for `log_label`.
+- Deliberately left unwired: `TEST_EXEC_IMAGE` uploads (`test_execution.py`, already logged via its own
+  "Attempt Recorded" entry), `COMMENT_IMAGE` uploads (`approvals.py`, already logged via its own "Commented"
+  entry), and the QA Request wizard's pre-raise draft checklist evidence (`qa_requests.py`'s
+  `upload_draft_checklist_evidence`/`delete_draft_checklist_evidence` -- nothing to attribute yet, the
+  request isn't raised) -- logging any of these would double up an already-existing Activity entry.
+
+**Part 2 -- Identity-aware evidence controls (frontend only; the backend already enforced this):**
+Confirmed the backend's own `_can_upload_documents` (one per module) already rejected anyone who wasn't the
+requester or the request's current stage owner (SM/Department Head by department match during their own
+decision window, or the assigned QA Lead/Security Lead/tester/analyst later on) with a 403 -- Admin always
+bypasses. The actual gap was the frontend: `constants.ts`'s `canManageReadinessEvidence(status)` was
+status-only, so the Attach/Remove controls looked clickable to *any* viewer matching the status, even though
+the backend would reject a non-owner.
+- `constants.ts`: `canManageReadinessEvidence` now takes an optional second `isOwner` parameter (default
+  `true`, so any not-yet-updated call site keeps its old behavior) -- returns `false` outright if `isOwner`
+  is `false`, regardless of status.
+- `Functional.tsx`/`SAST.tsx`/`DAST.tsx`/`Performance.tsx`: both the read-only detail view's and the Edit
+  Details modal's `<ChecklistEvidence canManage=.../>` call sites (8 total) now pass an `isOwner` computed
+  from `isRequester || <SM decides during SM_APPROVAL_PENDING, same dept> || <Department Head decides during
+  DEPARTMENT_HEAD_APPROVAL_PENDING, same dept>` -- mirroring each module's own backend `_can_upload_documents`
+  exactly for the statuses `READINESS_EVIDENCE_EDITABLE_STATUSES` actually covers. The detail view reuses
+  each module's already-computed `isRequester`/`canSMDecide`/`canDepartmentHeadDecide` flags directly; the
+  Edit Details modal (a separate component reachable only via the same `canEditDetails` gate) computes its
+  own equivalent local flags since it doesn't receive the detail view's as props.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`/
+uploads leftovers differ).
+
+## 209. De-duplicated the checklist-evidence file-row and delete-confirmation UI
+
+**Request:** "checklist UI still not uniformed like QA request checklist UI, Edit UI. why duplicate code, make
+consistent UI."
+
+**Context:** `components/Common.tsx`'s `ChecklistEvidence` (used post-raise by Functional/SAST/DAST/
+Performance's detail/edit views, backed by a real per-item documents endpoint) and
+`QARequests/steps/ChecklistEvidencePicker.tsx` (used pre-raise by the QA Request wizard, operating on a
+draft's local `File[]` state until the whole form is saved) already shared the same CSS classes from earlier
+consistency work, so the two looked alike -- but each still defined its own copy of the per-saved-file row
+markup (download button + delete "×" button) and its own copy of the delete-confirmation `<Modal>`. The two
+components' underlying data models differ too much to merge outright (one is a real REST resource, the other
+is pending local files not yet uploaded), so this extracts just the genuinely identical pieces instead.
+
+**Changes (`components/Common.tsx`):**
+- `ChecklistEvidenceFileRow({ fileName, onDownload, onDelete? })`: new exported component -- the download
+  button + optional delete button for one already-saved evidence file. `onDelete` omitted entirely hides the
+  delete button (was previously each caller conditionally rendering the button itself).
+- `ChecklistEvidenceDeleteModal({ fileName, itemLabel?, busy, onConfirm, onCancel })`: new exported component
+  -- the shared delete-confirmation dialog; `itemLabel` is an optional trailing phrase ("from this checklist
+  item") so the two callers' slightly different copy stays intact without duplicating the dialog's structure.
+- `ChecklistEvidence` itself now renders `documents.map(...)` via `ChecklistEvidenceFileRow` and its
+  `pendingDelete` dialog via `ChecklistEvidenceDeleteModal`, instead of its own inline JSX for both.
+
+**Changes (`QARequests/steps/ChecklistEvidencePicker.tsx`):**
+- `savedFiles.map(...)` (already-uploaded draft evidence) now renders via the same `ChecklistEvidenceFileRow`;
+  the separate `files.map(...)` block (pending local `File[]`, not yet uploaded -- shows "uploads when draft
+  is saved" and a plain remove button with no API call) is intentionally left as its own bespoke markup,
+  since it isn't a saved document and has no download/delete-confirmation behavior to share.
+- `pendingDelete` dialog now renders via the shared `ChecklistEvidenceDeleteModal` (no `itemLabel`, matching
+  its original shorter copy).
+- Dropped the now-unused `Modal` import.
+
+**Verified:** `npx tsc --noEmit -p .` clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/uploads leftovers differ).
+
+## 210. Document/evidence upload is now exclusive to the current assignee, not additive with the requester
+
+**Request (follow-up on section 208):** "still issue not resolved. Requester raise the request. now it's moved
+to SM, so SM is the current assignee then IT will go for Department Head, assignee is department head. so only
+the current assigned can edit the evidence, update checklist, upload evidence, remove evidence. else it will be
+blocked."
+
+**Root cause:** section 208's frontend fix (`isOwner`/`canManage`) was correct as far as it went, but every
+module's backend `_can_upload_documents` (functional.py/sast_dast.py/performance.py/signoff.py/suppression.py)
+had an unconditional `if obj.requester_id == user.id: return True` *before* the status-based checks -- so the
+original requester could still upload/remove documents and checklist evidence at any point in the request's
+life, even after handing it off to SM/Department Head/QA, alongside whoever the request's current status
+actually sat with. This is exactly the gap the user is describing: two people (requester + current assignee)
+both had access instead of exactly one. `_can_edit_details` in every one of these files already got this right
+(status-exclusive, no blanket requester bypass) -- `_can_upload_documents` just hadn't been aligned to match.
+
+**Backend changes -- `_can_upload_documents` reworked to be exclusive by status, mirroring `_can_edit_details`:**
+- `functional.py`: requester only during `DRAFT`/`SUBMITTED`/`RETURNED_BY_SM`/`SM_REJECTED`/
+  `RETURNED_BY_DEPARTMENT_HEAD`/`RETURNED_BY_QA_LEAD`/`REQUESTER_VERIFICATION`; SM exclusively during
+  `SM_APPROVAL_PENDING`; Department Head exclusively during `DEPARTMENT_HEAD_APPROVAL_PENDING`; QA
+  Lead/assigned tester for the QA-activity statuses (unchanged from before).
+- `sast_dast.py` (SAST + DAST share one function): requester only during `DRAFT`/`SUBMITTED`/`RETURNED_BY_SM`/
+  `SM_REJECTED`/`RETURNED_BY_DEPARTMENT_HEAD`/`RETURNED_BY_SECURITY_LEAD`; SM/Department Head exclusive during
+  their own pending status; Security Lead/Analyst for the post-readiness statuses (unchanged). `WAITING_FOR_FIX`
+  is the one deliberate exception -- both the requester (who has to actually fix the finding) *and* the
+  assigned Security Analyst are eligible there, exactly matching `_mark_fixed`'s own existing permission check.
+- `performance.py`: requester only during `DRAFT`/`SUBMITTED`/`RETURNED_BY_SM`/`SM_REJECTED`/
+  `RETURNED_BY_DEPARTMENT_HEAD`/`RETURNED_BY_ENGINEER`/`REQUESTER_VERIFICATION`; SM/Department Head exclusive
+  during their own pending status; engineer/tester for `_ENGINEER_OWNED_STATUSES` (unchanged).
+- `signoff.py`: requester only during `DRAFT`/`SUBMITTED`/`RETURNED_BY_SM`/`SM_REJECTED`/
+  `RETURNED_BY_DEPT_HEAD_COE` (`SIGNOFF_EDITABLE_STATUSES`, plus `SUBMITTED`); QA Lead exclusive during
+  `SM_APPROVAL_PENDING` (legacy status name); Executive COE exclusive during `DEPT_HEAD_COE_APPROVAL_PENDING`.
+- `suppression.py`: requester (`created_by_id`) only during `Draft`/`RETURNED_BY_SM`/
+  `RETURNED_BY_DEPARTMENT_HEAD`/`RETURNED_BY_SECURITY_TEAM`; SM/Department Head exclusive during their own
+  pending status; any Security Analyst during `SECURITY_TEAM_VERIFICATION` (unchanged, not per-request
+  assigned). Document *deletion* was already independently scoped to "whoever uploaded it, or Admin"
+  (`doc_store.can_delete_document`) in every module -- that rule is untouched, since it was never additive
+  with the requester in the first place.
+
+**Frontend changes -- mirrored the same exclusivity in both the checklist-evidence gate and the general
+Documents tab:**
+- `Functional.tsx`/`SAST.tsx`/`DAST.tsx`/`Performance.tsx`: the `evidenceOwner` flag introduced in section 208
+  (an OR of requester/SM/Department Head) is now a status-keyed *pick*, not an OR --
+  `status === 'SM_APPROVAL_PENDING' ? canSMDecide : status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ?
+  canDepartmentHeadDecide : isRequester` -- so only whichever single actor the backend would actually accept
+  shows the controls as usable. Applied to both the detail view and the Edit Details modal (which computes its
+  own local equivalent, same as section 208).
+- `components/Common.tsx`'s `RequestDocuments` (the general per-request Documents tab -- previously had *no*
+  permission gating on its Upload form at all, unlike `ChecklistEvidence`): gained the same `canManage?: boolean`
+  prop (default `true`, backward compatible), hiding the upload form behind a "Only the current assignee can
+  upload documents at this stage" message when `false`. The existing per-row Delete button's own
+  `isAdmin || uploaded_by_id === user.id` check is untouched (matches `can_delete_document`, which was never
+  tied to current-assignee status to begin with).
+- `Functional.tsx`/`SAST.tsx`/`DAST.tsx`/`Performance.tsx`/`SignOff.tsx`/`Suppression.tsx`: each detail view now
+  computes its own `canManageDocuments`, a full mirror of that module's backend `_can_upload_documents` (wider
+  than `evidenceOwner`, since the general Documents tab -- unlike checklist evidence -- stays open across every
+  QA-activity/engineer/tester/security status too, not just the pre-approval window), and passes it to
+  `<RequestDocuments canManage={canManageDocuments} />`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`/
+uploads leftovers differ).
+
+## 211. Full refactor to "Document and Evidence Access Control Based on Workflow Stage"
+
+**Request:** a formal 4-stage access-control spec, reproduced here for reference: (1) Requester, while
+creating/editing a request, may upload and delete any number of files in both the Readiness Checklist Evidence
+section and the Documents section, until submitted. (2) SM Approval Stage: previously-uploaded files are
+read-only; the SM may upload; the SM may delete only files uploaded by them, and only while still at SM
+Approval; once it moves to Department Head Approval, all upload/delete is disabled for the SM. (3) Department
+Head Approval Stage: same pattern -- previously-uploaded files read-only, Department Head may upload, may
+delete only their own files and only while still at that stage; disabled once it moves on. (4) After
+Department Head Approval: all evidence/documents locked -- no user may upload, replace, or delete anything;
+view/download only; modification rights restored only when returned to the Requester.
+
+**Gap vs. section 210:** section 210 made upload exclusive to the current stage's single actor, but two things
+still didn't match this spec: (a) deletion (`doc_store.can_delete_document`) was scoped to "whoever uploaded
+it, or Admin" with **no time limit** -- an SM who uploaded a file could still delete it later even after the
+request moved on to Department Head (or beyond), since deletion never re-checked whether the uploader was
+still the current stage owner; (b) `_can_upload_documents` in every module still had a post-Department-Head-
+approval upload window for QA Lead/tester/Security Lead/Analyst/engineer roles, which the new spec's stage (4)
+explicitly rules out ("No user should be allowed to upload... any file" after Department Head approval, until
+returned).
+
+**Backend changes:**
+- `documents.py::can_delete_document(doc, user, is_current_stage_actor: bool = True)`: reworked from
+  `isAdmin OR uploaded_by_id==user.id` to `isAdmin OR (is_current_stage_actor AND uploaded_by_id==user.id)`.
+  `is_current_stage_actor` is the caller's own `_can_upload_documents(obj, user)` result for the request right
+  now -- the exact same check that decided whether `user` could upload here at all -- so deletion is always a
+  strict subset of "could I upload here right now," never wider. This single change implements both "may
+  delete only files uploaded by them" (already true before) AND the new "only while still at that stage" time
+  limit (previously missing) in one place, for every module. Defaults to `True` for the one caller
+  (`qa_requests.py`'s own separate gateway document table) where upload was never staged in the first place --
+  that gateway has no SM/Department Head review of its own (see its own docstring), so its documents are
+  always the requester's (or admin's) alone at any non-cancelled status, matching prior behavior exactly.
+- `functional.py` / `sast_dast.py` (SAST + DAST) / `performance.py` / `suppression.py`: `_can_upload_documents`
+  stripped down to exactly 3 branches (requester-owned statuses / SM-only / Department-Head-only) plus the
+  Admin bypass -- every other status (all QA-activity, post-readiness Security, engineer/tester, and terminal
+  statuses) now returns `False` unconditionally. This removes: Functional's QA_LEAD_ASSIGNED-through-
+  QA_SIGNOFF_PENDING window; SAST/DAST's entire post-readiness window (SECURITY_LEAD_ASSIGNED through
+  SECURITY_COMPLETE), **including** the WAITING_FOR_FIX dual requester/security-analyst exception added in
+  section 210 -- now locked like everything else post-approval; Performance's entire `_ENGINEER_OWNED_STATUSES`
+  window; Suppression's SECURITY_TEAM_VERIFICATION analyst window. The now-unused `_SECURITY_OWNED_STATUSES`/
+  `_ENGINEER_OWNED_STATUSES` constants were deleted rather than left dead. `signoff.py`'s `_can_upload_documents`
+  needed no logic change -- it already had exactly this 3-stage shape (Sign-off has no workflow stage past
+  Executive COE approval besides Issued, which is terminal).
+- Deliberate, explicit scope note: this lockout applies only to the readiness-facing Documents tab and
+  Checklist Evidence section (`documents.py`'s `RequestDocument` table) -- **not** to Test Execution's own
+  attempt-artifact system (`TEST_EXEC_IMAGE`, a completely separate upload path in `test_execution.py`) or rich
+  comment images (`COMMENT_IMAGE`, `approvals.py`). Evidence QA/Security generates while actually executing
+  tests, scanning, or remediating findings belongs in those systems, which are entirely unaffected by this
+  refactor.
+- All 22 delete call sites across the 6 routers (general-docs + checklist-item, where applicable) updated to
+  fetch the parent object and pass `_can_upload_documents(obj, current_user)` as `can_delete_document`'s new
+  third argument, replacing the old two-argument call.
+
+**Frontend changes:**
+- `Functional.tsx`/`SAST.tsx`/`DAST.tsx`/`Performance.tsx`/`Suppression.tsx`: `canManageDocuments` (the general
+  Documents tab's identity gate, added in section 210) stripped down to the same 3-branch shape as the backend
+  -- removed the QA-activity/security/engineer/tester branches entirely. `SignOff.tsx`'s `canManageDocuments`
+  needed no change (already 3-branch).
+- `evidenceOwner` (checklist evidence's identity gate) in all 4 modules, and each module's Edit Details modal's
+  own `canManageEvidenceModal`, gained an explicit `isAdmin ||` prefix -- previously an Admin who didn't also
+  hold the SM/Department Head role would incorrectly fail `canSMDecide`/`canDeptHeadDecide` and lose the
+  Attach/Delete controls during those two stages, even though the backend's own unconditional Admin bypass in
+  `_can_upload_documents` would have accepted the request. This was a pre-existing UI/backend mismatch from
+  section 210, not something the new spec introduced, but was corrected here since the same logic was already
+  being touched.
+- `components/Common.tsx`'s `RequestDocuments`: the per-row Delete button's condition changed from
+  `isAdmin || uploaded_by_id === user.id` to `isAdmin || (canManage && uploaded_by_id === user.id)` -- so a
+  file only shows as deletable to its own uploader while `canManage` (current-stage-actor) is still true,
+  matching `can_delete_document`'s new time-boxed rule exactly. `ChecklistEvidence`'s existing delete condition
+  (`canManage && (isAdmin || uploaded_by_id === user.id)`) needed no change -- it already had the right shape,
+  and now correctly includes Admin too since `evidenceOwner` (which `canManage` is derived from) gained the
+  Admin bypass above.
+
+**Scope note for the requesting user:** this is a strict, literal implementation of the 4-stage spec, applied
+uniformly across all 6 request types. The most consequential side effect: QA Lead/testers (Functional), Security
+Lead/Analysts (SAST/DAST, including the WAITING_FOR_FIX "requester needs to attach a fix" case), engineers/
+testers (Performance), and Security Analysts (Suppression) can no longer attach anything to the Documents tab or
+Checklist Evidence section once Department Head has approved -- only Test Execution's own separate attempt-
+artifact system remains open to them during actual execution/remediation work. If any of these specific
+post-approval windows were meant to stay open, flag it and they can be reintroduced as named exceptions the
+same way WAITING_FOR_FIX was before this change.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` -- both clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`/
+uploads leftovers differ).
+
+## 212. Blocked resubmission with a previously-rejected Application Name
+
+**Reported bug:** "System Allows Resubmission with a Previously Rejected Application Name." Repro: raise a
+request with a new Application Name -> Application Owner rejects it -> Edit Details, change the name to
+something else, save -> Edit Details again, change it back to the exact name that was just rejected -> submit.
+The system silently accepted it, re-entering the Application Owner queue as if the name had never been
+rejected in the first place.
+
+**Root cause:** `_resolve_application_name` (`qa_requests.py`) treats any REJECTED `ApplicationMaster` row as a
+"fresh proposal" the moment its name is re-entered -- flips it back to `PENDING_APP_OWNER` and wipes its
+rejection fields (`app_owner_decided_by_id`/`app_owner_comments`/etc.), by design, so that a genuinely
+different, unrelated request can still legitimately try a name that was rejected for someone else's reasons.
+The bug is that this same reset also fires when it's the exact same QA Request cycling back to its own
+rejected name -- `ApplicationMaster.qa_request_id` (which tracks whichever request most recently resolved to
+that row) is left pointing at this same request the whole time (a Reject decision in `applications.py`
+deliberately doesn't touch `qa_request_id`, and `_cleanup_orphaned_application_master` deliberately leaves
+REJECTED rows untouched when the requester briefly switches away to a different name), so there was nothing
+distinguishing "a different request wants to try this rejected name" from "this exact request is trying to
+sneak its own rejected name back in."
+
+**Fix (`_resolve_application_name`):** when the resolved name points at a REJECTED row, check
+`existing.qa_request_id == qa_request_id` (the request making this call, right now) before resetting it --
+if they match, raise `HTTPException(400, "This application name was previously rejected by the Application
+Owner. Please enter a corrected application name before resubmitting the request.")` instead of silently
+resetting the row. A REJECTED row belonging to a *different* qa_request_id (or none at all) still resets to
+PENDING_APP_OWNER exactly as before -- that legitimate reuse case is untouched. Both call sites
+(`create_request`, `edit_request`) already pass their own object's real, persisted id as `qa_request_id`, so
+this can only ever trip for `edit_request` (a brand-new `create_request` row's id can never already be
+attributed to an existing rejected row).
+
+**Frontend:** no changes needed -- `api.ts`'s error handling already extracts FastAPI's `detail` string from
+any 400 response and throws it as the `Error`'s own message, and every Edit Details/wizard save path
+(`NewRequestModal.tsx`) already renders that via the shared `ErrorText` component. The new message surfaces
+verbatim, exactly as suggested in the bug report, with zero frontend code changes.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/uploads leftovers differ).
+
+## 213. Fixed ORA-02292 crash when editing a QA Request's Application Name
+
+**Reported error:**
+```
+sqlalchemy.exc.IntegrityError: (oracledb.exceptions.IntegrityError) ORA-02292: integrity constraint
+(QA_PORTAL.SYS_C008784) violated - child record found
+[SQL: DELETE FROM qap_application_master WHERE qap_application_master.id = :id]
+```
+
+**Root cause:** `_cleanup_orphaned_application_master` (`qa_requests.py`, section 262's own addition) deletes
+an abandoned, still-pending `ApplicationMaster` row once `edit_request` resolves a QA Request's Application
+Name to a genuinely different one -- but it only checked whether another `QARequest.application_master_id`
+still pointed at that row before deleting it. `models.TestProject.application_master_id` is a SECOND, separate
+foreign key onto `qap_application_master.id` (Test Management's "one Project maps to one Application" link,
+added well before this cleanup helper existed) that was never accounted for. If a Test Project had been
+created against a still-pending Application Name, and the QA Request that originally introduced that name was
+then edited to use a different name instead, this cleanup tried to delete the old ApplicationMaster row anyway
+-- Oracle rejected it with ORA-02292 since `qap_test_projects` still referenced it, and the entire
+`edit_request` call failed with a 500, for what should have been a completely unrelated, successful field
+edit.
+
+**Fix:** `_cleanup_orphaned_application_master` now also queries `TestProject.application_master_id` and
+leaves the row alone (matching its existing "if anything still needs it, don't delete it" behavior for
+QARequest) if any Test Project still references it. Confirmed via `grep -n
+'ForeignKey("qap_application_master.id")' app/models.py` that `QARequest` and `TestProject` are the *only* two
+columns anywhere in the schema that reference this table, so both are now covered.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. Documents and outputs copies
+re-synced and confirmed identical via `diff -rq` (only the standard `.env`/uploads leftovers differ).
+
+## 214. Closed 3 Admin-only Application Name edit paths that bypassed the ApplicationMaster registry
+
+**Reported requirement (verbatim, key points):** "Duplicate Application Name Validation Across All Request
+Actions" -- "Currently, the system does not verify whether a newly entered application name already exists. As
+a result, multiple requests can be created using the same application name. The system must validate the
+application name against all existing and pending application records at the following stages: 1. While
+creating a new request 2. While entering a new application name 3. While editing an existing request 4. While
+saving the edited request 5. During final request submission or resubmission... The validation must be
+case-insensitive. Leading and trailing spaces must be removed before comparison... 'Quality Hub' / 'quality
+hub' / 'QUALITY HUB' / 'Quality Hub ' must be treated as the same application."
+
+**Investigation, not a literal implementation:** taken completely literally, this would have hard-blocked
+reusing an existing/approved/pending Application Name anywhere it's entered -- but reusing a known application
+across more than one request is this app's entire, deliberately-designed purpose for
+`models.ApplicationMaster` (see its own class docstring, and sections 190+/212 for prior, explicit
+reconfirmations of this). A research pass across every Application Name entry point in the app found:
+- The QA Request gateway's own free-text "Other" path (`qa_requests.py::create_request`/`edit_request`) already
+  normalizes (strip + uppercase) and reuses-or-creates correctly via `_resolve_application_name` -- no gap.
+- `bulk_seed_application_names` (Admin bulk-import) already dedupes on the same normalized name -- no gap.
+- `DASTRequest.application_name` is a read-only delegated property (`return self.qa_request.application_name`)
+  and is absent from `schemas.DASTUpdate` -- not editable at all, no gap.
+- `routers/signoff.py` and `routers/suppression.py` only *read* `application_name` (PDF export) -- no gap.
+- Three real gaps: `routers/functional.py::update_functional`, `routers/sast_dast.py::update_sast`, and
+  `routers/performance.py::update_performance` each let an Admin overwrite `application_name` via a bare
+  `setattr`/generic field loop, with **zero** normalization or dedup check against `ApplicationMaster` --
+  `FunctionalRequest.application_name` is a delegated property writing through to the shared
+  `QARequest.application_name`/`application_master_id`, while `SASTRequest.application_name` and
+  `PerformanceRequest.application_name` are each their *own*, entirely disconnected `Column(String(150))` with
+  no `application_master_id` FK at all.
+
+Presented both interpretations to the user via AskUserQuestion -- (A) close only the 3 real bypass gaps
+(recommended) vs. (B) hard-block reuse everywhere, literally. **The user chose (A).** Legitimate reuse of an
+existing/approved/pending Application Name remains fully allowed everywhere else in the app, completely
+unchanged -- this section closes only the 3 confirmed gaps below.
+
+**Fix:**
+- Extracted `_resolve_application_name`/`_cleanup_orphaned_application_master` out of `qa_requests.py` into a
+  new shared, non-router module `app/application_names.py` (`resolve_application_name`/
+  `cleanup_orphaned_application_master`), mirroring the existing `app/documents.py` pattern -- this keeps the
+  app's one strict "no router imports from another router" convention intact (the only pre-existing exception
+  remains `applications.py` importing `_finalize_child_requests` from `qa_requests.py`) while letting
+  `functional.py`/`sast_dast.py`/`performance.py` share the exact same case/whitespace-insensitive
+  normalize-and-reuse-or-create logic. `qa_requests.py` now aliases `_resolve_application_name =
+  app_names.resolve_application_name` / `_cleanup_orphaned_application_master =
+  app_names.cleanup_orphaned_application_master` so its own existing call sites read unchanged.
+- `functional.py::update_functional`: pops `application_name` out of the incoming data before the generic
+  field loop; if genuinely different (case/whitespace-insensitive) from the current value, resolves it through
+  `app_names.resolve_application_name` and updates both `obj.qa_request.application_name` and
+  `obj.qa_request.application_master_id`, then calls `app_names.cleanup_orphaned_application_master` for the
+  old master id -- full parity with `qa_requests.py::edit_request`'s own handling of this same underlying field.
+- `sast_dast.py::update_sast` and `performance.py::update_performance`: same pop-and-resolve pattern, but only
+  the returned normalized *name* is kept (`obj.application_name = ...`) -- the returned
+  `application_master_id` is discarded and `cleanup_orphaned_application_master` is deliberately **not**
+  called, since neither `SASTRequest` nor `PerformanceRequest` has an `application_master_id` column to link
+  or an old id to track. This is an accepted, explicitly-reasoned limitation: retrofitting a real FK onto
+  either table would require an Oracle schema migration, judged out of scope for this fix -- these two now get
+  name normalization and registry-consistency dedup, just not a persisted master-id link.
+- All three still run the pre-existing `_ADMIN_ONLY_FIELDS = {"application_name", "epic_number", "cr_number"}`
+  role gate first, unchanged -- a non-Admin still can't touch this field at all.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` -- clean. `npx tsc --noEmit -p .` -- clean (no
+frontend files needed changes for this fix). Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/uploads leftovers differ).
+
+## 215. Removed the "Checklist (N pending)" tab-label annotation on DAST/SAST/Performance
+
+**Reported:** the request-detail tab strip was showing `Checklist (3 pending)` (DAST), `Checklist (1 pending)`
+(SAST), and `Checklist (11 pending)` (Performance) -- the user does not want this count shown on the tab label
+and asked for the code removed, plus removal of any extra API call feeding it if one existed.
+
+**What it was:** each of the 3 modules computes `pendingChecklistItems = checklist.filter((c) => c.is_mandatory
+&& !c.is_complete)` and used it purely to decorate the "Checklist" tab button label with a `(N pending)`
+suffix -- `frontend/src/modules/security/DAST.tsx`/`SAST.tsx` (tab label ternary) and
+`frontend/src/modules/specialised-testing/Performance.tsx` (inline `{pendingChecklistItems.length > 0 && ...}`
+suffix).
+
+**No extra API call to remove:** `checklist`/`pendingChecklistItems` is derived entirely client-side from
+`req.checklist_items`, which is already part of the single request-detail payload each module's `RequestDetail`
+component receives -- there was never a dedicated endpoint or extra fetch computing this count, so there was
+nothing to remove on that front.
+
+**Fix:** removed only the tab-label suffix in all 3 files -- the "Checklist" tab now always just reads
+"Checklist", same as the other plain tabs. Left `pendingChecklistItems` itself untouched, since it's also used
+for real, unrelated gating elsewhere in each file (disabling the "Readiness Passed"/"Security Readiness"
+decision buttons while mandatory items are incomplete, and the warning text explaining why) -- removing the
+variable entirely would have broken that existing, correct behavior, which the user did not ask to change.
+
+**Verified:** `npx tsc --noEmit -p .` -- clean. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq` (only the standard `.env`/uploads leftovers differ).

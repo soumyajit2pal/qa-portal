@@ -101,6 +101,16 @@ export interface ApplicationMasterOut {
   created_at: string
 }
 
+export interface ApplicationSeedResult {
+  created: number
+  approved_existing: number
+  skipped_duplicate: number
+  skipped_rejected: number
+  skipped_invalid: number
+  errors: string[]
+  failure_reason?: string | null
+}
+
 // ---------------- QA Request ----------------
 export interface ChecklistItemOut {
   id: number
