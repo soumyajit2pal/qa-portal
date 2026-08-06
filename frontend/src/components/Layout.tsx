@@ -65,14 +65,6 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
       ],
     },
     {
-      label: 'Test Management',
-      items: [
-        { to: '/test-projects', label: 'Projects', icon: IconApps },
-        { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
-        { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
-      ],
-    },
-    {
       label: 'Security',
       items: [
         { to: '/sast', label: 'SAST Requests', icon: IconShield },
@@ -84,6 +76,14 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
       label: 'Specialized Testing',
       items: [
         { to: '/performance', label: 'Performance Testing', icon: IconWorkflow },
+      ],
+    },
+    {
+      label: 'Test Management',
+      items: [
+        { to: '/test-projects', label: 'Projects', icon: IconApps },
+        { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
+        { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
       ],
     },
     {
