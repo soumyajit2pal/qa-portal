@@ -192,9 +192,11 @@ export default function Layout({ children }: { children?: ReactNode }) {
   const [search, setSearch] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('qa_nav_collapsed') === 'true')
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set([
-    'Overview', 'Request Management', 'Functional', 'Test Management', 'Security', 'Specialized Testing', 'Governance', 'Administration', 'Help & Support',
-  ]))
+  // Nav-group toggle buttons now default to closed -- the effect below still
+  // auto-opens whichever group contains the current route, so the active
+  // section is never hidden on load; only the OTHER groups start collapsed
+  // instead of every group being expanded up front.
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set())
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Topbar user menu -- clicking the signed-in name reveals Department +
   // Role(s) (mirrors the sidebar's own user-chip, but reachable from the
