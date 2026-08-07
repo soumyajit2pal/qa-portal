@@ -484,32 +484,42 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.TEST_DESIGN, "Start execution")
     _require_assigned_tester(obj, current_user)
-    cycle = None
+    # A link can be created from either side of the relationship. Resolve it
+    # before evaluating this request so starting from Functional never asks
+    # for (or creates) a second link when Test Lifecycle already linked one.
+    existing_link = (db.query(models.TestCycleChildRequestLink)
+                     .filter_by(child_type="Functional", child_id=obj.id)
+                     .order_by(models.TestCycleChildRequestLink.id.asc())
+                     .first())
+    cycle = existing_link.cycle if existing_link else None
     if payload.link_test_cycle:
         if payload.test_cycle_id is None:
             raise HTTPException(400, "Select a test cycle before starting execution")
-        cycle = (db.query(models.TestCycle)
-                 .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
-                 .filter(models.TestCycle.id == payload.test_cycle_id,
-                         models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
-                         models.TestCycle.status.in_(["Not Started", "In Progress"]))
-                 .first())
-        if not cycle:
+        selected_cycle = (db.query(models.TestCycle)
+                          .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+                          .filter(models.TestCycle.id == payload.test_cycle_id,
+                                  models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
+                                  models.TestCycle.status.in_(["Not Started", "In Progress"]))
+                          .first())
+        if not selected_cycle:
             raise HTTPException(400, "The selected test cycle is no longer active or eligible")
+        if existing_link and existing_link.cycle_id != selected_cycle.id:
+            raise HTTPException(400, f"Test cycle {cycle.cycle_key} is already linked to this request")
+        cycle = selected_cycle
         application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
         if (application_master_id and cycle.project.application_master_id is not None
                 and cycle.project.application_master_id != application_master_id):
             raise HTTPException(400, "The selected test cycle is not relevant to this request's application")
-        existing_link = db.query(models.TestCycleChildRequestLink).filter_by(cycle_id=cycle.id).first()
-        if existing_link:
-            if existing_link.child_type == "Functional" and existing_link.child_id == obj.id:
-                raise HTTPException(400, "This test cycle is already linked to this Functional Testing request")
-            raise HTTPException(400, "This test cycle is already linked to another request")
-        db.add(models.TestCycleChildRequestLink(
-            cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
-        ))
-        if cycle.status == "Not Started":
-            cycle.status = "In Progress"
+        cycle_link = db.query(models.TestCycleChildRequestLink).filter_by(cycle_id=cycle.id).first()
+        if cycle_link:
+            if cycle_link.child_type != "Functional" or cycle_link.child_id != obj.id:
+                raise HTTPException(400, "This test cycle is already linked to another request")
+        else:
+            db.add(models.TestCycleChildRequestLink(
+                cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
+            ))
+    if cycle and cycle.status == "Not Started":
+        cycle.status = "In Progress"
     obj.status = QAStatus.EXECUTION_IN_PROGRESS
     _log(
         db, obj.id, "Test Design", current_user, "Execution Started",

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
 import { useAuth } from "../../context/AuthContext";
 import {
@@ -420,6 +420,7 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const linkedCycle = req.linked_test_cycles?.[0];
 
   useEffect(() => {
     if (answer !== "yes") return;
@@ -436,13 +437,36 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
     cycle.project_key.toLowerCase().includes(query) ||
     cycle.project_name.toLowerCase().includes(query));
 
-  return <Modal title="Start Functional Test Execution" onClose={onCancel} wide>
+  return <Modal
+    title="Start Functional Test Execution"
+    onClose={onCancel}
+    wide={!linkedCycle}
+    variant={linkedCycle ? "dialog" : "drawer"}
+    preventBackdropClose={!!linkedCycle}
+    hideCloseButton={!!linkedCycle}
+  >
+    {linkedCycle ? <>
+      <div className="execution-cycle-existing">
+        <span className="execution-cycle-existing-icon">✓</span>
+        <div>
+          <strong>
+            Test Cycle <Link to={`/test-execution?project=${linkedCycle.project_id}&cycle=${linkedCycle.id}`}>{linkedCycle.cycle_key}</Link> is already linked to this request.
+          </strong>
+          <p>Do you want to start execution?</p>
+          <small>{linkedCycle.name} · {linkedCycle.status}</small>
+        </div>
+      </div>
+      <div className="execution-cycle-actions">
+        <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+        <button type="button" className="btn btn-primary" disabled={busy} onClick={() => onStart(null)}>{busy ? "Starting…" : "Start Execution"}</button>
+      </div>
+    </> : <>
     <div className="execution-cycle-question">
-      <strong>Do you have a test cycle to link with this request?</strong>
-      <p>Selecting a cycle connects repository execution results and reporting to <b>{req.request_id}</b>.</p>
+      <strong>No test cycle is currently linked to this request.</strong>
+      <p>Do you want to link a test cycle before starting execution?</p>
       <div className="execution-cycle-answer">
-        <button type="button" className={`btn ${answer === "yes" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("yes"); setSelectedCycleId(null); }}>Yes, link a cycle</button>
-        <button type="button" className={`btn ${answer === "no" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("no"); setSelectedCycleId(null); }}>No, start without linking</button>
+        <button type="button" className={`btn ${answer === "yes" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("yes"); setSelectedCycleId(null); }}>Yes, Link Test Cycle</button>
+        <button type="button" className={`btn ${answer === "no" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("no"); setSelectedCycleId(null); }}>No, Start Without Linking</button>
       </div>
     </div>
 
@@ -466,6 +490,7 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
       <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
       <button type="button" className="btn btn-primary" disabled={busy || answer === null || (answer === "yes" && selectedCycleId === null)} onClick={() => onStart(answer === "yes" ? selectedCycleId : null)}>{busy ? "Starting…" : "Start Execution"}</button>
     </div>
+    </>}
   </Modal>;
 }
 
@@ -700,7 +725,9 @@ function FunctionalDetail({
       setShowStartExecution(false);
       setExecutionNotice(cycleId !== null
         ? "Test cycle linked successfully. Test execution has started."
-        : "Test execution has started without a linked test cycle. Linking test cases and a test cycle is recommended for proper execution tracking, traceability, and reporting.");
+        : req.linked_test_cycles?.length
+          ? `Test Cycle ${req.linked_test_cycles[0].cycle_key} was already linked. Test execution has started.`
+          : "Execution has started without a linked test cycle. Linking a test cycle is recommended for traceability and reporting.");
       await load();
     } catch (err) {
       setError(err);
@@ -1055,7 +1082,7 @@ function FunctionalDetail({
             <DetailSection title="Linked Test Cycle">
               {req.linked_test_cycles.map((cycle) => (
                 <DetailField key={cycle.id} label={cycle.cycle_key}>
-                  <strong>{cycle.name}</strong> · {cycle.status}
+                  <Link className="linked-cycle-link" to={`/test-execution?project=${cycle.project_id}&cycle=${cycle.id}`}><strong>{cycle.name}</strong></Link> · {cycle.status}
                   {(cycle.start_date || cycle.end_date) && <span className="muted small"> · {cycle.start_date || "—"} to {cycle.end_date || "—"}</span>}
                   {(isAssignedTester || isAssignedQALead) && <button type="button" className="btn btn-sm" style={{ marginLeft: 8 }} disabled={!!busyAction} onClick={() => unlinkTestCycle(cycle)}>{busyAction === `unlink-cycle-${cycle.id}` ? "Unlinking…" : "Unlink"}</button>}
                 </DetailField>

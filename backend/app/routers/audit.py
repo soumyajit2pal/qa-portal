@@ -63,7 +63,7 @@ def list_audit_logs(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=10, le=200),
+    page_size: int = Query(5, ge=5, le=200),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_roles(*AUDIT_ROLES)),
 ):

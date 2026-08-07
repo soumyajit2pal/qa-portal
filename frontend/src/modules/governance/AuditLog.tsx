@@ -17,7 +17,7 @@ function prettyDetails(raw?: string | null): string {
 
 export default function AuditLog() {
   const [data, setData] = useState<AuditLogPage>({
-    rows: [], total: 0, page: 1, page_size: 50,
+    rows: [], total: 0, page: 1, page_size: 5,
     summary: { total: 0, failed: 0, authentication: 0, access_management: 0 },
   })
   const [eventType, setEventType] = useState('')
@@ -30,7 +30,7 @@ export default function AuditLog() {
   const [error, setError] = useState<unknown>(null)
 
   const query = useMemo(() => {
-    const p = new URLSearchParams({ page: String(page), page_size: '50' })
+    const p = new URLSearchParams({ page: String(page), page_size: '5' })
     if (eventType) p.set('event_type', eventType)
     if (outcome) p.set('outcome', outcome)
     if (search.trim()) p.set('search', search.trim())
@@ -81,7 +81,7 @@ export default function AuditLog() {
       </div>
 
       <Card subtitle="Select any row to see the complete event context and before/after access changes.">
-        <Table<AuditLogOut> rowKey="id" pageSize={50} onRowClick={setSelected} columns={[
+        <Table<AuditLogOut> rowKey="id" pageSize={5} onRowClick={setSelected} columns={[
           { key: 'created_at', header: 'When', render: (r) => new Date(r.created_at).toLocaleString() },
           { key: 'actor_name', header: 'Who', render: (r) => <div><div>{r.actor_name || r.actor_username || 'Unauthenticated'}</div><div className="muted small">{r.actor_username || '—'}</div></div>, filterValue: (r) => `${r.actor_name || ''} ${r.actor_username || ''}` },
           { key: 'event_type', header: 'Event', render: (r) => label(r.event_type) },

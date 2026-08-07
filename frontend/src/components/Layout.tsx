@@ -260,7 +260,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
   }
 
   return (
-    <div className="app-shell redesigned-shell navigation-v2 navigation-v3">
+    <div className="app-shell redesigned-shell navigation-v2 navigation-v3 navigation-v4">
       <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">

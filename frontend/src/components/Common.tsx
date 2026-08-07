@@ -568,7 +568,14 @@ export function ApprovalDecisionButtons({
       <div className="workflow-decision-flow">
         <SignField userName={userName} onSignedChange={setSignedBy} disabled={busy || signBlocked} />
         <div className="workflow-decision-step">
-          <div className="workflow-decision-heading"><span className="workflow-step-number">2</span><span><strong>Choose a decision</strong><small>Select one outcome for this workflow stage.</small></span></div>
+          <div className="workflow-decision-heading">
+            <span className="workflow-step-number">2</span>
+            <span className="workflow-sign-copy">
+              <small>WORKFLOW DECISION</small>
+              <strong>Choose a decision</strong>
+              <em>Select one outcome for this workflow stage.</em>
+            </span>
+          </div>
           <div className="workflow-decision-options">
             <button className="workflow-decision-card approve" disabled={busy || !signedBy || signBlocked} onClick={handleApproveClick} title={!signedBy ? "Sign first to enable approval" : approveLabel}>
               <span className="workflow-decision-icon">✓</span><span><strong>{approveLabel}</strong><small>Accept and move to the next stage</small></span><i>→</i>
@@ -946,7 +953,7 @@ export function Table<T extends Record<string, any>>({
   rows,
   rowKey,
   onRowClick,
-  pageSize = 10,
+  pageSize = 5,
   tableId,
 }: TableProps<T>) {
   const [filters, setFilters] = useState<Record<string, string>>({});
@@ -969,43 +976,20 @@ export function Table<T extends Record<string, any>>({
   const [popoverPos, setPopoverPos] = useState<{
     top: number;
     left: number;
+    width: number;
   } | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const columnsPanelRef = useRef<HTMLDivElement>(null);
   const columnsTriggerRef = useRef<HTMLDivElement>(null);
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [columnsPanelPosition, setColumnsPanelPosition] = useState({ top: 0, right: 12 });
-  // Screen definitions provide the important columns with purpose-built
-  // renderers. The API often returns additional fields, though, and those
-  // must also be available to the user's column chooser. This is the table
-  // equivalent of SELECT * for the response payload: preserve configured
-  // columns first, then append every other key found in any returned row.
-  const availableColumns = useMemo<TableColumn<T>[]>(() => {
-    const configuredKeys = new Set(columns.map((column) => column.key));
-    const discoveredKeys: string[] = [];
-    const discovered = new Set<string>();
-    rows.forEach((row) => {
-      Object.keys(row).forEach((key) => {
-        if (!configuredKeys.has(key) && !discovered.has(key)) {
-          discovered.add(key);
-          discoveredKeys.push(key);
-        }
-      });
-    });
-    const friendlyHeader = (key: string) =>
-      key
-        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-        .replace(/[_-]+/g, " ")
-        .replace(/\b\w/g, (letter) => letter.toUpperCase())
-        .replace(/\bId\b/g, "ID");
-    return [
-      ...columns,
-      ...discoveredKeys.map((key) => ({ key, header: friendlyHeader(key) })),
-    ];
-  }, [columns, rows]);
+  // Only columns deliberately configured by each screen belong in its table.
+  // Raw API response fields are intentionally not auto-discovered: doing so
+  // exposed internal IDs/metadata and made everyday tables unnecessarily wide.
+  const availableColumns = columns;
   const preferenceKey = useMemo(() => {
     const route = typeof window === "undefined" ? "table" : window.location.pathname;
-    return `qap-visible-columns:${tableId || `${route}:${columns.map((c) => c.key).join("|")}`}`;
+    return `qap-visible-columns:v2:${tableId || `${route}:${columns.map((c) => c.key).join("|")}`}`;
   }, [columns, tableId]);
   const [hiddenColumnKeys, setHiddenColumnKeys] = useState<string[]>([]);
   const [hasColumnPreference, setHasColumnPreference] = useState(false);
@@ -1024,23 +1008,18 @@ export function Table<T extends Record<string, any>>({
 
   const visibleColumns = useMemo(() => {
     const available = new Set(availableColumns.map((column) => column.key));
-    // With no saved choice, preserve the screen's original concise design.
-    // Newly discovered API fields are opt-in through the Columns panel.
-    const defaultHidden = availableColumns
-      .filter((column) => !columns.some((configured) => configured.key === column.key))
-      .map((column) => column.key);
+    // With no saved choice, show the screen's curated default column set.
+    const defaultHidden: string[] = [];
     const hidden = new Set(
       (hasColumnPreference ? hiddenColumnKeys : defaultHidden).filter((key) => available.has(key))
     );
     const selected = availableColumns.filter((column) => !hidden.has(column.key));
     return selected.length > 0 ? selected : availableColumns.slice(0, 1);
-  }, [availableColumns, columns, hasColumnPreference, hiddenColumnKeys]);
+  }, [availableColumns, hasColumnPreference, hiddenColumnKeys]);
 
   function setColumnVisible(key: string, visible: boolean) {
     setHiddenColumnKeys((current) => {
-      const defaultHidden = availableColumns
-        .filter((column) => !columns.some((configured) => configured.key === column.key))
-        .map((column) => column.key);
+      const defaultHidden: string[] = [];
       const startingHidden = hasColumnPreference ? current : defaultHidden;
       const next = visible
         ? startingHidden.filter((item) => item !== key)
@@ -1141,7 +1120,19 @@ export function Table<T extends Record<string, any>>({
       return;
     }
     const rect = e.currentTarget.getBoundingClientRect();
-    setPopoverPos({ top: rect.bottom + 6, left: rect.left });
+    const viewportGap = 10;
+    const popoverGap = 6;
+    const width = Math.min(300, window.innerWidth - viewportGap * 2);
+    const estimatedHeight = 54;
+    const left = Math.min(
+      Math.max(viewportGap, rect.left),
+      window.innerWidth - width - viewportGap
+    );
+    const opensAbove = rect.bottom + popoverGap + estimatedHeight > window.innerHeight - viewportGap;
+    const top = opensAbove
+      ? Math.max(viewportGap, rect.top - estimatedHeight - popoverGap)
+      : rect.bottom + popoverGap;
+    setPopoverPos({ top, left, width });
     setOpenFilterKey(key);
   }
 
@@ -1169,9 +1160,7 @@ export function Table<T extends Record<string, any>>({
       activeFilters.every(([key, value]) => {
         const col = availableColumns.find((c) => c.key === key);
         if (!col) return true;
-        return textFor(col, row)
-          .toLowerCase()
-          .includes(value.trim().toLowerCase());
+        return textFor(col, row).trim().toLowerCase() === value.trim().toLowerCase();
       })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1371,22 +1360,29 @@ export function Table<T extends Record<string, any>>({
         (() => {
           const col = availableColumns.find((c) => c.key === openFilterKey);
           if (!col) return null;
+          const values = Array.from(
+            new Set(rows.map((row) => textFor(col, row).trim()).filter(Boolean))
+          ).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
           return (
             <div
               className="th-filter-popover"
               ref={popoverRef}
-              style={{ top: popoverPos.top, left: popoverPos.left }}
+              style={{ top: popoverPos.top, left: popoverPos.left, width: popoverPos.width }}
               onClick={(e) => e.stopPropagation()}
             >
-              <input
+              <select
                 autoFocus
                 className="table-filter-input"
-                placeholder="Filter..."
                 value={filters[col.key] || ""}
                 onChange={(e) =>
                   setFilters((f) => ({ ...f, [col.key]: e.target.value }))
                 }
-              />
+              >
+                <option value="">All values</option>
+                {values.map((value) => (
+                  <option key={value} value={value}>{value}</option>
+                ))}
+              </select>
               {filters[col.key] && (
                 <button
                   type="button"

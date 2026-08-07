@@ -928,9 +928,10 @@ export default function TestExecution() {
         api.get<TestCaseOut[]>(`/api/test-repository/projects/${pid}/test-cases`),
       ])
       setCycles(c); setCases(cs)
-      setCycleId(c.length ? c[0].id : '')
+      const requestedCycle = Number(searchParams.get('cycle'))
+      setCycleId(c.some((cycle) => cycle.id === requestedCycle) ? requestedCycle : (c.length ? c[0].id : ''))
     } catch (err) { setError(err) }
-  }, [])
+  }, [searchParams])
   useEffect(() => { if (projectId) loadCycles(projectId) }, [projectId, loadCycles])
 
   const loadExecutions = useCallback(async (cid: number) => {

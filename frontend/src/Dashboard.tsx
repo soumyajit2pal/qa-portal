@@ -181,10 +181,24 @@ function Sparkline({ values }: { values?: Record<string, number> | null }) {
   const entries = Object.entries(values || {})
   if (entries.length === 0) return null
   const max = Math.max(1, ...entries.map(([, v]) => v))
+  const riskColors: Record<string, string> = {
+    critical: '#c9363e',
+    high: '#e66a24',
+    medium: '#d2a91e',
+    low: '#2f8a57',
+  }
   return (
     <div className="sparkline">
       {entries.map(([k, v]) => (
-        <div key={k} className={`bar ${v > 0 ? 'filled' : ''}`} style={{ height: `${Math.max(10, (v / max) * 100)}%` }} title={`${k}: ${v}`} />
+        <div
+          key={k}
+          className={`bar ${v > 0 ? 'filled' : ''}`}
+          style={{
+            height: `${Math.max(10, (v / max) * 100)}%`,
+            ...(v > 0 ? { background: riskColors[k.trim().toLowerCase()] || '#16788b' } : {}),
+          }}
+          title={`${k}: ${v}`}
+        />
       ))}
     </div>
   )
@@ -229,7 +243,7 @@ interface StatCardProps {
 
 function StatCard({ icon: Icon, iconClass, tag, value, label, hint, footline, spark, segments }: StatCardProps) {
   return (
-    <div className="stat-card">
+    <div className={`stat-card stat-card-${iconClass}`}>
       <div className="top-row">
         <div className={`icon-chip ${iconClass}`}><Icon width={17} height={17} /></div>
         {tag && <span className="chip-tag">{tag}</span>}
@@ -276,30 +290,35 @@ function Donut({ data, size = 128 }: { data?: Record<string, number> | null; siz
   )
 }
 
-// Representative subset of the QA Request lifecycle used for the funnel
-// visualization. Every status maps to one of these stage indices; CANCELLED requests
-// are excluded from the funnel entirely (they never completed the lifecycle).
+// The actual Functional Request lifecycle. Counts below are mutually
+// exclusive current-stage counts, not a cumulative "has reached this point"
+// funnel; that distinction keeps the numbers consistent with the widget's
+// "current workflow stage" description.
 const LIFECYCLE_STAGES = [
-  { key: 'request', label: 'Request' },
+  { key: 'request', label: 'Draft / Requester' },
+  { key: 'sm-approval', label: 'SM Approval' },
   { key: 'department-head-approval', label: 'Department Head Approval' },
-  { key: 'qa-lead-readiness', label: 'QA Lead / Readiness' },
-  { key: 'execution', label: 'Execution' },
+  { key: 'qa-activity', label: 'QA Activity' },
   { key: 'signoff', label: 'Sign-off' },
+  { key: 'closed', label: 'Closed' },
 ]
 
 const STATUS_STAGE_INDEX: Record<string, number> = {
-  DRAFT: 0, SUBMITTED: 0,
-  DEPARTMENT_HEAD_APPROVAL_PENDING: 1, RETURNED_BY_DEPARTMENT_HEAD: 1, DEPARTMENT_HEAD_REJECTED: 1,
-  QA_LEAD_ASSIGNED: 2, READINESS_VERIFICATION: 2, RETURNED_BY_QA_LEAD: 2,
-  QA_ACTIVITY_INITIATED: 3, PLANNING: 3, TESTER_ASSIGNED: 3, TEST_DESIGN: 3, EXECUTION_IN_PROGRESS: 3,
+  DRAFT: 0, RETURNED_BY_SM: 0, SM_REJECTED: 0,
+  RETURNED_BY_DEPARTMENT_HEAD: 0, RETURNED_BY_QA_LEAD: 0,
+  SUBMITTED: 1, SM_APPROVAL_PENDING: 1,
+  DEPARTMENT_HEAD_APPROVAL_PENDING: 2, DEPARTMENT_HEAD_REJECTED: 2,
+  QA_LEAD_ASSIGNED: 3, READINESS_VERIFICATION: 3, QA_ACTIVITY_INITIATED: 3,
+  PLANNING: 3, TESTER_ASSIGNED: 3, TEST_DESIGN: 3, EXECUTION_IN_PROGRESS: 3,
   DEFECT_RAISED: 3, WAITING_FOR_FIX: 3, RETESTING: 3, QA_COMPLETED: 3,
-  QA_SIGNOFF_PENDING: 4, QA_SIGNED_OFF: 4, REQUESTER_VERIFICATION: 4, CLOSED: 4,
+  QA_SIGNOFF_PENDING: 4, QA_SIGNED_OFF: 4, REQUESTER_VERIFICATION: 4,
+  CLOSED: 5,
 }
 
-function lifecycleFunnel(requests: { status: string }[]) {
+function lifecycleDistribution(requests: { status: string }[]) {
   const eligible = requests.filter((r) => r.status !== 'CANCELLED')
   return LIFECYCLE_STAGES.map((stage, i) => {
-    const count = eligible.filter((r) => (STATUS_STAGE_INDEX[r.status] ?? 0) >= i).length
+    const count = eligible.filter((r) => STATUS_STAGE_INDEX[r.status] === i).length
     return { ...stage, count }
   })
 }
@@ -308,20 +327,28 @@ function lifecycleFunnel(requests: { status: string }[]) {
 // the QAStatus lifecycle now lives; the QA Request gateway itself only has
 // Draft/Submitted/Raised/Cancelled (see constants.GATEWAY_STATUSES).
 function LifecycleStepper({ requests }: { requests: { status: string }[] }) {
-  const funnel = lifecycleFunnel(requests)
-  const maxCount = Math.max(1, ...funnel.map((f) => f.count))
+  const distribution = lifecycleDistribution(requests)
+  const total = distribution.reduce((sum, stage) => sum + stage.count, 0)
   return (
-    <div className="stepper">
-      {funnel.map((s, i) => (
-        <React.Fragment key={s.key}>
-          <div className={`step ${s.count > 0 ? 'filled' : ''}`}>
-            <div className="circle">{s.count}</div>
-            <div className="step-label">{s.label}</div>
+    <div className="lifecycle-distribution">
+      <div className="lifecycle-distribution-summary">
+        <div><span>Current portfolio</span><strong>{total}</strong></div>
+        <p>Each request appears once at its current workflow stage.</p>
+      </div>
+      <div className="lifecycle-stage-list">
+        {distribution.map((stage, index) => {
+          const percentage = total ? Math.round((stage.count / total) * 100) : 0
+          return <div className={`lifecycle-stage-row stage-${index}`} key={stage.key}>
+            <span className="lifecycle-stage-index">{index + 1}</span>
+            <div className="lifecycle-stage-copy">
+              <div><strong>{stage.label}</strong><span>{percentage}%</span></div>
+              <i><b style={{ width: `${percentage}%` }} /></i>
+            </div>
+            <strong className="lifecycle-stage-count">{stage.count}</strong>
           </div>
-          {i < funnel.length - 1 && <div className={`connector ${funnel[i + 1].count > 0 ? 'filled' : ''}`} />}
-        </React.Fragment>
-      ))}
-      {maxCount === 0 && <span className="muted small">No QA requests raised yet.</span>}
+        })}
+      </div>
+      {total === 0 && <span className="muted small">No Functional requests raised yet.</span>}
     </div>
   )
 }
@@ -445,7 +472,7 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
     [unifiedRequests, range]
   )
   const filteredActivity = useMemo(
-    () => activity.filter((a) => isWithinRaisedRange(a.created_at, range)).slice(0, 6),
+    () => activity.filter((a) => isWithinRaisedRange(a.created_at, range)).slice(0, 5),
     [activity, range]
   )
 
@@ -637,7 +664,7 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
       <div className="grid grid-2 dashboard-lower-grid">
         <Card
           title="QA Lifecycle Health"
-          subtitle="Projects by current workflow stage"
+          subtitle="Functional requests by current workflow stage"
         >
           <LifecycleStepper requests={functionalRequests} />
         </Card>
