@@ -175,3 +175,48 @@ was checked the same way and is wired correctly end-to-end, `TestCaseCreate`/`Te
 frontend files needed changes; the frontend was already sending the correct payload shape, the schema was the
 only thing behind). Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the
 standard `.env`/uploads leftovers differ).
+
+## 5. Fixed "upload storage not working... reverting old one" + "file is missing on disk" downloads
+
+**Reported:** "upload storage not working, though updating the path, its reverting old one, and whileing trying
+to download documents getting file is missing on disk".
+
+**Root cause:** `backend/app/storage_config.py`'s active upload root and legacy-roots list used to be plain
+module-level globals (`_active_root`/`_legacy_roots`), set once at process/import time and refreshed only by a
+`PATCH /api/system-settings/storage` handled by that exact process. The DB write itself
+(`routers/system_settings.py::update_storage_settings`) was never buggy — `db.commit()` always persisted the
+new path to `qap_system_settings` correctly. But in any deployment running more than one backend process
+(multiple uvicorn workers, multiple replicas/containers, or simply a process restart between an admin's save
+and a later request), every OTHER process kept serving its own stale in-memory copy indefinitely — with no
+mechanism to ever learn a save had happened elsewhere. That produces both reported symptoms as one shared bug:
+- An admin's save commits fine, but the next `GET` (or the same admin reloading the page) can land on a
+  different process that never saw the `PATCH` and still reports the old path — looks exactly like it
+  "reverted," even though nothing was ever actually lost.
+- A file uploaded via the process that picked up the new path is later looked up for download by a different
+  process still using the old active-root/legacy-roots list — `resolve_upload_path()` searches roots that don't
+  include where the file actually landed, and reports "file is missing on disk" even though the file exists on
+  shared storage, just under a root that process doesn't know about.
+
+**Fix — `backend/app/storage_config.py`:** `get_upload_root()`/`get_legacy_roots()`/`resolve_upload_path()` now
+re-read the DB-authoritative `qap_system_settings` rows on every call, bounded by a 2-second in-process TTL
+cache (`_ensure_fresh()`) so a tight loop resolving many files in one request (e.g.
+`qa_requests.py::_finalize_child_requests`, which walks a whole raised request's worth of evidence paths in one
+pass) doesn't turn into one DB round-trip per file. `configure_upload_storage()` (still called at startup via
+`load_storage_settings`, and right after a successful `PATCH`) immediately refreshes the process that actually
+handled the change, so that process's own next read is instant rather than waiting out the TTL; every other
+process converges within 2 seconds regardless. A DB read failure during the refresh is swallowed (never raises)
+so a transient DB hiccup can't break every file operation in the app — the process just keeps using its last
+successfully-read value until the next refresh succeeds.
+
+**Also added — `frontend/src/modules/governance/Admin.tsx`'s `UploadStorageCard`:** a short note under the
+existing description warning that if the backend runs as more than one process, the configured path must point
+at storage that's persistent and identically shared across all of them — otherwise files written by one process
+can look "missing on disk" to another for reasons outside this app's own code (e.g. a Docker volume mounted at
+only the default path, not a custom one). This is a documented, deliberately out-of-scope companion cause the
+investigation surfaced (this repo's own `docker-compose.yml` only declares a persistent volume for the default
+upload path, not any custom path an admin might configure) — not fixed here since it depends on the actual
+deployment topology, which this session doesn't have visibility into.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` — clean. `npx tsc --noEmit -p .` — clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`
+leftover differs).

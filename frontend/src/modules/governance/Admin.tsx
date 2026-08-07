@@ -267,6 +267,11 @@ function UploadStorageCard() {
         Absolute filesystem path on the backend server used for all new documents and checklist evidence.
         The server validates and creates this directory before saving.
       </p>
+      <p className="muted small">
+        If the backend runs as more than one process (multiple workers, containers, or replicas), make sure
+        this path points at storage that is persistent and shared identically across all of them — otherwise
+        downloads for files written by one process can report "file is missing on disk" to another.
+      </p>
       <form onSubmit={save} className="storage-setting-form">
         <Field label="Upload directory path">
           <input required value={path} onChange={(e) => { setPath(e.target.value); setSaved(false) }} placeholder="/data/qa-portal/uploads" />
