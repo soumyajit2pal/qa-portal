@@ -220,3 +220,26 @@ deployment topology, which this session doesn't have visibility into.
 **Verified:** `python3 -m py_compile app/*.py app/routers/*.py` — clean. `npx tsc --noEmit -p .` — clean.
 Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard `.env`
 leftover differs).
+
+## 6. Increased sidebar navigation font size and made it scale with viewport
+
+**Reported:** "Navigation font size need to be increase, adjust as per viewport."
+
+**Context:** `frontend/src/components/Layout.tsx` applies four shell-variant classes to the same root element
+at once — `"app-shell redesigned-shell navigation-v2 navigation-v3 navigation-v4"` — left over from iterative
+navigation redesign work. Every variant styles the exact same `.sidebar nav a` selector at equal CSS
+specificity, so plain cascade order (not intentional layering) decides which one actually renders — `.navigation-v4`'s
+rules, being last in `index.css`, are the ones genuinely in effect over `.navigation-v2`/`.navigation-v3`/the
+base `.sidebar` rule above them. Its nav-item font-size was a fixed `11.5px` with no viewport-based scaling.
+
+**Fix:** `frontend/src/index.css`, `.navigation-v4 .sidebar nav a`'s `font-size` changed from a fixed `11.5px`
+to `clamp(13px, 0.6vw + 11px, 15.5px)` — roughly 13px on a narrow/tablet-width viewport, ~14.5px on a typical
+laptop screen, capped at 15.5px on very wide monitors instead of growing unbounded. `.navigation-v4
+.nav-group-toggle` (section headers like "Overview"/"Governance") and `.nav-workspace-label` were bumped the
+same way with a smaller clamp, `clamp(9px, 0.5vw + 7px, 10.5px)` (up from a fixed 8px), scaled down
+proportionally so they still read as category labels above the actual nav items rather than competing with
+them. The existing `min-height: 39px` on each nav row comfortably fits the new max font size without any
+overflow.
+
+**Verified:** `npx tsc --noEmit -p .` — clean (CSS-only change). Documents and outputs copies re-synced and
+confirmed identical via `diff -rq` (only the standard `.env` leftover differs).

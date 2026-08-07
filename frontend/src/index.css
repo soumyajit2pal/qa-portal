@@ -2965,13 +2965,29 @@ td { padding: 12px; }
 .navigation-v4 .sidebar nav::-webkit-scrollbar { width: 5px; }
 .navigation-v4 .sidebar nav::-webkit-scrollbar-track { background: transparent; box-shadow: none; }
 .navigation-v4 .sidebar nav::-webkit-scrollbar-thumb { border: 1px solid transparent; background: rgba(231,189,46,.6); background-clip: padding-box; box-shadow: none; }
-.navigation-v4 .nav-workspace-label { margin: 1px 9px 10px; color: #79aab1; font-size: 8px; letter-spacing: .14em; }
+.navigation-v4 .nav-workspace-label { margin: 1px 9px 10px; color: #79aab1; font-size: clamp(9px, 0.5vw + 7px, 10.5px); letter-spacing: .14em; }
 .navigation-v4 .nav-workspace-label i { background: rgba(255,255,255,.1); }
 .navigation-v4 .nav-group + .nav-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,.075); }
-.navigation-v4 .nav-group-toggle { min-height: 27px; padding: 4px 8px; color: #82adb3; font-size: 8px; font-weight: 750; letter-spacing: .12em; }
+/* Reported: "Navigation font size need to be increase, adjust as per
+   viewport" -- .navigation-v4 is the shell variant that actually renders
+   (Layout.tsx applies "app-shell redesigned-shell navigation-v2
+   navigation-v3 navigation-v4" all at once; every one of these targets the
+   exact same ".sidebar nav a" selector at equal specificity, so plain CSS
+   cascade order decides which wins -- .navigation-v4's rules, being last in
+   this file, are the ones actually in effect over v2/v3/the base .sidebar
+   rule above). Its nav-item font-size was a fixed 11.5px with no viewport
+   scaling at all. Switched to clamp(min, preferred, max) so it grows with
+   the viewport instead of staying pinned to one size on every screen --
+   ~13px on a narrow/tablet-width viewport, ~14.5px on a typical laptop
+   screen, capping at 15.5px on very wide monitors so it doesn't keep
+   growing unbounded. Section-header labels (.nav-group-toggle,
+   .nav-workspace-label below) get the same treatment, scaled down
+   proportionally since they're meant to read as smaller category labels
+   above the actual nav items, not compete with them. */
+.navigation-v4 .nav-group-toggle { min-height: 27px; padding: 4px 8px; color: #82adb3; font-size: clamp(9px, 0.5vw + 7px, 10.5px); font-weight: 750; letter-spacing: .12em; }
 .navigation-v4 .nav-group.group-open .nav-group-toggle { color: #a9cbd0; }
 .navigation-v4 .nav-group-toggle i { width: 18px; height: 18px; color: #7ca9b0; font-size: 13px; }
-.navigation-v4 .sidebar nav a { min-height: 39px; margin: 2px 0; padding: 6px 9px; gap: 10px; border: 0; border-radius: 7px; color: #b9d1d5; font-size: 11.5px; font-weight: 520; }
+.navigation-v4 .sidebar nav a { min-height: 39px; margin: 2px 0; padding: 6px 9px; gap: 10px; border: 0; border-radius: 7px; color: #b9d1d5; font-size: clamp(13px, 0.6vw + 11px, 15.5px); font-weight: 520; }
 .navigation-v4 .sidebar nav a .nav-icon { width: 27px; height: 27px; border-radius: 6px; color: #91b7bd; background: transparent; }
 .navigation-v4 .sidebar nav a .nav-icon svg { width: 16px; height: 16px; }
 .navigation-v4 .sidebar nav a:hover { color: #fff; border: 0; background: rgba(255,255,255,.07); }
