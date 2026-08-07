@@ -97,7 +97,8 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
             </div>
             <div className="security-target-list">
               {form.dast_components.map((target, index) => {
-                const authId = `dast-target-auth-${index}`
+                const authYesId = `dast-target-auth-yes-${index}`
+                const authNoId = `dast-target-auth-no-${index}`
                 return (
                   <div className="security-target-card" key={index}>
                     <div className="security-target-card-head">
@@ -122,14 +123,17 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
                         </select>
                       </label>
                       <div className="security-auth-control">
-                        <span>Authentication</span>
-                        <label htmlFor={authId}>
-                          <input
-                            id={authId} type="checkbox" checked={target.authentication_required}
-                            onChange={(event) => setTarget(index, 'authentication_required', event.target.checked)}
-                          />
-                          <span><strong>{target.authentication_required ? 'Required' : 'Not required'}</strong><small>Does this target require sign-in?</small></span>
-                        </label>
+                        <span>Authentication Required?</span>
+                        <div className="security-auth-options" role="radiogroup" aria-label={`Authentication required for target ${index + 1}`}>
+                          <label htmlFor={authYesId} className={target.authentication_required ? 'selected' : ''}>
+                            <input id={authYesId} type="radio" name={`dast-target-auth-${index}`} checked={target.authentication_required} onChange={() => setTarget(index, 'authentication_required', true)} />
+                            <span><strong>Yes</strong><small>Sign-in required</small></span>
+                          </label>
+                          <label htmlFor={authNoId} className={!target.authentication_required ? 'selected' : ''}>
+                            <input id={authNoId} type="radio" name={`dast-target-auth-${index}`} checked={!target.authentication_required} onChange={() => setTarget(index, 'authentication_required', false)} />
+                            <span><strong>No</strong><small>No authentication</small></span>
+                          </label>
+                        </div>
                       </div>
                       {target.authentication_required && (
                         <label className="security-control security-control-credentials">

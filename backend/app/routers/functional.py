@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -477,13 +478,102 @@ def start_test_design(req_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/{req_id}/start-execution", response_model=schemas.FunctionalOut)
-def start_execution(req_id: int, db: Session = Depends(get_db),
+def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
+                     db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.TEST_DESIGN, "Start execution")
     _require_assigned_tester(obj, current_user)
+    cycle = None
+    if payload.link_test_cycle:
+        if payload.test_cycle_id is None:
+            raise HTTPException(400, "Select a test cycle before starting execution")
+        cycle = (db.query(models.TestCycle)
+                 .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+                 .filter(models.TestCycle.id == payload.test_cycle_id,
+                         models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
+                         models.TestCycle.status.in_(["Not Started", "In Progress"]))
+                 .first())
+        if not cycle:
+            raise HTTPException(400, "The selected test cycle is no longer active or eligible")
+        application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
+        if (application_master_id and cycle.project.application_master_id is not None
+                and cycle.project.application_master_id != application_master_id):
+            raise HTTPException(400, "The selected test cycle is not relevant to this request's application")
+        existing_link = db.query(models.TestCycleChildRequestLink).filter_by(cycle_id=cycle.id).first()
+        if existing_link:
+            if existing_link.child_type == "Functional" and existing_link.child_id == obj.id:
+                raise HTTPException(400, "This test cycle is already linked to this Functional Testing request")
+            raise HTTPException(400, "This test cycle is already linked to another request")
+        db.add(models.TestCycleChildRequestLink(
+            cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
+        ))
+        if cycle.status == "Not Started":
+            cycle.status = "In Progress"
     obj.status = QAStatus.EXECUTION_IN_PROGRESS
-    _log(db, obj.id, "Test Design", current_user, "Execution Started", None)
+    _log(
+        db, obj.id, "Test Design", current_user, "Execution Started",
+        f"Linked test cycle {cycle.cycle_key} - {cycle.name}" if cycle else "Started without a linked test cycle",
+    )
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.get("/{req_id}/eligible-test-cycles", response_model=List[schemas.EligibleTestCycleOut])
+def eligible_test_cycles(req_id: int, db: Session = Depends(get_db),
+                         current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+    obj = _get_or_404(db, req_id)
+    _require(obj, QAStatus.TEST_DESIGN, "List eligible test cycles")
+    _require_assigned_tester(obj, current_user)
+    query = (db.query(models.TestCycle)
+             .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+             .outerjoin(models.TestCycleChildRequestLink, models.TestCycleChildRequestLink.cycle_id == models.TestCycle.id)
+             .filter(models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
+                     models.TestCycle.status.in_(["Not Started", "In Progress"]),
+                     models.TestCycleChildRequestLink.id.is_(None)))
+    application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
+    if application_master_id:
+        # Older Test Projects and projects created without an Application
+        # Master mapping have NULL here. They are still valid candidates;
+        # only projects explicitly mapped to a different application are
+        # irrelevant and excluded.
+        query = query.filter(or_(
+            models.TestProject.application_master_id == application_master_id,
+            models.TestProject.application_master_id.is_(None),
+        ))
+    cycles = query.order_by(models.TestCycle.created_at.desc()).all()
+    return [{
+        "id": cycle.id, "cycle_key": cycle.cycle_key, "project_id": cycle.project_id,
+        "project_key": cycle.project.project_key, "project_name": cycle.project.name,
+        "name": cycle.name, "status": cycle.status, "start_date": cycle.start_date,
+        "end_date": cycle.end_date,
+    } for cycle in cycles]
+
+
+@router.delete("/{req_id}/test-cycles/{cycle_id}", response_model=schemas.FunctionalOut)
+def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
+                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+    obj = _get_or_404(db, req_id)
+    can_manage = (current_user.has_role(Role.ADMIN) or obj.qa_lead_id == current_user.id
+                  or current_user.id in _assigned_tester_ids(obj))
+    if not can_manage:
+        raise HTTPException(403, "Only the assigned QA Lead or Tester can unlink this test cycle")
+    link = db.query(models.TestCycleChildRequestLink).filter_by(
+        cycle_id=cycle_id, child_type="Functional", child_id=obj.id,
+    ).first()
+    if not link:
+        raise HTTPException(404, "This test cycle is not linked to the Functional Testing request")
+    cycle_key = link.cycle.cycle_key
+    cycle_name = link.cycle.name
+    db.delete(link)
+    _log(db, obj.id, "Test Execution", current_user, "Test Cycle Unlinked",
+         f"Unlinked test cycle {cycle_key} - {cycle_name}")
+    db.add(models.ApprovalAction(
+        entity_type="TEST_CYCLE", entity_id=cycle_id, step_name="Request Link",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision="Functional Request Unlinked", comments=f"Unlinked {obj.request_id}",
+    ))
     db.commit()
     db.refresh(obj)
     return obj

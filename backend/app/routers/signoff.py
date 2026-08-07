@@ -11,7 +11,7 @@ from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_not_requester, dashboard_department_scope
 from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, QA_DEPARTMENT
-from ..pdf_export import build_request_detail_pdf
+from ..pdf_export import RichTextValue, build_request_detail_pdf
 from .. import documents as doc_store
 
 router = APIRouter(prefix="/api/signoffs", tags=["signoff"])
@@ -305,9 +305,9 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Validity", f"{obj.validity_from or '—'} to {obj.validity_to or '—'}"),
         ]),
         ("Exit Criteria & Risk", [
-            ("Exit Criteria Notes", obj.exit_criteria_notes),
-            ("Open Defect Summary", obj.open_defect_summary),
-            ("Residual Risk Notes", obj.residual_risk_notes),
+            ("Exit Criteria Notes", RichTextValue(obj.exit_criteria_notes or "")),
+            ("Open Defect Summary", RichTextValue(obj.open_defect_summary or "")),
+            ("Residual Risk Notes", RichTextValue(obj.residual_risk_notes or "")),
         ]),
         # Mandatory on a fully-Issued certificate -- one name per approval
         # stage of the QA Team -> QA Lead -> Executive COE chain.

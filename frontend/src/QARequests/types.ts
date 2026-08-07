@@ -29,8 +29,8 @@ export interface DastComponent {
 }
 export function blankDastComponent(): DastComponent {
   // Environment defaults to 'UAT', not blank -- DAST scans are never run
-  // against Dev or SIT, and the picker itself (DastStep.tsx) only ever
-  // offers POST_SIT_ENVIRONMENTS (UAT/Pre-Production/Production), no blank
+  // against Dev, SIT, or Production, and the picker itself (DastStep.tsx)
+  // only ever offers POST_SIT_ENVIRONMENTS (UAT/Pre-Production), no blank
   // option -- so every row always carries a real, valid value from the
   // moment it's added, the same way every other mandatory dropdown in this
   // wizard already works (see validation.ts's detailsStepError comment).
@@ -99,7 +99,7 @@ export const EMPTY_FORM = {
   // Environment is NOT delegated from "Application & Change Details" for
   // Performance. Its own mandatory ask on the Performance step
   // (PerformanceStep.tsx), restricted to POST_SIT_ENVIRONMENTS
-  // (UAT/Pre-Production/Production) -- defaults to 'UAT', never blank, same
+  // (UAT/Pre-Production) -- defaults to 'UAT', never blank, same
   // "always a real value" convention as environment/target_promotion_environment
   // above.
   performance_environment: 'UAT',

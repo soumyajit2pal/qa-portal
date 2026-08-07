@@ -30,12 +30,6 @@ from ..pdf_export import build_request_detail_pdf
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
 
-# All uploaded documents live under backend/app/uploads/<request_id>/<filename>,
-# e.g. app/uploads/TQA-REQ-01/BRD_v2.pdf
-UPLOAD_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
-os.makedirs(UPLOAD_ROOT, exist_ok=True)
-
-
 def _log(db: Session, entity_id: int, step: str, user: models.User, decision: str, comments: Optional[str]):
     db.add(models.ApprovalAction(
         entity_type="QA_REQUEST", entity_id=entity_id, step_name=step,
@@ -50,11 +44,55 @@ def _storage_key(req: "models.QARequest") -> str:
     checklist evidence and general supporting documents -- can be attached
     while still Draft, so this can't simply wait for it. Falls back to a
     stable DRAFT-<id> key (the numeric PK is always present) in that case.
-    Files uploaded before raising just keep living under that folder
-    afterward -- there is no rename/migration once request_id shows up,
-    since each document's exact path is already recorded in its own
-    stored_path column and never re-derived from this key again."""
+    When a business request_id is assigned, _promote_draft_upload_folder
+    moves this folder and updates every tracked stored_path."""
     return req.request_id or f"DRAFT-{req.id}"
+
+
+def _promote_draft_upload_folder(db: Session, req: "models.QARequest") -> None:
+    """Move all tracked uploads from DRAFT-<pk> into the real request folder.
+
+    This is idempotent and moves rather than copies, so a raised request has
+    exactly one top-level upload folder. Both gateway supporting documents
+    and staged checklist evidence are updated together.
+    """
+    if not req.request_id:
+        return
+    upload_root = doc_store.get_upload_root()
+    draft_key = f"DRAFT-{req.id}"
+    prefix = draft_key + os.sep
+
+    gateway_documents = db.query(models.QARequestDocument).filter_by(qa_request_id=req.id).all()
+    evidence_documents = (db.query(models.RequestDocument)
+                          .filter(models.RequestDocument.stored_path.like(f"{draft_key}/%"))).all()
+    for document in [*gateway_documents, *evidence_documents]:
+        normalized = os.path.normpath(document.stored_path)
+        if not normalized.startswith(prefix):
+            continue
+        suffix = normalized[len(prefix):]
+        source = doc_store.resolve_upload_path(normalized)
+        destination = os.path.join(upload_root, req.request_id, suffix)
+        if os.path.isfile(source):
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            if os.path.exists(destination):
+                stem, ext = os.path.splitext(destination)
+                destination = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
+            shutil.move(source, destination)
+        document.stored_path = os.path.relpath(destination, upload_root)
+
+    draft_root = os.path.join(upload_root, draft_key)
+    if os.path.isdir(draft_root):
+        for root, _, files in os.walk(draft_root, topdown=False):
+            if ".DS_Store" in files:
+                try:
+                    os.remove(os.path.join(root, ".DS_Store"))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(root)
+            except OSError:
+                # Preserve any untracked file instead of deleting it.
+                pass
 
 
 _GATEWAY_PRIVATE_STATUSES = (GatewayStatus.DRAFT, GatewayStatus.CANCELLED)
@@ -191,6 +229,7 @@ def _finalize_child_requests(db: Session, obj: "models.QARequest", requester: mo
     -- Submitted" audit entries logged by _raise_child_to_sm for each child
     must still be attributed to the person who actually requested the work,
     not the approver who happened to unblock it."""
+    _promote_draft_upload_folder(db, obj)
     request_types = obj.request_types.split(",") if obj.request_types else []
     (checked_items, sast_components, dast_components, performance_details, performance_checked_items,
      classification_details, sast_checked_items, dast_checked_items) = _unstash_draft_details(obj.draft_child_details)
@@ -946,6 +985,11 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
                 "-- Performance testing is not performed in Dev or SIT.",
             )
 
+    # The real business ID now exists and validation has succeeded. Promote
+    # all Draft uploads before either raising immediately or waiting at the
+    # Application Owner checkpoint, preventing split DRAFT/TQA folders.
+    _promote_draft_upload_folder(db, obj)
+
     if obj.application_master_status == "PENDING_APP_OWNER":
         # Brand-new "Other" name, still awaiting the first approval tier --
         # stop here. draft_child_details is intentionally left in place;
@@ -1207,7 +1251,8 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
         raise HTTPException(400, "Documents cannot be uploaded to a cancelled request")
 
     storage_key = _storage_key(req)
-    request_dir = os.path.join(UPLOAD_ROOT, storage_key)
+    upload_root = doc_store.get_upload_root()
+    request_dir = os.path.join(upload_root, storage_key)
     os.makedirs(request_dir, exist_ok=True)
 
     created = []
@@ -1250,7 +1295,7 @@ def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
     doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
     if not doc:
         raise HTTPException(404, "Document not found")
-    full_path = os.path.join(UPLOAD_ROOT, doc.stored_path)
+    full_path = doc_store.resolve_upload_path(doc.stored_path)
     if not os.path.exists(full_path):
         raise HTTPException(404, "File is missing on disk")
     return FileResponse(full_path, filename=doc.file_name,
@@ -1261,7 +1306,7 @@ def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
 def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                      current_user: models.User = Depends(get_current_user)):
     # Own document table/UPLOAD_ROOT layout (UPLOAD_ROOT/<request_id>/<filename>,
-    # not documents.py's UPLOAD_ROOT/<module>/<folder>/<filename>), so this
+    # not documents.py's UPLOAD_ROOT/<folder>/<module>/<filename>), so this
     # can't call doc_store.delete_document() -- only reuses doc_store's
     # can_delete_document() for the permission check, which is duck-typed
     # (just needs .uploaded_by_id) and applies here unchanged.
@@ -1270,7 +1315,7 @@ def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Document not found")
     if not doc_store.can_delete_document(doc, current_user):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    full_path = os.path.join(UPLOAD_ROOT, doc.stored_path)
+    full_path = doc_store.resolve_upload_path(doc.stored_path)
     if os.path.exists(full_path):
         os.remove(full_path)
     db.delete(doc)

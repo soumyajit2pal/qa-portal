@@ -37,6 +37,19 @@ function listToMarkdown(element: HTMLElement, ordered: boolean): string {
   }).join('\n') + '\n'
 }
 
+function tableToMarkdown(element: HTMLElement): string {
+  const rows = Array.from(element.querySelectorAll('tr')).map((row) =>
+    Array.from(row.querySelectorAll('th,td')).map((cell) =>
+      textOf(cell).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').trim()
+    )
+  ).filter((row) => row.length > 0)
+  if (!rows.length) return ''
+  const width = Math.max(...rows.map((row) => row.length))
+  const normalized = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill('')])
+  const line = (row: string[]) => `| ${row.join(' | ')} |`
+  return `${line(normalized[0])}\n${line(Array(width).fill('---'))}\n${normalized.slice(1).map(line).join('\n')}\n`
+}
+
 function styledMarkdown(element: HTMLElement, value: string): string {
   let result = value
   const weight = element.style.fontWeight
@@ -80,6 +93,7 @@ function nodeToMarkdown(node: Node): string {
     case 'BLOCKQUOTE': return content.split('\n').filter(Boolean).map((line) => `> ${line}`).join('\n') + '\n'
     case 'UL': return listToMarkdown(node, false)
     case 'OL': return listToMarkdown(node, true)
+    case 'TABLE': return tableToMarkdown(node)
     case 'A': {
       const href = node.getAttribute('href') || ''
       return href ? `[${content || href}](${href})` : content
@@ -123,6 +137,15 @@ export function markdownToEditorHtml(value: string): string {
   while (index < lines.length) {
     const line = lines[index]
     if (!line.trim()) { blocks.push('<div><br></div>'); index += 1; continue }
+    if (line.includes('|') && index + 1 < lines.length && /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[index + 1])) {
+      const cells = (entry: string) => entry.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => inlineHtml(cell.trim().replace(/\\\|/g, '|')))
+      const header = cells(line)
+      index += 2
+      const body: string[][] = []
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) body.push(cells(lines[index++]))
+      blocks.push(`<table><thead><tr>${header.map((cell) => `<th>${cell}</th>`).join('')}</tr></thead><tbody>${body.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table>`)
+      continue
+    }
     if (/^\s*[-*]\s+/.test(line)) {
       const items: string[] = []
       while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) items.push(`<li>${inlineHtml(lines[index++].replace(/^\s*[-*]\s+/, ''))}</li>`)
@@ -270,6 +293,7 @@ export function RichTextToolbar({
   onCommand,
   onBeginLink,
   onPickImage,
+  onInsertTable,
 }: {
   ariaLabel: string
   imageButtonTitle?: string
@@ -277,6 +301,7 @@ export function RichTextToolbar({
   onCommand: (name: string, value?: string) => void
   onBeginLink: () => void
   onPickImage?: () => void
+  onInsertTable?: () => void
 }) {
   return (
     <div className="jira-editor-toolbar" role="toolbar" aria-label={ariaLabel}>
@@ -287,6 +312,7 @@ export function RichTextToolbar({
       <span />
       <button type="button" title="Bulleted list" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('insertUnorderedList')}>• List</button>
       <button type="button" title="Numbered list" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('insertOrderedList')}>1. List</button>
+      {onInsertTable && <button type="button" title="Insert 3-column table" onMouseDown={(event) => event.preventDefault()} onClick={onInsertTable}>Table</button>}
       <button type="button" title="Quote" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('formatBlock', 'blockquote')}>❝</button>
       <button type="button" title={codeButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('formatBlock', 'pre')}>{'</>'}</button>
       <span />

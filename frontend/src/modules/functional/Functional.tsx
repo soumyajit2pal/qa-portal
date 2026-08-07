@@ -22,6 +22,7 @@ import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
 import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
 import JiraActivity from "../../components/JiraActivity";
+import ClearableSearchInput from "../../components/ClearableSearchInput";
 import {
   QA_STATUSES,
   QA_STATUS_LABELS,
@@ -42,6 +43,7 @@ import {
   ChecklistItemOut,
   ApprovalActionOut,
   SignOffOut,
+  EligibleTestCycleOut,
 } from "../../types";
 // Reused as-is from the Governance module -- the app is now a single
 // consolidated Vite app (see README "Frontend architecture"), so importing
@@ -406,6 +408,67 @@ const LIFECYCLE_STAGES = [
   "Closed",
 ];
 
+function StartExecutionModal({ req, busy, onCancel, onStart }: {
+  req: FunctionalOut;
+  busy: boolean;
+  onCancel: () => void;
+  onStart: (cycleId: number | null) => void;
+}) {
+  const [answer, setAnswer] = useState<"yes" | "no" | null>(null);
+  const [cycles, setCycles] = useState<EligibleTestCycleOut[]>([]);
+  const [selectedCycleId, setSelectedCycleId] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    if (answer !== "yes") return;
+    setLoading(true);
+    setError(null);
+    api.get<EligibleTestCycleOut[]>(`/api/functional-requests/${req.id}/eligible-test-cycles`)
+      .then(setCycles).catch(setError).finally(() => setLoading(false));
+  }, [answer, req.id]);
+
+  const query = search.trim().toLowerCase();
+  const visibleCycles = cycles.filter((cycle) => !query ||
+    cycle.cycle_key.toLowerCase().includes(query) ||
+    cycle.name.toLowerCase().includes(query) ||
+    cycle.project_key.toLowerCase().includes(query) ||
+    cycle.project_name.toLowerCase().includes(query));
+
+  return <Modal title="Start Functional Test Execution" onClose={onCancel} wide>
+    <div className="execution-cycle-question">
+      <strong>Do you have a test cycle to link with this request?</strong>
+      <p>Selecting a cycle connects repository execution results and reporting to <b>{req.request_id}</b>.</p>
+      <div className="execution-cycle-answer">
+        <button type="button" className={`btn ${answer === "yes" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("yes"); setSelectedCycleId(null); }}>Yes, link a cycle</button>
+        <button type="button" className={`btn ${answer === "no" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("no"); setSelectedCycleId(null); }}>No, start without linking</button>
+      </div>
+    </div>
+
+    {answer === "yes" && <div className="execution-cycle-picker">
+      <ClearableSearchInput value={search} onChange={(event) => setSearch(event.target.value)} onClear={() => setSearch("")} placeholder="Search cycle name, ID or project…" clearLabel="Clear test cycle search" />
+      {loading && <p className="muted">Loading eligible test cycles…</p>}
+      {!loading && cycles.length === 0 && !error && <div className="execution-cycle-empty"><strong>No eligible test cycles found</strong><span>Only unlinked Not Started or In Progress cycles from an active project for this application can be selected.</span></div>}
+      {!loading && cycles.length > 0 && visibleCycles.length === 0 && <p className="muted">No test cycles match your search.</p>}
+      <div className="execution-cycle-list">
+        {visibleCycles.map((cycle) => <button type="button" key={cycle.id} className={selectedCycleId === cycle.id ? "selected" : ""} onClick={() => setSelectedCycleId(cycle.id)}>
+          <span><strong>{cycle.name}</strong><small>{cycle.cycle_key} · {cycle.project_key} — {cycle.project_name}</small></span>
+          <Badge status={cycle.status} />
+        </button>)}
+      </div>
+      <ErrorText error={error} />
+    </div>}
+
+    {answer === "no" && <div className="execution-cycle-advice">Test execution can start without a cycle. Linking test cases and a cycle is recommended for traceability and reporting.</div>}
+
+    <div className="execution-cycle-actions">
+      <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+      <button type="button" className="btn btn-primary" disabled={busy || answer === null || (answer === "yes" && selectedCycleId === null)} onClick={() => onStart(answer === "yes" ? selectedCycleId : null)}>{busy ? "Starting…" : "Start Execution"}</button>
+    </div>
+  </Modal>;
+}
+
 // Reported directly: while an Application Name is still with the
 // Application Owner -- the first of the two approval tiers a name goes
 // through, see ApplicationNameBanner -- this request's own `status` is
@@ -420,22 +483,60 @@ const LIFECYCLE_STAGES = [
 // the normal stage list the moment the name clears that tier (or was never
 // gated by one at all, e.g. an older request with no ApplicationMaster row).
 function LifecyclePreview({
-  activeIndex,
+  status,
+  history,
   applicationOwnerPending,
 }: {
-  activeIndex: number;
+  status?: string;
+  history: ApprovalActionOut[];
   applicationOwnerPending?: boolean;
 }) {
-  const showAppOwnerStage = !!applicationOwnerPending && activeIndex === 1;
-  const stages = showAppOwnerStage
-    ? [LIFECYCLE_STAGES[0], "Application Owner", ...LIFECYCLE_STAGES.slice(1)]
-    : LIFECYCLE_STAGES;
-  const effectiveActiveIndex = showAppOwnerStage ? 1 : activeIndex;
+  let stages = [...LIFECYCLE_STAGES];
+  let effectiveActiveIndex = lifecycleStageIndex(status);
+
+  // A return is a branch back to the requester, not continued forward
+  // progress at the reviewer who returned it. Keep the stages genuinely
+  // reached before the decision, then show where the request is now.
+  if (status === "RETURNED_BY_SM" || status === "SM_REJECTED") {
+    stages = ["Draft", "SM Approval", "Requester Action", "Dept. Head Approval", "QA Activity", "Sign-off", "Closed"];
+    effectiveActiveIndex = 2;
+  } else if (status === "RETURNED_BY_DEPARTMENT_HEAD") {
+    stages = ["Draft", "SM Approval", "Dept. Head Approval", "Requester Action", "QA Activity", "Sign-off", "Closed"];
+    effectiveActiveIndex = 3;
+  } else if (status === "RETURNED_BY_QA_LEAD") {
+    stages = ["Draft", "SM Approval", "Dept. Head Approval", "QA Activity", "Requester Action", "Sign-off", "Closed"];
+    effectiveActiveIndex = 4;
+  }
+
+  const latestRejection = [...history].reverse().find((item) =>
+    String(item.decision || "").toLowerCase() === "rejected"
+  );
+  const rejectionStep = latestRejection?.step_name || "";
+  const terminalAfterRejection = status === "CLOSED" && !!latestRejection;
+
+  // Rejection/early closure is a terminal branch. Do not paint QA Activity
+  // and Sign-off as completed when the request never entered those stages.
+  if (status === "DEPARTMENT_HEAD_REJECTED" || (terminalAfterRejection && rejectionStep.includes("Department Head"))) {
+    stages = ["Draft", "SM Approval", "Dept. Head Approval", "Closed"];
+    effectiveActiveIndex = 3;
+  } else if (terminalAfterRejection && rejectionStep.includes("SM Approval")) {
+    stages = ["Draft", "SM Approval", "Closed"];
+    effectiveActiveIndex = 2;
+  } else if (status === "CANCELLED") {
+    stages = ["Draft", "Closed"];
+    effectiveActiveIndex = 1;
+  }
+
+  const showAppOwnerStage = !!applicationOwnerPending && status === "SM_APPROVAL_PENDING";
+  if (showAppOwnerStage) {
+    stages = [LIFECYCLE_STAGES[0], "Application Owner", ...LIFECYCLE_STAGES.slice(1)];
+    effectiveActiveIndex = 1;
+  }
   return (
     <div className="stepper" style={{ margin: "4px 0 18px" }}>
       {stages.map((label, i) => (
         <React.Fragment key={label}>
-          <div className={`step ${i <= effectiveActiveIndex ? "filled" : ""}`}>
+          <div className={`step ${i <= effectiveActiveIndex ? "filled" : ""} ${i === effectiveActiveIndex ? "current" : ""}`}>
             <div className="circle">{i + 1}</div>
             <div className="step-label">{label}</div>
           </div>
@@ -527,6 +628,8 @@ function FunctionalDetail({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [editingDetails, setEditingDetails] = useState(false);
   const [showSignoffModal, setShowSignoffModal] = useState(false);
+  const [showStartExecution, setShowStartExecution] = useState(false);
+  const [executionNotice, setExecutionNotice] = useState("");
   const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments(
     "/api/functional-requests",
     req.id
@@ -583,6 +686,43 @@ function FunctionalDetail({
   async function requestSignoffWithCertificate(cert: SignOffOut) {
     setShowSignoffModal(false);
     await act("request-signoff", { signoff_id: cert.id });
+  }
+
+  async function startExecution(cycleId: number | null) {
+    setError(null);
+    setBusyAction("start-execution");
+    try {
+      const updated = await api.post<FunctionalOut>(
+        `/api/functional-requests/${req.id}/start-execution`,
+        { link_test_cycle: cycleId !== null, test_cycle_id: cycleId }
+      );
+      onChanged(updated);
+      setShowStartExecution(false);
+      setExecutionNotice(cycleId !== null
+        ? "Test cycle linked successfully. Test execution has started."
+        : "Test execution has started without a linked test cycle. Linking test cases and a test cycle is recommended for proper execution tracking, traceability, and reporting.");
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function unlinkTestCycle(cycle: FunctionalOut["linked_test_cycles"][number]) {
+    if (!window.confirm(`Unlink ${cycle.cycle_key} - ${cycle.name} from ${req.request_id}? Test cases and execution results will not be deleted.`)) return;
+    setError(null);
+    setBusyAction(`unlink-cycle-${cycle.id}`);
+    try {
+      const updated = await api.del<FunctionalOut>(`/api/functional-requests/${req.id}/test-cycles/${cycle.id}`);
+      onChanged(updated);
+      setExecutionNotice(`Test cycle ${cycle.cycle_key} was unlinked successfully. Existing test cases and execution results were preserved.`);
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   async function toggleChecklistItem(item: ChecklistItemOut) {
@@ -809,7 +949,8 @@ function FunctionalDetail({
       {tab === "overview" && (
         <div>
           <LifecyclePreview
-            activeIndex={lifecycleStageIndex(req.status)}
+            status={req.status}
+            history={history}
             applicationOwnerPending={req.application_master_status === "PENDING_APP_OWNER"}
           />
 
@@ -910,6 +1051,18 @@ function FunctionalDetail({
             </DetailField>
           </DetailSection>
 
+          {req.linked_test_cycles?.length > 0 && (
+            <DetailSection title="Linked Test Cycle">
+              {req.linked_test_cycles.map((cycle) => (
+                <DetailField key={cycle.id} label={cycle.cycle_key}>
+                  <strong>{cycle.name}</strong> · {cycle.status}
+                  {(cycle.start_date || cycle.end_date) && <span className="muted small"> · {cycle.start_date || "—"} to {cycle.end_date || "—"}</span>}
+                  {(isAssignedTester || isAssignedQALead) && <button type="button" className="btn btn-sm" style={{ marginLeft: 8 }} disabled={!!busyAction} onClick={() => unlinkTestCycle(cycle)}>{busyAction === `unlink-cycle-${cycle.id}` ? "Unlinking…" : "Unlink"}</button>}
+                </DetailField>
+              ))}
+            </DetailSection>
+          )}
+
           {req.qa_request && (
             <p className="muted small">
               Raised alongside QA Request{" "}
@@ -945,6 +1098,7 @@ function FunctionalDetail({
             )}
 
           <div className="section-title">Workflow Actions</div>
+          {executionNotice && <div className={`execution-start-notice ${req.linked_test_cycles?.length ? "linked" : "unlinked"}`} role="status"><strong>{executionNotice.includes("was unlinked") ? "Test cycle unlinked" : req.linked_test_cycles?.length ? "Execution started" : "Execution started without a cycle"}</strong><span>{executionNotice}</span></div>}
           <div className="actions-panel">
             <div
               style={{
@@ -1012,11 +1166,11 @@ function FunctionalDetail({
                       comments: signed,
                     })
                   }
-                  onReturn={() =>
-                    act("sm-decision", { decision: "Returned", comments })
+                  onReturn={(actionNote) =>
+                    act("sm-decision", { decision: "Returned", comments: actionNote })
                   }
-                  onReject={() =>
-                    act("sm-decision", { decision: "Rejected", comments })
+                  onReject={(actionNote) =>
+                    act("sm-decision", { decision: "Rejected", comments: actionNote })
                   }
                 />
               )}
@@ -1053,16 +1207,16 @@ function FunctionalDetail({
                       qa_lead_id: Number(selectedQALead),
                     })
                   }
-                  onReturn={() =>
+                  onReturn={(actionNote) =>
                     act("department-head-decision", {
                       decision: "Returned",
-                      comments,
+                      comments: actionNote,
                     })
                   }
-                  onReject={() =>
+                  onReject={(actionNote) =>
                     act("department-head-decision", {
                       decision: "Rejected",
-                      comments,
+                      comments: actionNote,
                     })
                   }
                 />
@@ -1171,7 +1325,7 @@ function FunctionalDetail({
                 <button
                   className="btn btn-primary btn-sm"
                   disabled={!!busyAction}
-                  onClick={() => act("start-execution")}
+                  onClick={() => { setExecutionNotice(""); setShowStartExecution(true); }}
                 >
                   Start Execution
                 </button>
@@ -1275,27 +1429,6 @@ function FunctionalDetail({
                   </span>
                 )}
             </div>
-            {(canSMDecide ||
-              canDepartmentHeadDecide ||
-              canReadinessDecide ||
-              canRaiseDefect ||
-              canMarkWaitingForFix ||
-              canStartRetest ||
-              canCompleteQA ||
-              canRequesterDecide) && (
-              <input
-                placeholder="Action note (optional — attached to the next workflow action)"
-                value={comments}
-                onChange={(e) => setComments(e.target.value)}
-                style={{
-                  marginTop: 8,
-                  width: "100%",
-                  padding: 8,
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                }}
-              />
-            )}
           </div>
 
           {editingDetails && (
@@ -1427,6 +1560,7 @@ function FunctionalDetail({
         title="Readiness cannot be passed"
         guidance="Review the Readiness Checklist, complete the listed verification items, and then try “Readiness Passed” again."
       />
+      {showStartExecution && <StartExecutionModal req={req} busy={busyAction === "start-execution"} onCancel={() => setShowStartExecution(false)} onStart={startExecution} />}
     </Modal>
   );
 }

@@ -283,6 +283,22 @@ export interface FunctionalOut {
   // the Edit Details modal show/refresh a self-declaration section, same
   // as SASTOut/DASTOut/PerformanceOut's own checklist_items.
   checklist_items: ChecklistItemOut[]
+  linked_test_cycles: LinkedTestCycleRef[]
+}
+
+export interface LinkedTestCycleRef {
+  id: number
+  cycle_key: string
+  project_id: number
+  name: string
+  status: string
+  start_date?: string | null
+  end_date?: string | null
+}
+
+export interface EligibleTestCycleOut extends LinkedTestCycleRef {
+  project_key: string
+  project_name: string
 }
 
 export interface ApprovalActionOut {
@@ -703,6 +719,7 @@ export interface TestCaseOut {
   pre_condition?: string | null
   description?: string | null
   priority?: string | null
+  tags: string[]
   status: string
   version?: string
   created_by_id?: number | null
@@ -732,6 +749,9 @@ export interface TestCycleOut {
   status: string
   start_date?: string | null
   end_date?: string | null
+  linked_request_type?: string | null
+  linked_request_id?: number | null
+  linked_request_key?: string | null
   created_by_id?: number | null
   created_at: string
 }
@@ -801,6 +821,8 @@ export interface PendingApprovalItem {
   entity_type: string
   entity_id: number
   display_id?: string | null
+  parent_request_id?: string | null
+  parent_path?: string | null
   title: string
   status: string
   status_label: string
@@ -808,4 +830,10 @@ export interface PendingApprovalItem {
   submitted_by?: string | null
   submitted_at?: string | null
   path: string
+}
+
+export interface StorageSettingsOut {
+  upload_path: string
+  default_path: string
+  legacy_paths: string[]
 }

@@ -375,9 +375,6 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
           <p style={{ marginTop: 14 }}><strong>Risk Assessment:</strong> {sup.risk_assessment || '—'}</p>
 
           <div className="section-title">Workflow Actions</div>
-          <Field label="Action note (optional)">
-            <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
-          </Field>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/suppressions/${sup.id}/export`, `${sup.suppression_id}.pdf`)}>
               Export PDF
@@ -391,8 +388,8 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
                 busy={busy}
                 approveLabel="Approve (assign to Dept Head)"
                 onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
-                onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+                onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canDeptHeadDecide && (
@@ -402,8 +399,8 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
                 busy={busy}
                 approveLabel="Approve (Department Head)"
                 onApprove={(signed) => act('dept-head-decision', { decision: 'Approved', comments: signed })}
-                onReturn={() => act('dept-head-decision', { decision: 'Returned', comments })}
-                onReject={() => act('dept-head-decision', { decision: 'Rejected', comments })}
+                onReturn={(actionNote) => act('dept-head-decision', { decision: 'Returned', comments: actionNote })}
+                onReject={(actionNote) => act('dept-head-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canSecurityDecide && (

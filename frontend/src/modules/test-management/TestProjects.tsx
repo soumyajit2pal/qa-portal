@@ -5,7 +5,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import { hasRole } from '../../constants'
-import { ApplicationMasterOut, TestProjectOut, TestCaseOut, TestCycleOut, ApprovalActionOut } from '../../types'
+import { ApplicationMasterOut, TestProjectOut, TestCaseOut, TestCycleOut, ApprovalActionOut, DepartmentOut } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
@@ -17,8 +17,9 @@ import ClearableSearchInput from '../../components/ClearableSearchInput'
 // Execution both start with "pick a Project" before showing anything else.
 const CAN_MANAGE_ROLES = ['QA_ENGINEER', 'QA_LEAD']
 
-function NewProjectModal({ applications, onClose, onCreated }: {
+function NewProjectModal({ applications, departments, onClose, onCreated }: {
   applications: ApplicationMasterOut[]
+  departments: DepartmentOut[]
   onClose: () => void
   onCreated: (p: TestProjectOut) => void
 }) {
@@ -35,20 +36,21 @@ function NewProjectModal({ applications, onClose, onCreated }: {
     const app = applications.find((a) => a.id === id)
     if (app) {
       setName(app.name)
-      setDepartment(app.department || '')
+      setDepartment(departments.some((item) => item.name === app.department) ? (app.department || '') : '')
     }
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { setError(new Error('Project name cannot be blank')); return }
+    if (!department) { setError(new Error('Select a department')); return }
     setBusy(true)
     setError(null)
     try {
       const created = await api.post<TestProjectOut>('/api/test-projects', {
         name: name.trim(),
         application_master_id: applicationId || null,
-        department: department.trim() || null,
+        department,
         description: description.trim() || null,
       })
       onCreated(created)
@@ -74,8 +76,9 @@ function NewProjectModal({ applications, onClose, onCreated }: {
         <Field label="Project Name *">
           <input required value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="Department">
-          <input value={department} onChange={(e) => setDepartment(e.target.value)} />
+        <Field label="Department *">
+          <SearchableSelect disabled={applicationId !== ''} value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select department…"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
+          {applicationId !== '' && <small className="muted">Department is controlled by the selected Application.</small>}
         </Field>
         <Field label="Description">
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -97,9 +100,10 @@ function NewProjectModal({ applications, onClose, onCreated }: {
 // fields/behavior (including auto-filling name/department when an
 // Application is picked), just pre-filled from the existing project and
 // PATCHing instead of POSTing.
-function EditProjectModal({ project, applications, onClose, onUpdated }: {
+function EditProjectModal({ project, applications, departments, onClose, onUpdated }: {
   project: TestProjectOut
   applications: ApplicationMasterOut[]
+  departments: DepartmentOut[]
   onClose: () => void
   onUpdated: (p: TestProjectOut) => void
 }) {
@@ -116,20 +120,21 @@ function EditProjectModal({ project, applications, onClose, onUpdated }: {
     const app = applications.find((a) => a.id === id)
     if (app) {
       setName(app.name)
-      setDepartment(app.department || '')
+      setDepartment(departments.some((item) => item.name === app.department) ? (app.department || '') : '')
     }
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { setError(new Error('Project name cannot be blank')); return }
+    if (!department) { setError(new Error('Select a department')); return }
     setBusy(true)
     setError(null)
     try {
       const updated = await api.patch<TestProjectOut>(`/api/test-projects/${project.id}`, {
         name: name.trim(),
         application_master_id: applicationId || null,
-        department: department.trim() || null,
+        department,
         description: description.trim() || null,
       })
       onUpdated(updated)
@@ -153,8 +158,9 @@ function EditProjectModal({ project, applications, onClose, onUpdated }: {
         <Field label="Project Name *">
           <input required value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="Department">
-          <input value={department} onChange={(e) => setDepartment(e.target.value)} />
+        <Field label="Department *">
+          <SearchableSelect disabled={applicationId !== ''} value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select department…"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
+          {applicationId !== '' && <small className="muted">Department is controlled by the selected Application.</small>}
         </Field>
         <Field label="Description">
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -182,6 +188,7 @@ export default function TestProjects() {
   const canReview = hasRole(user, 'QA_LEAD')
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [applications, setApplications] = useState<ApplicationMasterOut[]>([])
+  const [departments, setDepartments] = useState<DepartmentOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [showNew, setShowNew] = useState(false)
   const [summaries, setSummaries] = useState<Record<number, { cases: number; cycles: number }>>({})
@@ -207,11 +214,12 @@ export default function TestProjects() {
 
   const load = useCallback(async () => {
     try {
-      const [p, a] = await Promise.all([
+      const [p, a, d] = await Promise.all([
         api.get<TestProjectOut[]>('/api/test-projects?include_inactive=true'),
         api.get<ApplicationMasterOut[]>('/api/application-names'),
+        api.get<DepartmentOut[]>('/api/departments'),
       ])
-      setProjects(p); setApplications(a)
+      setProjects(p); setApplications(a); setDepartments(d)
       const stats = await Promise.all(p.map(async (project) => {
         const [cases, cycles] = await Promise.all([
           api.get<TestCaseOut[]>(`/api/test-repository/projects/${project.id}/test-cases`),
@@ -380,6 +388,7 @@ export default function TestProjects() {
       {showNew && (
         <NewProjectModal
           applications={applications}
+          departments={departments}
           onClose={() => setShowNew(false)}
           onCreated={(p) => { setProjects((prev) => [p, ...prev]); setShowNew(false) }}
         />
@@ -388,6 +397,7 @@ export default function TestProjects() {
         <EditProjectModal
           project={editProject}
           applications={applications}
+          departments={departments}
           onClose={() => setEditProject(null)}
           onUpdated={(p) => { setProjects((prev) => prev.map((project) => project.id === p.id ? p : project)); setEditProject(null) }}
         />

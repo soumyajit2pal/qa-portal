@@ -17,6 +17,7 @@ import { DastStep } from './steps/DastStep'
 import { PerformanceStep } from './steps/PerformanceStep'
 import { DocumentsStep } from './steps/DocumentsStep'
 import { EvidenceKind, evidenceKey } from './steps/ChecklistEvidencePicker'
+import { POST_SIT_ENVIRONMENTS } from '../constants'
 
 interface NewRequestModalProps {
   onClose: () => void
@@ -78,7 +79,9 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     // only matters while the Performance step is still editable anyway
     // (existingPerformance === false), so the staged Draft value is the only
     // one that matters here.
-    performance_environment: editing.draft_performance?.performance_environment || 'UAT',
+    performance_environment: POST_SIT_ENVIRONMENTS.includes(editing.draft_performance?.performance_environment || '')
+      ? editing.draft_performance!.performance_environment!
+      : 'UAT',
     target_release_date: editing.target_release_date || '',
     remarks: editing.remarks || '',
     // Pre-fill from the requester's previously-saved self-declaration ticks,
@@ -103,7 +106,7 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     sast_checked_items: editing.draft_sast_checked_items || [],
     dast_components: editing.draft_dast_components?.length
       ? editing.draft_dast_components.map((c) => ({
-          application_url: c.application_url || '', environment: c.environment || '',
+          application_url: c.application_url || '', environment: POST_SIT_ENVIRONMENTS.includes(c.environment || '') ? c.environment! : 'UAT',
           authentication_required: (c.authentication_required || '').trim().toLowerCase() === 'yes',
           test_credentials: c.test_credentials || '',
         }))

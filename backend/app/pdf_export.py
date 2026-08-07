@@ -15,6 +15,9 @@ hands them to build_request_detail_pdf below -- so the reportlab boilerplate
 (styles, table formatting, page setup) lives in exactly one place.
 """
 import io
+import re
+from dataclasses import dataclass
+from xml.sax.saxutils import escape
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from reportlab.lib import colors
@@ -35,10 +38,111 @@ Section = Tuple[str, Sequence[Field]]
 HistoryRow = Tuple[str, str, str, str, str, str]
 
 
+@dataclass(frozen=True)
+class RichTextValue:
+    """Markdown-backed field that should retain formatting in PDF exports."""
+    markdown: str
+
+
 def _fmt(value: object) -> str:
     if value is None or value == "":
         return "—"
-    return str(value)
+    # ReportLab Paragraph parses a small XML/HTML dialect. Request content is
+    # user-authored and rich-text fields are stored as Markdown, so raw values
+    # containing <, >, &, links, code, or Markdown tables must never be handed
+    # to Paragraph as markup. Escape first and retain intentional line breaks.
+    return escape(str(value)).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
+
+
+def _safe_text(value: object) -> str:
+    return escape(str(value))
+
+
+def _markdown_inline(value: str) -> str:
+    """Convert the editor's safe inline Markdown subset to ReportLab tags."""
+    rendered = escape(value)
+    rendered = re.sub(r"\[u\]([\s\S]+?)\[/u\]", r"<u>\1</u>", rendered)
+    rendered = re.sub(r"\*\*([\s\S]+?)\*\*", r"<b>\1</b>", rendered)
+    rendered = re.sub(r"~~([\s\S]+?)~~", r"<strike>\1</strike>", rendered)
+    rendered = re.sub(r"`([^`]+)`", r"<font name=\"Courier\">\1</font>", rendered)
+    rendered = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<i>\1</i>", rendered)
+    # Keep link text readable without putting an untrusted URL into ReportLab
+    # markup. The full URL remains visible in parentheses for printed copies.
+    rendered = re.sub(r"\[([^\]]+)\]\((https?://[^)]+|mailto:[^)]+)\)", r"\1 (\2)", rendered, flags=re.I)
+    return rendered
+
+
+def _markdown_cells(line: str) -> list[str]:
+    value = line.strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|"):
+        value = value[:-1]
+    return [cell.strip().replace(r"\|", "|") for cell in re.split(r"(?<!\\)\|", value)]
+
+
+_TABLE_SEPARATOR = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
+
+
+def _rich_text_flowables(markdown: str, available_width: float = 320) -> list:
+    """Render paragraphs and Markdown tables as native ReportLab flowables."""
+    if not markdown.strip():
+        return [Paragraph("—", _styles["Normal"])]
+    lines = markdown.replace("\r", "").split("\n")
+    flowables: list = []
+    paragraph: list[str] = []
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            content = "<br/>".join(_markdown_inline(line) for line in paragraph)
+            flowables.append(Paragraph(content, _styles["Normal"]))
+            paragraph.clear()
+
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() and "|" in line and index + 1 < len(lines) and _TABLE_SEPARATOR.match(lines[index + 1]):
+            flush_paragraph()
+            rows = [_markdown_cells(line)]
+            index += 2
+            while index < len(lines) and lines[index].strip() and "|" in lines[index]:
+                rows.append(_markdown_cells(lines[index]))
+                index += 1
+            width = max(len(row) for row in rows)
+            normalized = [row + [""] * (width - len(row)) for row in rows]
+            table_data = [[Paragraph(_markdown_inline(cell), _styles["Normal"]) for cell in row] for row in normalized]
+            nested = Table(table_data, colWidths=[available_width / width] * width, repeatRows=1)
+            nested.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8edf2")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#263442")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#aeb8c3")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            flowables.append(nested)
+            continue
+        if not line.strip():
+            flush_paragraph()
+            if flowables:
+                flowables.append(Spacer(1, 3))
+        else:
+            paragraph.append(line)
+        index += 1
+    flush_paragraph()
+    if flowables and isinstance(flowables[-1], Spacer):
+        flowables.pop()
+    return flowables or [Paragraph("—", _styles["Normal"])]
+
+
+def _field_content(value: object):
+    if isinstance(value, RichTextValue):
+        return _rich_text_flowables(value.markdown)
+    return Paragraph(_fmt(value), _styles["Normal"])
 
 
 def build_request_detail_pdf(
@@ -52,15 +156,15 @@ def build_request_detail_pdf(
         title=title,
     )
     elements: List = [
-        Paragraph(title, _styles["Title"]),
-        Paragraph(subtitle, _styles["Normal"]),
-        Paragraph(f"Generated by {generated_by} on {generated_at}", _meta_style),
+        Paragraph(_safe_text(title), _styles["Title"]),
+        Paragraph(_safe_text(subtitle), _styles["Normal"]),
+        Paragraph(_safe_text(f"Generated by {generated_by} on {generated_at}"), _meta_style),
         Spacer(1, 10),
     ]
 
     for section_title, fields in sections:
-        elements.append(Paragraph(section_title, _section_title_style))
-        data = [[Paragraph(str(label), _styles["Normal"]), Paragraph(_fmt(value), _styles["Normal"])] for label, value in fields]
+        elements.append(Paragraph(_safe_text(section_title), _section_title_style))
+        data = [[Paragraph(_safe_text(label), _styles["Normal"]), _field_content(value)] for label, value in fields]
         if not data:
             continue
         t = Table(data, colWidths=[150, 330])
@@ -77,7 +181,7 @@ def build_request_detail_pdf(
 
     elements.append(Paragraph("Workflow / Approval History — Who Signed", _section_title_style))
     if history_note:
-        elements.append(Paragraph(history_note, _meta_style))
+        elements.append(Paragraph(_fmt(history_note), _meta_style))
         elements.append(Spacer(1, 4))
     if history:
         head = ["Step", "Decision", "Actor", "Role", "Comments", "When"]

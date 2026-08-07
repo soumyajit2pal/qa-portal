@@ -6,6 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   QA_STATUS_LABELS,
@@ -217,11 +218,12 @@ interface CardProps {
   children?: ReactNode;
   right?: ReactNode;
   style?: React.CSSProperties;
+  className?: string;
 }
 
-export function Card({ title, subtitle, children, right, style }: CardProps) {
+export function Card({ title, subtitle, children, right, style, className }: CardProps) {
   return (
-    <div className="card" style={style}>
+    <div className={`card${className ? ` ${className}` : ""}`} style={style}>
       {(title || right) && (
         <div className="card-head">
           <div>
@@ -332,9 +334,25 @@ export function Modal({
   hideCloseButton,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
+  // Record drawers open in the spacious centered view by default. Users can
+  // restore the compact right-side drawer with the header toggle.
+  const [expanded, setExpanded] = useState(variant === "drawer");
+
+  function handleExplicitClose() {
+    onClose();
+    // Pending Approvals opens a child module only as a host for its detail
+    // drawer. Closing that drawer should return to the queue, not strand the
+    // user on the module list and force another sidebar click.
+    if (variant === "drawer" && new URLSearchParams(window.location.search).get("fromPending") === "1") {
+      window.history.back();
+    }
+  }
 
   function handleBackdropClick() {
-    if (!preventBackdropClose) {
+    // Drawers hold record details and forms, so an outside click must never
+    // dismiss them. They stay open until the user deliberately uses Close.
+    // Centered dialogs retain their existing opt-in backdrop behaviour.
+    if (variant === "dialog" && !preventBackdropClose) {
       onClose();
       return;
     }
@@ -368,20 +386,38 @@ export function Modal({
     );
   }
   return (
-    <div className="modal-overlay" onClick={handleBackdropClick}>
+    <div
+      className={`modal-overlay ${expanded ? "modal-overlay-expanded" : ""}`}
+      onClick={handleBackdropClick}
+    >
       <div
-        className={`drawer ${wide ? "drawer-wide" : ""} ${
+        className={`drawer ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
           shake ? "modal-shake" : ""
         }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="drawer-header">
           <h3>{title}</h3>
-          {!hideCloseButton && (
-            <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
-              ×
+          <div className="drawer-header-actions">
+            <button
+              type="button"
+              className="modal-close-btn drawer-expand-btn"
+              onClick={() => setExpanded((value) => !value)}
+              aria-label={expanded ? "Restore drawer" : "Expand drawer"}
+              title={expanded ? "Restore drawer" : "Expand drawer"}
+            >
+              {expanded ? (
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v6H3M15 21v-6h6M3 9l6-6M21 15l-6 6" /></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 21h5v-5M3 8l6-5M21 16l-6 5" /></svg>
+              )}
             </button>
-          )}
+            {!hideCloseButton && (
+              <button type="button" className="modal-close-btn" onClick={handleExplicitClose} aria-label="Close" title="Close">
+                ×
+              </button>
+            )}
+          </div>
         </div>
         <div className="drawer-body">{children}</div>
       </div>
@@ -408,20 +444,12 @@ export function SignField({
   const [signed, setSigned] = useState(false);
 
   return (
-    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-      <span
-        style={{
-          display: "inline-block",
-          minWidth: 190,
-          padding: "6px 9px",
-          border: "1px solid var(--border)",
-          borderRadius: 7,
-          fontSize: 12.5,
-          background: "var(--panel-soft, #f4f6f8)",
-          color: userName ? "var(--navy)" : "var(--muted)",
-        }}
-      >
-        {userName || "Unknown user"}
+    <div className={`workflow-sign-step${signed ? " signed" : ""}`}>
+      <span className="workflow-step-number">1</span>
+      <span className="workflow-sign-copy">
+        <small>IDENTITY CONFIRMATION</small>
+        <strong>{signed ? `Signed by ${userName}` : userName || "Unknown user"}</strong>
+        <em>{signed ? "Identity confirmed. You can now approve." : "Sign with your logged-in identity before approving."}</em>
       </span>
       <button
         type="button"
@@ -432,9 +460,9 @@ export function SignField({
           onSignedChange(userName as string);
         }}
       >
-        {signed ? "Signed ✓" : "Sign"}
+        {signed ? "✓ Signed" : "Sign now"}
       </button>
-    </span>
+    </div>
   );
 }
 
@@ -459,8 +487,8 @@ interface ApprovalDecisionButtonsProps {
   comments: string;
   busy: boolean;
   onApprove: (signedComments: string) => void;
-  onReturn: () => void;
-  onReject: () => void;
+  onReturn: (comments: string) => void;
+  onReject: (comments: string) => void;
   approveLabel?: string;
   returnLabel?: string;
   rejectLabel?: string;
@@ -515,55 +543,60 @@ export function ApprovalDecisionButtons({
   // directly, twice, with screenshots. A modal sidesteps the problem
   // entirely: it's a dedicated overlay with its own stacking context, so
   // there's nothing underneath for its popover to collide with.
-  const [assignModalOpen, setAssignModalOpen] = useState(false);
+  const [pendingDecision, setPendingDecision] = useState<"approve" | "return" | "reject" | null>(null);
+  const [actionNote, setActionNote] = useState(comments);
 
   function handleApproveClick() {
-    if (extraControl) {
-      setAssignModalOpen(true);
-    } else {
-      onApprove(withSignature(comments, signedBy));
-    }
+    setActionNote(comments);
+    setPendingDecision("approve");
+  }
+
+  function openDecision(decision: "return" | "reject") {
+    setActionNote(comments);
+    setPendingDecision(decision);
+  }
+
+  function confirmDecision() {
+    if (pendingDecision === "approve") onApprove(withSignature(actionNote, signedBy));
+    if (pendingDecision === "return") onReturn(actionNote);
+    if (pendingDecision === "reject") onReject(actionNote);
+    setPendingDecision(null);
   }
 
   return (
     <>
-      <SignField
-        userName={userName}
-        onSignedChange={setSignedBy}
-        disabled={busy || signBlocked}
-      />
-      <button
-        className="btn btn-success btn-sm"
-        disabled={busy || !signedBy || signBlocked}
-        onClick={handleApproveClick}
-      >
-        {approveLabel}
-      </button>
-      <button className="btn btn-sm" disabled={busy} onClick={onReturn}>
-        {returnLabel}
-      </button>
-      <button
-        className="btn btn-danger btn-sm"
-        disabled={busy}
-        onClick={onReject}
-      >
-        {rejectLabel}
-      </button>
-      {signBlocked && signBlockedMessage && (
-        <span style={{ fontSize: 12.5, color: "#b45309" }}>
-          {signBlockedMessage}
-        </span>
-      )}
-      {assignModalOpen && (
+      <div className="workflow-decision-flow">
+        <SignField userName={userName} onSignedChange={setSignedBy} disabled={busy || signBlocked} />
+        <div className="workflow-decision-step">
+          <div className="workflow-decision-heading"><span className="workflow-step-number">2</span><span><strong>Choose a decision</strong><small>Select one outcome for this workflow stage.</small></span></div>
+          <div className="workflow-decision-options">
+            <button className="workflow-decision-card approve" disabled={busy || !signedBy || signBlocked} onClick={handleApproveClick} title={!signedBy ? "Sign first to enable approval" : approveLabel}>
+              <span className="workflow-decision-icon">✓</span><span><strong>{approveLabel}</strong><small>Accept and move to the next stage</small></span><i>→</i>
+            </button>
+            <button className="workflow-decision-card return" disabled={busy} onClick={() => openDecision("return")}>
+              <span className="workflow-decision-icon">↩</span><span><strong>{returnLabel}</strong><small>Send back for corrections and resubmission</small></span><i>→</i>
+            </button>
+            <button className="workflow-decision-card reject" disabled={busy} onClick={() => openDecision("reject")}>
+              <span className="workflow-decision-icon">×</span><span><strong>{rejectLabel}</strong><small>Stop and close this approval path</small></span><i>→</i>
+            </button>
+          </div>
+        </div>
+        {signBlocked && signBlockedMessage && <div className="workflow-blocked-message"><b>Approval unavailable</b><span>{signBlockedMessage}</span></div>}
+      </div>
+      {pendingDecision && (
         <Modal
-          title={extraControlLabel ? `${extraControlLabel} & ${approveLabel}` : approveLabel}
-          onClose={() => setAssignModalOpen(false)}
+          title={`Confirm ${pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}`}
+          onClose={() => setPendingDecision(null)}
           variant="dialog"
           preventBackdropClose
           hideCloseButton
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div>
+            <div className={`workflow-confirm-banner ${pendingDecision}`}>
+              <span>{pendingDecision === "approve" ? "✓" : pendingDecision === "return" ? "↩" : "×"}</span>
+              <div><strong>{pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}</strong><small>{pendingDecision === "approve" ? "The request will proceed to its next workflow stage." : pendingDecision === "return" ? "The requester can correct the details and submit again." : "This approval path will be stopped."}</small></div>
+            </div>
+            {pendingDecision === "approve" && extraControl && <div>
               {extraControlLabel && (
                 <label
                   style={{
@@ -578,30 +611,32 @@ export function ApprovalDecisionButtons({
                 </label>
               )}
               {extraControl}
-            </div>
-            {!extraReady && (
+            </div>}
+            {pendingDecision === "approve" && !extraReady && (
               <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
                 Select someone above before confirming {approveLabel.toLowerCase()}.
               </div>
             )}
+            <label className="workflow-note-field">
+              <span>Action note <em>Optional</em></span>
+              <textarea value={actionNote} onChange={(event) => setActionNote(event.target.value)} rows={4} placeholder="Add context for this decision, or continue without a note…" />
+              <small>No note is required. If entered, it will be saved in workflow history.</small>
+            </label>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button
                 type="button"
                 className="btn btn-sm"
-                onClick={() => setAssignModalOpen(false)}
+                onClick={() => setPendingDecision(null)}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="btn btn-success btn-sm"
-                disabled={!extraReady}
-                onClick={() => {
-                  onApprove(withSignature(comments, signedBy));
-                  setAssignModalOpen(false);
-                }}
+                className={`btn btn-sm ${pendingDecision === "reject" ? "btn-danger" : pendingDecision === "approve" ? "btn-success" : "btn-primary"}`}
+                disabled={pendingDecision === "approve" && !extraReady}
+                onClick={confirmDecision}
               >
-                Confirm {approveLabel}
+                Confirm {pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}
               </button>
             </div>
           </div>
@@ -901,6 +936,9 @@ interface TableProps<T> {
   // call site that genuinely needs a different page size, not because any
   // current one does.
   pageSize?: number;
+  // Optional stable identifier for pages containing multiple similar tables.
+  // When omitted, the route and column keys form the preference key.
+  tableId?: string;
 }
 
 export function Table<T extends Record<string, any>>({
@@ -909,6 +947,7 @@ export function Table<T extends Record<string, any>>({
   rowKey,
   onRowClick,
   pageSize = 10,
+  tableId,
 }: TableProps<T>) {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
@@ -932,6 +971,141 @@ export function Table<T extends Record<string, any>>({
     left: number;
   } | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const columnsPanelRef = useRef<HTMLDivElement>(null);
+  const columnsTriggerRef = useRef<HTMLDivElement>(null);
+  const [columnsOpen, setColumnsOpen] = useState(false);
+  const [columnsPanelPosition, setColumnsPanelPosition] = useState({ top: 0, right: 12 });
+  // Screen definitions provide the important columns with purpose-built
+  // renderers. The API often returns additional fields, though, and those
+  // must also be available to the user's column chooser. This is the table
+  // equivalent of SELECT * for the response payload: preserve configured
+  // columns first, then append every other key found in any returned row.
+  const availableColumns = useMemo<TableColumn<T>[]>(() => {
+    const configuredKeys = new Set(columns.map((column) => column.key));
+    const discoveredKeys: string[] = [];
+    const discovered = new Set<string>();
+    rows.forEach((row) => {
+      Object.keys(row).forEach((key) => {
+        if (!configuredKeys.has(key) && !discovered.has(key)) {
+          discovered.add(key);
+          discoveredKeys.push(key);
+        }
+      });
+    });
+    const friendlyHeader = (key: string) =>
+      key
+        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+        .replace(/[_-]+/g, " ")
+        .replace(/\b\w/g, (letter) => letter.toUpperCase())
+        .replace(/\bId\b/g, "ID");
+    return [
+      ...columns,
+      ...discoveredKeys.map((key) => ({ key, header: friendlyHeader(key) })),
+    ];
+  }, [columns, rows]);
+  const preferenceKey = useMemo(() => {
+    const route = typeof window === "undefined" ? "table" : window.location.pathname;
+    return `qap-visible-columns:${tableId || `${route}:${columns.map((c) => c.key).join("|")}`}`;
+  }, [columns, tableId]);
+  const [hiddenColumnKeys, setHiddenColumnKeys] = useState<string[]>([]);
+  const [hasColumnPreference, setHasColumnPreference] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(preferenceKey);
+      const parsed = saved ? JSON.parse(saved) : [];
+      setHiddenColumnKeys(Array.isArray(parsed) ? parsed.filter((key) => typeof key === "string") : []);
+      setHasColumnPreference(saved !== null);
+    } catch {
+      setHiddenColumnKeys([]);
+      setHasColumnPreference(false);
+    }
+  }, [preferenceKey]);
+
+  const visibleColumns = useMemo(() => {
+    const available = new Set(availableColumns.map((column) => column.key));
+    // With no saved choice, preserve the screen's original concise design.
+    // Newly discovered API fields are opt-in through the Columns panel.
+    const defaultHidden = availableColumns
+      .filter((column) => !columns.some((configured) => configured.key === column.key))
+      .map((column) => column.key);
+    const hidden = new Set(
+      (hasColumnPreference ? hiddenColumnKeys : defaultHidden).filter((key) => available.has(key))
+    );
+    const selected = availableColumns.filter((column) => !hidden.has(column.key));
+    return selected.length > 0 ? selected : availableColumns.slice(0, 1);
+  }, [availableColumns, columns, hasColumnPreference, hiddenColumnKeys]);
+
+  function setColumnVisible(key: string, visible: boolean) {
+    setHiddenColumnKeys((current) => {
+      const defaultHidden = availableColumns
+        .filter((column) => !columns.some((configured) => configured.key === column.key))
+        .map((column) => column.key);
+      const startingHidden = hasColumnPreference ? current : defaultHidden;
+      const next = visible
+        ? startingHidden.filter((item) => item !== key)
+        : Array.from(new Set([...startingHidden, key]));
+      // A useful table must always retain at least one visible column.
+      if (availableColumns.every((column) => next.includes(column.key))) return current;
+      try {
+        window.localStorage.setItem(preferenceKey, JSON.stringify(next));
+      } catch {
+        // Storage can be unavailable in private/restricted browser contexts.
+      }
+      setHasColumnPreference(true);
+      if (!visible) {
+        setFilters((existing) => {
+          const updated = { ...existing };
+          delete updated[key];
+          return updated;
+        });
+        setOpenFilterKey((open) => (open === key ? null : open));
+      }
+      return next;
+    });
+  }
+
+  function showAllColumns() {
+    setHiddenColumnKeys([]);
+    setHasColumnPreference(true);
+    try {
+      window.localStorage.setItem(preferenceKey, "[]");
+    } catch {
+      // See storage note above.
+    }
+  }
+
+  useEffect(() => {
+    if (!columnsOpen) return;
+    function closeColumns(e: MouseEvent) {
+      const target = e.target as Node;
+      if (
+        !columnsPanelRef.current?.contains(target) &&
+        !columnsTriggerRef.current?.contains(target)
+      )
+        setColumnsOpen(false);
+    }
+    function closeOnEscape(e: KeyboardEvent) {
+      if (e.key === "Escape") setColumnsOpen(false);
+    }
+    document.addEventListener("mousedown", closeColumns);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeColumns);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [columnsOpen]);
+
+  function toggleColumnsPanel() {
+    if (!columnsOpen && columnsTriggerRef.current) {
+      const rect = columnsTriggerRef.current.getBoundingClientRect();
+      setColumnsPanelPosition({
+        top: Math.min(rect.bottom + 6, window.innerHeight - 180),
+        right: Math.max(12, window.innerWidth - rect.right),
+      });
+    }
+    setColumnsOpen((open) => !open);
+  }
 
   useEffect(() => {
     if (!openFilterKey) return;
@@ -974,7 +1148,15 @@ export function Table<T extends Record<string, any>>({
   function textFor(col: TableColumn<T>, row: T): string {
     if (col.filterValue) return col.filterValue(row);
     const v = (row as any)[col.key];
-    return v === null || v === undefined ? "" : String(v);
+    if (v === null || v === undefined) return "";
+    if (typeof v === "object") {
+      try {
+        return JSON.stringify(v);
+      } catch {
+        return String(v);
+      }
+    }
+    return String(v);
   }
 
   const activeFilters = Object.entries(filters).filter(
@@ -985,7 +1167,7 @@ export function Table<T extends Record<string, any>>({
     if (activeFilters.length === 0) return rows;
     return rows.filter((row) =>
       activeFilters.every(([key, value]) => {
-        const col = columns.find((c) => c.key === key);
+        const col = availableColumns.find((c) => c.key === key);
         if (!col) return true;
         return textFor(col, row)
           .toLowerCase()
@@ -993,7 +1175,7 @@ export function Table<T extends Record<string, any>>({
       })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, filters, columns]);
+  }, [rows, filters, availableColumns]);
 
   // Reset to page 1 whenever the filtered set changes shape (a new filter
   // typed, or the underlying row count changes, e.g. fresh data loaded) --
@@ -1025,11 +1207,61 @@ export function Table<T extends Record<string, any>>({
   }
 
   return (
-    <div className="table-wrap">
+    <div className="table-shell">
+      <div className="table-column-controls" ref={columnsTriggerRef}>
+        <button
+          type="button"
+          className="table-columns-trigger"
+          onClick={toggleColumnsPanel}
+          aria-expanded={columnsOpen}
+        >
+          Columns <span>{visibleColumns.length}/{availableColumns.length}</span>
+        </button>
+        {columnsOpen && createPortal(
+          <div
+            className="table-columns-panel"
+            ref={columnsPanelRef}
+            style={{
+              top: columnsPanelPosition.top,
+              right: columnsPanelPosition.right,
+              bottom: 12,
+            }}
+          >
+            <div className="table-columns-heading">
+              <div>
+                <strong>Choose visible columns</strong>
+                <small>Saved only for your view</small>
+              </div>
+              <button type="button" onClick={showAllColumns} disabled={visibleColumns.length === availableColumns.length}>
+                Show all
+              </button>
+            </div>
+            <div className="table-columns-list">
+              {availableColumns.map((column) => {
+                const visible = visibleColumns.some((item) => item.key === column.key);
+                const lastVisible = visible && visibleColumns.length === 1;
+                return (
+                  <label key={column.key} title={lastVisible ? "At least one column must remain visible" : undefined}>
+                    <input
+                      type="checkbox"
+                      checked={visible}
+                      disabled={lastVisible}
+                      onChange={(event) => setColumnVisible(column.key, event.target.checked)}
+                    />
+                    <span>{typeof column.header === "string" ? column.header : column.key}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>,
+          document.body
+        )}
+      </div>
+      <div className="table-wrap">
       <table>
         <thead>
           <tr>
-            {columns.map((c) => (
+            {visibleColumns.map((c) => (
               <th key={c.key}>
                 <div className="th-cell">
                   <span>{c.header}</span>
@@ -1055,7 +1287,7 @@ export function Table<T extends Record<string, any>>({
         <tbody>
           {filteredRows.length === 0 && (
             <tr>
-              <td colSpan={columns.length}>
+              <td colSpan={visibleColumns.length}>
                 <div className="empty-state">
                   <IconFolder width={26} height={26} />
                   <span className="msg">
@@ -1082,9 +1314,9 @@ export function Table<T extends Record<string, any>>({
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               className={onRowClick ? "row-clickable" : undefined}
             >
-              {columns.map((c) => (
+              {visibleColumns.map((c) => (
                 <td key={c.key}>
-                  {c.render ? c.render(row) : (row as any)[c.key]}
+                  {c.render ? c.render(row) : textFor(c, row)}
                 </td>
               ))}
             </tr>
@@ -1137,7 +1369,7 @@ export function Table<T extends Record<string, any>>({
       {openFilterKey &&
         popoverPos &&
         (() => {
-          const col = columns.find((c) => c.key === openFilterKey);
+          const col = availableColumns.find((c) => c.key === openFilterKey);
           if (!col) return null;
           return (
             <div
@@ -1167,6 +1399,7 @@ export function Table<T extends Record<string, any>>({
             </div>
           );
         })()}
+      </div>
     </div>
   );
 }

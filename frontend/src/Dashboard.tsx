@@ -423,20 +423,19 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
     ))
   }, [threeW, teamFilter, priorityFilter, ageingFilter, governanceSearch])
 
-  // Combines the gateway + every linked child request type into one list --
-  // org-wide, not scoped to any one user/department (that view now lives in
-  // its own "My Requests" tab below, see MyRequestsTab) -- so the Command
-  // Centre's own stats reflect everything happening across the whole portal.
+  // Operational totals count only executable child requests. TQA-REQ-* is
+  // an intake/parent gateway, not an additional testing work item; including
+  // it alongside its Functional/SAST/DAST/Performance children inflated the
+  // exact request count by one for every parent.
   const unifiedRequests = useMemo<UnifiedRequestRow[]>(() => {
     const all = [
-      ...toUnified('QA Request', requests),
       ...toUnified('Functional QA', functionalRequests),
       ...toUnified('SAST', sastRequests),
       ...toUnifiedDast(dastRequests),
       ...toUnified('Performance', performanceRequests),
     ]
     return all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-  }, [requests, functionalRequests, sastRequests, dastRequests, performanceRequests])
+  }, [functionalRequests, sastRequests, dastRequests, performanceRequests])
 
   // Everything below this point that's keyed off a raise/created timestamp
   // -- narrowed to whatever window RaisedRangeFilter above has selected (see
@@ -486,19 +485,8 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
 
   return (
     <div className="dashboard-command-centre">
-      <div className="dashboard-brief">
-        <div>
-          <span className="dashboard-brief-kicker">Enterprise quality overview</span>
-          <h2>Release governance Dashboard</h2>
-          <p>Live visibility across testing, security, approvals, sign-offs, and audit readiness.</p>
-        </div>
-        <div className="dashboard-brief-meta">
-          <span className="live-indicator"><i /> Live data</span>
-          <small>Updated {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
-        </div>
-      </div>
       <div className="dashboard-section-head">
-        <div><span>Portfolio health</span><h3>Operational pulse</h3></div>
+        <div><span>Live portfolio</span><h3>What needs attention</h3></div>
       </div>
       <div className="grid grid-4 dashboard-metric-grid">
         <StatCard icon={IconGrid} iconClass="blue" tag="Live" value={m.active_projects} label="Active projects"
@@ -513,9 +501,9 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
                   footline="Open the relevant request module to approve, return, or reject." />
         <StatCard icon={IconWorkflow} iconClass="purple" tag="Live" value={activeRequestsCount} label="Active requests (org-wide)"
                   hint={range.preset === 'all'
-                    ? 'Open QA, security, and performance requests.'
-                    : 'Open requests raised within the selected period.'}
-                  footline={`${filteredUnifiedRequests.length} raised in total${range.preset === 'all' ? ' across all departments' : ' in the selected range'}`} />
+                    ? 'Open Functional, SAST, DAST, and Performance child requests.'
+                    : 'Open child requests raised within the selected period.'}
+                  footline={`${filteredUnifiedRequests.length} exact child request${filteredUnifiedRequests.length === 1 ? '' : 's'}${range.preset === 'all' ? ' across all departments' : ' in the selected range'}`} />
       </div>
 
       <Card
@@ -1036,6 +1024,7 @@ const REQUESTS_TAB_HIDDEN_ROLES = [
 export default function Dashboard() {
   const { user } = useAuth()
   const [tab, setTab] = useState('command')
+  const [insightTab, setInsightTab] = useState<'security' | 'suppression' | '3w'>('security')
   const range = DEFAULT_RAISED_RANGE
 
   // Shared across CommandCentre and MyRequestsTab (see each of their own
@@ -1084,9 +1073,7 @@ export default function Dashboard() {
   const tabs = [
     { key: 'command', label: 'Dashboard' },
     ...(hideRequestsTab ? [] : [{ key: 'my-requests', label: 'Requests' }]),
-    { key: 'security', label: 'Security (SAST/DAST)' },
-    { key: 'suppression', label: 'Suppression' },
-    { key: '3w', label: '3W Pending Items' },
+    { key: 'insights', label: 'Insights' },
     ...(showTesterOverviewTab ? [{ key: 'tester-overview', label: 'QA Tester Overview' }] : []),
   ]
 
@@ -1129,9 +1116,21 @@ export default function Dashboard() {
           error={requestsError}
         />
       )}
-      {tab === 'security' && <SecurityTab range={range} />}
-      {tab === 'suppression' && <SuppressionTab range={range} />}
-      {tab === '3w' && <ThreeWTab range={range} />}
+      {tab === 'insights' && (
+        <div className="dashboard-insights">
+          <div className="dashboard-insights-head">
+            <div><span>Detailed analytics</span><h2>Insights</h2><p>Open a focused view only when deeper analysis is needed.</p></div>
+            <div className="pill-tabs dashboard-insight-tabs">
+              <button className={insightTab === 'security' ? 'active' : ''} onClick={() => setInsightTab('security')}>Security</button>
+              <button className={insightTab === 'suppression' ? 'active' : ''} onClick={() => setInsightTab('suppression')}>Suppression</button>
+              <button className={insightTab === '3w' ? 'active' : ''} onClick={() => setInsightTab('3w')}>3W Pending</button>
+            </div>
+          </div>
+          {insightTab === 'security' && <SecurityTab range={range} />}
+          {insightTab === 'suppression' && <SuppressionTab range={range} />}
+          {insightTab === '3w' && <ThreeWTab range={range} />}
+        </div>
+      )}
       {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab range={range} />}
     </div>
   )

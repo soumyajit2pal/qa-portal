@@ -508,6 +508,16 @@ class FunctionalUpdate(BaseModel):
     checked_items: Optional[List[str]] = None
 
 
+class LinkedTestCycleRef(ORMModel):
+    id: int
+    cycle_key: str
+    project_id: int
+    name: str
+    status: str
+    start_date: Optional[datetime.date] = None
+    end_date: Optional[datetime.date] = None
+
+
 class FunctionalOut(ORMModel):
     """Carries the full Draft -> SM -> Department Head -> QA Lead -> ... ->
     Closed lifecycle (constants.QAStatus) that used to live directly on
@@ -529,7 +539,6 @@ class FunctionalOut(ORMModel):
     signoff_id: Optional[int] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
-    qa_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
     # Delegated from the linked QA Request gateway.
     application_name: Optional[str] = None
@@ -560,6 +569,7 @@ class FunctionalOut(ORMModel):
     # a self-declaration section the same way SASTOut/DASTOut/
     # PerformanceOut's own checklist_items already do.
     checklist_items: List[ChecklistItemOut] = []
+    linked_test_cycles: List[LinkedTestCycleRef] = []
 
 
 class WorkflowDecision(BaseModel):
@@ -586,6 +596,11 @@ class DepartmentHeadDecisionIn(BaseModel):
 
 class AssignTesterIn(BaseModel):
     tester_ids: List[int]
+
+
+class StartFunctionalExecutionIn(BaseModel):
+    link_test_cycle: bool = False
+    test_cycle_id: Optional[int] = None
 
 
 class AssignSecurityAnalystIn(BaseModel):
@@ -736,7 +751,8 @@ class SASTOut(ORMModel):
     # Set when this SAST request was auto-created from a QA Request that
     # included SAST in its request types; null for standalone SAST requests
     # raised directly through this module.
-    qa_request_id: Optional[int] = None
+    linked_request_type: Optional[str] = None
+    linked_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
     # Read-only lookups (via the linked QA Request, if any) -- lets the
     # Suppression "Request ID" autosuggest auto-populate Department/Owner.
@@ -1226,7 +1242,7 @@ class ApplicationSeedResult(ORMModel):
 class TestProjectCreate(BaseModel):
     name: str
     application_master_id: Optional[int] = None
-    department: Optional[str] = None
+    department: str
     description: Optional[str] = None
 
 
@@ -1327,6 +1343,7 @@ class TestCaseCreate(BaseModel):
     pre_condition: Optional[str] = None
     description: Optional[str] = None
     priority: Optional[str] = None
+    tags: List[str] = []
     # The API always creates cases as Draft/Pending QA Lead Review. Kept in
     # the input shape for backward compatibility with older clients, but the
     # router never trusts a client-supplied lifecycle status.
@@ -1346,6 +1363,7 @@ class TestCaseUpdate(BaseModel):
     pre_condition: Optional[str] = None
     description: Optional[str] = None
     priority: Optional[str] = None
+    tags: Optional[List[str]] = None
     status: Optional[str] = None
     steps: Optional[List[TestStepIn]] = None
 
@@ -1356,6 +1374,9 @@ class TestCaseBulkUpdate(BaseModel):
     # from an explicit null meaning "move selected cases to Unfiled".
     folder_id: Optional[int] = None
     priority: Optional[str] = None
+    test_type: Optional[str] = None
+    module_name: Optional[str] = None
+    tags: Optional[List[str]] = None
     status: Optional[str] = None
 
 
@@ -1389,6 +1410,7 @@ class TestCaseOut(ORMModel):
     pre_condition: Optional[str] = None
     description: Optional[str] = None
     priority: Optional[str] = None
+    tags: List[str] = []
     status: str
     version: str = "1.0"
     created_by_id: Optional[int] = None
@@ -1419,6 +1441,22 @@ class TestCycleCreate(BaseModel):
     description: Optional[str] = None
     start_date: Optional[datetime.date] = None
     end_date: Optional[datetime.date] = None
+    # Reported: "failure in test lifecycle and testcases, basically on test
+    # management" -- routers/test_execution.py::create_cycle unconditionally
+    # reads payload.linked_request_id/linked_request_type (added alongside
+    # the "Linked Child Request" feature, and correctly present on
+    # TestCycleUpdate/TestCycleOut below), but this Create schema was never
+    # updated to match -- it only had the vestigial `qa_request_id` field
+    # below, which nothing in create_cycle ever read. Since Pydantic v2's
+    # default extra="ignore" silently drops any field the frontend sent that
+    # isn't declared here, `payload.linked_request_id` didn't just come back
+    # None -- the attribute didn't exist on the model at all, so every single
+    # POST /projects/{project_id}/cycles (creating a new Test Cycle) raised
+    # AttributeError -> unhandled 500, unconditionally, whether or not a
+    # linked request was even selected. Editing an existing cycle
+    # (TestCycleUpdate) was never affected -- only creation was broken.
+    linked_request_type: Optional[str] = None
+    linked_request_id: Optional[int] = None
 
 
 class TestCycleUpdate(BaseModel):
@@ -1427,6 +1465,8 @@ class TestCycleUpdate(BaseModel):
     status: Optional[str] = None
     start_date: Optional[datetime.date] = None
     end_date: Optional[datetime.date] = None
+    linked_request_type: Optional[str] = None
+    linked_request_id: Optional[int] = None
 
 
 class TestCycleOut(ORMModel):
@@ -1438,8 +1478,23 @@ class TestCycleOut(ORMModel):
     status: str
     start_date: Optional[datetime.date] = None
     end_date: Optional[datetime.date] = None
+    linked_request_type: Optional[str] = None
+    linked_request_id: Optional[int] = None
+    linked_request_key: Optional[str] = None
     created_by_id: Optional[int] = None
     created_at: datetime.datetime
+
+
+class EligibleTestCycleOut(ORMModel):
+    id: int
+    cycle_key: str
+    project_id: int
+    project_key: str
+    project_name: str
+    name: str
+    status: str
+    start_date: Optional[datetime.date] = None
+    end_date: Optional[datetime.date] = None
 
 
 class TestExecutionAdd(BaseModel):
@@ -1480,6 +1535,14 @@ class TestExecutionBulkRemoveResult(BaseModel):
     removed_execution_ids: List[int]
     removed_test_case_keys: List[str]
     removed_attempt_count: int
+    removed_evidence_count: int
+
+
+class TestCycleResetResult(BaseModel):
+    cycle_id: int
+    reset_execution_count: int
+    removed_attempt_count: int
+    removed_defect_count: int
     removed_evidence_count: int
 
 
@@ -1548,6 +1611,16 @@ class TestExecutionOut(ORMModel):
     runs: List[TestExecutionRunOut] = []
 
 
+class StorageSettingsOut(BaseModel):
+    upload_path: str
+    default_path: str
+    legacy_paths: List[str] = []
+
+
+class StorageSettingsUpdate(BaseModel):
+    upload_path: str
+
+
 # ---------------- Pending Approvals (see routers/pending_approvals.py) ----------------
 class PendingApprovalItem(BaseModel):
     """One row in the logged-in user's Pending Approvals feed -- a single
@@ -1563,6 +1636,8 @@ class PendingApprovalItem(BaseModel):
     entity_type: str        # e.g. "APPLICATION_MASTER", "FUNCTIONAL_REQUEST", "SAST", ...
     entity_id: int
     display_id: Optional[str] = None    # business id, e.g. "TQA-FUNC-0007" -- None where the entity has no business id of its own (ApplicationMaster)
+    parent_request_id: Optional[str] = None  # gateway business id, e.g. TQA-REQ-0007
+    parent_path: Optional[str] = None
     title: str               # short human label, e.g. the application name or "Functional Testing -- SM Approval"
     status: str
     status_label: str

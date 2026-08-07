@@ -712,6 +712,7 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
   const [preCondition, setPreCondition] = useState(existing?.pre_condition || '')
   const [description, setDescription] = useState(existing?.description || '')
   const [priority, setPriority] = useState(existing?.priority || TEST_CASE_PRIORITIES[0])
+  const [tags, setTags] = useState((existing?.tags || []).join(', '))
   const [steps, setSteps] = useState<TestStepIn[]>(
     existing?.steps.length ? existing.steps.map((s) => ({ step_no: s.step_no, step_text: s.step_text, expected_result: s.expected_result })) : [emptyStep(1)]
   )
@@ -727,10 +728,11 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
   // testcase is locked for editing by that user." A case someone ELSE
   // checked out is forced read-only here too (not just on the backend,
   // which would otherwise only surface as a 423 on Save) -- lockedByMe
-  // leaves editing open as normal.
+  // leaves editing open as normal. An existing unreserved case is also
+  // read-only until Start editing checks it out to the current user.
   const lockedByOther = !!existing?.checked_out_by_id && existing.checked_out_by_id !== user?.id
   const lockedByMe = !!existing?.checked_out_by_id && existing.checked_out_by_id === user?.id
-  const readOnly = !canAuthor || lockedByOther
+  const readOnly = !canAuthor || lockedByOther || (!!existing && !lockedByMe)
 
   useEffect(() => {
     if (existing) api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CASE&entity_id=${existing.id}`).then(setActivity).catch(() => setActivity([]))
@@ -757,6 +759,7 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
       test_type: testType || null, module_name: moduleName || null, test_scenario: scenario || null,
       pre_condition: preCondition || null, description: description || null,
       priority: priority || null,
+      tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
       steps,
     }
     try {
@@ -820,6 +823,10 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
               {TEST_CASE_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </Field>
+          <Field label="Tags / Labels">
+            <input value={tags} onChange={(e) => setTags(e.target.value)} disabled={readOnly} placeholder="smoke, payments, regression" />
+            <small className="muted">Separate multiple tags with commas.</small>
+          </Field>
           <Field label="Workflow Status">
             <div className="tm-workflow-status-field">
               <Badge status={existing?.status || 'Draft'} label={TEST_CASE_STATUS_LABELS[existing?.status || 'Draft']} />
@@ -835,18 +842,18 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
             </Field>
           )}
           {existing && (
-            <Field label="Checkout">
+            <Field label="Editing access">
               <div className="tm-workflow-status-field">
                 {existing.checked_out_by_id ? (
                   <span className={`badge ${lockedByMe ? 'badge-blue' : 'badge-yellow'}`}>
-                    {lockedByMe ? 'Checked out by you' : `Checked out by ${existing.checked_out_by_name}`}
+                    {lockedByMe ? 'Reserved by you' : `Being edited by ${existing.checked_out_by_name}`}
                   </span>
                 ) : (
-                  <span className="badge badge-gray">Not checked out</span>
+                  <span className="badge badge-gray">Available</span>
                 )}
                 {canAuthor && (lockedByMe || !existing.checked_out_by_id) && (
                   <button type="button" className="btn btn-sm" onClick={toggleCheckout} disabled={checkoutBusy}>
-                    {checkoutBusy ? '...' : lockedByMe ? 'Check in' : 'Check out'}
+                    {checkoutBusy ? 'Please wait…' : lockedByMe ? 'Finish editing' : 'Start editing'}
                   </button>
                 )}
               </div>
@@ -858,6 +865,9 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
             <strong>{existing?.checked_out_by_name}</strong> has this test case checked out, so it's locked
             for editing until they check it back in (an Administrator can force a check-in if needed).
           </div>
+        )}
+        {existing && canAuthor && !existing.checked_out_by_id && (
+          <div className="tm-edit-access-notice"><strong>Read-only until reserved</strong><span>Select <b>Start editing</b> above to check out this case and enable the form.</span></div>
         )}
         <Field label="Test Scenario">
           <input value={scenario} onChange={(e) => setScenario(e.target.value)} disabled={readOnly} />
@@ -915,6 +925,26 @@ function TestCaseModal({ projectId, folders, folderId, existing, onClose, onSave
   )
 }
 
+function BulkFieldCard({ title, description, enabled, onToggle, children, wide = false }: {
+  title: string
+  description: string
+  enabled: boolean
+  onToggle: (enabled: boolean) => void
+  children: React.ReactNode
+  wide?: boolean
+}) {
+  return (
+    <section className={`tm-bulk-field-card${enabled ? ' active' : ''}${wide ? ' wide' : ''}`}>
+      <label className="tm-bulk-field-heading">
+        <input type="checkbox" checked={enabled} onChange={(event) => onToggle(event.target.checked)} />
+        <span className="tm-bulk-switch" aria-hidden="true"><i /></span>
+        <span><strong>{title}</strong><small>{description}</small></span>
+      </label>
+      <div className="tm-bulk-field-control" aria-disabled={!enabled}>{children}</div>
+    </section>
+  )
+}
+
 function BulkUpdateModal({ projectId, selectedIds, folders, onClose, onUpdated }: {
   projectId: number
   selectedIds: number[]
@@ -923,9 +953,17 @@ function BulkUpdateModal({ projectId, selectedIds, folders, onClose, onUpdated }
   onUpdated: (cases: TestCaseOut[]) => void
 }) {
   type BulkUpdateStage = 'edit' | 'confirm' | 'updating' | 'success' | 'error'
-  type BulkUpdateBody = { ids: number[]; folder_id?: number | null; priority?: string }
+  type BulkUpdateBody = { ids: number[]; folder_id?: number | null; priority?: string; test_type?: string; module_name?: string; tags?: string[] }
   const [folder, setFolder] = useState('unchanged')
   const [priority, setPriority] = useState('')
+  const [testType, setTestType] = useState('')
+  const [moduleName, setModuleName] = useState('')
+  const [tags, setTags] = useState('')
+  const [updateFolder, setUpdateFolder] = useState(false)
+  const [updatePriority, setUpdatePriority] = useState(false)
+  const [updateTestType, setUpdateTestType] = useState(false)
+  const [updateModule, setUpdateModule] = useState(false)
+  const [updateTags, setUpdateTags] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [stage, setStage] = useState<BulkUpdateStage>('edit')
   const [pendingBody, setPendingBody] = useState<BulkUpdateBody | null>(null)
@@ -936,19 +974,25 @@ function BulkUpdateModal({ projectId, selectedIds, folders, onClose, onUpdated }
 
   const changeSummary = useMemo(() => {
     const changes: string[] = []
-    if (folder !== 'unchanged') {
+    if (updateFolder) {
       const folderName = folder === 'unfiled' ? 'Unfiled' : folders.find((item) => item.id === Number(folder))?.name || 'Selected folder'
       changes.push(`Folder → ${folderName}`)
     }
-    if (priority) changes.push(`Priority → ${priority}`)
+    if (updatePriority) changes.push(`Priority → ${priority}`)
+    if (updateTestType) changes.push(`Test Type → ${testType}`)
+    if (updateModule) changes.push(`Module Name → ${moduleName.trim() || 'None'}`)
+    if (updateTags) changes.push(`Tags → ${tags.trim() || 'None'}`)
     return changes
-  }, [folder, folders, priority])
+  }, [folder, folders, priority, testType, moduleName, tags, updateFolder, updatePriority, updateTestType, updateModule, updateTags])
 
   function review(e: React.FormEvent) {
     e.preventDefault()
     const body: BulkUpdateBody = { ids: selectedIds }
-    if (folder !== 'unchanged') body.folder_id = folder === 'unfiled' ? null : Number(folder)
-    if (priority) body.priority = priority
+    if (updateFolder) body.folder_id = folder === 'unfiled' ? null : Number(folder)
+    if (updatePriority) body.priority = priority
+    if (updateTestType) body.test_type = testType
+    if (updateModule) body.module_name = moduleName.trim()
+    if (updateTags) body.tags = tags.split(',').map((tag) => tag.trim()).filter(Boolean)
     if (Object.keys(body).length === 1) {
       setError(new Error('Choose at least one field to update'))
       return
@@ -1005,32 +1049,41 @@ function BulkUpdateModal({ projectId, selectedIds, folders, onClose, onUpdated }
           : `Update ${totalSelected} test case${totalSelected !== 1 ? 's' : ''}`
 
   return (
-    <Modal title={title} onClose={stage === 'updating' ? () => undefined : onClose} variant="dialog" preventBackdropClose hideCloseButton>
-      {stage === 'edit' && <form onSubmit={review}>
-        <p className="muted small">Only the fields changed below will be applied. Existing test steps and other details will remain unchanged.</p>
-        <Field label="Folder">
-          <SearchableSelect
-            value={folder}
-            onChange={setFolder}
-            options={[
-              { value: 'unchanged', label: 'No change' },
-              { value: 'unfiled', label: 'Unfiled' },
-              ...folders.map((f) => ({ value: String(f.id), label: folderPathLabel(folders, f) })),
-            ]}
-          />
-        </Field>
-        <Field label="Priority">
-          <select value={priority} onChange={(e) => setPriority(e.target.value)}>
-            <option value="">No change</option>
-            {TEST_CASE_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </Field>
-        {priority && <p className="muted small">Changing priority on an approved test case sends it back to QA Lead review.</p>}
-        <ErrorText error={error} />
-        <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-          <button className="btn btn-primary">Review update</button>
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+    <Modal title={title} onClose={stage === 'updating' ? () => undefined : onClose} variant="dialog" preventBackdropClose wide hideCloseButton>
+      {stage === 'edit' && <form className="tm-bulk-editor" onSubmit={review}>
+        <div className="tm-bulk-hero">
+          <span className="tm-bulk-hero-icon">✦</span>
+          <div><strong>Choose what to change</strong><p>Turn on only the fields you want applied. Everything else—including test steps—stays untouched.</p></div>
+          <span className="tm-bulk-selection"><b>{totalSelected}</b> selected</span>
         </div>
+        <div className="tm-bulk-layout">
+          <div className="tm-bulk-field-grid">
+            <BulkFieldCard title="Folder" description="Move cases together" enabled={updateFolder} onToggle={setUpdateFolder}>
+              <SearchableSelect value={folder === 'unchanged' ? 'unfiled' : folder} onChange={setFolder} options={[{ value: 'unfiled', label: 'Unfiled' }, ...folders.map((f) => ({ value: String(f.id), label: folderPathLabel(folders, f) }))]} />
+            </BulkFieldCard>
+            <BulkFieldCard title="Priority" description="Set execution importance" enabled={updatePriority} onToggle={setUpdatePriority}>
+              <select required={updatePriority} value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">Select priority</option>{TEST_CASE_PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select>
+            </BulkFieldCard>
+            <BulkFieldCard title="Test Type" description="Change testing category" enabled={updateTestType} onToggle={setUpdateTestType}>
+              <select required={updateTestType} value={testType} onChange={(e) => setTestType(e.target.value)}><option value="">Select test type</option>{TEST_CASE_TYPES.map((type) => <option key={type}>{type}</option>)}</select>
+            </BulkFieldCard>
+            <BulkFieldCard title="Module Name" description="Organize by product module" enabled={updateModule} onToggle={setUpdateModule}>
+              <input value={moduleName} onChange={(e) => setModuleName(e.target.value)} placeholder="Blank removes module name" />
+            </BulkFieldCard>
+            <BulkFieldCard title="Tags / Labels" description="Replace searchable labels" enabled={updateTags} onToggle={setUpdateTags} wide>
+              <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="smoke, payments, regression — blank removes tags" />
+              {tags.trim() && <div className="tm-bulk-tag-preview">{tags.split(',').map((tag) => tag.trim()).filter(Boolean).slice(0, 8).map((tag) => <span key={tag}>{tag}</span>)}</div>}
+            </BulkFieldCard>
+          </div>
+          <aside className="tm-bulk-summary">
+            <small>UPDATE SUMMARY</small>
+            <strong>{changeSummary.length ? `${changeSummary.length} field${changeSummary.length !== 1 ? 's' : ''} selected` : 'No fields selected'}</strong>
+            {changeSummary.length ? <ul>{changeSummary.map((change) => <li key={change}>{change}</li>)}</ul> : <p>Enable a field to preview the change here.</p>}
+            {(updatePriority || updateTestType || updateModule) && <div className="tm-bulk-review-note"><b>Approval required</b><span>Approved cases will return to QA Lead review.</span></div>}
+          </aside>
+        </div>
+        <ErrorText error={error} />
+        <div className="tm-bulk-actions"><button type="button" className="btn" onClick={onClose}>Cancel</button><button className="btn btn-primary" disabled={!changeSummary.length}>Review changes <span>→</span></button></div>
       </form>}
 
       {stage === 'confirm' && (
@@ -1098,6 +1151,7 @@ export default function TestRepository() {
   const [search, setSearch] = useState('')
   const [priorityFilter, setPriorityFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  const [tagFilter, setTagFilter] = useState('')
   const [folderToDelete, setFolderToDelete] = useState<TestFolderOut | null>(null)
   const [folderAction, setFolderAction] = useState<{ mode: 'move' | 'copy'; folder: TestFolderOut } | null>(null)
   const [folderToRename, setFolderToRename] = useState<TestFolderOut | null>(null)
@@ -1180,11 +1234,14 @@ export default function TestRepository() {
       ? cases.filter((c) => !c.folder_id)
       : cases.filter((c) => c.folder_id === selectedFolder)
     const q = search.trim().toLowerCase()
-    if (q) rows = rows.filter((c) => [c.test_case_key, c.test_scenario, c.epic_id, c.cr_number, c.feature_id, c.user_story_id, c.module_name].some((v) => String(v || '').toLowerCase().includes(q)))
+    if (q) rows = rows.filter((c) => [c.test_case_key, c.test_scenario, c.epic_id, c.cr_number, c.feature_id, c.user_story_id, c.module_name, ...(c.tags || [])].some((v) => String(v || '').toLowerCase().includes(q)))
     if (priorityFilter) rows = rows.filter((c) => c.priority === priorityFilter)
     if (statusFilter) rows = rows.filter((c) => c.status === statusFilter)
+    if (tagFilter) rows = rows.filter((c) => (c.tags || []).some((tag) => tag.toLowerCase() === tagFilter.toLowerCase()))
     return rows
-  }, [cases, selectedFolder, search, priorityFilter, statusFilter])
+  }, [cases, selectedFolder, search, priorityFilter, statusFilter, tagFilter])
+
+  const availableTags = useMemo(() => Array.from(new Set(cases.flatMap((testCase) => testCase.tags || []))).sort((a, b) => a.localeCompare(b)), [cases])
 
   const folderCounts = useMemo(() => {
     const counts: Record<number, number> = {}
@@ -1256,6 +1313,7 @@ export default function TestRepository() {
     try {
       const updated = await api.post<TestCaseOut>(`/api/test-repository/test-cases/${id}/checkout`)
       setCases((prev) => prev.map((c) => (c.id === id ? updated : c)))
+      setEditingCase(updated)
     } catch (err) { setError(err) }
   }
 
@@ -1385,13 +1443,14 @@ export default function TestRepository() {
               <ClearableSearchInput value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear test case search" wrapperClassName="search-grow" placeholder="Search cases, epics, features, or stories…" />
               <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}><option value="">All priorities</option>{TEST_CASE_PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select>
               <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="">All statuses</option>{TEST_CASE_STATUSES.map((s) => <option key={s} value={s}>{TEST_CASE_STATUS_LABELS[s] || s}</option>)}</select>
+              <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}><option value="">All tags</option>{availableTags.map((tag) => <option key={tag}>{tag}</option>)}</select>
               <span>{visibleCases.length} result{visibleCases.length !== 1 ? 's' : ''}</span>
             </div>
-            <div className="tm-checkout-guide" role="note" aria-label="How check-out and check-in work">
+            <div className="tm-checkout-guide" role="note" aria-label="How test case editing access works">
               <span className="tm-checkout-guide-icon">↔</span>
               <div>
-                <strong>Editing a test case</strong>
-                <p><b>Check Out</b> reserves the test case for you so others cannot overwrite your changes. <b>Check In</b> releases it after you finish editing.</p>
+                <strong>Safe editing</strong>
+                <p><b>Start editing</b> reserves and opens the test case for you. When finished, use <b>Finish editing</b> to release it for another QA user.</p>
               </div>
             </div>
             {selectedCount > 0 && canAuthor && projectIsActive && (
@@ -1432,12 +1491,13 @@ export default function TestRepository() {
                 { key: 'test_case_key', header: 'Test Case', render: (c) => <span className="tm-test-case-cell"><strong>{c.test_case_key}</strong><small>{c.test_scenario || 'Scenario not provided'}{c.module_name ? ` · ${c.module_name}` : ''}</small></span>, filterValue: (c) => `${c.test_case_key} ${c.test_scenario || ''} ${c.module_name || ''}` },
                 { key: 'epic_id', header: 'Epic / CR / Story', render: (c) => <span className="tm-hierarchy-cell"><strong>{c.epic_id || '—'}</strong><small>{[c.cr_number, c.feature_id, c.user_story_id].filter(Boolean).join(' · ') || 'No mapping'}</small></span>, filterValue: (c) => `${c.epic_id || ''} ${c.cr_number || ''} ${c.feature_id || ''} ${c.user_story_id || ''}` },
                 { key: 'classification', header: 'Type / Priority', render: (c) => <span className="tm-classification-cell"><strong>{c.test_type || '—'}</strong>{c.priority ? <Badge status={c.priority} /> : <small>No priority</small>}</span>, filterValue: (c) => `${c.test_type || ''} ${c.priority || ''}` },
+                { key: 'tags', header: 'Tags', render: (c) => <span className="tm-case-tags">{(c.tags || []).length ? c.tags.map((tag) => <button type="button" key={tag} onClick={(event) => { event.stopPropagation(); setTagFilter(tag) }}>{tag}</button>) : <small>—</small>}</span>, filterValue: (c) => (c.tags || []).join(' ') },
                 { key: 'status', header: 'Workflow', render: (c) => <span className="tm-workflow-cell"><Badge status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} /><small>{TEST_CASE_PENDING_WITH[c.status] ? `Pending with ${TEST_CASE_PENDING_WITH[c.status]}` : 'No action pending'}</small></span>, filterValue: (c) => `${TEST_CASE_STATUS_LABELS[c.status] || c.status} ${TEST_CASE_PENDING_WITH[c.status] || ''}` },
                 { key: 'version', header: 'Version', render: (c) => <span className="badge badge-gray">{`v${c.version || '1.0'}`}</span>, filterValue: (c) => `v${c.version || '1.0'}` },
                 { key: 'steps', header: 'Steps', render: (c) => c.steps.length, filterable: false },
                 {
                   key: 'checkout',
-                  header: 'Check-out status',
+                  header: 'Editing access',
                   render: (c) => {
                     const lockedByMe = c.checked_out_by_id === user?.id
                     const lockedByOther = !!c.checked_out_by_id && !lockedByMe
@@ -1455,13 +1515,13 @@ export default function TestRepository() {
                           </span>
                         ) : lockedByMe ? (
                           <>
-                            <span className="tm-checkout-state is-mine"><strong>Checked out by you</strong><small>Only you can edit this case</small></span>
-                            <button className="btn btn-sm tm-checkin-button" title="Release this test case so another QA user can edit it" onClick={() => checkinCase(c.id)}>Check In</button>
+                            <span className="tm-checkout-state is-mine"><strong>Reserved by you</strong><small>Editing is currently locked to you</small></span>
+                            <button className="btn btn-sm tm-checkin-button" title="Check in and release this test case for other QA users" onClick={() => checkinCase(c.id)}>Finish editing</button>
                           </>
                         ) : (
                           <>
-                            <span className="tm-checkout-state is-available"><strong>Available to edit</strong><small>Check out before editing</small></span>
-                            <button className="btn btn-sm tm-checkout-button" title="Reserve this test case for your editing session" onClick={() => checkoutCase(c.id)}>Check Out</button>
+                            <span className="tm-checkout-state is-available"><strong>Available to edit</strong><small>No one has reserved this case</small></span>
+                            <button className="btn btn-sm tm-checkout-button" title="Check out, reserve, and open this test case" onClick={() => checkoutCase(c.id)}>Start editing</button>
                           </>
                         )}
                       </span>

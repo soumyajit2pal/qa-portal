@@ -223,6 +223,7 @@ def _clone_folder_subtree(db: Session, source: models.TestFolder, new_parent_id:
             models.TestStep(step_no=step.step_no, step_text=step.step_text, expected_result=step.expected_result)
             for step in case.steps
         ]
+        new_case.tag_rows = [models.TestCaseTag(tag=tag) for tag in case.tags]
         db.add(new_case)
         db.flush()
         db.add(_case_workflow_action(
@@ -347,7 +348,7 @@ def export_test_repository(
     case_headers = [
         "Test Case ID", "Version", "Folder Path", "Epic ID", "CR Number",
         "Feature ID", "User Story ID", "Test Type", "Module", "Scenario",
-        "Pre-Condition", "Description", "Priority", "Workflow Status",
+        "Pre-Condition", "Description", "Priority", "Tags", "Workflow Status",
         "Created By", "Created At", "Updated At", "Step Count",
     ]
     add_table_sheet(
@@ -356,7 +357,7 @@ def export_test_repository(
             case.test_case_key, case.version, folder_path(case.folder_id), case.epic_id,
             case.cr_number, case.feature_id, case.user_story_id, case.test_type,
             case.module_name, case.test_scenario, case.pre_condition, case.description,
-            case.priority, case.status, case.created_by_name, case.created_at,
+            case.priority, ", ".join(case.tags), case.status, case.created_by_name, case.created_at,
             case.updated_at, len(case.steps),
         ] for case in cases],
         subtitle="One row per reusable testcase. Workflow Status shows its QA Lead approval state.",
@@ -399,10 +400,11 @@ def create_test_case(project_id: int, payload: schemas.TestCaseCreate, db: Sessi
     # IDs are always system-owned. Accepting a caller/import-supplied key
     # allowed arbitrary formats to leak into an otherwise governed sequence.
     key = models.gen_id(models.BUSINESS_ID_PREFIXES["TEST_CASE"], db)
-    data = payload.model_dump(exclude={"steps", "test_case_key", "status"})
+    data = payload.model_dump(exclude={"steps", "test_case_key", "status", "tags"})
     obj = models.TestCase(project_id=project_id, test_case_key=key, created_by_id=current_user.id,
                           status="Draft", **data)
     obj.steps = [models.TestStep(**s.model_dump()) for s in payload.steps]
+    obj.tag_rows = [models.TestCaseTag(tag=tag) for tag in _normalize_tags(payload.tags)]
     db.add(obj)
     db.flush()
     db.add(_case_workflow_action(
@@ -511,12 +513,14 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
     _enforce_checkout_lock(obj, current_user)
     if "status" in payload.model_fields_set:
         raise HTTPException(400, "Test case status is controlled by QA Lead review and cannot be changed while editing")
-    data = payload.model_dump(exclude_unset=True, exclude={"steps"})
+    data = payload.model_dump(exclude_unset=True, exclude={"steps", "tags"})
     substantive_change = bool(set(data) - {"folder_id"}) or payload.steps is not None
     for field, value in data.items():
         setattr(obj, field, value)
     if payload.steps is not None:
         obj.steps = [models.TestStep(**s.model_dump()) for s in payload.steps]
+    if payload.tags is not None:
+        obj.tag_rows = [models.TestCaseTag(tag=tag) for tag in _normalize_tags(payload.tags)]
     if substantive_change and obj.status == "Active":
         obj.status = "Draft"
         db.add(_case_workflow_action(
@@ -585,6 +589,18 @@ def _selected_project_cases(db: Session, project_id: int, ids: List[int]) -> Lis
     return rows
 
 
+def _normalize_tags(tags: List[str]) -> List[str]:
+    normalized = []
+    seen = set()
+    for raw in tags or []:
+        tag = " ".join((raw or "").strip().split())[:80]
+        key = tag.casefold()
+        if tag and key not in seen:
+            seen.add(key)
+            normalized.append(tag)
+    return normalized[:30]
+
+
 @router.post("/projects/{project_id}/test-cases/bulk-update", response_model=List[schemas.TestCaseOut])
 def bulk_update_test_cases(project_id: int, payload: schemas.TestCaseBulkUpdate,
                            db: Session = Depends(get_db),
@@ -608,11 +624,18 @@ def bulk_update_test_cases(project_id: int, payload: schemas.TestCaseBulkUpdate,
             row.folder_id = payload.folder_id
         if "priority" in changes:
             row.priority = payload.priority
-        if "priority" in changes and row.status == "Active":
+        if "test_type" in changes:
+            row.test_type = payload.test_type
+        if "module_name" in changes:
+            row.module_name = payload.module_name
+        if "tags" in changes:
+            row.tag_rows = [models.TestCaseTag(tag=tag) for tag in _normalize_tags(payload.tags or [])]
+        substantive_changes = changes.intersection({"priority", "test_type", "module_name"})
+        if substantive_changes and row.status == "Active":
             row.status = "Draft"
             db.add(_case_workflow_action(
                 row.id, current_user, "Resubmitted for review",
-                "Priority was changed in a bulk update; QA Lead verification is required again.",
+                "Test case classification was changed in a bulk update; QA Lead verification is required again.",
             ))
     db.commit()
     for row in rows:
@@ -690,6 +713,8 @@ _HEADER_MAP = {
     "steps": "step_text",
     "expected result": "expected_result",
     "priority (critical/high/medium/low)": "priority",
+    "tags": "tags",
+    "labels": "tags",
     "actual result": "actual_result",
     "status (pass/fail/blocked/na/retest passed)": "status",
     "test run artifacts": "test_run_artifacts",
@@ -701,7 +726,7 @@ _HEADER_MAP = {
 # template's own merged-cell-style layout).
 _CASE_LEVEL_FIELDS = [
     "epic_id", "cr_number", "feature_id", "user_story_id", "test_type", "module_name",
-    "test_scenario", "pre_condition", "description", "priority",
+    "test_scenario", "pre_condition", "description", "priority", "tags",
 ]
 _EXECUTION_LEVEL_FIELDS = ["actual_result", "status", "test_run_artifacts", "defect_id"]
 
@@ -803,6 +828,10 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
             pre_condition=case_row.get("pre_condition"), description=case_row.get("description"),
             priority=case_row.get("priority"), status="Draft", created_by_id=current_user.id,
         )
+        tc.tag_rows = [
+            models.TestCaseTag(tag=tag)
+            for tag in _normalize_tags((case_row.get("tags") or "").split(","))
+        ]
         tc.steps = [
             models.TestStep(step_no=i + 1, step_text=s.get("step_text"), expected_result=s.get("expected_result"))
             for i, s in enumerate(step_rows)

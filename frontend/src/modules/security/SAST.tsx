@@ -535,9 +535,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
           <div className="section-title">Workflow Actions</div>
           <div className="actions-panel">
-            <Field label="Action note (optional)">
-              <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
-            </Field>
             <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
               <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/sast-requests/${req.id}/export`, `${req.request_id}.pdf`)}>
                 Export PDF
@@ -583,8 +580,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                       : undefined
                   }
                   onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                  onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
-                  onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+                  onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                  onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
                 />
               )}
               {canDeptHeadDecide && (
@@ -613,8 +610,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                   }
                   extraReady={!!selectedQALead}
                   onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed, qa_lead_id: Number(selectedQALead) })}
-                  onReturn={() => act('department-head-decision', { decision: 'Returned', comments })}
-                  onReject={() => act('department-head-decision', { decision: 'Rejected', comments })}
+                  onReturn={(actionNote) => act('department-head-decision', { decision: 'Returned', comments: actionNote })}
+                  onReject={(actionNote) => act('department-head-decision', { decision: 'Rejected', comments: actionNote })}
                 />
               )}
               {canStartReadiness && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-readiness')}>Start Security Readiness</button>}

@@ -9,7 +9,8 @@ import {
   canSeeQaDepartmentOnlyData,
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, ApprovalActionOut } from '../../types'
-import JiraActivity from '../../components/JiraActivity'
+import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
+import JiraRichTextField from '../../components/JiraRichTextField'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -42,6 +43,13 @@ type SignOffForm = typeof EMPTY
 // Shared by both the create and edit forms below.
 function validityError(from: string, to: string): string | null {
   if (from && to && to < from) return 'Validity To cannot be before Validity From.'
+  return null
+}
+
+function richTextRequiredError(form: Pick<SignOffForm, 'exit_criteria_notes' | 'open_defect_summary' | 'residual_risk_notes'>): string | null {
+  if (!form.exit_criteria_notes.trim()) return 'Exit Criteria Validation Notes are required.'
+  if (!form.open_defect_summary.trim()) return 'Open Defect Review Summary is required.'
+  if (!form.residual_risk_notes.trim()) return 'Residual Risk Documentation is required.'
   return null
 }
 
@@ -192,6 +200,8 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     }
     const validityErr = validityError(form.validity_from, form.validity_to)
     if (validityErr) { setError(validityErr); return }
+    const richTextErr = richTextRequiredError(form)
+    if (richTextErr) { setError(richTextErr); return }
     setBusy(true)
     try {
       const created = await api.post<SignOffOut>('/api/signoffs', {
@@ -266,9 +276,9 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
             <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
-        <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
-        <Field label="Open Defect Review Summary *"><textarea required value={form.open_defect_summary} onChange={(e) => set('open_defect_summary', e.target.value)} /></Field>
-        <Field label="Residual Risk Documentation *"><textarea required value={form.residual_risk_notes} onChange={(e) => set('residual_risk_notes', e.target.value)} /></Field>
+        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
+        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
+        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
         <Field label="Supporting Documents">
           <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
           {files.length > 0 && (
@@ -314,6 +324,8 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
     e.preventDefault()
     const validityErr = validityError(form.validity_from, form.validity_to)
     if (validityErr) { setError(validityErr); return }
+    const richTextErr = richTextRequiredError(form)
+    if (richTextErr) { setError(richTextErr); return }
     setBusy(true)
     setError(null)
     try {
@@ -371,9 +383,9 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
             <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
-        <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
-        <Field label="Open Defect Review Summary *"><textarea required value={form.open_defect_summary} onChange={(e) => set('open_defect_summary', e.target.value)} /></Field>
-        <Field label="Residual Risk Documentation *"><textarea required value={form.residual_risk_notes} onChange={(e) => set('residual_risk_notes', e.target.value)} /></Field>
+        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
+        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
+        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
           <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Changes'}</button>
@@ -470,9 +482,9 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
 
       <div className="section-title">Exit Criteria &amp; Risk</div>
       <div className="grid grid-2">
-        <div><strong>Exit Criteria Validation Notes:</strong> {item.exit_criteria_notes || '—'}</div>
-        <div><strong>Open Defect Review Summary:</strong> {item.open_defect_summary || '—'}</div>
-        <div><strong>Residual Risk Documentation:</strong> {item.residual_risk_notes || '—'}</div>
+        <div><strong>Exit Criteria Validation Notes:</strong>{item.exit_criteria_notes ? <MarkdownComment value={item.exit_criteria_notes} /> : '—'}</div>
+        <div><strong>Open Defect Review Summary:</strong>{item.open_defect_summary ? <MarkdownComment value={item.open_defect_summary} /> : '—'}</div>
+        <div><strong>Residual Risk Documentation:</strong>{item.residual_risk_notes ? <MarkdownComment value={item.residual_risk_notes} /> : '—'}</div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -484,12 +496,6 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
         {canResubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
       </div>
 
-      {(canQALeadDecide || canExecutiveCoeDecide) && (
-        <div className="form-field" style={{ marginTop: 10 }}>
-          <label>Action note (optional)</label>
-          <textarea value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next approval action" />
-        </div>
-      )}
       {canQALeadDecide && (
         <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <ApprovalDecisionButtons
@@ -497,8 +503,8 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
             comments={comments}
             busy={!!busyAction}
             onApprove={(signed) => act('qa-lead-decision', { decision: 'Approved', comments: signed })}
-            onReturn={() => act('qa-lead-decision', { decision: 'Returned', comments })}
-            onReject={() => act('qa-lead-decision', { decision: 'Rejected', comments })}
+            onReturn={(actionNote) => act('qa-lead-decision', { decision: 'Returned', comments: actionNote })}
+            onReject={(actionNote) => act('qa-lead-decision', { decision: 'Rejected', comments: actionNote })}
           />
         </div>
       )}
@@ -510,8 +516,8 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
             busy={!!busyAction}
             approveLabel="Approve & Issue Certificate"
             onApprove={(signed) => act('executive-coe-decision', { decision: 'Approved', comments: signed })}
-            onReturn={() => act('executive-coe-decision', { decision: 'Returned', comments })}
-            onReject={() => act('executive-coe-decision', { decision: 'Rejected', comments })}
+            onReturn={(actionNote) => act('executive-coe-decision', { decision: 'Returned', comments: actionNote })}
+            onReject={(actionNote) => act('executive-coe-decision', { decision: 'Rejected', comments: actionNote })}
           />
         </div>
       )}

@@ -618,6 +618,7 @@ export function RequestDetail({
             </DetailField>
           </DetailSection>
 
+
           {hasLinked && (
             <div style={{ marginTop: 8 }}>
               <div className="section-title">Linked Requests</div>

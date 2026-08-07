@@ -583,13 +583,11 @@ export function validTargetPromotionOptions(environment: string): string[] {
 }
 
 // Reported directly: DAST scans and Performance tests are never run against
-// Dev or SIT -- both are restricted to UAT and later. Simply
-// ENVIRONMENT_PIPELINE_ORDER without its first entry (SIT); Dev was never in
-// that list to begin with. Used by DastStep.tsx's own target Environment
-// picker and PerformanceStep.tsx's Environment picker -- both offer only
-// these three options, no blank/"Dev"/"SIT" choice. Mirrors backend
+// Dev, SIT, or Production -- both are restricted to UAT and Pre-Production.
+// Used by DastStep.tsx's own target Environment picker and
+// PerformanceStep.tsx's Environment picker. Mirrors backend
 // app/constants.py's POST_SIT_ENVIRONMENTS exactly.
-export const POST_SIT_ENVIRONMENTS: string[] = ENVIRONMENT_PIPELINE_ORDER.slice(1)
+export const POST_SIT_ENVIRONMENTS: string[] = ['UAT', 'Pre-Production']
 
 // Same ordering rule as backend/app/constants.py's
 // validate_environment_promotion -- used to gate Next/Submit/Save so a

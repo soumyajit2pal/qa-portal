@@ -258,11 +258,29 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Cycle name cannot be blank")
+    linked_request = None
+    child_models = {
+        "Functional": models.FunctionalRequest, "SAST": models.SASTRequest,
+        "DAST": models.DASTRequest, "Performance": models.PerformanceRequest,
+    }
+    if payload.linked_request_id is not None:
+        child_model = child_models.get(payload.linked_request_type or "")
+        if not child_model:
+            raise HTTPException(400, "Select a valid child request type")
+        linked_request = db.query(child_model).get(payload.linked_request_id)
+        if not linked_request or not linked_request.request_id:
+            raise HTTPException(404, "Child request not found")
     obj = models.TestCycle(
         project_id=project_id, name=name, description=payload.description,
         start_date=payload.start_date, end_date=payload.end_date, created_by_id=current_user.id,
     )
     db.add(obj)
+    if linked_request:
+        db.flush()
+        obj.child_request_link = models.TestCycleChildRequestLink(
+            child_type=payload.linked_request_type, child_id=linked_request.id,
+            child_key=linked_request.request_id,
+        )
     db.commit()
     db.refresh(obj)
     return obj
@@ -279,8 +297,59 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     obj = _get_cycle_or_404(db, cycle_id)
     _require_active_project(db, obj.project_id)
     data = payload.model_dump(exclude_unset=True)
+    link_changed = "linked_request_type" in data or "linked_request_id" in data
+    link_type = data.pop("linked_request_type", None)
+    link_id = data.pop("linked_request_id", None)
     for field, value in data.items():
         setattr(obj, field, value)
+    if link_changed:
+        if link_id is None:
+            obj.child_request_link = None
+        else:
+            child_models = {
+                "Functional": models.FunctionalRequest, "SAST": models.SASTRequest,
+                "DAST": models.DASTRequest, "Performance": models.PerformanceRequest,
+            }
+            child_model = child_models.get(link_type or "")
+            if not child_model:
+                raise HTTPException(400, "Select a valid child request type")
+            linked_request = db.query(child_model).get(link_id)
+            if not linked_request or not linked_request.request_id:
+                raise HTTPException(404, "Child request not found")
+            if obj.child_request_link:
+                obj.child_request_link.child_type = link_type
+                obj.child_request_link.child_id = linked_request.id
+                obj.child_request_link.child_key = linked_request.request_id
+            else:
+                obj.child_request_link = models.TestCycleChildRequestLink(
+                    child_type=link_type, child_id=linked_request.id, child_key=linked_request.request_id,
+                )
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.delete("/cycles/{cycle_id}/request-link", response_model=schemas.TestCycleOut)
+def unlink_cycle_request(cycle_id: int, db: Session = Depends(get_db),
+                         current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    obj = _get_cycle_or_404(db, cycle_id)
+    _require_active_project(db, obj.project_id)
+    link = obj.child_request_link
+    if not link:
+        raise HTTPException(404, "This test cycle does not have a linked request")
+    child_type, child_id, child_key = link.child_type, link.child_id, link.child_key
+    obj.child_request_link = None
+    db.add(models.ApprovalAction(
+        entity_type="TEST_CYCLE", entity_id=obj.id, step_name="Request Link",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision="Request Unlinked", comments=f"Unlinked {child_type} request {child_key}",
+    ))
+    if child_type == "Functional":
+        db.add(models.ApprovalAction(
+            entity_type="FUNCTIONAL_REQUEST", entity_id=child_id, step_name="Test Execution",
+            actor_id=current_user.id, actor_role=current_user.roles_csv,
+            decision="Test Cycle Unlinked", comments=f"Unlinked test cycle {obj.cycle_key} - {obj.name}",
+        ))
     db.commit()
     db.refresh(obj)
     return obj
@@ -611,6 +680,8 @@ def update_execution(execution_id: int, payload: schemas.TestExecutionUpdate, db
     obj = _execution_or_404(db, execution_id)
     _prepare_execution_update(db, obj, payload.status, current_user)
     defect_key, _ = _validate_defect_values(payload.defect_id or "")
+    if defect_key and payload.status not in {"Fail", "Blocked"}:
+        raise HTTPException(400, "A defect can only be linked when the latest attempt result is Fail or Blocked")
     run = _record_attempt(db, obj, payload.status, payload.actual_result,
                           payload.test_run_artifacts, defect_key or None, current_user)
     if defect_key:
@@ -652,6 +723,8 @@ def bulk_update_execution_results(
     if len(artifacts) > 255:
         raise HTTPException(400, "Test Run Artifacts cannot exceed 255 characters")
     defect_key, defect_url = _validate_defect_values(payload.defect_id or "", payload.defect_url or "")
+    if defect_key and payload.status not in {"Fail", "Blocked"}:
+        raise HTTPException(400, "A defect can only be linked when the latest attempt result is Fail or Blocked")
     if not defect_key and any((value or "").strip() for value in (
         payload.defect_url, payload.defect_title, payload.defect_status, payload.defect_notes,
     )):
@@ -786,6 +859,8 @@ def update_rich_execution_result(
         raise HTTPException(400, "Actual Result cannot exceed 10,000 characters")
     _validate_result_images(files)
     defect_key, validated_defect_url = _validate_defect_values(defect_id, defect_url)
+    if defect_key and status_value not in {"Fail", "Blocked"}:
+        raise HTTPException(400, "A defect can only be linked when the latest attempt result is Fail or Blocked")
     if not defect_key and any(value.strip() for value in (defect_url, defect_title, defect_notes)):
         raise HTTPException(400, "Enter a Defect Key before adding defect URL, title, or notes")
     run = _record_attempt(db, obj, status_value, result_text or None,
@@ -829,6 +904,11 @@ def add_run_defect(execution_id: int, run_id: int, payload: schemas.TestRunDefec
     _require_active_project(db, cycle.project_id)
     _require_assigned_runner(obj, current_user)
     run = _run_or_404(db, obj, run_id)
+    latest_run = _latest_run_or_404(db, obj)
+    if run.id != latest_run.id:
+        raise HTTPException(400, "Defects can only be linked to the latest execution attempt")
+    if run.status not in {"Fail", "Blocked"}:
+        raise HTTPException(400, "A defect can only be linked when the latest attempt result is Fail or Blocked")
     defect = _link_defect(db, run, payload, current_user)
     db.commit()
     db.refresh(defect)
@@ -1058,5 +1138,80 @@ def bulk_remove_executions(
         removed_execution_ids=execution_ids,
         removed_test_case_keys=removed_keys,
         removed_attempt_count=removed_attempt_count,
+        removed_evidence_count=len(documents_by_id),
+    )
+
+
+@router.post("/cycles/{cycle_id}/reset", response_model=schemas.TestCycleResetResult)
+def reset_test_cycle(
+    cycle_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.QA_LEAD)),
+):
+    """Reset execution state while preserving cycle membership and links.
+
+    This is deliberately QA Lead/Admin-only because immutable attempts,
+    defects and evidence are permanently removed. Database changes commit
+    atomically; physical files are removed only after that commit succeeds.
+    """
+    _require_qa_assignment_manager(current_user)
+    cycle = _get_cycle_or_404(db, cycle_id)
+    _require_active_project(db, cycle.project_id)
+    executions = (db.query(models.TestExecution).filter_by(cycle_id=cycle_id)
+                  .order_by(models.TestExecution.id).all())
+    runs = [run for execution in executions for run in execution.runs]
+    removed_defect_count = sum(len(run.defects) for run in runs)
+
+    documents_by_id = {}
+    for execution in executions:
+        for run in execution.runs:
+            for document in doc_store.list_documents(db, _RESULT_IMAGE_MODULE, run.id):
+                documents_by_id[document.id] = document
+        # Includes evidence from records created before attempt history was
+        # introduced, where images were keyed directly by execution id.
+        for document in doc_store.list_documents(db, _RESULT_IMAGE_MODULE, execution.id):
+            documents_by_id[document.id] = document
+    file_paths = [doc_store.full_path(document) for document in documents_by_id.values()]
+
+    db.add(models.ApprovalAction(
+        entity_type="TEST_CYCLE", entity_id=cycle.id, step_name="Lifecycle Reset",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision="Test Lifecycle Reset",
+        comments=(
+            f"Reset {len(executions)} testcase(s) to Not Executed. Permanently removed "
+            f"{len(runs)} attempt(s), {removed_defect_count} defect link(s), and "
+            f"{len(documents_by_id)} evidence file(s). Testcase membership, assignments, "
+            "cycle/request link, and repository definitions were preserved."
+        ),
+    ))
+    for document in documents_by_id.values():
+        db.delete(document)
+    for execution in executions:
+        for run in list(execution.runs):
+            db.delete(run)
+        execution.status = "Not Executed"
+        execution.actual_result = None
+        execution.test_run_artifacts = None
+        execution.defect_id = None
+        execution.executed_by_id = None
+        execution.executed_at = None
+    cycle.status = "Not Started"
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    for path in file_paths:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+    return schemas.TestCycleResetResult(
+        cycle_id=cycle.id,
+        reset_execution_count=len(executions),
+        removed_attempt_count=len(runs),
+        removed_defect_count=removed_defect_count,
         removed_evidence_count=len(documents_by_id),
     )

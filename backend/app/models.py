@@ -4,9 +4,9 @@ from typing import List
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, UniqueConstraint, text
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, UniqueConstraint, Index, text, and_
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, foreign
 from .database import Base
 from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES
 
@@ -190,6 +190,15 @@ class Department(Base):
     name = Column(String(150), unique=True, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=now)
+
+
+class SystemSetting(Base):
+    """Admin-managed server settings that must persist across deployments."""
+    __tablename__ = "qap_system_settings"
+    id = pk_column()
+    key = Column(String(100), unique=True, nullable=False)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=now, onupdate=now)
 
 
 class ApplicationMaster(Base):
@@ -504,6 +513,18 @@ class FunctionalRequest(Base):
     qa_request = relationship("QARequest", back_populates="linked_functional_requests")
     checklist_items = relationship("ReadinessChecklistItem", back_populates="functional_request", cascade="all,delete-orphan")
     walkthroughs = relationship("WalkthroughSession", back_populates="functional_request", cascade="all,delete-orphan")
+    test_cycle_links = relationship(
+        "TestCycleChildRequestLink",
+        primaryjoin=lambda: and_(
+            FunctionalRequest.id == foreign(TestCycleChildRequestLink.child_id),
+            TestCycleChildRequestLink.child_type == "Functional",
+        ),
+        viewonly=True,
+    )
+
+    @property
+    def linked_test_cycles(self):
+        return [link.cycle for link in self.test_cycle_links if link.cycle]
 
     # Delegated (read-only) lookups from the parent gateway QA Request --
     # see the class docstring above for why these aren't duplicated columns.
@@ -1398,8 +1419,8 @@ class RequestDocument(Base):
     `module` string (FUNCTIONAL / SAST / DAST / PERFORMANCE /
     SUPPRESSION / SIGNOFF / COMMENT_IMAGE / TEST_EXEC_IMAGE), so
     (module, request_id) is always unambiguous.
-    Files are stored on disk under backend/app/uploads/<module>/<request's
-    own request_id string>/<filename> -- see UPLOAD_ROOT in documents.py."""
+    Files are stored on disk under backend/app/uploads/<request's own
+    request_id string>/<module>/<filename> -- see UPLOAD_ROOT in documents.py."""
     __tablename__ = "qap_module_documents"
     id = pk_column()
     module = Column(String(20), nullable=False, index=True)
@@ -1593,13 +1614,18 @@ class TestCase(Base):
     # deliberately NOT gated by this lock.
     checked_out_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     checked_out_at = Column(DateTime, nullable=True)
+    tag_rows = relationship("TestCaseTag", back_populates="test_case", cascade="all,delete-orphan")
+
+    @property
+    def tags(self):
+        return [row.tag for row in self.tag_rows]
 
     project = relationship("TestProject", back_populates="test_cases")
     folder = relationship("TestFolder")
     created_by = relationship("User", foreign_keys=[created_by_id])
     checked_out_by = relationship("User", foreign_keys=[checked_out_by_id])
     steps = relationship("TestStep", back_populates="test_case", cascade="all,delete-orphan",
-                          order_by="TestStep.step_no")
+                         order_by="TestStep.step_no")
     executions = relationship("TestExecution", back_populates="test_case", cascade="all,delete-orphan")
 
     @property
@@ -1617,6 +1643,16 @@ class TestCase(Base):
     @property
     def version(self):
         return f"{self.version_major}.{self.version_minor}"
+
+
+class TestCaseTag(Base):
+    """Reusable labels attached to test cases for repository filtering."""
+    __tablename__ = "qap_test_case_tags"
+    __table_args__ = (UniqueConstraint("test_case_id", "tag", name="uq_qap_test_case_tag"),)
+    id = pk_column()
+    test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False, index=True)
+    tag = Column(String(80), nullable=False, index=True)
+    test_case = relationship("TestCase", back_populates="tag_rows")
 
 
 class TestStep(Base):
@@ -1651,6 +1687,30 @@ class TestCycle(Base):
     project = relationship("TestProject", back_populates="cycles")
     created_by = relationship("User", foreign_keys=[created_by_id])
     executions = relationship("TestExecution", back_populates="cycle", cascade="all,delete-orphan")
+    child_request_link = relationship("TestCycleChildRequestLink", back_populates="cycle", cascade="all,delete-orphan", uselist=False)
+
+    @property
+    def linked_request_id(self):
+        return self.child_request_link.child_id if self.child_request_link else None
+
+    @property
+    def linked_request_key(self):
+        return self.child_request_link.child_key if self.child_request_link else None
+
+    @property
+    def linked_request_type(self):
+        return self.child_request_link.child_type if self.child_request_link else None
+
+
+class TestCycleChildRequestLink(Base):
+    """Optional Functional/SAST/DAST/Performance child association."""
+    __tablename__ = "qap_test_cycle_child_links"
+    id = pk_column()
+    cycle_id = Column(Integer, ForeignKey("qap_test_cycles.id"), nullable=False, unique=True)
+    child_type = Column(String(20), nullable=False)
+    child_id = Column(Integer, nullable=False, index=True)
+    child_key = Column(String(40), nullable=False, index=True)
+    cycle = relationship("TestCycle", back_populates="child_request_link")
 
 
 class TestExecution(Base):

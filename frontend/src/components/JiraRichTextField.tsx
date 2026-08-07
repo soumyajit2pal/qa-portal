@@ -18,13 +18,16 @@ import {
 // this file only owns what's specific to being a controlled form field
 // (seeding from an initial markdown value, reporting images back up,
 // character-count footer).
-export default function JiraRichTextField({ value, disabled, onChange, onImagesChange, maxLength = 10000, allowImages = true }: {
+export default function JiraRichTextField({ value, disabled, onChange, onImagesChange, maxLength = 10000, allowImages = true,
+  ariaLabel = 'Actual Result', placeholder = 'Describe the observed result. Paste screenshots with Ctrl/Cmd+V…' }: {
   value: string
   disabled?: boolean
   onChange: (value: string) => void
   onImagesChange: (files: File[]) => void
   maxLength?: number
   allowImages?: boolean
+  ariaLabel?: string
+  placeholder?: string
 }) {
   const editorRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -64,16 +67,25 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
     sync()
   }
 
+  function insertTable() {
+    editorRef.current?.focus()
+    document.execCommand('insertHTML', false,
+      '<table><thead><tr><th>Column 1</th><th>Column 2</th><th>Column 3</th></tr></thead>' +
+      '<tbody><tr><td>Value</td><td>Value</td><td>Value</td></tr><tr><td>Value</td><td>Value</td><td>Value</td></tr></tbody></table><div><br></div>')
+    sync()
+  }
+
   return (
     <div className="jira-result-editor">
       {!disabled && (
         <RichTextToolbar
-          ariaLabel="Actual Result formatting"
+          ariaLabel={`${ariaLabel} formatting`}
           codeButtonTitle="Code"
           imageButtonTitle="Upload images"
           onCommand={command}
           onBeginLink={beginLink}
           onPickImage={allowImages ? () => fileRef.current?.click() : undefined}
+          onInsertTable={insertTable}
         />
       )}
       {allowImages && <RichTextImageInput inputRef={fileRef} onFiles={addImages} />}
@@ -91,9 +103,9 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
         className="jira-rich-editor actual-result-rich-editor"
         contentEditable={!disabled}
         role="textbox"
-        aria-label="Actual Result"
+        aria-label={ariaLabel}
         aria-multiline="true"
-        data-placeholder="Describe the observed result. Paste screenshots with Ctrl/Cmd+V…"
+        data-placeholder={placeholder}
         onInput={sync}
         onPaste={allowImages ? pasteImages : undefined}
         suppressContentEditableWarning

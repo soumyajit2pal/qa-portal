@@ -14,6 +14,7 @@ import Login from './Login'
 import Dashboard from './Dashboard'
 import QARequests from './QARequests'
 import ModuleBoundary from './components/ModuleBoundary'
+import ApiActivityIndicator from './components/ApiActivityIndicator'
 
 const Help = lazy(() => import('./Help'))
 
@@ -96,7 +97,7 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
 // before), which a route nested under an auth-gated parent could never do.
 function ProtectedLayout() {
   const { user, loading } = useAuth()
-  if (loading) return <div style={{ padding: 40 }}>Loading...</div>
+  if (loading) return <ModuleFallback />
   if (!user) return <Navigate to="/login" replace />
   return (
     <AuthenticatedChrome user={user}>
@@ -120,7 +121,7 @@ function ProtectedLayout() {
 // manual to keep in sync.
 function HelpRoute() {
   const { user, loading } = useAuth()
-  if (loading) return <div style={{ padding: 40 }}>Loading...</div>
+  if (loading) return <ModuleFallback />
   if (user) return <AuthenticatedChrome user={user}><Help /></AuthenticatedChrome>
   return <PublicHelp />
 }
@@ -149,13 +150,22 @@ function PublicHelp() {
 // plain-text loading state above rather than introducing a spinner
 // component just for this.
 function ModuleFallback() {
-  return <div style={{ padding: 40 }}>Loading...</div>
+  return (
+    <div className="route-loading" role="status" aria-label="Loading page">
+      <div className="route-loading-title" />
+      <div className="route-loading-toolbar" />
+      <div className="route-loading-card" />
+      <div className="route-loading-card route-loading-card-short" />
+    </div>
+  )
 }
 
 export default function App() {
   return (
-    <Suspense fallback={<ModuleFallback />}>
-      <Routes>
+    <>
+      <ApiActivityIndicator />
+      <Suspense fallback={<ModuleFallback />}>
+        <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/help" element={<HelpRoute />} />
 
@@ -199,7 +209,8 @@ export default function App() {
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Suspense>
+        </Routes>
+      </Suspense>
+    </>
   )
 }

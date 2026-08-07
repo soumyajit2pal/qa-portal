@@ -45,16 +45,23 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
     if not name:
         raise HTTPException(400, "Project name cannot be blank")
 
-    department = payload.department
+    department = payload.department.strip()
     application_master_id = payload.application_master_id
     if application_master_id:
         app_master = db.query(models.ApplicationMaster).get(application_master_id)
         if not app_master:
             raise HTTPException(404, "Application not found")
-        # Application Name is the canonical source of truth for department
-        # when a Project is explicitly linked to one -- only falls back to
-        # whatever the caller typed if the application itself has none set.
-        department = app_master.department or department
+        department = (app_master.department or "").strip()
+        if not department:
+            raise HTTPException(400, "The selected Application does not have a mapped department")
+    if not department:
+        raise HTTPException(400, "Department is required")
+    department_row = db.query(models.Department).filter(
+        models.Department.name == department,
+        models.Department.is_active == True,  # noqa: E712 - Oracle boolean column
+    ).first()
+    if not department_row:
+        raise HTTPException(400, "The selected department is not active in the system department list")
 
     obj = models.TestProject(
         name=name, application_master_id=application_master_id, department=department,
@@ -94,6 +101,17 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
         data["name"] = data["name"].strip()
         if not data["name"]:
             raise HTTPException(400, "Project name cannot be blank")
+    if "department" in data:
+        department = (data["department"] or "").strip()
+        if not department:
+            raise HTTPException(400, "Department is required")
+        department_row = db.query(models.Department).filter(
+            models.Department.name == department,
+            models.Department.is_active == True,  # noqa: E712 - Oracle boolean column
+        ).first()
+        if not department_row:
+            raise HTTPException(400, "Select an active department from the system department list")
+        data["department"] = department
     is_qa_lead_or_admin = current_user.has_role(Role.QA_LEAD)
     requested_active = data.pop("is_active", None)
     if "application_master_id" in data:
@@ -103,15 +121,26 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
             if not app_master:
                 raise HTTPException(404, "Application not found")
             obj.application_master_id = new_app_id
-            # Same "Application Name is the canonical source of truth for
-            # department" rule create_test_project uses -- only overrides
-            # department here if the caller didn't also explicitly set one in
-            # this same request, so re-linking a project never silently
-            # clobbers a department someone deliberately typed in this edit.
-            if "department" not in data and app_master.department:
-                obj.department = app_master.department
+            mapped_department = (app_master.department or "").strip()
+            if not mapped_department:
+                raise HTTPException(400, "The selected Application does not have a mapped department")
+            mapped_row = db.query(models.Department).filter(
+                models.Department.name == mapped_department,
+                models.Department.is_active == True,  # noqa: E712 - Oracle boolean column
+            ).first()
+            if not mapped_row:
+                raise HTTPException(400, "The selected Application's department is not active")
+            data["department"] = mapped_department
         else:
             obj.application_master_id = None
+    elif obj.application_master_id and "department" in data:
+        # A linked Application owns the department even if a caller attempts
+        # to PATCH only the department and omit application_master_id.
+        app_master = db.query(models.ApplicationMaster).get(obj.application_master_id)
+        mapped_department = (app_master.department or "").strip() if app_master else ""
+        if not mapped_department:
+            raise HTTPException(400, "The linked Application does not have a mapped department")
+        data["department"] = mapped_department
     for field in ("name", "department", "description"):
         if field in data and data[field] is not None:
             setattr(obj, field, data[field])

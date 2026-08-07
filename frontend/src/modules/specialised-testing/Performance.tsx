@@ -465,9 +465,6 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
           )}
 
           <div className="actions-panel">
-          <Field label="Action note (optional)">
-            <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
-          </Field>
           {canCompleteReadiness && pendingChecklistItems.length > 0 && (
             <p className="muted small" style={{ color: 'var(--danger, #c0392b)' }}>
               {pendingChecklistItems.length} mandatory pre-testing readiness checklist item(s) still incomplete —
@@ -495,8 +492,8 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                     : undefined
                 }
                 onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
-                onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+                onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canDeptHeadDecide && (
@@ -525,8 +522,8 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                 }
                 extraReady={!!selectedQALead}
                 onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed, qa_lead_id: Number(selectedQALead) })}
-                onReturn={() => act('department-head-decision', { decision: 'Returned', comments })}
-                onReject={() => act('department-head-decision', { decision: 'Rejected', comments })}
+                onReturn={(actionNote) => act('department-head-decision', { decision: 'Returned', comments: actionNote })}
+                onReject={(actionNote) => act('department-head-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canStartReadiness && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-readiness')}>Start Readiness</button>}

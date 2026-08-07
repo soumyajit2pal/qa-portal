@@ -412,15 +412,12 @@ ENVIRONMENTS = ["Dev", "SIT", "UAT", "Pre-Production", "Production"]
 # client-side), so it's not part of this ordering at all.
 ENVIRONMENT_PIPELINE_ORDER = ["SIT", "UAT", "Pre-Production", "Production"]
 
-# Reported directly: DAST scans and Performance tests are never run against
-# Dev or SIT -- both are restricted to UAT and later. Simply
-# ENVIRONMENT_PIPELINE_ORDER without its first entry (SIT); Dev was never in
-# that list to begin with. Used by DastStep.tsx/PerformanceStep.tsx's own
-# Environment pickers (each restricted to exactly this list, no blank/"Dev"/
-# "SIT" option) and enforced again server-side in
+# DAST scans and Performance tests are restricted to UAT and Pre-Production;
+# Production is intentionally unavailable alongside Dev and SIT. Used by the
+# DastStep.tsx/PerformanceStep.tsx pickers and enforced again server-side in
 # routers/qa_requests.py::submit_request as a defense-in-depth check before
 # either child request is ever created.
-POST_SIT_ENVIRONMENTS = ENVIRONMENT_PIPELINE_ORDER[1:]
+POST_SIT_ENVIRONMENTS = ["UAT", "Pre-Production"]
 
 
 def validate_environment_promotion(environment: str, target_promotion_environment: str) -> None:

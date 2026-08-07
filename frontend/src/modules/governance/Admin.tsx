@@ -3,9 +3,9 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
-import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch } from '../../components/Icons'
+import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch, IconFolder } from '../../components/Icons'
 import SearchableSelect from '../../components/SearchableSelect'
-import { UserOut, DepartmentOut, ApplicationSeedResult } from '../../types'
+import { UserOut, DepartmentOut, ApplicationSeedResult, StorageSettingsOut } from '../../types'
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -239,6 +239,59 @@ function DepartmentManagerCard({ departments, onChanged }: { departments: Depart
   )
 }
 
+function UploadStorageCard() {
+  const [settings, setSettings] = useState<StorageSettingsOut | null>(null)
+  const [path, setPath] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    api.get<StorageSettingsOut>('/api/system-settings/storage').then((value) => {
+      setSettings(value); setPath(value.upload_path)
+    }).catch(setError)
+  }, [])
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault()
+    setBusy(true); setSaved(false); setError(null)
+    try {
+      const value = await api.patch<StorageSettingsOut>('/api/system-settings/storage', { upload_path: path.trim() })
+      setSettings(value); setPath(value.upload_path); setSaved(true)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Card title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><IconFolder /> Upload Storage</span>}>
+      <p className="muted small">
+        Absolute filesystem path on the backend server used for all new documents and checklist evidence.
+        The server validates and creates this directory before saving.
+      </p>
+      <form onSubmit={save} className="storage-setting-form">
+        <Field label="Upload directory path">
+          <input required value={path} onChange={(e) => { setPath(e.target.value); setSaved(false) }} placeholder="/data/qa-portal/uploads" />
+        </Field>
+        <div className="storage-setting-actions">
+          <button type="submit" className="btn btn-primary" disabled={busy || !path.trim() || path.trim() === settings?.upload_path}>
+            {busy ? 'Validating…' : 'Save storage path'}
+          </button>
+          {settings && path !== settings.default_path && (
+            <button type="button" className="btn" disabled={busy} onClick={() => setPath(settings.default_path)}>Use default</button>
+          )}
+          {saved && <span className="storage-setting-saved">✓ Storage path updated</span>}
+        </div>
+      </form>
+      <ErrorText error={error} />
+      {settings?.legacy_paths.length ? (
+        <div className="storage-legacy-paths">
+          <strong>Previous locations retained for existing downloads</strong>
+          {settings.legacy_paths.map((legacy) => <code key={legacy}>{legacy}</code>)}
+        </div>
+      ) : null}
+    </Card>
+  )
+}
+
 // Admin section: "add one functionality on admin section to upload excel
 // and based on data present on excel Application name will be seed" -- lets
 // an Admin bulk-load a spreadsheet of known-good Application Names straight
@@ -343,6 +396,7 @@ export default function Admin() {
   const [userSearch, setUserSearch] = useState('')
   const [accountFilter, setAccountFilter] = useState<'ALL' | 'ACTIVE' | 'DISABLED' | 'REVIEW'>('ALL')
   const [loginFilter, setLoginFilter] = useState<'ALL' | 'STANDARD' | 'LDAP'>('ALL')
+  const [section, setSection] = useState<'users' | 'departments' | 'storage' | 'applications'>('users')
 
   const load = useCallback(async () => {
     try {
@@ -413,7 +467,7 @@ export default function Admin() {
   return (
     <div className="access-page">
       <ErrorText error={error} />
-      {reviewCount > 0 && (
+      {section === 'users' && reviewCount > 0 && (
         <div className="alert-banner">
           <div className="icon-wrap"><IconWarning width={16} height={16} /></div>
           <div className="body">
@@ -428,13 +482,21 @@ export default function Admin() {
       <PageHeader
         title="Users & Access" count={users.length}
         subtitle="Create accounts, control role and department access, and manage Standard or LDAP authentication from one workspace."
-        actions={(
+        actions={section === 'users' ? (
           <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
             <IconPlus width={14} height={14} /> Create User
           </button>
-        )}
+        ) : undefined}
       />
 
+      <nav className="access-workspace-nav" aria-label="Administration sections">
+        <button type="button" className={section === 'users' ? 'active' : ''} onClick={() => setSection('users')}><IconLock /><span><strong>User Directory</strong><small>Accounts, roles and access</small></span><em>{users.length}</em></button>
+        <button type="button" className={section === 'departments' ? 'active' : ''} onClick={() => setSection('departments')}><IconPlus /><span><strong>Departments</strong><small>Organisation structure</small></span><em>{departments.length}</em></button>
+        <button type="button" className={section === 'storage' ? 'active' : ''} onClick={() => setSection('storage')}><IconFolder /><span><strong>Storage</strong><small>Document upload location</small></span></button>
+        <button type="button" className={section === 'applications' ? 'active' : ''} onClick={() => setSection('applications')}><IconCheckCircle /><span><strong>Application Data</strong><small>Approved-name bulk setup</small></span></button>
+      </nav>
+
+      {section === 'users' && <div className="access-workspace-panel">
       <div className="access-summary" aria-label="User account summary">
         <div><small>Total accounts</small><strong>{users.length}</strong><span>All provisioned users</span></div>
         <div><small>Active accounts</small><strong>{activeCount}</strong><span>Can access the portal</span></div>
@@ -550,14 +612,19 @@ export default function Admin() {
           </div>
         )}
       </div>
+      </div>}
 
-      <div className="access-departments-section">
+      {section === 'departments' && <div className="access-workspace-panel access-departments-section">
         <DepartmentManagerCard departments={departments} onChanged={loadDepartments} />
-      </div>
+      </div>}
 
-      <div className="access-departments-section">
+      {section === 'applications' && <div className="access-workspace-panel access-departments-section">
         <ApplicationSeedCard />
-      </div>
+      </div>}
+
+      {section === 'storage' && <div className="access-workspace-panel access-departments-section">
+        <UploadStorageCard />
+      </div>}
 
       {showCreate && (
         <CreateUserModal

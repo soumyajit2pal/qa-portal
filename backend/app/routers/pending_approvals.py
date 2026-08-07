@@ -48,12 +48,21 @@ router = APIRouter(prefix="/api/pending-approvals", tags=["pending-approvals"])
 
 
 def _item(category, entity_type, entity_id, display_id, title, status, status_label,
-          department, submitted_by, submitted_at, path) -> dict:
+          department, submitted_by, submitted_at, path,
+          parent_request_id=None, parent_path=None) -> dict:
     return {
         "category": category, "entity_type": entity_type, "entity_id": entity_id,
         "display_id": display_id, "title": title, "status": status, "status_label": status_label,
         "department": department, "submitted_by": submitted_by, "submitted_at": submitted_at, "path": path,
+        "parent_request_id": parent_request_id, "parent_path": parent_path,
     }
+
+
+def _parent_context(obj):
+    gateway = getattr(obj, "qa_request", None)
+    if not gateway or not gateway.request_id:
+        return None, None
+    return gateway.request_id, f"/qa-requests?search={gateway.request_id}"
 
 
 def _name(user: Optional["models.User"]) -> Optional[str]:
@@ -108,7 +117,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
 
     def _gateway_path(gw) -> str:
         if gw and gw.request_id:
-            return f"/qa-requests?search={gw.request_id}"
+            return f"/qa-requests?open={gw.request_id}"
         return "/qa-requests"
 
     if user.has_role(Role.APPLICATION_OWNER):
@@ -124,6 +133,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
                 f"New Application Name: {obj.name}", obj.status,
                 APPLICATION_MASTER_STATUS_LABELS.get(obj.status, obj.status),
                 obj.department, _name(obj.requested_by), obj.created_at, _gateway_path(gw),
+                gw.request_id, _gateway_path(gw),
             ))
 
     if user.has_role(Role.SM):
@@ -139,6 +149,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
                 f"New Application Name: {obj.name}", obj.status,
                 APPLICATION_MASTER_STATUS_LABELS.get(obj.status, obj.status),
                 obj.department, _name(obj.requested_by), obj.created_at, _gateway_path(gw),
+                gw.request_id, _gateway_path(gw),
             ))
     return results
 
@@ -202,6 +213,7 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
                     f"{module_label}: {obj.application_name or '—'}", obj.status,
                     labels.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
                     obj.created_at, f"{path}?open={obj.request_id}",
+                    *_parent_context(obj),
                 ))
         if user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
             q = (
@@ -220,6 +232,7 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
                     f"{module_label}: {obj.application_name or '—'}", obj.status,
                     labels.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
                     obj.created_at, f"{path}?open={obj.request_id}",
+                    *_parent_context(obj),
                 ))
     return results
 
@@ -243,6 +256,7 @@ def _readiness_items(db: Session, user: models.User) -> List[dict]:
                 f"{module_label}: {obj.application_name or '—'}", obj.status,
                 labels.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
                 obj.created_at, f"{path}?open={obj.request_id}",
+                *_parent_context(obj),
             ))
     return results
 
