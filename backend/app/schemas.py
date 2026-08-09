@@ -588,7 +588,7 @@ class WorkflowDecision(BaseModel):
 
 # ---- QA Request lifecycle-specific payloads ----
 class DepartmentHeadDecisionIn(BaseModel):
-    """Department Head reviews the request and assigns its IT-QA QA Lead."""
+    """Department Head reviews the request and assigns its COE - Quality Assurance QA Lead."""
     decision: str                          # Approved / Returned / Rejected
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
@@ -608,7 +608,7 @@ class AssignSecurityAnalystIn(BaseModel):
 
 
 class SecurityDeptHeadDecisionIn(BaseModel):
-    """SAST/DAST Department Head decision with IT-QA QA Lead assignment."""
+    """SAST/DAST Department Head decision with COE - Quality Assurance QA Lead assignment."""
     decision: str                          # Approved / Returned / Rejected
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
@@ -616,7 +616,7 @@ class SecurityDeptHeadDecisionIn(BaseModel):
 
 
 class PerformanceDeptHeadDecisionIn(BaseModel):
-    """Performance Department Head decision with IT-QA QA Lead assignment."""
+    """Performance Department Head decision with COE - Quality Assurance QA Lead assignment."""
     decision: str                     # Approved / Returned / Rejected
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
@@ -1053,6 +1053,11 @@ class ApprovalActionOut(ORMModel):
     actor_role: Optional[str] = None
     decision: Optional[str] = None
     comments: Optional[str] = None
+    # APR-005 -- populated for TEST_CASE approval-workflow rows (see
+    # ApprovalAction's own docstring in models.py); None for every other
+    # entity type's rows, which is expected, not a gap.
+    previous_state: Optional[str] = None
+    new_state: Optional[str] = None
     created_at: datetime.datetime
 
     _normalize_actor_name = field_validator("actor_name", mode="before")(_plain_person_name)
@@ -1060,6 +1065,167 @@ class ApprovalActionOut(ORMModel):
 
 class CommentCreate(BaseModel):
     body: str
+
+
+# ---------------- Defect Management ----------------
+class DefectCreate(BaseModel):
+    title: str
+    description: str
+    qa_request_id: int
+    cycle_id: Optional[int] = None
+    test_case_id: Optional[int] = None
+    execution_id: Optional[int] = None
+    test_case_ids: List[int] = []
+    module_feature: str
+    environment: str
+    severity: str
+    priority: str
+    steps_to_reproduce: str
+    expected_result: str
+    actual_result: str
+    retest_tester_id: Optional[int] = None
+    device_details: Optional[str] = None
+    build_version: Optional[str] = None
+    api_endpoint: Optional[str] = None
+    request_response_details: Optional[str] = None
+    log_details: Optional[str] = None
+    related_cr_number: Optional[str] = None
+    external_defect_id: Optional[str] = None
+    remarks: Optional[str] = None
+    labels: Optional[str] = None
+
+
+class DefectLinkExecution(BaseModel):
+    execution_id: int
+
+
+class DefectUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    module_feature: Optional[str] = None
+    environment: Optional[str] = None
+    severity: Optional[str] = None
+    priority: Optional[str] = None
+    steps_to_reproduce: Optional[str] = None
+    expected_result: Optional[str] = None
+    actual_result: Optional[str] = None
+    device_details: Optional[str] = None
+    build_version: Optional[str] = None
+    api_endpoint: Optional[str] = None
+    request_response_details: Optional[str] = None
+    log_details: Optional[str] = None
+    related_cr_number: Optional[str] = None
+    external_defect_id: Optional[str] = None
+    remarks: Optional[str] = None
+    labels: Optional[str] = None
+
+
+class DefectTransition(BaseModel):
+    status: str
+    assignee_id: Optional[int] = None
+    assigned_team: Optional[str] = None
+    remarks: Optional[str] = None
+    resolution_type: Optional[str] = None
+    resolution_summary: Optional[str] = None
+    root_cause: Optional[str] = None
+    fix_details: Optional[str] = None
+    fixed_build_version: Optional[str] = None
+    tested_build_version: Optional[str] = None
+    actual_result: Optional[str] = None
+    retest_remarks: Optional[str] = None
+    reopen_reason: Optional[str] = None
+    deferral_reason: Optional[str] = None
+    deferral_approved_by: Optional[str] = None
+    target_release: Optional[str] = None
+    expected_resolution_date: Optional[datetime.date] = None
+    rejection_reason: Optional[str] = None
+    duplicate_defect_id: Optional[int] = None
+    closure_remarks: Optional[str] = None
+
+
+class DefectOut(ORMModel):
+    id: int
+    defect_key: str
+    title: str
+    description: str
+    status: str
+    qa_request_id: int
+    qa_request_key: Optional[str] = None
+    cycle_id: Optional[int] = None
+    cycle_key: Optional[str] = None
+    project_id: Optional[int] = None
+    primary_test_case_id: Optional[int] = None
+    test_case_key: Optional[str] = None
+    execution_id: Optional[int] = None
+    linked_test_case_ids: List[int] = []
+    linked_test_case_keys: List[str] = []
+    application_name: str
+    module_feature: str
+    environment: str
+    severity: str
+    priority: str
+    steps_to_reproduce: str
+    expected_result: str
+    actual_result: str
+    reporter_id: int
+    reporter_name: Optional[str] = None
+    reported_at: datetime.datetime
+    assignee_id: Optional[int] = None
+    assignee_name: Optional[str] = None
+    assigned_team: Optional[str] = None
+    assigned_by_id: Optional[int] = None
+    assigned_by_name: Optional[str] = None
+    assigned_at: Optional[datetime.datetime] = None
+    assignment_remarks: Optional[str] = None
+    retest_tester_id: Optional[int] = None
+    device_details: Optional[str] = None
+    build_version: Optional[str] = None
+    api_endpoint: Optional[str] = None
+    request_response_details: Optional[str] = None
+    log_details: Optional[str] = None
+    related_cr_number: Optional[str] = None
+    external_defect_id: Optional[str] = None
+    remarks: Optional[str] = None
+    labels: Optional[str] = None
+    resolution_type: Optional[str] = None
+    resolution_summary: Optional[str] = None
+    root_cause: Optional[str] = None
+    fix_details: Optional[str] = None
+    fixed_build_version: Optional[str] = None
+    resolved_at: Optional[datetime.datetime] = None
+    retest_result: Optional[str] = None
+    retest_at: Optional[datetime.datetime] = None
+    tested_build_version: Optional[str] = None
+    retest_actual_result: Optional[str] = None
+    retest_remarks: Optional[str] = None
+    reopen_reason: Optional[str] = None
+    reopen_count: int = 0
+    deferral_reason: Optional[str] = None
+    deferral_approved_by: Optional[str] = None
+    target_release: Optional[str] = None
+    expected_resolution_date: Optional[datetime.date] = None
+    rejection_reason: Optional[str] = None
+    duplicate_of_id: Optional[int] = None
+    duplicate_of_key: Optional[str] = None
+    closure_remarks: Optional[str] = None
+    closed_at: Optional[datetime.datetime] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+
+class DefectDashboardOut(BaseModel):
+    total: int
+    open: int
+    closed: int
+    reopened: int
+    deferred: int
+    by_status: dict[str, int]
+    by_severity: dict[str, int]
+    by_priority: dict[str, int]
+    by_application: dict[str, int]
+    by_assignee: dict[str, int]
+    by_ageing: dict[str, int]
+    closure_trend: dict[str, int]
 
 
 # ---------------- Module 8: QA Sign-off ----------------
@@ -1120,6 +1286,7 @@ class SignOffOut(ORMModel):
     application_name: str
     application_owner: Optional[str] = None
     department: Optional[str] = None
+    request_department: Optional[str] = None
     vendor_si_partner: Optional[str] = None
     technology_stack: Optional[str] = None
     risk_tier: Optional[str] = None
@@ -1244,6 +1411,12 @@ class TestProjectCreate(BaseModel):
     application_master_id: Optional[int] = None
     department: str
     description: Optional[str] = None
+    owner_id: Optional[int] = None
+    # APR-001 -- project-level default Reviewer/QA Lead, copied onto each
+    # TestCaseVersion at submission time (see TestCaseVersion.
+    # assigned_reviewer_id/assigned_qa_lead_id).
+    default_reviewer_id: Optional[int] = None
+    default_qa_lead_id: Optional[int] = None
 
 
 class TestProjectUpdate(BaseModel):
@@ -1252,6 +1425,9 @@ class TestProjectUpdate(BaseModel):
     department: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
+    owner_id: Optional[int] = None
+    default_reviewer_id: Optional[int] = None
+    default_qa_lead_id: Optional[int] = None
 
 
 class TestProjectOut(ORMModel):
@@ -1262,17 +1438,74 @@ class TestProjectOut(ORMModel):
     department: Optional[str] = None
     description: Optional[str] = None
     is_active: bool
+    owner_id: Optional[int] = None
+    owner_name: Optional[str] = None
     created_by_id: Optional[int] = None
     created_at: datetime.datetime
     pending_is_active: Optional[bool] = None
     pending_requested_by_id: Optional[int] = None
     pending_requested_by_name: Optional[str] = None
     pending_requested_at: Optional[datetime.datetime] = None
+    is_archived: bool = False
+    archived_by_id: Optional[int] = None
+    archived_by_name: Optional[str] = None
+    archived_at: Optional[datetime.datetime] = None
+    archived_reason: Optional[str] = None
+    default_reviewer_id: Optional[int] = None
+    default_reviewer_name: Optional[str] = None
+    default_qa_lead_id: Optional[int] = None
+    default_qa_lead_name: Optional[str] = None
+
+
+class TestProjectMyAccessOut(BaseModel):
+    """SRS PRJ-005/GOV-001 -- advisory permission summary for the signed-in
+    user on one Test Project, matching deps.py's enforcement helpers exactly.
+    See routers/test_projects.py::get_my_project_access."""
+    project_id: int
+    project_role: Optional[str] = None
+    is_member: bool
+    can_author_repository: bool
+    can_review_repository: bool
+    # 2026-08 "Test Approval Workflow" refactor -- Stage 2 (QA Lead final
+    # approve/return/reject on "Review Completed"), deliberately narrower
+    # than can_review_repository (Stage 1, Reviewer recommend/return on "In
+    # Review") -- see can_give_final_approval's own docstring in deps.py.
+    can_give_final_approval: bool
+    can_execute: bool
+    can_manage_execution_governance: bool
 
 
 class TestProjectActivationReview(BaseModel):
     decision: str
     comments: Optional[str] = None
+
+
+class TestProjectArchive(BaseModel):
+    reason: Optional[str] = None
+
+
+class TestProjectMemberCreate(BaseModel):
+    """SRS PRJ-005/GOV-001. project_role must be one of
+    constants.TEST_PROJECT_ROLES -- see routers/test_projects.py::
+    add_project_member for validation."""
+    user_id: int
+    project_role: str = "Tester"
+
+
+class TestProjectMemberUpdate(BaseModel):
+    project_role: str
+
+
+class TestProjectMemberOut(ORMModel):
+    id: int
+    project_id: int
+    user_id: int
+    user_name: Optional[str] = None
+    user_email: Optional[str] = None
+    project_role: str
+    added_by_id: Optional[int] = None
+    added_by_name: Optional[str] = None
+    added_at: datetime.datetime
 
 
 class TestFolderCreate(BaseModel):
@@ -1327,6 +1560,82 @@ class TestStepOut(ORMModel):
     expected_result: Optional[str] = None
 
 
+class TestCaseVersionStepOut(ORMModel):
+    id: int
+    step_no: int
+    step_text: Optional[str] = None
+    expected_result: Optional[str] = None
+
+
+class TestCaseVersionOut(ORMModel):
+    """SRS VER-001..006 -- one immutable snapshot. See
+    models.TestCaseVersion's own docstring."""
+    id: int
+    test_case_id: int
+    version_major: int
+    version_minor: int
+    version: str
+    status: str
+    epic_id: Optional[str] = None
+    cr_number: Optional[str] = None
+    feature_id: Optional[str] = None
+    user_story_id: Optional[str] = None
+    test_type: Optional[str] = None
+    module_name: Optional[str] = None
+    test_scenario: Optional[str] = None
+    pre_condition: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[str] = None
+    author_id: Optional[int] = None
+    author_name: Optional[str] = None
+    created_at: datetime.datetime
+    submitted_by_id: Optional[int] = None
+    submitted_by_name: Optional[str] = None
+    submitted_at: Optional[datetime.datetime] = None
+    submit_note: Optional[str] = None
+    reviewed_by_id: Optional[int] = None
+    reviewed_by_name: Optional[str] = None
+    reviewed_at: Optional[datetime.datetime] = None
+    review_comments: Optional[str] = None
+    qa_lead_decided_by_id: Optional[int] = None
+    qa_lead_decided_by_name: Optional[str] = None
+    qa_lead_decided_at: Optional[datetime.datetime] = None
+    qa_lead_decision_comments: Optional[str] = None
+    assigned_reviewer_id: Optional[int] = None
+    assigned_reviewer_name: Optional[str] = None
+    assigned_qa_lead_id: Optional[int] = None
+    assigned_qa_lead_name: Optional[str] = None
+    pending_with_user_id: Optional[int] = None
+    pending_with_user_name: Optional[str] = None
+    source_version_id: Optional[int] = None
+    steps: List[TestCaseVersionStepOut] = []
+
+
+class TestCaseVersionSummary(ORMModel):
+    """Lightweight row for a testcase's version-history list -- avoids
+    shipping every version's full steps when the UI just needs the
+    dropdown/list of versions (VER-005 compare picker)."""
+    id: int
+    version: str
+    status: str
+    author_name: Optional[str] = None
+    created_at: datetime.datetime
+    submitted_at: Optional[datetime.datetime] = None
+    reviewed_at: Optional[datetime.datetime] = None
+
+
+class TestCaseVersionCompareOut(BaseModel):
+    """SRS VER-005 "field-level and step-level differences" between any two
+    versions of the same testcase."""
+    left: TestCaseVersionOut
+    right: TestCaseVersionOut
+    # Field name -> (left value, right value), only for fields that differ.
+    field_diffs: dict
+    # Step number -> {"left": {...}|None, "right": {...}|None} for any step
+    # that was added, removed, or changed between the two versions.
+    step_diffs: dict
+
+
 class TestCaseCreate(BaseModel):
     # Retained for backward compatibility with older clients/templates. The
     # router always assigns the governed TQA-TC-NN key and never trusts this
@@ -1344,7 +1653,8 @@ class TestCaseCreate(BaseModel):
     description: Optional[str] = None
     priority: Optional[str] = None
     tags: List[str] = []
-    # The API always creates cases as Draft/Pending QA Lead Review. Kept in
+    # The API always creates cases as Draft, ready for explicit submission
+    # to Reviewer recommendation. Kept in
     # the input shape for backward compatibility with older clients, but the
     # router never trusts a client-supplied lifecycle status.
     status: str = "Draft"
@@ -1377,6 +1687,10 @@ class TestCaseBulkUpdate(BaseModel):
     test_type: Optional[str] = None
     module_name: Optional[str] = None
     tags: Optional[List[str]] = None
+    # APR-001 routing assignments. model_fields_set distinguishes unchanged
+    # from explicit null (clear the item override/use the project default).
+    assigned_reviewer_id: Optional[int] = None
+    assigned_qa_lead_id: Optional[int] = None
     status: Optional[str] = None
 
 
@@ -1385,13 +1699,106 @@ class TestCaseBulkDelete(BaseModel):
 
 
 class TestCaseBulkApprove(BaseModel):
+    """QA-Lead-tier bulk FINAL decision -- acts only on rows whose draft is
+    "Review Completed" (see bulk_recommend_test_cases below for the
+    Reviewer-tier bulk equivalent on "In Review" rows). Always an Approve &
+    Activate, minor-bump only -- a major bump's mandatory justification is
+    inherently per-case, so that path stays single-case only via review_
+    test_case."""
     ids: List[int]
     comments: str
 
 
-class TestCaseReview(BaseModel):
-    decision: str
+class TestCaseBulkRecommend(BaseModel):
+    """2026-08 Approval Workflow refactor -- Reviewer-tier bulk equivalent
+    of TestCaseBulkApprove, acting on rows whose draft is "In Review",
+    moving each to "Review Completed" for QA Lead final decision. comments
+    is optional to match the single-case Recommend action (APR-004: return/
+    reject require a comment, approval/recommendation don't)."""
+    ids: List[int]
+    assigned_qa_lead_id: int
     comments: Optional[str] = None
+
+
+class TestCaseBulkSubmit(BaseModel):
+    """REV-001, bulk form -- submits every selected case's current Draft/
+    Returned version for Reviewer recommendation in one action. Reported
+    directly: with a large imported/cloned batch, submitting one testcase
+    at a time was impractical."""
+    ids: List[int]
+    assigned_reviewer_id: int
+    assigned_qa_lead_id: int
+    note: Optional[str] = None
+
+
+class TestCaseReview(BaseModel):
+    """2026-08 Approval Workflow refactor -- one endpoint, two stages,
+    decision vocabulary depends on which stage the target draft is
+    currently sitting in (see routers/test_repository.py::review_test_case):
+      draft.status == "In Review" (Reviewer-tier acts):
+        RECOMMEND -> "Review Completed" (comments optional)
+        RETURN    -> "Returned" (comments MANDATORY, APR-004)
+      draft.status == "Review Completed" (QA-Lead-tier acts):
+        APPROVE -> "Approved" (comments optional; version_bump applies)
+        RETURN  -> "Returned" (comments MANDATORY)
+        REJECT  -> "Rejected", terminal (comments MANDATORY)
+    """
+    decision: str
+    # Required by the router when decision == RECOMMEND; ignored for the
+    # Stage 2 decisions and Stage 1 RETURN.
+    assigned_qa_lead_id: Optional[int] = None
+    comments: Optional[str] = None
+    # SRS VER-004 "Default policy may auto-increment minor and permit QA
+    # Lead to select major with justification" -- version_bump is ignored
+    # unless decision=="APPROVE"; "major" requires non-blank comments
+    # (enforced in routers/test_repository.py) since a major bump is meant
+    # to record WHY the intent materially changed, not just that it did.
+    version_bump: Optional[str] = None  # "minor" (default) | "major"
+
+
+class TestCaseReassignApprovers(BaseModel):
+    """APR-001 -- optional item-level reassignment of a test case's current
+    draft version away from its project-level default Reviewer/QA Lead.
+    Both optional/independent; only fields present in model_fields_set are
+    changed (so reassigning just the Reviewer doesn't disturb the QA Lead
+    assignment, and vice versa). Passing null explicitly clears that
+    assignment back to "unassigned" (still actionable by anyone holding the
+    right project role -- see TestCaseVersion.assigned_reviewer_id's own
+    docstring; this is a routing field, not an authorization gate)."""
+    assigned_reviewer_id: Optional[int] = None
+    assigned_qa_lead_id: Optional[int] = None
+
+
+class TestCaseSubmit(BaseModel):
+    """REV-001 -- submitting a Draft version for Reviewer recommendation. note is
+    the author's own optional context for the reviewer, stored on
+    TestCaseVersion.submit_note."""
+    assigned_reviewer_id: int
+    assigned_qa_lead_id: int
+    note: Optional[str] = None
+
+
+class TestCaseCheckoutOverride(BaseModel):
+    """TC-004 "QA Lead and Administrator override shall require a reason
+    and audit event" -- forcing a checkout away from whoever currently
+    holds it."""
+    reason: str
+
+
+class TestCaseCloneIn(BaseModel):
+    """TC-005 -- clone creates a NEW testcase identity at version 1.0
+    Draft, in the given (or same) project/folder, recording the source
+    testcase/version it was cloned from."""
+    project_id: Optional[int] = None
+    folder_id: Optional[int] = None
+    name_suffix: Optional[str] = None
+
+
+class TestCaseArchive(BaseModel):
+    """TC-006 -- archiving preserves all versions/cycle membership/
+    execution history while preventing new cycle selection. reason is
+    optional but recorded on the audit trail when given."""
+    reason: Optional[str] = None
 
 
 class TestCaseOut(ORMModel):
@@ -1413,6 +1820,11 @@ class TestCaseOut(ORMModel):
     tags: List[str] = []
     status: str
     version: str = "1.0"
+    # SRS VER-002 -- which version is which, when both a live approved
+    # baseline and an in-progress draft revision exist side by side.
+    current_approved_version_id: Optional[int] = None
+    current_draft_version_id: Optional[int] = None
+    current_draft_author_id: Optional[int] = None
     created_by_id: Optional[int] = None
     created_by_name: Optional[str] = None
     created_at: datetime.datetime
@@ -1420,6 +1832,13 @@ class TestCaseOut(ORMModel):
     checked_out_by_id: Optional[int] = None
     checked_out_by_name: Optional[str] = None
     checked_out_at: Optional[datetime.datetime] = None
+    # APR-006 "current assignee, pending action, elapsed time" -- bridges
+    # through the current draft version, see models.TestCase's own
+    # properties. None once nothing is pending (Approved with no draft in
+    # progress, or a brand-new never-submitted Draft).
+    pending_with_user_id: Optional[int] = None
+    pending_with_user_name: Optional[str] = None
+    pending_since: Optional[datetime.datetime] = None
     steps: List[TestStepOut] = []
 
 
@@ -1457,6 +1876,11 @@ class TestCycleCreate(BaseModel):
     # (TestCycleUpdate) was never affected -- only creation was broken.
     linked_request_type: Optional[str] = None
     linked_request_id: Optional[int] = None
+    # CYC-001 / LNK-003.
+    cycle_type: Optional[str] = None
+    environment: Optional[str] = None
+    build: Optional[str] = None
+    owner_id: Optional[int] = None
 
 
 class TestCycleUpdate(BaseModel):
@@ -1467,6 +1891,12 @@ class TestCycleUpdate(BaseModel):
     end_date: Optional[datetime.date] = None
     linked_request_type: Optional[str] = None
     linked_request_id: Optional[int] = None
+    cycle_type: Optional[str] = None
+    environment: Optional[str] = None
+    build: Optional[str] = None
+    owner_id: Optional[int] = None
+    blocking_reason: Optional[str] = None
+    remarks: Optional[str] = None
 
 
 class TestCycleOut(ORMModel):
@@ -1481,6 +1911,11 @@ class TestCycleOut(ORMModel):
     linked_request_type: Optional[str] = None
     linked_request_id: Optional[int] = None
     linked_request_key: Optional[str] = None
+    cycle_type: Optional[str] = None
+    environment: Optional[str] = None
+    build: Optional[str] = None
+    owner_id: Optional[int] = None
+    owner_name: Optional[str] = None
     created_by_id: Optional[int] = None
     created_at: datetime.datetime
 
@@ -1509,6 +1944,19 @@ class TestExecutionUpdate(BaseModel):
     actual_result: Optional[str] = None
     test_run_artifacts: Optional[str] = None
     defect_id: Optional[str] = None
+    # SRS EXE-007 "optimistic concurrency" -- when given, the server 409s
+    # instead of recording the attempt if this slot's run_version has moved
+    # on since the client last read it (someone else already saved a newer
+    # attempt). Optional so older/simpler callers (e.g. Excel import) still
+    # work unchanged -- the check only runs when a caller opts in.
+    expected_run_version: Optional[int] = None
+
+
+class TestExecutionVersionUpgrade(BaseModel):
+    """CYC-006 -- upgrade an unexecuted cycle item to a newer approved
+    version after reviewing a change summary. Rejected once any attempt
+    exists against the slot (see models.TestExecution's own docstring)."""
+    target_version_id: int
 
 
 class TestExecutionBulkResult(BaseModel):
@@ -1538,16 +1986,13 @@ class TestExecutionBulkRemoveResult(BaseModel):
     removed_evidence_count: int
 
 
-class TestCycleResetResult(BaseModel):
-    cycle_id: int
-    reset_execution_count: int
-    removed_attempt_count: int
-    removed_defect_count: int
-    removed_evidence_count: int
-
-
 class TestExecutionAssign(BaseModel):
     assigned_to_id: Optional[int] = None
+
+
+class TestExecutionBulkAssign(BaseModel):
+    execution_ids: List[int]
+    assigned_to_id: int
 
 
 class TestRunDefectCreate(BaseModel):
@@ -1571,6 +2016,20 @@ class TestRunDefectOut(ORMModel):
     created_at: datetime.datetime
 
 
+class LinkedGovernedDefectRef(ORMModel):
+    """A governed Defect (defects.py, not the free-text TestRunDefect above)
+    linked to a specific execution slot via Defect.execution_id. Reported
+    directly: while any linked defect is active (not Deferred/Closed) the
+    whole execution is locked, and once failed at least once, 'Pass'/'NA'
+    stay permanently blocked -- the frontend needs each linked defect's own
+    key + governed status to explain why, not just a yes/no flag. See
+    routers/test_execution.py::_execution_status_gate for where this is
+    enforced server-side too (this field is read-only/informational)."""
+    id: int
+    defect_key: str
+    status: str
+
+
 class TestExecutionRunOut(ORMModel):
     """One immutable historical attempt -- see models.TestExecutionRun."""
     id: int
@@ -1591,6 +2050,14 @@ class TestExecutionOut(ORMModel):
     cycle_id: int
     test_case_id: int
     test_case: Optional[TestCaseOut] = None
+    # SRS CYC-004 -- the exact version this slot is pinned to, frozen once
+    # any attempt exists. pinned_version_label is the "1.0"/"1.1"-style
+    # string; is_pinned_stale flags when the testcase's current approved
+    # version has since moved on (surfaced as an upgrade affordance while
+    # still unexecuted, or as a "Version impact" report entry once it isn't).
+    pinned_version_id: Optional[int] = None
+    pinned_version_label: Optional[str] = None
+    is_pinned_stale: bool = False
     status: str
     actual_result: Optional[str] = None
     test_run_artifacts: Optional[str] = None
@@ -1604,11 +2071,151 @@ class TestExecutionOut(ORMModel):
     executed_by_name: Optional[str] = None
     executed_at: Optional[datetime.datetime] = None
     run_count: int = 0
+    run_version: int = 0
     created_at: datetime.datetime
     # Full attempt-by-attempt history, oldest first -- see
     # models.TestExecutionRun. The columns above always mirror runs[-1] once
     # at least one attempt has been recorded.
     runs: List[TestExecutionRunOut] = []
+    # Governed Defect(s) (defects.py) linked to this slot -- see
+    # LinkedGovernedDefectRef's own docstring.
+    linked_defects: List[LinkedGovernedDefectRef] = []
+
+
+# ---------------- Test Management Reporting (SRS section 11) ----------------
+# Typed response contracts for routers/test_reports.py -- RPT-002 "Counts
+# shall link to the filtered underlying records" is carried by
+# ReportFilterRef on every grouped row: the frontend reproduces that exact
+# slice by passing these fields to the existing list endpoints
+# (test_repository.py::list_test_cases, test_execution.py::list_executions,
+# etc.), so this router itself never needs to return the underlying rows.
+class ReportFilterRef(BaseModel):
+    project_id: Optional[int] = None
+    cycle_id: Optional[int] = None
+    status: Optional[str] = None
+    test_case_id: Optional[int] = None
+    requirement: Optional[str] = None
+
+
+class ReportCountRow(BaseModel):
+    key: str
+    count: int
+    filters: ReportFilterRef
+
+
+class ReportStatusCountRow(BaseModel):
+    status: str
+    count: int
+    filters: ReportFilterRef
+
+
+class RepositoryHealthOut(BaseModel):
+    project_id: int
+    project_key: str
+    population_note: str
+    total_cases: int
+    by_status: List[ReportCountRow]
+    by_module: List[ReportCountRow]
+    by_priority: List[ReportCountRow]
+    by_test_type: List[ReportCountRow]
+    by_owner: List[ReportCountRow]
+    average_age_days: float
+    never_executed_count: int
+
+
+class CycleProgressOut(BaseModel):
+    cycle_id: int
+    cycle_key: str
+    cycle_status: str
+    population_note: str
+    total_items: int
+    by_status: List[ReportStatusCountRow]
+    assigned_count: int
+    unassigned_count: int
+    completion_pct: float
+    is_locked: bool
+
+
+class DefectQualityOut(BaseModel):
+    project_id: int
+    project_key: str
+    population_note: str
+    total_defect_links: int
+    by_module: List[ReportCountRow]
+    by_status: List[ReportCountRow]
+    retest_success_rate_pct: float
+
+
+class VersionImpactItemOut(BaseModel):
+    cycle_id: int
+    cycle_key: str
+    cycle_status: str
+    stale_item_count: int
+    upgradeable_count: int
+    permanently_pinned_count: int
+    filters: ReportFilterRef
+
+
+class VersionImpactOut(BaseModel):
+    project_id: int
+    project_key: str
+    population_note: str
+    cycles_with_stale_items: int
+    total_items: int
+    returned_items: int
+    items: List[VersionImpactItemOut]
+
+
+class CycleStatusCountRow(BaseModel):
+    status: str
+    count: int
+
+
+class CycleTrendPointOut(BaseModel):
+    month: str
+    count: int
+
+
+class ProjectOwnershipRow(BaseModel):
+    owner: str
+    project_count: int
+
+
+class ProjectPortfolioOut(BaseModel):
+    population_note: str
+    active_project_count: int
+    inactive_project_count: int
+    archived_project_count: int
+    cycle_count: int
+    cycles_by_status: List[CycleStatusCountRow]
+    cycle_creation_trend: List[CycleTrendPointOut]
+    ownership: List[ProjectOwnershipRow]
+
+
+class NotificationOut(ORMModel):
+    """2026-08 Approval Workflow refactor section 10 -- see
+    models.Notification's own docstring."""
+    id: int
+    recipient_id: int
+    event_type: str
+    entity_type: Optional[str] = None
+    entity_id: Optional[int] = None
+    entity_key: Optional[str] = None
+    message: str
+    created_by_id: Optional[int] = None
+    created_by_name: Optional[str] = None
+    created_at: datetime.datetime
+    read_at: Optional[datetime.datetime] = None
+
+
+class ApprovalNotificationSettingsOut(BaseModel):
+    reminder_business_days: int
+    escalation_business_days: int
+
+
+class ApprovalNotificationSettingsUpdate(BaseModel):
+    reminder_business_days: int
+    escalation_business_days: int
 
 
 class StorageSettingsOut(BaseModel):
@@ -1636,8 +2243,24 @@ class PendingApprovalItem(BaseModel):
     entity_type: str        # e.g. "APPLICATION_MASTER", "FUNCTIONAL_REQUEST", "SAST", ...
     entity_id: int
     display_id: Optional[str] = None    # business id, e.g. "TQA-FUNC-0007" -- None where the entity has no business id of its own (ApplicationMaster)
-    parent_request_id: Optional[str] = None  # gateway business id, e.g. TQA-REQ-0007
+    # Reported directly: "Parent Section should be Project Name, the Folder
+    # wise testcase segregation" -- for a QA-Request-backed category
+    # (Functional/SAST/DAST/Performance/Suppression/Sign-off) this remains
+    # the gateway's own business id (e.g. "TQA-REQ-0007"); for TEST_CASE
+    # items (which have no QA Request parent at all) this is instead the
+    # owning Test Project's own identity ("<project_key> — <name>"), so the
+    # frontend's existing parent-grouping-by-this-field logic clusters every
+    # pending test case under its Test Project card instead of showing one
+    # "Standalone Request" card per test case. parent_label distinguishes
+    # the two so the frontend can label the card accurately ("Parent QA
+    # Request" vs "Test Project") without hardcoding entity_type checks.
+    parent_request_id: Optional[str] = None  # gateway business id, e.g. TQA-REQ-0007, OR a Test Project's own identity
     parent_path: Optional[str] = None
+    parent_label: Optional[str] = None  # e.g. "Parent QA Request" or "Test Project" -- None defaults to the QA-Request wording on the frontend
+    # Second-level grouping WITHIN a parent card, e.g. the Test Repository
+    # folder a pending test case lives in ("Unfiled" when it has none).
+    # Always None for every other category.
+    folder_name: Optional[str] = None
     title: str               # short human label, e.g. the application name or "Functional Testing -- SM Approval"
     status: str
     status_label: str

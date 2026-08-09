@@ -1,7 +1,6 @@
 import datetime
 import os
 from typing import List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
@@ -82,8 +81,8 @@ _ADMIN_ONLY_FIELDS = {"application_name", "epic_number", "cr_number"}
 # above SAST_DAST_STATUSES in constants.py):
 #
 #   Draft -> Submit -> same-department SM Approval -> same-department
-#   Department Head Approval (assigns an IT-QA QA Lead) -> Security Readiness
-#   (owned by that QA Lead) -> Planning (QA Lead assigns an IT-QA Security
+#   Department Head Approval (assigns a COE - Quality Assurance QA Lead) -> Security Readiness
+#   (owned by that QA Lead) -> Planning (QA Lead assigns a COE - Quality Assurance Security
 #   Analyst) -> Configuration -> Scanning -> Complete
 #   Scan, gated on a confirmation pop-up ("Are you sure no security findings
 #   were identified during the scan?"):
@@ -353,7 +352,7 @@ def _sm_decision(db: Session, obj, payload, current_user):
 
 
 def _department_head_decision(db: Session, obj, payload, current_user):
-    """Approval requires assignment to an active IT-QA QA Lead."""
+    """Approval requires assignment to an active COE - Quality Assurance QA Lead."""
     require_same_department(current_user, obj.department)
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
@@ -443,7 +442,7 @@ def _start_configuration(db: Session, obj, current_user):
     raise HTTPException(
         400,
         "A Security Analyst must be assigned before configuration can start. "
-        "Use Assign Security Analyst and select an active IT-QA Security Analyst.",
+        "Use Assign Security Analyst and select an active COE - Quality Assurance Security Analyst.",
     )
 
 
@@ -902,7 +901,7 @@ def export_sast(req_id: int, db: Session = Depends(get_db), current_user: models
         subtitle="SAST Request — Full Detail Export",
         sections=sections, history=history, history_note=history_note,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -1052,7 +1051,7 @@ def update_sast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     item.is_complete = payload.is_complete
     if payload.is_complete:
         item.approved_by_id = current_user.id
-        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        item.approved_at = models.now()
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -1088,7 +1087,7 @@ def acknowledge_sast_walkthrough(req_id: int, wt_id: int, db: Session = Depends(
     if not obj:
         raise HTTPException(404, "Walkthrough session not found")
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj
@@ -1356,7 +1355,7 @@ def export_dast(req_id: int, db: Session = Depends(get_db), current_user: models
         subtitle="DAST Request — Full Detail Export",
         sections=sections, history=history, history_note=history_note,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -1503,7 +1502,7 @@ def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     item.is_complete = payload.is_complete
     if payload.is_complete:
         item.approved_by_id = current_user.id
-        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        item.approved_at = models.now()
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -1537,7 +1536,7 @@ def acknowledge_dast_walkthrough(req_id: int, wt_id: int, db: Session = Depends(
     if not obj:
         raise HTTPException(404, "Walkthrough session not found")
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj

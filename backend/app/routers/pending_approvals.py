@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, can_review_repository, can_give_final_approval
 from ..constants import (
     Role, QA_DEPARTMENT, GatewayStatus,
     QA_REQUEST_STATUS_LABELS, SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
@@ -41,20 +41,23 @@ router = APIRouter(prefix="/api/pending-approvals", tags=["pending-approvals"])
 #
 # Deliberately NOT covered here (out of scope for this pass): Functional/
 # Performance "Requester Verification" (the requester confirming their own
-# already-approved work, not a peer approving someone else's request) and
-# Test Case review (QA Lead approving test-case CONTENT, not a request/
-# workflow entity at all). Flagged in ORACLE_MIGRATION_2026-07.md as a
-# possible follow-up rather than silently folded in.
+# already-approved work, not a peer approving someone else's request).
+#
+# Test Case review (2026-08 "Test Approval Workflow" refactor, APR-007
+# "Pending Approval shall show only items on which the logged-in user can
+# act") IS covered now -- see _test_case_items below. This was flagged as a
+# deliberate gap in an earlier pass; closing it here.
 
 
 def _item(category, entity_type, entity_id, display_id, title, status, status_label,
           department, submitted_by, submitted_at, path,
-          parent_request_id=None, parent_path=None) -> dict:
+          parent_request_id=None, parent_path=None, parent_label=None, folder_name=None) -> dict:
     return {
         "category": category, "entity_type": entity_type, "entity_id": entity_id,
         "display_id": display_id, "title": title, "status": status, "status_label": status_label,
         "department": department, "submitted_by": submitted_by, "submitted_at": submitted_at, "path": path,
         "parent_request_id": parent_request_id, "parent_path": parent_path,
+        "parent_label": parent_label, "folder_name": folder_name,
     }
 
 
@@ -313,7 +316,7 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
 
 def _signoff_items(db: Session, user: models.User) -> List[dict]:
     """QA Sign-off's own QA Lead / Executive COE checkpoints -- gated by the
-    REVIEWER's own department being IT-QA (see routers/signoff.py::
+    REVIEWER's own department being COE - Quality Assurance (see routers/signoff.py::
     _require_qa_department), not by matching the certificate's own
     (requesting) department -- unlike every SM/Department Head checkpoint
     above."""
@@ -336,7 +339,7 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
                 SIGNOFF_STATUS_LABELS.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
                 obj.created_at, f"/signoff?open={obj.certificate_id}",
             ))
-    if user.has_role(Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM):
+    if user.has_role(Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA, Role.AGM_COE):
         for obj in _query("DEPT_HEAD_COE_APPROVAL_PENDING").order_by(models.QASignOff.created_at).all():
             results.append(_item(
                 "QA Sign-off -- Executive COE Approval", "SIGNOFF", obj.id, obj.certificate_id,
@@ -368,6 +371,77 @@ def _test_project_items(db: Session, user: models.User) -> List[dict]:
     return results
 
 
+def _test_case_items(db: Session, user: models.User) -> List[dict]:
+    """Test Case review (2026-08 "Test Approval Workflow" refactor,
+    APR-007) -- two checkpoints, mirroring routers/test_repository.py::
+    review_test_case's own two-stage gate exactly: can_review_repository
+    for a version "In Review" (Reviewer-tier), can_give_final_approval for
+    "Review Completed" (QA-Lead-tier). Both already correctly return True
+    for system QA_LEAD/Admin on every project internally, so no separate
+    is_admin short-circuit is needed the way other categories in this file
+    use one -- this file's own stated principle: "each category works out
+    is this awaiting me the exact same way its own decision endpoint
+    already gates the actual decision call," so this literally calls the
+    same two functions review_test_case calls. Queue VISIBILITY follows the
+    stage assignment: assigned_reviewer_id for In Review and
+    assigned_qa_lead_id for Review Completed. This does not change action
+    authorization -- another qualified project member may still act after
+    opening the testcase directly. Admin retains the cross-queue oversight
+    view. GOV-002 self-approval exclusion applies too."""
+    results: List[dict] = []
+    checkpoints = (
+        ("In Review", can_review_repository, "Test Case -- Reviewer Recommendation"),
+        ("Review Completed", can_give_final_approval, "Test Case -- QA Lead Final Approval"),
+    )
+    for status, checker, category in checkpoints:
+        q = (
+            db.query(models.TestCaseVersion)
+            .join(models.TestCase, models.TestCaseVersion.test_case_id == models.TestCase.id)
+            .filter(models.TestCaseVersion.status == status)
+        )
+        for draft in q.order_by(models.TestCaseVersion.submitted_at).all():
+            if draft.author_id == user.id:
+                continue
+            case = draft.test_case
+            if not case or not checker(db, case.project_id, user):
+                continue
+            assigned_user_id = (
+                draft.assigned_reviewer_id if status == "In Review"
+                else draft.assigned_qa_lead_id
+            )
+            if assigned_user_id != user.id and not user.has_role(Role.ADMIN):
+                continue
+            project = case.project
+            # Reported directly: "Parent Section should be Project Name, the
+            # Folder wise testcase segregation" -- Test Case items have no
+            # QA Request parent, so every pending test case used to fall
+            # into the frontend's "standalone" bucket and render as its own
+            # one-item card. Populating parent_request_id/parent_path with
+            # the owning Test Project (parent_label="Test Project" so the
+            # frontend doesn't mislabel it "Parent QA Request") groups every
+            # pending test case from the same project under one card, and
+            # folder_name sub-groups within it exactly like the Test
+            # Repository's own folder tree does.
+            results.append(_item(
+                category, "TEST_CASE", case.id, case.test_case_key,
+                f"Test Case: {case.test_scenario or case.test_case_key}", draft.status, draft.status,
+                project.department if project else None,
+                draft.submitted_by_name or draft.author_name, draft.submitted_at or draft.created_at,
+                # Reported bug while tracing this: TestRepository.tsx never
+                # reads a `case` query param (only `project` and `open`, the
+                # latter matched against a test case's own key) -- `case=`
+                # here was a dead link that opened the right project but not
+                # the pending test case itself. Fixed to the param the page
+                # actually consumes.
+                f"/test-repository?project={case.project_id}&open={case.test_case_key}",
+                parent_request_id=f"{project.project_key} — {project.name}" if project else None,
+                parent_path=f"/test-repository?project={case.project_id}" if project else None,
+                parent_label="Test Project",
+                folder_name=case.folder_name or "Unfiled",
+            ))
+    return results
+
+
 @router.get("", response_model=List[schemas.PendingApprovalItem])
 def list_pending_approvals(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Everything genuinely awaiting the logged-in user's own decision right
@@ -383,6 +457,7 @@ def list_pending_approvals(db: Session = Depends(get_db), current_user: models.U
         + _suppression_items(db, current_user)
         + _signoff_items(db, current_user)
         + _test_project_items(db, current_user)
+        + _test_case_items(db, current_user)
     )
     items.sort(key=lambda i: i["submitted_at"] or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
     return items

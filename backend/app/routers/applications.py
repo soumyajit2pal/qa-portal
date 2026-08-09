@@ -1,7 +1,5 @@
-import datetime
 import io
 from typing import List, Optional
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -120,7 +118,7 @@ def _approve_pending_application_name(db: Session, obj: "models.ApplicationMaste
     since decide_app_owner_name already does so unconditionally after this
     runs (for both Approve and Reject) and bulk-seeding wants its own
     distinct comment text on that activity entry."""
-    now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    now = models.now()
     obj.app_owner_decided_by_id = current_user.id
     obj.app_owner_decided_at = now
     obj.app_owner_comments = comments
@@ -242,7 +240,7 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
         # helper -- see its own docstring.
         _approve_pending_application_name(db, obj, current_user, payload.comments)
     else:
-        now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        now = models.now()
         obj.app_owner_decided_by_id = current_user.id
         obj.app_owner_decided_at = now
         obj.app_owner_comments = payload.comments
@@ -319,7 +317,7 @@ def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecis
         raise HTTPException(400, "decision must be one of: Approved, Rejected")
     obj.status = "APPROVED" if payload.decision == "Approved" else "REJECTED"
     obj.decided_by_id = current_user.id
-    obj.decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.decided_at = models.now()
     obj.comments = payload.comments
     if obj.status == "REJECTED":
         reason = f"Application Name '{obj.name}' was rejected by SM"

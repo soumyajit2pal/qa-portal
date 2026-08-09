@@ -182,7 +182,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     or overloaded. Shared requests divide their load across assigned testers."""
     qa_team_roles = {
         Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
-        Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM,
+        Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA, Role.AGM_COE,
     }
     if not qa_team_roles.intersection(current_user.roles):
         raise HTTPException(403, "QA tester workload is restricted to the QA team")
@@ -297,15 +297,16 @@ def _age_days(dt) -> int:
         return 0
     if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
         dt = datetime.datetime(dt.year, dt.month, dt.day)
-    if dt.tzinfo is None:
-        # `updated_at`/`created_at` are plain `Column(DateTime)` (no
-        # timezone=True), so Oracle round-trips them as naive datetimes even
-        # though `models.now()` writes them as IST wall-clock time -- treat a
-        # naive value as already being in IST rather than comparing it
-        # against a UTC-derived "now" (which raised "can't subtract
-        # offset-naive and offset-aware datetimes").
-        dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
-    now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    # `updated_at`/`created_at` are plain `Column(DateTime)` (no
+    # timezone=True), so Oracle round-trips them as naive datetimes even
+    # though `models.now()` writes them as IST wall-clock time -- models.
+    # as_aware() treats a naive value as already being in IST rather than
+    # comparing it against a UTC-derived "now" (which raised "can't
+    # subtract offset-naive and offset-aware datetimes"). Shared helper --
+    # see its own docstring for the full story and every other call site
+    # that needed the same fix.
+    dt = models.as_aware(dt)
+    now = models.now()
     return (now - dt).days
 
 

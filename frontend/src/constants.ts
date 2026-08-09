@@ -3,13 +3,15 @@ export const ROLE_LABELS: Record<string, string> = {
   BUSINESS_ANALYST: 'Business Analyst',
   QA_ENGINEER: 'QA Engineer (QA)',
   QA_LEAD: 'QA Lead',
+  CHEIF_MANAGER_QA: 'Cheif Manager - QA',
   // Split from a single DEPARTMENT_HEAD_COE role (2026-08) into two roles
-  // with IDENTICAL authority -- same rationale as the DEPARTMENT_HEAD_CM/
+  // with IDENTICAL authority -- CHEIF_MANAGER_QA is an additional peer of
+  // CHEIF_MANAGER_COE with the same authority; same rationale as the DEPARTMENT_HEAD_CM/
   // DEPARTMENT_HEAD_AGM split below: every hasRole(user, 'DEPARTMENT_HEAD_COE')
   // check now checks both, so either can approve the Executive COE / QA
   // Sign-off checkpoint. Purely so approval logs show the exact position.
-  DEPARTMENT_HEAD_COE_CM: 'Chief Manager - COE',
-  DEPARTMENT_HEAD_COE_AGM: 'Assistant General Manager - COE',
+  CHEIF_MANAGER_COE: 'Chief Manager - COE',
+  AGM_COE: 'Assistant General Manager - COE',
   SECURITY_ANALYST: 'Security Analyst (QA)',
   APPLICATION_OWNER: 'Application Owner',
   // Split from a single DEPARTMENT_HEAD role (2026-08) into two roles with
@@ -46,8 +48,8 @@ export const ALL_ROLES = Object.keys(ROLE_LABELS)
 // oversee different teams: DEPARTMENT_ADMIN_ASSIGNABLE_ROLES for the former,
 // QA_ADMIN_ASSIGNABLE_ROLES for the latter (which DepartmentAdmin.tsx picks
 // between based on which kind of local admin is logged in). Both exclude
-// ADMIN and DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/DEPARTMENT_HEAD_COE_CM/
-// DEPARTMENT_HEAD_COE_AGM -- neither kind of local admin may mint peer
+// ADMIN and DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHEIF_MANAGER_COE/
+// CHEIF_MANAGER_QA/AGM_COE -- neither kind of local admin may mint peer
 // department heads, Executive COE approvers, or other System Admins
 // themselves.
 export const DEPARTMENT_ADMIN_ASSIGNABLE_ROLES: string[] = [
@@ -57,9 +59,9 @@ export const QA_ADMIN_ASSIGNABLE_ROLES: string[] = [
   'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST',
 ]
 
-// QA Sign-off is an IT - QA-owned workflow even when its linked testing
+// QA Sign-off is a COE - Quality Assurance-owned workflow even when its linked testing
 // request came from another business department.
-export const QA_DEPARTMENT = 'IT - QA'
+export const QA_DEPARTMENT = 'COE - Quality Assurance'
 
 // Mirrors backend/app/deps.py's DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES
 // exactly -- roles whose own department mapping is ignored for department-
@@ -75,7 +77,7 @@ export const QA_DEPARTMENT = 'IT - QA'
 // role check -- Admin is deliberately NOT in this set, same as the backend).
 export const DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES: string[] = [
   'QA_LEAD', 'QA_ENGINEER', 'SECURITY_ANALYST',
-  'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM',
+  'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE',
   'SCALE_6_PLUS',
 ]
 
@@ -630,20 +632,107 @@ export const TEST_CASE_TYPES: string[] = [
   'Functional Positive', 'Functional Negative', 'Regression', 'Sanity',
   'Integration', 'Security', 'Performance', 'UAT', 'Other',
 ]
-export const TEST_CASE_STATUSES: string[] = ['Active', 'Draft', 'Deprecated']
+// 2026-08 "Test Approval Workflow" refactor (Test_Approval_Workflow_
+// Requirements.docx) -- mirrors backend constants.py's own 7-state
+// TEST_CASE_STATUSES exactly: Draft -> In Review -> Review Completed ->
+// Approved/Active is the strict two-stage happy path (Reviewer recommends
+// in "In Review", QA Lead gives final approval in "Review Completed" --
+// a Reviewer alone can never reach Approved). "Rework Required" was
+// renamed "Returned" to match the spec's exact wording (same mechanic:
+// author-editable in place, resubmit moves back to "In Review"). Rejected
+// is new and terminal (QA Lead only, from Review Completed, mandatory
+// comment) -- not editable in place; editing spins a new Draft off its
+// content, same as editing an Approved baseline. A TestCaseOut's own
+// `status` is a mirror of whichever TestCaseVersion is "current" (its
+// in-progress draft, if any, else its approved baseline) -- see backend
+// models.py's own "Module 10" header comment.
+export const TEST_CASE_STATUSES: string[] = ['Draft', 'In Review', 'Review Completed', 'Returned', 'Approved', 'Rejected', 'Archived']
 export const TEST_CASE_STATUS_LABELS: Record<string, string> = {
-  Draft: 'Pending QA Lead Review',
-  Active: 'Approved',
-  Deprecated: 'Deprecated',
+  Draft: 'Draft',
+  'In Review': 'Pending Reviewer Recommendation',
+  'Review Completed': 'Pending QA Lead Approval',
+  Returned: 'Returned for Correction',
+  Approved: 'Approved',
+  Rejected: 'Rejected',
+  Archived: 'Archived',
 }
 // "Pending With" -- who needs to act next, for the Test Repository list
-// table's column of the same name. A testcase's only checkpoint is QA Lead
-// verification (see TestRepository.tsx's review/bulk-approve flow); Active/
-// Deprecated have nothing further pending.
+// table's column of the same name. Prefer TestCaseOut.pending_with_user_name
+// (the real assigned person, APR-006) when present; this status->role map is
+// the fallback label when no assignment exists yet.
 export const TEST_CASE_PENDING_WITH: Record<string, string> = {
-  Draft: 'QA Lead', Active: '—', Deprecated: '—',
+  Draft: 'Author', 'In Review': 'Reviewer', 'Review Completed': 'QA Lead', Returned: 'Author',
+  Approved: '—', Rejected: '—', Archived: '—',
 }
+// Statuses where a decision (Reviewer recommend/return, or QA Lead
+// approve/return/reject) is currently awaited -- mirrors backend
+// constants.TEST_CASE_PENDING_DECISION_STATUSES.
+export const TEST_CASE_PENDING_DECISION_STATUSES: string[] = ['In Review', 'Review Completed']
+// Mirrors backend constants.TEST_CASE_TERMINAL_STATUSES -- Rejected cannot
+// be executed, added to a Ready cycle, or edited in place.
+export const TEST_CASE_TERMINAL_STATUSES: string[] = ['Rejected']
+// Explicit action-label vocabulary for the review decision UI (spec
+// section 9) -- keyed by the same decision strings the backend expects on
+// POST .../review (see TestCaseReviewDecision in types.ts).
+export const TEST_CASE_REVIEW_ACTION_LABELS: Record<string, string> = {
+  RECOMMEND: 'Recommend Approval',
+  APPROVE: 'Approve & Activate',
+  RETURN: 'Return for Correction',
+  REJECT: 'Reject',
+}
+// Return/Reject require a comment; Recommend/Approve comments are optional
+// (spec section 6/9).
+export const TEST_CASE_REVIEW_MANDATORY_COMMENT_DECISIONS: string[] = ['RETURN', 'REJECT']
 export const TEST_CASE_PRIORITIES: string[] = PRIORITIES
-export const TEST_CYCLE_STATUSES: string[] = ['Not Started', 'In Progress', 'Completed']
+export const TEST_PROJECT_ROLES: string[] = ['Owner', 'Project Lead', 'Author', 'Tester', 'Reviewer', 'Viewer']
+// Controlled five-state Test Cycle workflow. Completed is terminal.
+export const TEST_CYCLE_STATUSES: string[] = ['Draft', 'Ready', 'In Progress', 'Blocked', 'Completed']
+export const TEST_CYCLE_LOCKED_STATUSES: string[] = ['Blocked', 'Completed']
 export const TEST_EXECUTION_STATUSES: string[] = ['Not Executed', 'Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed']
 export const TEST_EXECUTION_TERMINAL_STATUSES: string[] = ['Pass', 'Fail', 'NA', 'Retest Passed']
+export const TEST_EXECUTION_DEFECT_ELIGIBLE_STATUSES: string[] = ['Fail', 'Blocked']
+// Governed statuses (defects.py) that count as "resolved enough to retest
+// against" -- mirrors the backend's own _DEFECT_RETEST_CLEAR_STATUSES
+// (test_execution.py) exactly. Rejected/Duplicate deliberately excluded --
+// reported directly as "Deferred or Closed" only.
+const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed']
+
+// Mirrors the backend's own _execution_status_gate (test_execution.py)
+// exactly -- see that function's docstring for the full reasoning. Purely
+// for disabling the blocked option and explaining why before the user even
+// submits -- the backend enforces the same rule regardless of what this
+// returns, so a stale/unrefreshed row can't bypass it.
+//
+// Two layers:
+// 1. While any governed Defect linked to this slot is still active (not
+//    Deferred/Closed), every status is blocked -- the execution is fully
+//    locked until the defect(s) clear.
+// 2. Once clear (or nothing was ever linked), but this slot has EVER
+//    recorded a 'Fail': 'Pass'/'NA' are permanently blocked for the rest of
+//    its history -- a defect-corrected pass is always 'Retest Passed'.
+//    'Fail' (failed again on retest) requires a Defect Key to be entered
+//    (defectKeyInput) -- the backend additionally verifies that key
+//    resolves to an existing, currently-active governed Defect, which this
+//    client-side check can't do without a round trip.
+export function executionStatusGate(
+  linkedDefects: { defect_key: string; status: string }[] | undefined,
+  runs: { status: string }[] | undefined,
+  status: string,
+  defectKeyInput?: string,
+): string | null {
+  if (!['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed'].includes(status)) return null
+  const activeDefects = (linkedDefects || []).filter((d) => !DEFECT_RETEST_CLEAR_STATUSES.includes(d.status))
+  if (activeDefects.length) {
+    const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
+    return `this test case previously failed and has an active linked defect (${names}). The execution status cannot be changed until all linked defects are Closed or Deferred.`
+  }
+  const hasPriorFail = (runs || []).some((run) => run.status === 'Fail')
+  if (!hasPriorFail) return null
+  if (status === 'Pass' || status === 'NA') {
+    return `this test case failed earlier in its history -- '${status}' is no longer available. The linked defect has been Closed or Deferred: select 'Retest Passed' if it passes now, or 'Fail' if it fails again.`
+  }
+  if (status === 'Fail' && !(defectKeyInput || '').trim()) {
+    return 'this test case is failing again after a resolved defect -- reopen the existing defect, link another active defect, or create a new defect in Defect Management, then reference its Defect Key here before recording this Fail.'
+  }
+  return null
+}

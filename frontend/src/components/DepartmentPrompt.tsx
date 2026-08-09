@@ -46,11 +46,9 @@ export default function DepartmentPrompt() {
   return (
     // Reported directly ("cross button and close duplicate -- wherever on
     // confirmation modal will be close then cross button should be removed"):
-    // the header's own × used to be wired to the same action as "Log out
-    // instead" below -- an exact duplicate of that explicit button -- so it's
-    // hidden now via hideCloseButton. There's still no "just dismiss without
-    // deciding" option here; only Save or "Log out instead" can close this.
-    <Modal title="Welcome — one more step" onClose={logout} preventBackdropClose variant="dialog" hideCloseButton>
+    // Department selection is mandatory. The shared header × follows the
+    // same safe exit path as "Log out instead" rather than bypassing setup.
+    <Modal title="Welcome — one more step" onClose={logout} preventBackdropClose variant="dialog">
       <p className="muted small" style={{ marginTop: -4, marginBottom: 16 }}>
         Hi {user?.full_name || 'there'} — this is your first time signing in. Pick your department below so
         the right people (your SM, Department Head) can review requests you raise. You can always ask an

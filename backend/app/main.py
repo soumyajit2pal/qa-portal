@@ -23,8 +23,8 @@ from .routers import (
     auth, qa_requests, functional,
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
-    test_projects, test_repository, test_execution, audit, checklist_config,
-    pending_approvals, system_settings,
+    test_projects, test_repository, test_execution, test_reports, audit, checklist_config,
+    pending_approvals, system_settings, notifications, defects,
 )
 
 # Reported: "Custom Fields not working" traced back to an Oracle identifier-
@@ -59,6 +59,12 @@ with SessionLocal() as migration_db:
     migrated_uploads = migrate_legacy_document_layout(migration_db)
     if migrated_uploads:
         logger.info("Migrated %d upload(s) to request-first folders", migrated_uploads)
+    swept = notifications.sweep_overdue_approvals(migration_db)
+    if swept:
+        logger.info("Test approval reminder/escalation sweep: %d notification(s) created", swept)
+    overdue_defects = notifications.sweep_overdue_defects(migration_db)
+    if overdue_defects:
+        logger.info("Defect overdue sweep: %d notification(s) created", overdue_defects)
 
 app = FastAPI(
     title="Centralized QA Portal API",
@@ -202,10 +208,13 @@ app.include_router(applications.router)
 app.include_router(test_projects.router)
 app.include_router(test_repository.router)
 app.include_router(test_execution.router)
+app.include_router(test_reports.router)
+app.include_router(defects.router)
 app.include_router(audit.router)
 app.include_router(checklist_config.router)
 app.include_router(pending_approvals.router)
 app.include_router(system_settings.router)
+app.include_router(notifications.router)
 
 
 @app.get("/api/health")

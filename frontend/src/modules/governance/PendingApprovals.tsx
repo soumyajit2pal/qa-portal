@@ -78,11 +78,27 @@ export default function PendingApprovals() {
       key,
       parentId: row.parent_request_id || row.display_id || row.title,
       parentPath: row.parent_path || null,
+      parentLabel: row.parent_label || null,
       hasParent: Boolean(row.parent_request_id),
       items: [row],
     })
     return map
-  }, new Map<string, { key: string; parentId: string; parentPath: string | null; hasParent: boolean; items: Row[] }>()).values())
+  }, new Map<string, { key: string; parentId: string; parentPath: string | null; parentLabel: string | null; hasParent: boolean; items: Row[] }>()).values())
+
+  // Sub-groups a parent card's own children by folder_name (Test Project
+  // parents only -- every other category leaves folder_name null on every
+  // item, which collapses to a single unlabeled bucket, i.e. today's flat
+  // list, unchanged).
+  function folderBuckets(items: Row[]) {
+    const map = new Map<string, Row[]>()
+    for (const item of items) {
+      const key = item.folder_name || ''
+      const bucket = map.get(key)
+      if (bucket) bucket.push(item)
+      else map.set(key, [item])
+    }
+    return Array.from(map.entries())
+  }
 
   function openFromPending(path: string) {
     const separator = path.includes('?') ? '&' : '?'
@@ -103,7 +119,7 @@ export default function PendingApprovals() {
       <ErrorText error={error} />
       <PageHeader
         title="Pending Approvals" count={rows.length}
-        subtitle="Review work grouped by its parent QA Request. Select a child to open its approval drawer directly."
+        subtitle="Review work grouped by its parent QA Request or Test Project (folder-wise, for test cases). Select a child to open its approval drawer directly."
       />
       {categories.length > 1 && (
         <div className="pending-approval-filters" role="group" aria-label="Filter approval checkpoints">
@@ -132,14 +148,22 @@ export default function PendingApprovals() {
           {groups.map((group) => {
             const isCollapsed = collapsed.has(group.key)
             const oldest = group.items.find((item) => item.submitted_at)?.submitted_at
+            // "Test Project" (folder-wise grouped, see folderBuckets above)
+            // vs the pre-existing "Parent QA Request"/"Standalone Request"
+            // wording for every other category -- parentLabel is only ever
+            // set by the backend for Test Case items right now, but this
+            // stays generic rather than hardcoding entity_type here.
+            const parentIcon = group.parentLabel === 'Test Project' ? 'TP' : group.hasParent ? 'PR' : 'RQ'
+            const parentKicker = group.parentLabel || (group.hasParent ? 'Parent QA Request' : 'Standalone Request')
+            const buckets = folderBuckets(group.items)
             return (
             <Card key={group.key} className={`pending-approval-group${isCollapsed ? ' collapsed' : ''}`}>
               <div className="pending-approval-parent">
                 <button type="button" className="pending-approval-parent-toggle" onClick={() => toggleGroup(group.key)} aria-expanded={!isCollapsed}>
                   <span className="pending-approval-chevron">⌄</span>
-                  <span className="pending-approval-parent-icon">{group.hasParent ? 'PR' : 'RQ'}</span>
+                  <span className="pending-approval-parent-icon">{parentIcon}</span>
                   <span className="pending-approval-parent-copy">
-                    <small>{group.hasParent ? 'Parent QA Request' : 'Standalone Request'}</small>
+                    <small>{parentKicker}</small>
                     <strong>{group.parentId}</strong>
                     {oldest && <em>Oldest pending since {new Date(oldest).toLocaleDateString()}</em>}
                   </span>
@@ -153,24 +177,34 @@ export default function PendingApprovals() {
               </div>
               {!isCollapsed && (
                 <div className="pending-approval-children">
-                  {group.items.map((item, index) => (
-                    <button type="button" className="pending-approval-child" key={item._key} onClick={() => openFromPending(item.path)}>
-                      <span className="pending-approval-branch" aria-hidden="true">{index === group.items.length - 1 ? '└' : '├'}</span>
-                      <span className="pending-approval-child-main">
-                        <span className="pending-approval-child-heading">
-                          <strong>{item.display_id || 'Application Name Approval'}</strong>
-                          <Badge status={item.status} label={item.status_label} />
-                        </span>
-                        <span className="pending-approval-child-title">{item.title}</span>
-                        <span className="pending-approval-child-meta">
-                          <span>{item.category.replace(' -- ', ' · ')}</span>
-                          {item.department && <span>{item.department}</span>}
-                          {item.submitted_by && <span>From {item.submitted_by}</span>}
-                          {item.submitted_at && <span>{new Date(item.submitted_at).toLocaleString()}</span>}
-                        </span>
-                      </span>
-                      <span className="pending-approval-open">Review <b>→</b></span>
-                    </button>
+                  {buckets.map(([folderName, items]) => (
+                    <React.Fragment key={folderName || '__none__'}>
+                      {folderName && (
+                        <div className="pending-approval-folder-heading">
+                          <span className="pending-approval-folder-icon">📁</span>{folderName}
+                          <span className="pending-approval-folder-count">{items.length}</span>
+                        </div>
+                      )}
+                      {items.map((item, index) => (
+                        <button type="button" className="pending-approval-child" key={item._key} onClick={() => openFromPending(item.path)}>
+                          <span className="pending-approval-branch" aria-hidden="true">{index === items.length - 1 ? '└' : '├'}</span>
+                          <span className="pending-approval-child-main">
+                            <span className="pending-approval-child-heading">
+                              <strong>{item.display_id || 'Application Name Approval'}</strong>
+                              <Badge status={item.status} label={item.status_label} />
+                            </span>
+                            <span className="pending-approval-child-title">{item.title}</span>
+                            <span className="pending-approval-child-meta">
+                              <span>{item.category.replace(' -- ', ' · ')}</span>
+                              {item.department && <span>{item.department}</span>}
+                              {item.submitted_by && <span>From {item.submitted_by}</span>}
+                              {item.submitted_at && <span>{new Date(item.submitted_at).toLocaleString()}</span>}
+                            </span>
+                          </span>
+                          <span className="pending-approval-open">Review <b>→</b></span>
+                        </button>
+                      ))}
+                    </React.Fragment>
                   ))}
                 </div>
               )}

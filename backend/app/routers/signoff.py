@@ -1,7 +1,5 @@
-import datetime
 import os
 from typing import List, Optional
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
@@ -20,7 +18,7 @@ router = APIRouter(prefix="/api/signoffs", tags=["signoff"])
 # Module 8: QA Sign-off Certificate lifecycle -- Draft (QA Engineer fills
 # in the certificate) -> QA Lead Approval -> Executive COE Approval -> Issued.
 # The linked application may belong to any department, but this certificate
-# workflow is owned entirely by IT - QA.
+# workflow is owned entirely by COE - Quality Assurance.
 # ---------------------------------------------------------------------------
 
 
@@ -41,6 +39,17 @@ def _require(obj, expected_statuses, action: str):
 def _get_or_404(db: Session, signoff_id: int) -> "models.QASignOff":
     obj = db.query(models.QASignOff).get(signoff_id)
     if not obj:
+        raise HTTPException(404, "Sign-off certificate not found")
+    return obj
+
+
+def _get_visible_or_404(db: Session, signoff_id: int, user: models.User) -> "models.QASignOff":
+    """Resolve a certificate while enforcing request-department privacy."""
+    obj = _get_or_404(db, signoff_id)
+    scope = dashboard_department_scope(user)
+    if scope and obj.request_department != scope:
+        # Deliberately 404 instead of 403 so another department cannot use
+        # sequential IDs to discover whether a private certificate exists.
         raise HTTPException(404, "Sign-off certificate not found")
     return obj
 
@@ -90,26 +99,28 @@ def _require_qa_department(user: models.User) -> None:
 
 @router.get("", response_model=List[schemas.SignOffOut])
 def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # Reported directly: department scoping (see list_requests' matching
-    # comment in routers/qa_requests.py, and dashboard_department_scope's own
-    # docstring in deps.py) was missed here. Every QASignOff row's own
-    # `department` is hardcoded to QA_DEPARTMENT ("IT - QA") at creation time
-    # (see create_signoff below -- "never trust the linked business request's
-    # department... the sign-off certificate is an IT - QA-owned record"), so
-    # applying the same scope naturally means only someone actually mapped to
-    # IT - QA (or one of the unrestricted roles, which already includes every
-    # QA/Security/Executive-COE role -- i.e. everyone who'd ever legitimately
-    # work this workflow) ever sees a row here; no separate rule needed.
+    # The module is visible to every authenticated account, but business
+    # users may only see certificates originating from their own department.
+    # QA delivery/executive roles and Administrators are intentionally
+    # unscoped by dashboard_department_scope because their governed workflow
+    # responsibilities span departments. Filter on the linked request's
+    # department, not QASignOff.department (the latter is always the COE - Quality Assurance
+    # approval owner and would make business privacy filtering meaningless).
     q = db.query(models.QASignOff)
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.QASignOff.department == scope)
+        q = (q.join(
+                models.FunctionalRequest,
+                models.FunctionalRequest.request_id == models.QASignOff.testing_request_id,
+            )
+            .join(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id)
+            .filter(models.QARequest.department == scope))
     return q.order_by(models.QASignOff.created_at.desc()).all()
 
 
 @router.get("/{signoff_id}", response_model=schemas.SignOffOut)
 def get_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return _get_or_404(db, signoff_id)
+    return _get_visible_or_404(db, signoff_id, current_user)
 
 
 @router.post("", response_model=schemas.SignOffOut)
@@ -119,7 +130,7 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     _require_qa_department(current_user)
     data = payload.model_dump()
     # Never trust the linked business request's department for approval
-    # routing: the sign-off certificate is an IT - QA-owned record.
+    # routing: the sign-off certificate is a COE - Quality Assurance-owned record.
     data["department"] = QA_DEPARTMENT
     obj = models.QASignOff(**data, status="DRAFT", requester_id=current_user.id)
     db.add(obj)
@@ -238,8 +249,10 @@ def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Ses
 @router.post("/{signoff_id}/department-head-coe-decision", response_model=schemas.SignOffOut, include_in_schema=False)
 @router.post("/{signoff_id}/executive-coe-decision", response_model=schemas.SignOffOut)
 def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
-                           current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
-    """Final IT - QA approval by Executive COE; approval issues the certificate."""
+                           current_user: models.User = Depends(require_roles(
+                               Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
+                               Role.AGM_COE))):
+    """Final COE - Quality Assurance approval by Executive COE; approval issues the certificate."""
     obj = _get_or_404(db, signoff_id)
     _require_qa_department(current_user)
     require_not_requester(current_user, obj.requester_id)
@@ -262,6 +275,7 @@ def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, d
 
 @router.get("/{signoff_id}/history", response_model=List[schemas.ApprovalActionOut])
 def signoff_history(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _get_visible_or_404(db, signoff_id, current_user)
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="SIGNOFF", entity_id=signoff_id)
             .order_by(models.ApprovalAction.created_at).all())
@@ -272,7 +286,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     """Every field on this QA Sign-off Certificate, plus who requested,
     reviewed and approved it and when, as one downloadable PDF -- the
     offline/printable copy of the certificate itself."""
-    obj = _get_or_404(db, signoff_id)
+    obj = _get_visible_or_404(db, signoff_id, current_user)
 
     def uname(uid):
         if not uid:
@@ -290,7 +304,8 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         ("Application & Change", [
             ("Application Name", obj.application_name),
             ("Application Owner", obj.application_owner),
-            ("Department", obj.department),
+            ("Request Department", obj.request_department),
+            ("QA Approval Department", obj.department),
             ("Testing Request ID", obj.testing_request_id),
             ("Change Request ID(s)", obj.change_request_ids),
             ("Vendor / SI Partner", obj.vendor_si_partner),
@@ -331,8 +346,9 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         title=f"{obj.certificate_id} — {obj.application_name}",
         subtitle="QA Sign-off Certificate — Full Detail Export",
         sections=sections, history=history,
+        history_title=None,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -362,7 +378,10 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.QA_LEAD) and user.department == QA_DEPARTMENT
     if status == "DEPT_HEAD_COE_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM) and user.department == QA_DEPARTMENT
+        return user.has_role(
+            Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
+            Role.AGM_COE,
+        ) and user.department == QA_DEPARTMENT
     return False
 
 
@@ -370,6 +389,7 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
 # certificate has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/{signoff_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_signoff_documents(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _get_visible_or_404(db, signoff_id, current_user)
     return doc_store.list_documents(db, "SIGNOFF", signoff_id)
 
 
@@ -386,6 +406,7 @@ def upload_signoff_documents(signoff_id: int, files: List[UploadFile] = File(...
 @router.get("/{signoff_id}/documents/{doc_id}/download")
 def download_signoff_document(signoff_id: int, doc_id: int, db: Session = Depends(get_db),
                                current_user: models.User = Depends(get_current_user)):
+    _get_visible_or_404(db, signoff_id, current_user)
     doc = doc_store.get_document_or_404(db, "SIGNOFF", signoff_id, doc_id)
     full_path = doc_store.full_path(doc)
     if not os.path.exists(full_path):

@@ -149,6 +149,7 @@ def build_request_detail_pdf(
     *, title: str, subtitle: str, sections: Iterable[Section],
     history: Sequence[HistoryRow], generated_by: str, generated_at: str,
     history_note: Optional[str] = None,
+    history_title: Optional[str] = "Workflow / Approval History — Who Signed",
 ) -> io.BytesIO:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -179,26 +180,27 @@ def build_request_detail_pdf(
         elements.append(t)
         elements.append(Spacer(1, 6))
 
-    elements.append(Paragraph("Workflow / Approval History — Who Signed", _section_title_style))
-    if history_note:
-        elements.append(Paragraph(_fmt(history_note), _meta_style))
-        elements.append(Spacer(1, 4))
-    if history:
-        head = ["Step", "Decision", "Actor", "Role", "Comments", "When"]
-        rows = [[Paragraph(_fmt(c), _styles["Normal"]) for c in row] for row in history]
-        t = Table([head] + rows, repeatRows=1, colWidths=[70, 60, 75, 65, 140, 70])
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
-        elements.append(t)
-    else:
-        elements.append(Paragraph("No workflow history recorded yet.", _styles["Normal"]))
+    if history_title:
+        elements.append(Paragraph(_safe_text(history_title), _section_title_style))
+        if history_note:
+            elements.append(Paragraph(_fmt(history_note), _meta_style))
+            elements.append(Spacer(1, 4))
+        if history:
+            head = ["Step", "Decision", "Actor", "Role", "Comments", "When"]
+            rows = [[Paragraph(_fmt(c), _styles["Normal"]) for c in row] for row in history]
+            t = Table([head] + rows, repeatRows=1, colWidths=[70, 60, 75, 65, 140, 70])
+            t.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            elements.append(t)
+        else:
+            elements.append(Paragraph("No workflow history recorded yet.", _styles["Normal"]))
 
     doc.build(elements)
     buf.seek(0)

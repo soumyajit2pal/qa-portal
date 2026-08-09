@@ -64,7 +64,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'test-management', number: '08', title: 'Test management',
     summary: 'Projects, repository, test-case review, cycles, assignment, execution, defects, and export.',
-    keywords: 'project department application repository folder tag testcase test case bulk import select all filter skipped approve qa lead cycle child request link unlink reset lifecycle execution runner assign attempt defect blocked checkout checkin export actual result image',
+    keywords: 'project department application repository folder tag testcase test case bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete execution runner assign attempt defect blocked checkout checkin export actual result image',
   },
   {
     id: 'collaboration', number: '09', title: 'Comments and collaboration',
@@ -93,11 +93,11 @@ const ROLE_ROWS = [
   ['Business Analyst', 'Raise QA requests and provide business or requirement context.', 'Request initiation.'],
   ['Application Owner', 'Approve or reject a newly proposed application name for the same department.', 'Same-department application-name decisions.'],
   ['SM', 'Review the requester’s submission before Department Head review.', 'Same department; cannot approve their own request.'],
-  ['Chief Manager / AGM – Department', 'Approve or return a request and assign an IT-QA QA Lead.', 'Business department checkpoint; Department Coordinator access.'],
-  ['QA Engineer (QA)', 'Author test cases, execute assigned work, record results, link defects, and raise QA Sign-off.', 'IT - QA working role.'],
+  ['Chief Manager / AGM – Department', 'Approve or return a request and assign a COE - Quality Assurance QA Lead.', 'Business department checkpoint; Department Coordinator access.'],
+  ['QA Engineer (QA)', 'Author test cases, execute assigned work, record results, link defects, and raise QA Sign-off.', 'COE - Quality Assurance working role.'],
   ['QA Lead', 'Verify readiness, assign QA/Security work, review test cases, manage testing, and approve QA Sign-off.', 'Cross-department QA delivery role.'],
-  ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'IT - QA security delivery role.'],
-  ['Chief Manager / AGM – COE', 'Approve QA Sign-off and coordinate QA-team working roles.', 'IT - QA governance role; Department Coordinator access.'],
+  ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'COE - Quality Assurance security delivery role.'],
+  ['Chief Manager / AGM – COE', 'Approve QA Sign-off and coordinate QA-team working roles.', 'COE - Quality Assurance governance role; Department Coordinator access.'],
   ['Administrator', 'Manage all accounts, departments, privileged roles, checklist configuration, and system-wide access.', 'System-wide; assign only when operationally required.'],
 ]
 
@@ -282,7 +282,7 @@ export default function Help() {
               </div>
               <div className="help-rule-grid">
                 <article><strong>Business approvals</strong><p>SM and Department Head decisions are normally limited to the requester’s department.</p></article>
-                <article><strong>QA delivery</strong><p>QA Lead, QA Engineer, and Security Analyst work across requester departments but are governed as the IT - QA team.</p></article>
+                <article><strong>QA delivery</strong><p>QA Lead, QA Engineer, and Security Analyst work across requester departments but are governed as the COE - Quality Assurance team.</p></article>
                 <article><strong>Assigned work</strong><p>Some actions require both the correct role and assignment to that request, test case, or execution.</p></article>
                 <article><strong>Self-approval</strong><p>Holding an approval role does not allow a user to approve a request they created where separation of duties is enforced.</p></article>
               </div>
@@ -313,13 +313,13 @@ export default function Help() {
               <div className="help-card-grid three">
                 <article><IconUsers /><h3>System Administrator</h3><p>Creates accounts; changes departments; assigns Administrator, Department Head, and Executive COE roles; manages protected accounts.</p></article>
                 <article><IconApprove /><h3>Business Department Coordinator</h3><p>A Department Head can assign Requester, Business Analyst, Application Owner, and SM roles to users in their own department.</p></article>
-                <article><IconShield /><h3>QA Department Coordinator</h3><p>An Executive COE can assign QA Engineer, QA Lead, and Security Analyst roles to users mapped to IT - QA.</p></article>
+                <article><IconShield /><h3>QA Department Coordinator</h3><p>An Executive COE can assign QA Engineer, QA Lead, and Security Analyst roles to users mapped to COE - Quality Assurance.</p></article>
               </div>
               <h3 className="help-subheading">SOP: create or change user access</h3>
               <SopSteps items={[
                 { title: 'Validate the access request', text: 'Confirm the user’s identity, department, employment status, requested responsibilities, approver, and effective period.' },
                 { title: 'Find or create the account', text: 'System Administrators use Users & Access. Department Coordinators search their department roster and manage an existing eligible user.' },
-                { title: 'Set the correct department', text: 'Department mapping must be correct before roles are assigned. Business approvals use this mapping; QA delivery roles must be mapped to IT - QA.' },
+                { title: 'Set the correct department', text: 'Department mapping must be correct before roles are assigned. Business approvals use this mapping; QA delivery roles must be mapped to COE - Quality Assurance.' },
                 { title: 'Assign all required roles', text: 'Select every approved role chip. Existing roles outside a Department Coordinator’s assignable scope are preserved and cannot be removed from that page.' },
                 { title: 'Confirm and verify', text: 'Review the confirmation, save, then search for the user again and verify department, roles, login type, and Active status.' },
                 { title: 'Record and review', text: 'Use Audit Log to verify the change. Review multi-role and privileged access periodically and remove roles that are no longer justified.' },
@@ -362,10 +362,10 @@ export default function Help() {
               <Workflow label="Suppression / false positive" steps={['Requester', 'SM', 'Department Head', 'Security verification', 'Done / Rejected']} />
               <Workflow label="QA Sign-off" steps={['QA Engineer raises', 'QA Lead approves', 'Executive COE approves', 'Issued']} />
               <div className="help-rule-grid">
-                <article><strong>Functional</strong><p>The Department Head assigns an IT-QA QA Lead. The QA Lead verifies readiness and assigns one or more QA Testers.</p></article>
-                <article><strong>Performance</strong><p>The Department Head assigns IT-QA for readiness; QA owns planning, execution, analysis, reporting, and sign-off.</p></article>
-                <article><strong>SAST / DAST</strong><p>The QA Lead performs Security Readiness and assigns an IT-QA Security Analyst for scan execution and findings.</p></article>
-                <article><strong>QA Sign-off</strong><p>Only IT - QA can raise the request. It follows QA Engineer → QA Lead → Executive COE, with no SM stage.</p></article>
+                <article><strong>Functional</strong><p>The Department Head assigns a COE - Quality Assurance QA Lead. The QA Lead verifies readiness and assigns one or more QA Testers.</p></article>
+                <article><strong>Performance</strong><p>The Department Head assigns COE - Quality Assurance for readiness; QA owns planning, execution, analysis, reporting, and sign-off.</p></article>
+                <article><strong>SAST / DAST</strong><p>The QA Lead performs Security Readiness and assigns a COE - Quality Assurance Security Analyst for scan execution and findings.</p></article>
+                <article><strong>QA Sign-off</strong><p>Only COE - Quality Assurance can raise the request. It follows QA Engineer → QA Lead → Executive COE, with no SM stage.</p></article>
               </div>
             </ManualSection>
           )}
@@ -405,8 +405,8 @@ export default function Help() {
                 { title: 'Select an active project', text: 'A project requires a Department selected from the system list. Selecting an Application automatically uses and locks its mapped Department. Create folders and subfolders for release, module, epic, or test scope.' },
                 { title: 'Create or import test cases', text: 'Complete the ID-linked hierarchy and all fields including epic, CR, module, priority, pre-condition, scenario, steps, expected result, and data.' },
                 { title: 'Review import results', text: 'The completion dialog identifies created and skipped rows and gives a reason for each issue. The uploaded xlsx is parsed in memory; the source workbook is not retained in document storage.' },
-                { title: 'Submit for QA Lead review', text: 'A new or materially updated test case remains Pending QA Lead Review and cannot be used in a cycle.' },
-                { title: 'Approve or return', text: 'QA Leads can review singly or bulk approve with one approval message. Approved cases become Active; re-approval increments the version.' },
+                { title: 'Submit for Reviewer recommendation', text: 'A new or materially updated testcase first moves to Pending Reviewer Recommendation and cannot be used in a cycle.' },
+                { title: 'Recommend, then approve', text: 'The Reviewer recommends or returns the testcase at Stage 1. The QA Lead then approves, returns, or rejects it at Stage 2. Approved cases become Active; re-approval increments the version.' },
                 { title: 'Use check-out for editing', text: 'Check Out reserves the case so others know it is being edited. Save the work, then Check In to release the editing reservation.' },
                 { title: 'Maintain in bulk', text: 'Use tags to filter matching test cases. Bulk update can change Test Type, Folder, Module Name, and Priority. Confirm the selected count before bulk update or delete.' },
               ]} />
@@ -414,12 +414,13 @@ export default function Help() {
               <SopSteps items={[
                 { title: 'Create or edit a test cycle', text: 'Choose an active project, define cycle scope and dates, and optionally link the cycle to a child Functional, SAST, DAST, or Performance request ID. Existing cycles can be edited.' },
                 { title: 'Add approved test cases', text: 'Use Select all, column filters, pagination, and configurable columns in Add Test Cases to Cycle. Already-linked and unapproved cases are excluded.' },
-                { title: 'Assign runners', text: 'Any IT-QA QA Engineer or QA Lead can assign or reassign cases to an active IT-QA QA Engineer or QA Lead.' },
-                { title: 'Execute an attempt', text: 'The assigned runner opens the test case, reviews all repository details, and records status, actual result, comments, and evidence.' },
+                { title: 'Assign runners', text: 'Any COE - Quality Assurance QA Engineer or QA Lead can assign or reassign cases to an active COE - Quality Assurance QA Engineer or QA Lead.' },
+                { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. An In Progress cycle can be blocked with a mandatory reason, resumed, or completed. Completed is final.' },
+                { title: 'Execute an attempt', text: 'While the cycle is In Progress, the assigned runner opens the test case, reviews all repository details, and records status, actual result, comments, and evidence.' },
                 { title: 'Use rich Actual Result', text: 'Format text, add bullets, paste images, or upload supported images. Keep results specific enough for another person to reproduce.' },
                 { title: 'Link defects', text: 'For Fail or Blocked outcomes, add the defect reference and explain the observed behavior. Use a new execution attempt for retest history rather than overwriting evidence.' },
                 { title: 'Operate in bulk', text: 'Use bulk assignment, bulk execution, bulk removal from the cycle, or export after validating the selected cases and confirmation summary.' },
-                { title: 'Maintain lifecycle links', text: 'Link or unlink a child request from either Functional Request details or Test Lifecycle. Reset Lifecycle is destructive and requires confirmation; use it only when the cycle must return to its initial execution state.' },
+                { title: 'Maintain request links', text: 'Link or unlink a child request from either Functional Request details or Test Lifecycle while the cycle remains active.' },
               ]} />
               <Callout title="One test case can be executed many times">
                 Execution attempts preserve runner, result, timestamps, evidence, and linked defects independently. This provides a complete run and retest trail.
@@ -500,7 +501,7 @@ export default function Help() {
                 <div><strong>404 popup / page</strong><span>The record does not exist, was removed, or the ID/route is incorrect.</span><span>Search the full TQA ID, verify the module, and confirm the record still exists.</span></div>
                 <div><strong>Import skipped or failed</strong><span>Duplicate, invalid, missing, unsupported, or unapproved data.</span><span>Open the issue summary and correct each row using its displayed reason; do not retry unchanged data.</span></div>
                 <div><strong>Upload path error</strong><span>The Admin-configured server path is not absolute, writable, mounted, or available to every API container.</span><span>Use System Settings to enter an absolute production path and verify the same persistent volume is mounted at that path for all API replicas.</span></div>
-                <div><strong>Cannot execute</strong><span>Test case is unapproved, project inactive, or runner not assigned.</span><span>Approve the case, reactivate the project if authorized, and assign an IT-QA runner.</span></div>
+                <div><strong>Cannot execute</strong><span>Test case is unapproved, project inactive, or runner not assigned.</span><span>Approve the case, reactivate the project if authorized, and assign a COE - Quality Assurance runner.</span></div>
               </div>
               <Callout title="Excel import storage">
                 Test-case import workbooks are read in memory and are not retained under the configured upload path. Documents, checklist evidence, execution images, and other retained attachments use the active Admin-configured upload root.

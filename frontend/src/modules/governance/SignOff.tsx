@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
@@ -6,7 +6,6 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocumen
 import {
   CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, hasRole,
   SIGNOFF_EDITABLE_STATUSES, QA_DEPARTMENT, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
-  canSeeQaDepartmentOnlyData,
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, ApprovalActionOut } from '../../types'
 import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
@@ -152,6 +151,23 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   // own Documents tab does post-raise (see Common.tsx::RequestDocuments),
   // just folded into this one form instead of a separate step.
   const [files, setFiles] = useState<File[]>([])
+  // Reported directly: pasting a screenshot into these three fields did
+  // nothing useful (allowImages was false below, same root cause as the
+  // Defect Management module before it was fixed -- see
+  // ORACLE_MIGRATION_2026-07.md sections 29-32) except that, with
+  // allowImages false, JiraRichTextField doesn't attach its own paste
+  // handler at all, so the paste fell through to the browser's raw default
+  // contentEditable behaviour instead of being cleanly blocked -- which for
+  // an image on the clipboard typically means Chrome/Edge embed it directly
+  // as a multi-megabyte base64 <img> in the DOM. That's the most likely
+  // cause of "Save Draft Certificate not working" reported alongside it:
+  // not a backend bug, but the editor silently becoming enormous/sluggish
+  // right before Save was clicked. Enabling proper image support below
+  // (event.preventDefault() inside pasteImages, see RichTextEditor.tsx)
+  // stops the raw paste from ever reaching the DOM in the first place.
+  const [exitCriteriaImages, setExitCriteriaImages] = useState<File[]>([])
+  const [openDefectImages, setOpenDefectImages] = useState<File[]>([])
+  const [residualRiskImages, setResidualRiskImages] = useState<File[]>([])
   function set<K extends keyof SignOffForm>(k: K, v: SignOffForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   const applyRequest = useCallback((r: FunctionalOut) => {
@@ -213,8 +229,13 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
       // so a failed upload shouldn't block onCreated -- surface the error but
       // still hand back the created certificate (its own Documents tab, via
       // RequestDocuments in SignOffDetail below, can always retry the upload).
-      if (files.length > 0) {
-        try { await api.uploadFiles(`/api/signoffs/${created.id}/documents`, files) }
+      // Screenshots pasted into Exit Criteria/Open Defect/Residual Risk are
+      // never embedded inline (same as every other JiraRichTextField in the
+      // app) -- they're combined with the explicitly-picked Supporting
+      // Documents and uploaded together here.
+      const allFiles = [...files, ...exitCriteriaImages, ...openDefectImages, ...residualRiskImages]
+      if (allFiles.length > 0) {
+        try { await api.uploadFiles(`/api/signoffs/${created.id}/documents`, allFiles) }
         catch (err) { setError(err) }
       }
       onCreated(created)
@@ -276,9 +297,9 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
             <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
-        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
-        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
-        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
+        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
+        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
+        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
         <Field label="Supporting Documents">
           <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
           {files.length > 0 && (
@@ -318,6 +339,9 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
   })
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const [exitCriteriaImages, setExitCriteriaImages] = useState<File[]>([])
+  const [openDefectImages, setOpenDefectImages] = useState<File[]>([])
+  const [residualRiskImages, setResidualRiskImages] = useState<File[]>([])
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   async function submit(e: React.FormEvent) {
@@ -329,11 +353,20 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
     setBusy(true)
     setError(null)
     try {
-      onSaved(await api.put<SignOffOut>(`/api/signoffs/${item.id}`, {
+      const saved = await api.put<SignOffOut>(`/api/signoffs/${item.id}`, {
         ...form,
         validity_from: form.validity_from || null,
         validity_to: form.validity_to || null,
-      }))
+      })
+      // Same best-effort convention as NewSignOffModal above -- the edit
+      // itself already succeeded, so a failed image upload shouldn't block
+      // handing back the saved certificate.
+      const images = [...exitCriteriaImages, ...openDefectImages, ...residualRiskImages]
+      if (images.length > 0) {
+        try { await api.uploadFiles(`/api/signoffs/${item.id}/documents`, images) }
+        catch (err) { setError(err) }
+      }
+      onSaved(saved)
     }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -383,9 +416,9 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
             <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
-        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
-        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
-        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={() => undefined} allowImages={false} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
+        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
+        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
+        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
           <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Changes'}</button>
@@ -439,7 +472,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   // require_not_requester, which enforces the same check server-side).
   const isSelfApproval = item.requester_id === user?.id && !isAdmin
   const canQALeadDecide = hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
-  const canExecutiveCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
+  const canExecutiveCoeDecide = hasRole(user, 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
   // Reported directly: "only the assigned person can update" -- once the
   // certificate has moved past the requester, document control passes
   // exclusively to whoever it's actually sitting with now, matching the
@@ -464,6 +497,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
         <div><strong>Testing Request ID:</strong> {item.testing_request_id || '—'}</div>
         <div><strong>Change Request ID(s):</strong> {item.change_request_ids || '—'}</div>
         <div><strong>Application Owner:</strong> {item.application_owner || '—'}</div>
+        <div><strong>Request Department:</strong> {item.request_department || '—'}</div>
         <div><strong>QA Approval Department:</strong> {item.department || QA_DEPARTMENT}</div>
         <div><strong>Requested By (QA Team):</strong> {userName(users, item.requester_id) || '—'}</div>
         <div><strong>Approved By (QA Lead):</strong> {userName(users, item.reviewed_by_id) || '—'}</div>
@@ -544,6 +578,7 @@ export default function SignOff() {
   const [showNew, setShowNew] = useState(false)
   const [selected, setSelected] = useState<SignOffOut | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
+  const [departmentFilter, setDepartmentFilter] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -567,21 +602,8 @@ export default function SignOff() {
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
   }, [rows, searchParams, setSearchParams])
 
-  // Reported directly: "Hide QA Sign Off except IT-QA." Every certificate's
-  // own department is hardcoded to QA_DEPARTMENT at creation (see
-  // routers/signoff.py::create_signoff), and the list endpoint now scopes to
-  // that (see ORACLE_MIGRATION_2026-07.md section 201) -- so anyone outside
-  // canSeeQaDepartmentOnlyData would only ever land on a guaranteed-empty
-  // page. The nav link is already hidden for them (see Layout.tsx); this is
-  // the matching direct-URL guard, same "Access Restricted" pattern already
-  // used by Admin.tsx/DepartmentAdmin.tsx.
-  if (!canSeeQaDepartmentOnlyData(user)) {
-    return (
-      <Card title="Access Restricted">
-        <p className="muted">QA Sign-off is only available to the {QA_DEPARTMENT} department.</p>
-      </Card>
-    )
-  }
+  const departments = useMemo(() => Array.from(new Set(rows.map((row) => row.request_department).filter((value): value is string => !!value))).sort((a, b) => a.localeCompare(b)), [rows])
+  const visibleRows = useMemo(() => departmentFilter ? rows.filter((row) => row.request_department === departmentFilter) : rows, [rows, departmentFilter])
 
   const canCreate = hasRole(user, 'ADMIN')
     || (hasRole(user, 'QA_ENGINEER') && user?.department === QA_DEPARTMENT)
@@ -591,13 +613,18 @@ export default function SignOff() {
       <ErrorText error={error} />
       <PageHeader
         title="QA Sign-off Certificates" count={rows.length}
-        subtitle="IT - QA clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive COE approval."
+        subtitle="COE - Quality Assurance clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive COE approval."
         actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Sign-off Certificate</button>}
       />
       <Card>
+        <div className="signoff-register-toolbar">
+          <div><strong>Certificate Register</strong><span>{visibleRows.length} of {rows.length} certificates</span></div>
+          <label><span>Request Department</span><select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option value="">All departments</option>{departments.map((department) => <option key={department} value={department}>{department}</option>)}</select></label>
+        </div>
         <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
           { key: 'certificate_id', header: 'Certificate ID' },
           { key: 'application_name', header: 'Application' },
+          { key: 'request_department', header: 'Department', render: (r) => r.request_department || '—' },
           { key: 'requester_id', header: 'Requested By', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'reviewed_by_id', header: 'Reviewed By', render: (r) => userName(users, r.reviewed_by_id) || '—', filterValue: (r) => userName(users, r.reviewed_by_id) || '' },
           { key: 'approved_by_id', header: 'Approved By', render: (r) => userName(users, r.approved_by_id) || '—', filterValue: (r) => userName(users, r.approved_by_id) || '' },
@@ -605,7 +632,7 @@ export default function SignOff() {
           { key: 'testing_type', header: 'Testing Type' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={SIGNOFF_STATUS_LABELS[r.status] || r.status} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => SIGNOFF_PENDING_WITH[r.status] || '—', filterValue: (r) => SIGNOFF_PENDING_WITH[r.status] || '' },
-        ]} rows={rows} />
+        ]} rows={visibleRows} />
       </Card>
       {showNew && <NewSignOffModal onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load() }} />}
       {selected && <SignOffDetail item={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }} users={users} />}

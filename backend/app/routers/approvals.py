@@ -51,6 +51,9 @@ def _resolve_request_ref(db: Session, entity_type: str, entity_id: int) -> Optio
     if entity_type == "SIGNOFF":
         obj = db.query(models.QASignOff).get(entity_id)
         return obj.certificate_id if obj else None
+    if entity_type == "DEFECT":
+        obj = db.query(models.Defect).get(entity_id)
+        return obj.defect_key if obj else None
     return None
 
 
@@ -124,6 +127,7 @@ _COMMENT_ENTITY_MODELS = {
     "TEST_PROJECT": models.TestProject,
     "TEST_CASE": models.TestCase,
     "TEST_CYCLE": models.TestCycle,
+    "DEFECT": models.Defect,
 }
 
 _COMMENT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}

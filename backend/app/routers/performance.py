@@ -1,7 +1,5 @@
-import datetime
 import os
 from typing import List
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
@@ -82,7 +80,7 @@ def _require_performance_execution_owner(obj: "models.PerformanceRequest", user:
         return
     if user.id in _performance_tester_ids(obj) and user.has_role(Role.QA_ENGINEER):
         return
-    raise HTTPException(403, "Only the assigned QA Lead or an assigned IT-QA QA Tester can perform this action")
+    raise HTTPException(403, "Only the assigned QA Lead or an assigned COE - Quality Assurance QA Tester can perform this action")
 
 
 @router.get("", response_model=List[schemas.PerformanceOut])
@@ -262,7 +260,7 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 @router.post("/{req_id}/department-head-decision", response_model=schemas.PerformanceOut)
 def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDecisionIn, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
-    """Approval requires assignment to an active IT-QA QA Lead."""
+    """Approval requires assignment to an active COE - Quality Assurance QA Lead."""
     obj = _get_or_404(db, req_id)
     require_same_department(current_user, obj.department)
     require_not_requester(current_user, obj.requester_id)
@@ -401,7 +399,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.Performanc
     if payload.is_complete:
         item.approved_by_id = current_user.id
         import datetime
-        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        item.approved_at = models.now()
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -566,7 +564,7 @@ def acknowledge_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_d
         raise HTTPException(404, "Walkthrough session not found")
     import datetime
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj
@@ -647,7 +645,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
         subtitle="Performance Testing Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

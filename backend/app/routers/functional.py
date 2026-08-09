@@ -1,7 +1,5 @@
-import datetime
 import os
 from typing import Optional, List
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
@@ -26,7 +24,7 @@ router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
 # lifecycle that used to live directly on the QA Request itself:
 #
 #   Draft -> Submit -> same-department SM Approval -> same-department
-#   Department Head Approval (assigns an IT-QA QA Lead) -> that lead starts
+#   Department Head Approval (assigns a COE - Quality Assurance QA Lead) -> that lead starts
 #   Readiness Verification -> QA Activity (Planning -> Tester
 #   Assignment -> Test Design -> Execution, with a Defect -> Waiting For Fix
 #   -> Retesting -> Regression Testing cycle) -> QA Completed -> QA Sign-off
@@ -75,7 +73,7 @@ def _assigned_tester_ids(obj: "models.FunctionalRequest") -> set[int]:
 
 def _require_assigned_tester(obj: "models.FunctionalRequest", user: models.User) -> None:
     if not user.has_role(Role.ADMIN) and user.id not in _assigned_tester_ids(obj):
-        raise HTTPException(403, "Only an IT-QA QA Tester assigned by the QA Lead can perform this action")
+        raise HTTPException(403, "Only a COE - Quality Assurance QA Tester assigned by the QA Lead can perform this action")
 
 
 @router.get("", response_model=List[schemas.FunctionalOut])
@@ -336,7 +334,7 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 @router.post("/{req_id}/department-head-decision", response_model=schemas.FunctionalOut)
 def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisionIn, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
-    """Department Head reviews the request and assigns an IT-QA QA Lead."""
+    """Department Head reviews the request and assigns a COE - Quality Assurance QA Lead."""
     obj = _get_or_404(db, req_id)
     require_same_department(current_user, obj.department)
     require_not_requester(current_user, obj.requester_id)
@@ -499,7 +497,7 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
                           .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
                           .filter(models.TestCycle.id == payload.test_cycle_id,
                                   models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
-                                  models.TestCycle.status.in_(["Not Started", "In Progress"]))
+                          models.TestCycle.status == "In Progress")
                           .first())
         if not selected_cycle:
             raise HTTPException(400, "The selected test cycle is no longer active or eligible")
@@ -518,8 +516,6 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
             db.add(models.TestCycleChildRequestLink(
                 cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
             ))
-    if cycle and cycle.status == "Not Started":
-        cycle.status = "In Progress"
     obj.status = QAStatus.EXECUTION_IN_PROGRESS
     _log(
         db, obj.id, "Test Design", current_user, "Execution Started",
@@ -540,7 +536,7 @@ def eligible_test_cycles(req_id: int, db: Session = Depends(get_db),
              .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
              .outerjoin(models.TestCycleChildRequestLink, models.TestCycleChildRequestLink.cycle_id == models.TestCycle.id)
              .filter(models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
-                     models.TestCycle.status.in_(["Not Started", "In Progress"]),
+                     models.TestCycle.status == "In Progress",
                      models.TestCycleChildRequestLink.id.is_(None)))
     application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
     if application_master_id:
@@ -574,6 +570,8 @@ def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
     ).first()
     if not link:
         raise HTTPException(404, "This test cycle is not linked to the Functional Testing request")
+    if link.cycle.status in ("Blocked", "Completed"):
+        raise HTTPException(400, f"This Test Cycle is {link.cycle.status} and its request link cannot be changed")
     cycle_key = link.cycle.cycle_key
     cycle_name = link.cycle.name
     db.delete(link)
@@ -590,12 +588,34 @@ def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
 
 
 # ---- Defect -> Fix -> Retest -> Regression cycle ----
+# Workflow change (reported directly: "raise defect, start retest currently
+# not required as everything is linked with test cycle"): once a Test Cycle
+# is linked to this request (see start_execution's link_test_cycle option),
+# defects are raised, tracked, and retested through Test Execution + the
+# Defects module -- both scoped to that Test Cycle -- instead of this
+# request's own manual Defect Raised -> Waiting For Fix -> Retesting states.
+# This whole 3-endpoint sub-flow (raise_defect/mark_waiting_for_fix/
+# start_retesting) is therefore now reachable only for a request that was
+# started WITHOUT linking a cycle (still a supported path -- see
+# eligible_test_cycles/start_execution's own link_test_cycle=False branch),
+# where it remains the only defect-tracking mechanism available. See
+# complete_qa below for the matching linked-cycle-completion gate.
+def _require_no_linked_cycle_for_manual_defect_flow(obj: "models.FunctionalRequest", action: str) -> None:
+    if obj.linked_test_cycles:
+        raise HTTPException(
+            400,
+            f"'{action}' is not used once a Test Cycle is linked -- raise, fix, and retest defects from "
+            "Test Execution / the Defects module against the linked Test Cycle instead.",
+        )
+
+
 @router.post("/{req_id}/raise-defect", response_model=schemas.FunctionalOut)
 def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.EXECUTION_IN_PROGRESS, "Raise defect")
     _require_assigned_tester(obj, current_user)
+    _require_no_linked_cycle_for_manual_defect_flow(obj, "Raise Defect")
     obj.status = QAStatus.DEFECT_RAISED
     _log(db, obj.id, "Execution In Progress", current_user, "Defect Raised", payload.comments)
     db.commit()
@@ -644,6 +664,24 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     obj = _get_or_404(db, req_id)
     _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING], "Complete QA")
     _require_assigned_tester(obj, current_user)
+
+    # Workflow change (reported directly): once execution is tracked through
+    # a linked Test Cycle, that cycle's own lifecycle is the real record of
+    # whether testing actually finished -- QA Complete can no longer jump
+    # ahead of it. Every linked cycle must reach "Completed" first. A
+    # request that was started without linking a cycle (link_test_cycle=
+    # False at Start Execution) has nothing to wait on and keeps today's
+    # behavior unchanged. See raise_defect's matching comment above for why
+    # the Defect Raised/Waiting For Fix/Retesting states are no longer part
+    # of this path once a cycle is linked.
+    open_cycles = [cycle for cycle in obj.linked_test_cycles if cycle.status != "Completed"]
+    if open_cycles:
+        names = ", ".join(f"{cycle.cycle_key} ({cycle.status})" for cycle in open_cycles)
+        raise HTTPException(
+            400,
+            f"Mark QA Complete requires every linked Test Cycle to reach Completed first. "
+            f"Still open: {names}",
+        )
 
     obj.status = QAStatus.QA_COMPLETED
     _log(db, obj.id, "Execution", current_user, "QA Completed", payload.comments)
@@ -764,7 +802,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistI
     if payload.is_complete:
         item.approved_by_id = current_user.id
         import datetime
-        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        item.approved_at = models.now()
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -800,7 +838,7 @@ def acknowledge_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_d
         raise HTTPException(404, "Walkthrough session not found")
     import datetime
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj
@@ -879,7 +917,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         subtitle="Functional QA Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

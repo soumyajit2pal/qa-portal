@@ -313,6 +313,11 @@ export interface ApprovalActionOut {
   decision?: string | null
   comments?: string | null
   created_at: string
+  // 2026-08 Test Approval Workflow refactor (APR-005) -- populated only by
+  // the Test Case approval workflow's own audit calls; NULL for every other
+  // entity type's approval actions, which predate this column pair.
+  previous_state?: string | null
+  new_state?: string | null
 }
 
 // ---------------- SAST / DAST ----------------
@@ -561,6 +566,7 @@ export interface SignOffOut {
   application_name: string
   application_owner?: string | null
   department?: string | null
+  request_department?: string | null
   vendor_si_partner?: string | null
   technology_stack?: string | null
   risk_tier?: string | null
@@ -666,9 +672,16 @@ export interface SuppressionDashboard {
 
 // ---------------- Test Management (Project Management / Test Repository / Test Execution) ----------------
 // See backend models.TestProject's header comment for the full design --
-// one Project per Application, a folder tree of Test Cases (with Steps)
-// under it, and Test Cycles that record a Pass/Fail/Blocked/NA/Retest
-// Passed result per test case run.
+// one Project per Application, a folder tree of Test Cases under it, Test
+// Plans grouping Test Cycles, and Test Cycles that record a Pass/Fail/
+// Blocked/NA/Retest Passed result per test case run.
+//
+// 2026-08 "Test Management Revamp": testcase content/steps now live in
+// immutable TestCaseVersion/TestCaseVersionStep records instead of being
+// mutated in place -- TestCaseOut's own status/version/content fields are a
+// mirror of whichever version is "current" (its in-progress draft, if any,
+// else its approved baseline). See constants.ts's TEST_CASE_STATUSES (5
+// values) and TEST_CYCLE_STATUSES (7 values) for the current vocabularies.
 export interface TestProjectOut {
   id: number
   project_key: string
@@ -677,12 +690,85 @@ export interface TestProjectOut {
   department?: string | null
   description?: string | null
   is_active: boolean
+  owner_id?: number | null
+  owner_name?: string | null
   created_by_id?: number | null
   created_at: string
   pending_is_active?: boolean | null
   pending_requested_by_id?: number | null
   pending_requested_by_name?: string | null
   pending_requested_at?: string | null
+  is_archived: boolean
+  archived_by_id?: number | null
+  archived_by_name?: string | null
+  archived_at?: string | null
+  archived_reason?: string | null
+  // 2026-08 Test Approval Workflow refactor (APR-001) -- project-level
+  // default assignment targets; routing/visibility only, not an
+  // authorization gate (see TestCaseVersionOut.assigned_* fields).
+  default_reviewer_id?: number | null
+  default_reviewer_name?: string | null
+  default_qa_lead_id?: number | null
+  default_qa_lead_name?: string | null
+}
+
+// Request body for POST /api/test-projects -- mirrors backend TestProjectCreate.
+export interface TestProjectCreateIn {
+  project_key: string
+  name: string
+  application_master_id?: number | null
+  department?: string | null
+  description?: string | null
+  owner_id?: number | null
+  default_reviewer_id?: number | null
+  default_qa_lead_id?: number | null
+}
+
+// Request body for PATCH /api/test-projects/{id} -- mirrors backend TestProjectUpdate.
+// All fields optional/partial; explicit null clears default_reviewer_id/default_qa_lead_id.
+export interface TestProjectUpdateIn {
+  name?: string
+  application_master_id?: number | null
+  department?: string | null
+  description?: string | null
+  is_active?: boolean
+  owner_id?: number | null
+  default_reviewer_id?: number | null
+  default_qa_lead_id?: number | null
+}
+
+// SRS PRJ-005/GOV-001 -- project-scoped membership, separate from the
+// app-wide Role enum (see constants.ts TEST_PROJECT_ROLES).
+// SRS PRJ-005/GOV-001 -- advisory permission summary for the signed-in user
+// on one Test Project; see routers/test_projects.py::get_my_project_access.
+// Every mutating endpoint still enforces these same rules server-side
+// regardless of what the UI does with this.
+export interface TestProjectMyAccessOut {
+  project_id: number
+  project_role?: string | null
+  is_member: boolean
+  can_author_repository: boolean
+  can_review_repository: boolean
+  // 2026-08 Test Approval Workflow refactor -- Stage 2 (QA Lead final
+  // approve/reject) gate, strictly narrower than can_review_repository:
+  // Project Lead/Owner project roles or system QA_LEAD/Admin only, no
+  // non-member fallback. A plain "Reviewer" project role does NOT satisfy
+  // this even though it satisfies can_review_repository.
+  can_give_final_approval: boolean
+  can_execute: boolean
+  can_manage_execution_governance: boolean
+}
+
+export interface TestProjectMemberOut {
+  id: number
+  project_id: number
+  user_id: number
+  user_name?: string | null
+  user_email?: string | null
+  project_role: string
+  added_by_id?: number | null
+  added_by_name?: string | null
+  added_at: string
 }
 
 export interface TestFolderOut {
@@ -722,6 +808,9 @@ export interface TestCaseOut {
   tags: string[]
   status: string
   version?: string
+  current_approved_version_id?: number | null
+  current_draft_version_id?: number | null
+  current_draft_author_id?: number | null
   created_by_id?: number | null
   created_by_name?: string | null
   created_at: string
@@ -730,6 +819,108 @@ export interface TestCaseOut {
   checked_out_by_name?: string | null
   checked_out_at?: string | null
   steps: TestStepOut[]
+  // 2026-08 Test Approval Workflow refactor -- who the case is currently
+  // "Pending with" (APR-006/section 9), bridged through current_draft_version;
+  // null when the case isn't awaiting anyone (Draft with no submission, or
+  // a terminal Approved/Rejected/Archived state).
+  pending_with_user_id?: number | null
+  pending_with_user_name?: string | null
+  pending_since?: string | null
+}
+
+export type TestCaseVersionStepOut = TestStepIn & { id: number; version_id: number }
+
+// One immutable-once-Approved snapshot of a testcase's full content (VER-001).
+export interface TestCaseVersionOut {
+  id: number
+  test_case_id: number
+  version: string
+  version_major: number
+  version_minor: number
+  status: string
+  epic_id?: string | null
+  cr_number?: string | null
+  feature_id?: string | null
+  user_story_id?: string | null
+  test_type?: string | null
+  module_name?: string | null
+  test_scenario?: string | null
+  pre_condition?: string | null
+  description?: string | null
+  priority?: string | null
+  author_id?: number | null
+  author_name?: string | null
+  created_at: string
+  submitted_by_id?: number | null
+  submitted_by_name?: string | null
+  submitted_at?: string | null
+  submit_note?: string | null
+  // Stage 1 (Reviewer) decision -- set on RECOMMEND or a Stage-1 RETURN.
+  reviewed_by_id?: number | null
+  reviewed_by_name?: string | null
+  reviewed_at?: string | null
+  review_comments?: string | null
+  // Stage 2 (QA Lead) decision -- set on APPROVE, REJECT, or a Stage-2 RETURN.
+  qa_lead_decided_by_id?: number | null
+  qa_lead_decided_by_name?: string | null
+  qa_lead_decided_at?: string | null
+  qa_lead_decision_comments?: string | null
+  // APR-001 -- per-item assignment override of the project's default_reviewer/
+  // default_qa_lead; routing/visibility only, not an authorization gate.
+  assigned_reviewer_id?: number | null
+  assigned_reviewer_name?: string | null
+  assigned_qa_lead_id?: number | null
+  assigned_qa_lead_name?: string | null
+  pending_with_user_id?: number | null
+  pending_with_user_name?: string | null
+  source_version_id?: number | null
+  steps: TestCaseVersionStepOut[]
+}
+
+// Request body for PATCH /api/test-cases/{id}/approvers.
+export interface TestCaseReassignApproversIn {
+  assigned_reviewer_id?: number | null
+  assigned_qa_lead_id?: number | null
+}
+
+// Request body for POST /api/test-cases/{id}/review (and bulk variants).
+// Stage 1 (In Review, gated by can_review_repository): RECOMMEND | RETURN
+// Stage 2 (Review Completed, gated by can_give_final_approval): APPROVE | RETURN | REJECT
+export type TestCaseReviewDecision = "RECOMMEND" | "APPROVE" | "RETURN" | "REJECT"
+export interface TestCaseReviewIn {
+  decision: TestCaseReviewDecision
+  assigned_qa_lead_id?: number | null
+  comments?: string | null
+}
+
+// Request body for POST /api/projects/{id}/test-cases/bulk-recommend.
+export interface TestCaseBulkRecommendIn {
+  ids: number[]
+  assigned_qa_lead_id: number
+  comments?: string | null
+}
+
+// Lighter-weight row for version history lists (VER-005) -- no steps.
+export interface TestCaseVersionSummary {
+  id: number
+  test_case_id: number
+  version: string
+  version_major: number
+  version_minor: number
+  status: string
+  author_id?: number | null
+  author_name?: string | null
+  created_at: string
+  submitted_at?: string | null
+  reviewed_by_name?: string | null
+  reviewed_at?: string | null
+}
+
+export interface TestCaseVersionCompareOut {
+  left: TestCaseVersionOut
+  right: TestCaseVersionOut
+  field_diffs: Record<string, { left: unknown; right: unknown }>
+  step_diffs: Record<string, { left: { step_text?: string | null; expected_result?: string | null } | null; right: { step_text?: string | null; expected_result?: string | null } | null }>
 }
 
 export interface TestCaseImportResult {
@@ -752,6 +943,11 @@ export interface TestCycleOut {
   linked_request_type?: string | null
   linked_request_id?: number | null
   linked_request_key?: string | null
+  cycle_type?: string | null
+  environment?: string | null
+  build?: string | null
+  owner_id?: number | null
+  owner_name?: string | null
   created_by_id?: number | null
   created_at: string
 }
@@ -789,6 +985,13 @@ export interface TestExecutionOut {
   cycle_id: number
   test_case_id: number
   test_case?: TestCaseOut | null
+  // SRS CYC-004 -- the exact TestCaseVersion this slot is pinned to, frozen
+  // once any attempt exists. is_pinned_stale flags when the testcase's
+  // current approved version has since moved on (CYC-006 upgrade affordance
+  // while still unexecuted).
+  pinned_version_id?: number | null
+  pinned_version_label?: string | null
+  is_pinned_stale: boolean
   status: string
   actual_result?: string | null
   test_run_artifacts?: string | null
@@ -802,10 +1005,194 @@ export interface TestExecutionOut {
   executed_by_name?: string | null
   executed_at?: string | null
   run_count: number
+  // SRS EXE-007 optimistic concurrency -- send back as expected_run_version
+  // on the next save; a 409 means someone else recorded a newer attempt
+  // first and the slot must be refreshed before retrying.
+  run_version: number
   created_at: string
   // Full attempt-by-attempt history, oldest first. These columns above
   // always mirror runs[runs.length - 1] once at least one attempt exists.
   runs?: TestExecutionRunOut[]
+  // Governed Defect(s) (defects.py, not the free-text per-attempt
+  // TestRunDefect above) linked to this slot via Defect.execution_id. Used
+  // together with `runs` (for prior-Fail history) to lock/gate status
+  // changes client-side -- see constants.ts's executionStatusGate, used by
+  // both TestExecution.tsx and MyExecutions.tsx. The backend enforces the
+  // same rule regardless (test_execution.py's _execution_status_gate) --
+  // this is only for disabling the option and explaining why before the
+  // user even submits.
+  linked_defects?: LinkedGovernedDefectRef[]
+}
+
+export interface LinkedGovernedDefectRef {
+  id: number
+  defect_key: string
+  status: string
+}
+
+// ---------------- Test Management Reporting (SRS section 11) ----------------
+export interface ReportFilterRef {
+  project_id?: number | null
+  cycle_id?: number | null
+  status?: string | null
+  test_case_id?: number | null
+  requirement?: string | null
+}
+export interface ReportCountRow { key: string; count: number; filters: ReportFilterRef }
+export interface ReportStatusCountRow { status: string; count: number; filters: ReportFilterRef }
+
+export interface RepositoryHealthOut {
+  project_id: number
+  project_key: string
+  population_note: string
+  total_cases: number
+  by_status: ReportCountRow[]
+  by_module: ReportCountRow[]
+  by_priority: ReportCountRow[]
+  by_test_type: ReportCountRow[]
+  by_owner: ReportCountRow[]
+  average_age_days: number
+  never_executed_count: number
+}
+
+export interface CycleProgressOut {
+  cycle_id: number
+  cycle_key: string
+  cycle_status: string
+  population_note: string
+  total_items: number
+  by_status: ReportStatusCountRow[]
+  assigned_count: number
+  unassigned_count: number
+  completion_pct: number
+  is_locked: boolean
+}
+
+export interface DefectQualityOut {
+  project_id: number
+  project_key: string
+  population_note: string
+  total_defect_links: number
+  by_module: ReportCountRow[]
+  by_status: ReportCountRow[]
+  retest_success_rate_pct: number
+}
+
+export interface DefectOut {
+  id: number
+  defect_key: string
+  title: string
+  description: string
+  status: string
+  qa_request_id: number
+  qa_request_key?: string | null
+  cycle_id?: number | null
+  cycle_key?: string | null
+  project_id?: number | null
+  primary_test_case_id?: number | null
+  test_case_key?: string | null
+  execution_id?: number | null
+  linked_test_case_ids: number[]
+  linked_test_case_keys: string[]
+  application_name: string
+  module_feature: string
+  environment: string
+  severity: string
+  priority: string
+  steps_to_reproduce: string
+  expected_result: string
+  actual_result: string
+  reporter_id: number
+  reporter_name?: string | null
+  reported_at: string
+  assignee_id?: number | null
+  assignee_name?: string | null
+  assigned_team?: string | null
+  assigned_by_id?: number | null
+  assigned_by_name?: string | null
+  assigned_at?: string | null
+  retest_tester_id?: number | null
+  device_details?: string | null
+  build_version?: string | null
+  api_endpoint?: string | null
+  request_response_details?: string | null
+  log_details?: string | null
+  related_cr_number?: string | null
+  external_defect_id?: string | null
+  remarks?: string | null
+  labels?: string | null
+  resolution_type?: string | null
+  resolution_summary?: string | null
+  root_cause?: string | null
+  fix_details?: string | null
+  fixed_build_version?: string | null
+  resolved_at?: string | null
+  retest_result?: string | null
+  retest_at?: string | null
+  tested_build_version?: string | null
+  retest_actual_result?: string | null
+  retest_remarks?: string | null
+  reopen_reason?: string | null
+  reopen_count: number
+  deferral_reason?: string | null
+  deferral_approved_by?: string | null
+  target_release?: string | null
+  expected_resolution_date?: string | null
+  rejection_reason?: string | null
+  duplicate_of_id?: number | null
+  duplicate_of_key?: string | null
+  closure_remarks?: string | null
+  closed_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface DefectDashboardOut {
+  total: number
+  open: number
+  closed: number
+  reopened: number
+  deferred: number
+  by_status: Record<string, number>
+  by_severity: Record<string, number>
+  by_priority: Record<string, number>
+  by_application: Record<string, number>
+  by_assignee: Record<string, number>
+  by_ageing: Record<string, number>
+  closure_trend: Record<string, number>
+}
+
+export interface VersionImpactItemOut {
+  cycle_id: number
+  cycle_key: string
+  cycle_status: string
+  stale_item_count: number
+  upgradeable_count: number
+  permanently_pinned_count: number
+  filters: ReportFilterRef
+}
+export interface VersionImpactOut {
+  project_id: number
+  project_key: string
+  population_note: string
+  cycles_with_stale_items: number
+  total_items: number
+  returned_items: number
+  items: VersionImpactItemOut[]
+}
+
+export interface CycleStatusCountRow { status: string; count: number }
+export interface CycleTrendPointOut { month: string; count: number }
+export interface ProjectOwnershipRow { owner: string; project_count: number }
+export interface ProjectPortfolioOut {
+  population_note: string
+  active_project_count: number
+  inactive_project_count: number
+  archived_project_count: number
+  cycle_count: number
+  cycles_by_status: CycleStatusCountRow[]
+  cycle_creation_trend: CycleTrendPointOut[]
+  ownership: ProjectOwnershipRow[]
 }
 
 // One row in the logged-in user's Pending Approvals feed -- see
@@ -823,6 +1210,14 @@ export interface PendingApprovalItem {
   display_id?: string | null
   parent_request_id?: string | null
   parent_path?: string | null
+  // Reported directly: "Parent Section should be Project Name, the Folder
+  // wise testcase segregation" -- parent_label distinguishes what kind of
+  // parent parent_request_id actually is (e.g. "Parent QA Request" vs
+  // "Test Project"), null defaults to the QA-Request wording. folder_name
+  // is a second-level grouping within that parent (Test Repository folder
+  // a pending test case lives in) -- always null for every other category.
+  parent_label?: string | null
+  folder_name?: string | null
   title: string
   status: string
   status_label: string
@@ -830,6 +1225,33 @@ export interface PendingApprovalItem {
   submitted_by?: string | null
   submitted_at?: string | null
   path: string
+}
+
+// 2026-08 Test Approval Workflow refactor (section 10) -- in-app-only
+// notifications; see backend/app/routers/notifications.py. No email/SMTP
+// delivery exists anywhere in this app.
+export interface NotificationOut {
+  id: number
+  recipient_id: number
+  event_type: string
+  entity_type: string
+  entity_id: number
+  entity_key?: string | null
+  message: string
+  created_by_id?: number | null
+  created_by_name?: string | null
+  created_at: string
+  read_at?: string | null
+}
+
+// GET/PATCH /api/system-settings/approval-notifications (Admin-only).
+export interface ApprovalNotificationSettingsOut {
+  reminder_business_days: number
+  escalation_business_days: number
+}
+export interface ApprovalNotificationSettingsUpdateIn {
+  reminder_business_days: number
+  escalation_business_days: number
 }
 
 export interface StorageSettingsOut {

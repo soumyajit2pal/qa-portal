@@ -326,8 +326,8 @@ def reset_password(user_id: int, payload: schemas.PasswordReset, request: Reques
 # to constants.QA_DEPARTMENT same as every other QA staffer, so the
 # department-scoping below already confines them to QA -- gets
 # QA_ADMIN_ASSIGNABLE_ROLES instead), can never touch ADMIN/
-# DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/DEPARTMENT_HEAD_COE_CM/
-# DEPARTMENT_HEAD_COE_AGM on anyone (including roles a target user already
+# DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHEIF_MANAGER_COE/
+# CHEIF_MANAGER_QA/AGM_COE on anyone (including roles a target user already
 # holds outside their own assignable subset -- see the "preserved" logic
 # below, which protects the OTHER kind of local admin's roles too), and can
 # never edit their own account this way.
@@ -366,7 +366,9 @@ def _local_admin_assignable_roles(current_user: models.User) -> list:
     `has_role()` -- `has_role()` always returns True for an Administrator
     account regardless of which role(s) it's asked about, which would
     wrongly hand an Admin who somehow hits this endpoint the QA subset."""
-    if Role.DEPARTMENT_HEAD_COE_CM in current_user.roles or Role.DEPARTMENT_HEAD_COE_AGM in current_user.roles:
+    if any(role in current_user.roles for role in (
+        Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA, Role.AGM_COE,
+    )):
         return QA_ADMIN_ASSIGNABLE_ROLES
     return DEPARTMENT_ADMIN_ASSIGNABLE_ROLES
 
@@ -375,7 +377,8 @@ def _local_admin_assignable_roles(current_user: models.User) -> list:
 def list_local_admin_users(db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(
                                 Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
-                                Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
+                                Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
+                                Role.AGM_COE))):
     """Every user mapped to the local admin's own department (any status,
     so a previously-disabled account can be re-activated too), excluding
     their own account, any Administrator accounts, any account flagged
@@ -402,7 +405,8 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
                              db: Session = Depends(get_db),
                              current_user: models.User = Depends(require_roles(
                                  Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
-                                 Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM))):
+                                 Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
+                                 Role.AGM_COE))):
     user = db.query(models.User).get(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

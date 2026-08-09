@@ -1,7 +1,5 @@
-import datetime
 import os
 from typing import List
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
@@ -217,7 +215,7 @@ def sm_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = De
     _require(obj, "SM_APPROVAL_PENDING", "SM decision")
     obj.sm_decision = payload.decision
     obj.sm_id = current_user.id
-    obj.sm_decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.sm_decided_at = models.now()
     if payload.decision == "Approved":
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
     elif payload.decision == "Returned":
@@ -243,7 +241,7 @@ def dept_head_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Sessi
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
     obj.dept_head_decision = payload.decision
     obj.dept_head_id = current_user.id
-    obj.dept_head_decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.dept_head_decided_at = models.now()
     if payload.decision == "Approved":
         obj.status = "SECURITY_TEAM_VERIFICATION"
     elif payload.decision == "Returned":
@@ -276,7 +274,7 @@ def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: S
         raise HTTPException(400, "decision must be one of: Accepted, Rejected, Returned")
     obj.security_decision = decision
     obj.security_id = current_user.id
-    obj.security_decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.security_decided_at = models.now()
     if decision in ("Accepted", "Approved"):
         obj.status = "Done"
     elif decision == "Rejected":
@@ -355,7 +353,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
         subtitle="Suppression / False Positive Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -464,7 +462,7 @@ def acknowledge_walkthrough(sup_id: int, wt_id: int, db: Session = Depends(get_d
     if not obj:
         raise HTTPException(404, "Walkthrough session not found")
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj

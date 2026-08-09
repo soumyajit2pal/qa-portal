@@ -12,8 +12,8 @@ import { RoleChipSelect } from './Admin'
 // department, without going through a System Admin for every routine role
 // change. Deliberately much narrower than Admin.tsx: no user creation, no
 // password resets, no department reassignment, no touching ADMIN/
-// DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/DEPARTMENT_HEAD_COE_CM/
-// DEPARTMENT_HEAD_COE_AGM on anyone -- see routers/auth.py's local-admin
+// DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHEIF_MANAGER_COE/
+// CHEIF_MANAGER_QA/AGM_COE on anyone -- see routers/auth.py's local-admin
 // endpoints for the matching server-side guard rails (this page is a
 // convenience UI; the real enforcement is there). The two role-pairs each
 // carry identical authority within their own kind (CM vs AGM, split only so
@@ -34,7 +34,7 @@ export default function DepartmentAdmin() {
   }, [])
   useEffect(() => { load() }, [load])
 
-  const isQAAdmin = hasRole(user, 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')
+  const isQAAdmin = hasRole(user, 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE')
   const isDeptAdmin = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM')
 
   if (!isQAAdmin && !isDeptAdmin) {
@@ -93,8 +93,8 @@ export default function DepartmentAdmin() {
             { key: 'roles', header: 'Role(s)', render: (u) => {
               // A user can also hold a role outside THIS local admin's own
               // authority -- most commonly DEPARTMENT_HEAD_CM/
-              // DEPARTMENT_HEAD_AGM/DEPARTMENT_HEAD_COE_CM/
-              // DEPARTMENT_HEAD_COE_AGM on someone who wears two hats, but
+              // DEPARTMENT_HEAD_AGM/CHEIF_MANAGER_COE/CHEIF_MANAGER_QA/
+              // AGM_COE on someone who wears two hats, but
               // also the OTHER kind of local admin's own role subset (e.g. a
               // business Department Head viewing someone who also holds
               // QA_LEAD) -- PATCH /local-admin/users/{id} already preserves

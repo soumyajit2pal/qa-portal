@@ -185,9 +185,9 @@ function FunctionalFormModal({
       )}
       <form onSubmit={submit}>
         <div className="form-section">
-          <div className="form-section-title">
+          {/* <div className="form-section-title">
             Identity{!isAdmin ? " (Admin-only)" : ""}
-          </div>
+          </div> */}
           <div className="form-row">
             <Field label="Application Name">
               <input
@@ -443,7 +443,6 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
     wide={!linkedCycle}
     variant={linkedCycle ? "dialog" : "drawer"}
     preventBackdropClose={!!linkedCycle}
-    hideCloseButton={!!linkedCycle}
   >
     {linkedCycle ? <>
       <div className="execution-cycle-existing">
@@ -895,18 +894,41 @@ function FunctionalDetail({
     isAssignedTester && status === "TESTER_ASSIGNED";
   const canStartExecution =
     isAssignedTester && status === "TEST_DESIGN";
+  // Workflow change (reported directly: "raise defect, start retest
+  // currently not required as everything is linked with test cycle") --
+  // once a Test Cycle is linked, defects are raised/tracked/retested via
+  // Test Execution + the Defects module against that cycle, not this
+  // request's own manual Defect Raised/Waiting For Fix/Retesting states.
+  // The backend enforces this too (see functional.py's
+  // _require_no_linked_cycle_for_manual_defect_flow) -- this just keeps the
+  // button from ever being offered in that case. Still shown for a request
+  // started without linking a cycle (link_test_cycle=false at Start
+  // Execution remains supported), where it's the only defect-tracking path.
+  const hasLinkedCycle = (req.linked_test_cycles?.length ?? 0) > 0;
+  const openLinkedCycles = (req.linked_test_cycles || []).filter(
+    (cycle) => cycle.status !== "Completed"
+  );
   const canRaiseDefect =
     isAssignedTester &&
-    status === "EXECUTION_IN_PROGRESS";
+    status === "EXECUTION_IN_PROGRESS" &&
+    !hasLinkedCycle;
   const canMarkWaitingForFix =
     isAssignedTester && status === "DEFECT_RAISED";
   const canStartRetest =
     isAssignedTester && status === "WAITING_FOR_FIX";
+  // Mark QA Complete now also requires every linked Test Cycle to have
+  // actually reached Completed -- see functional.py::complete_qa's matching
+  // gate. A request with no linked cycle has nothing to wait on.
   const canCompleteQA =
     isAssignedTester &&
     ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(
       status
-    );
+    ) &&
+    openLinkedCycles.length === 0;
+  const completeQABlockedByCycle =
+    isAssignedTester &&
+    ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(status) &&
+    openLinkedCycles.length > 0;
   // Matches the backend's own role gate on POST /{id}/request-signoff and
   // POST /api/signoffs (both require_roles(Role.QA_LEAD, Role.QA_ENGINEER))
   // -- whichever of them actually ran QA through to completion should be
@@ -1126,6 +1148,28 @@ function FunctionalDetail({
 
           <div className="section-title">Workflow Actions</div>
           {executionNotice && <div className={`execution-start-notice ${req.linked_test_cycles?.length ? "linked" : "unlinked"}`} role="status"><strong>{executionNotice.includes("was unlinked") ? "Test cycle unlinked" : req.linked_test_cycles?.length ? "Execution started" : "Execution started without a cycle"}</strong><span>{executionNotice}</span></div>}
+          {completeQABlockedByCycle && (
+            <div
+              style={{
+                marginTop: 8,
+                marginBottom: 8,
+                background: "#fffaeb",
+                border: "1px solid #fde68a",
+                borderRadius: 10,
+                padding: "10px 14px",
+                color: "#92400e",
+                fontSize: 13,
+              }}
+            >
+              <strong>Mark QA Complete is locked</strong> — every linked Test
+              Cycle must reach Completed first. Still open:{" "}
+              {openLinkedCycles
+                .map((cycle) => `${cycle.cycle_key} (${cycle.status})`)
+                .join(", ")}
+              . Raise and retest defects from Test Execution / the Defects
+              module against the linked cycle.
+            </div>
+          )}
           <div className="actions-panel">
             <div
               style={{
@@ -1215,7 +1259,7 @@ function FunctionalDetail({
                       ? "Mandatory Readiness checklist item(s) are not self-declared ready -- see the notice above."
                       : undefined
                   }
-                  extraControlLabel="Assign IT-QA QA Lead"
+                  extraControlLabel="Assign COE - Quality Assurance QA Lead"
                   extraControl={
                     <UserAssignSelect
                       value={selectedQALead}

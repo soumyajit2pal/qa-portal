@@ -617,7 +617,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                       ? 'Mandatory Security Readiness checklist item(s) are not self-declared ready -- see the notice above.'
                       : undefined
                   }
-                  extraControlLabel="Assign IT-QA QA Lead"
+                  extraControlLabel="Assign COE - Quality Assurance QA Lead"
                   extraControl={
                     <UserAssignSelect
                       value={selectedQALead}

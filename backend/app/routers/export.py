@@ -1,7 +1,6 @@
 import csv
 import datetime
 import io
-from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -177,7 +176,7 @@ def export_report(report_key: str, format: str = Query("xlsx", pattern="^(xlsx|p
     meta = {
         "report_name": report_key.replace("-", " ").title(),
         "module": report_key,
-        "generated_at": datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "generated_at": models.now().strftime("%Y-%m-%d %H:%M:%S UTC"),
         "generated_by": current_user.full_name,
         "filters": filters,
         "total_records": len(rows),

@@ -80,7 +80,7 @@ function nodeToMarkdown(node: Node): string {
     case 'H3':
     case 'H4':
     case 'H5':
-    case 'H6': return content ? `**${content.trim()}**\n` : ''
+    case 'H6': return content ? `${'#'.repeat(Number(node.tagName.slice(1)))} ${content.trim()}\n` : ''
     case 'B':
     case 'STRONG': return content ? `**${content}**` : ''
     case 'I':
@@ -137,6 +137,8 @@ export function markdownToEditorHtml(value: string): string {
   while (index < lines.length) {
     const line = lines[index]
     if (!line.trim()) { blocks.push('<div><br></div>'); index += 1; continue }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/)
+    if (heading) { const level = heading[1].length; blocks.push(`<h${level}>${inlineHtml(heading[2])}</h${level}>`); index += 1; continue }
     if (line.includes('|') && index + 1 < lines.length && /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[index + 1])) {
       const cells = (entry: string) => entry.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => inlineHtml(cell.trim().replace(/\\\|/g, '|')))
       const header = cells(line)
@@ -226,6 +228,20 @@ export function useRichTextImages(opts: {
   // should happen on a successful image paste (e.g. JiraActivity expanding
   // its composer).
   function pasteImages(event: React.ClipboardEvent<HTMLDivElement>): boolean {
+    // Excel (and some other spreadsheet applications) place several
+    // representations of the same copied cells on the clipboard: HTML/table
+    // markup, tab-separated plain text, and an image preview. Previously the
+    // image item won, preventDefault() discarded the real cells, and the
+    // spreadsheet data was saved as a screenshot attachment. Prefer the
+    // structured representation whenever it is present; the browser will
+    // paste the table into contentEditable and the shared Markdown codec will
+    // persist it as an editable Markdown table.
+    const clipboardHtml = event.clipboardData.getData('text/html')
+    const clipboardText = event.clipboardData.getData('text/plain')
+    const hasSpreadsheetData = /<table\b|urn:schemas-microsoft-com:office:excel|\bmso-/i.test(clipboardHtml)
+      || /\t/.test(clipboardText)
+    if (hasSpreadsheetData) return false
+
     const files = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
       .map((item, index) => {
@@ -288,7 +304,7 @@ export function useRichTextLink(editorRef: React.RefObject<HTMLDivElement>, onEr
 
 export function RichTextToolbar({
   ariaLabel,
-  imageButtonTitle = 'Attach images',
+  imageButtonTitle = 'Add image',
   codeButtonTitle = 'Inline code',
   onCommand,
   onBeginLink,
@@ -303,21 +319,36 @@ export function RichTextToolbar({
   onPickImage?: () => void
   onInsertTable?: () => void
 }) {
+  const [menu, setMenu] = useState<'style' | 'list' | 'emoji' | 'insert' | null>(null)
+  const run = (name: string, value?: string) => { onCommand(name, value); setMenu(null) }
+  const toggle = (name: typeof menu) => setMenu((current) => current === name ? null : name)
   return (
     <div className="jira-editor-toolbar" role="toolbar" aria-label={ariaLabel}>
-      <button type="button" title="Bold" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('bold')}><strong>B</strong></button>
-      <button type="button" title="Italic" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('italic')}><em>I</em></button>
-      <button type="button" title="Underline" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('underline')}><u>U</u></button>
-      <button type="button" title="Strikethrough" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('strikeThrough')}><s>S</s></button>
-      <span />
-      <button type="button" title="Bulleted list" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('insertUnorderedList')}>• List</button>
-      <button type="button" title="Numbered list" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('insertOrderedList')}>1. List</button>
-      {onInsertTable && <button type="button" title="Insert 3-column table" onMouseDown={(event) => event.preventDefault()} onClick={onInsertTable}>Table</button>}
-      <button type="button" title="Quote" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('formatBlock', 'blockquote')}>❝</button>
-      <button type="button" title={codeButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('formatBlock', 'pre')}>{'</>'}</button>
-      <span />
-      <button type="button" title="Add link" onMouseDown={(event) => event.preventDefault()} onClick={onBeginLink}>Link</button>
-      {onPickImage && <button type="button" title={imageButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={onPickImage}>Image</button>}
+      <div className="jira-toolbar-menu-wrap">
+        <button type="button" className={menu === 'style' ? 'active' : ''} title="Text style" aria-label="Text style" aria-expanded={menu === 'style'} onMouseDown={(event) => event.preventDefault()} onClick={() => toggle('style')}><b className="jira-toolbar-glyph">T</b><small>⌄</small></button>
+        {menu === 'style' && <div className="jira-toolbar-menu style-menu"><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'div')}>Normal text</button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'h2')}><strong>Heading</strong></button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'h3')}><strong>Subheading</strong></button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'blockquote')}>Quote</button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'pre')}>Code block</button></div>}
+      </div>
+      <button type="button" title="Bold" aria-label="Bold" onMouseDown={(event) => event.preventDefault()} onClick={() => run('bold')}><strong className="jira-toolbar-glyph">B</strong></button>
+      <button type="button" title="Italic" aria-label="Italic" onMouseDown={(event) => event.preventDefault()} onClick={() => run('italic')}><em className="jira-toolbar-glyph">I</em></button>
+      <button type="button" title="Underline" aria-label="Underline" onMouseDown={(event) => event.preventDefault()} onClick={() => run('underline')}><u className="jira-toolbar-glyph">U</u></button>
+      <button type="button" title="Strikethrough" aria-label="Strikethrough" onMouseDown={(event) => event.preventDefault()} onClick={() => run('strikeThrough')}><s className="jira-toolbar-glyph">S</s></button>
+      <i />
+      <div className="jira-toolbar-menu-wrap">
+        <button type="button" className={menu === 'list' ? 'active' : ''} title="Lists" aria-label="Lists" aria-expanded={menu === 'list'} onMouseDown={(event) => event.preventDefault()} onClick={() => toggle('list')}><span className="jira-toolbar-icon">☷</span><small>⌄</small></button>
+        {menu === 'list' && <div className="jira-toolbar-menu"><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('insertUnorderedList')}>• Bulleted list</button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('insertOrderedList')}>1. Numbered list</button></div>}
+      </div>
+      <button type="button" title="Clear formatting" aria-label="Clear formatting" onMouseDown={(event) => event.preventDefault()} onClick={() => run('removeFormat')}><span className="jira-toolbar-clear">A</span></button>
+      {onPickImage && <button type="button" className="jira-toolbar-emphasis" title={imageButtonTitle} aria-label={imageButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={onPickImage}><span className="jira-toolbar-icon">▧</span></button>}
+      <button type="button" title={codeButtonTitle} aria-label={codeButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'pre')}><span className="jira-toolbar-code">{'</>'}</span></button>
+      <div className="jira-toolbar-menu-wrap">
+        <button type="button" className={menu === 'emoji' ? 'active' : ''} title="Insert emoji" aria-label="Insert emoji" aria-expanded={menu === 'emoji'} onMouseDown={(event) => event.preventDefault()} onClick={() => toggle('emoji')}><span className="jira-toolbar-icon">☺</span></button>
+        {menu === 'emoji' && <div className="jira-toolbar-menu emoji-menu">{['🙂', '👍', '✅', '⚠️', '❌', '🎯', '🐞', '🚀'].map((emoji) => <button type="button" key={emoji} onMouseDown={(event) => event.preventDefault()} onClick={() => run('insertText', emoji)}>{emoji}</button>)}</div>}
+      </div>
+      {onInsertTable && <div className="jira-toolbar-menu-wrap"><button type="button" className={menu === 'insert' ? 'active' : ''} title="Insert more" aria-label="Insert more" aria-expanded={menu === 'insert'} onMouseDown={(event) => event.preventDefault()} onClick={() => toggle('insert')}><span className="jira-toolbar-icon">＋</span></button>{menu === 'insert' && <div className="jira-toolbar-menu"><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => { onInsertTable(); setMenu(null) }}>▦ Insert table</button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'blockquote')}>❝ Insert quote</button></div>}</div>}
+      <button type="button" title="Add link" aria-label="Add link" onMouseDown={(event) => event.preventDefault()} onClick={() => { setMenu(null); onBeginLink() }}><span className="jira-toolbar-icon">⌁</span></button>
+      <i />
+      <button type="button" title="Undo" aria-label="Undo" onMouseDown={(event) => event.preventDefault()} onClick={() => run('undo')}><span className="jira-toolbar-icon">↶</span></button>
+      <button type="button" title="Redo" aria-label="Redo" onMouseDown={(event) => event.preventDefault()} onClick={() => run('redo')}><span className="jira-toolbar-icon">↷</span></button>
     </div>
   )
 }

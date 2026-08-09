@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS, hasRole, canSeeQaDepartmentOnlyData } from '../constants'
+import { ROLE_LABELS, hasRole } from '../constants'
 import { UserOut } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
@@ -10,6 +10,7 @@ import {
   IconHelp,
 } from './Icons'
 import ClearableSearchInput from './ClearableSearchInput'
+import NotificationBell from './NotificationBell'
 
 interface NavItem {
   to: string
@@ -66,22 +67,24 @@ function navGroups(user: UserOut | null): NavGroup[] {
         { to: '/test-projects', label: 'Projects', icon: IconApps },
         { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
         { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
+        { to: '/defects', label: 'Defect Management', icon: IconTarget },
+        // SRS EXE-002 "My Executions" -- the signed-in user's own actionable
+        // items across every authorized project, one cross-project view
+        // instead of hunting through each project's own Test Execution page.
+        { to: '/my-executions', label: 'My Executions', icon: IconCheckCircle },
+        // SRS section 11 -- the 5 reporting views (repository health, cycle
+        // progress, defect quality, version impact, project portfolio).
+        { to: '/test-reports', label: 'Test Reports', icon: IconChart },
       ],
     },
     {
       label: 'Governance',
       items: [
-        // Reported directly: "Hide QA Sign Off except IT-QA" -- every
-        // certificate's own department is hardcoded to QA_DEPARTMENT ("IT -
-        // QA") at creation (see routers/signoff.py::create_signoff), and the
-        // list endpoint now scopes to that (see ORACLE_MIGRATION_2026-07.md
-        // section 201), so anyone outside canSeeQaDepartmentOnlyData would
-        // only ever land on a guaranteed-empty page -- hidden here instead.
-        ...(canSeeQaDepartmentOnlyData(user) ? [{ to: '/signoff', label: 'QA Sign-off', icon: IconCertificate }] : []),
+        { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate },
         { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
-        ...(hasRole(user, 'ADMIN', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')
+        ...(hasRole(user, 'ADMIN', 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE')
           ? [{ to: '/audit-log', label: 'Audit Log', icon: IconSearch }]
           : []),
       ],
@@ -102,7 +105,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
     adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers })
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
   }
-  if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')) {
+  if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE')) {
     adminItems.push({ to: '/department-admin', label: 'Department Coordinator', icon: IconUsers })
   }
   if (adminItems.length > 0) {
@@ -124,8 +127,10 @@ const ID_PREFIX_ROUTES: { prefix: string; path: string }[] = [
   { prefix: 'TQA-SUP', path: '/suppression' },
   { prefix: 'TQA-SIGN', path: '/signoff' },
   { prefix: 'TQA-PROJ', path: '/test-projects' },
+  { prefix: 'TQA-PLAN', path: '/test-projects' },
   { prefix: 'TQA-TC', path: '/test-repository' },
   { prefix: 'TQA-CYCLE', path: '/test-execution' },
+  { prefix: 'DEF-', path: '/defects' },
   { prefix: 'SUP', path: '/suppression' },
   { prefix: 'QA-CERT', path: '/signoff' },
 ]
@@ -336,6 +341,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
             <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">
+            {user && <NotificationBell />}
             {user && (
               <div className="topbar-user-menu" ref={userMenuRef}>
                 <button

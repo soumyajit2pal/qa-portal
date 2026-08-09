@@ -19,12 +19,13 @@ DEMO_USERS = [
     ("requester1", "Requester 1", Role.REQUESTER, "IT - Software"),
     ("requester2", "Requester 2", Role.REQUESTER, "IT - Software"),
     ("ba1", "BA 1", Role.BUSINESS_ANALYST, "IT - Software"),
-    ("qa1", "QA 1", Role.QA_ENGINEER, "IT - QA"),
-    ("qa2", "QA 2", Role.QA_ENGINEER, "IT - QA"),
-    ("qalead1", "QA Lead 1", Role.QA_LEAD, "IT - QA"),
-    ("cm1", "Dep head CM 1", Role.DEPARTMENT_HEAD_COE_CM, "IT - QA"),
-    ("agm1", "Dep head COE 1", Role.DEPARTMENT_HEAD_COE_AGM, "IT - QA"),
-    ("security1", "SA 1", Role.SECURITY_ANALYST, "IT - QA"),
+    ("qa1", "QA 1", Role.QA_ENGINEER, "COE - Quality Assurance"),
+    ("qa2", "QA 2", Role.QA_ENGINEER, "COE - Quality Assurance"),
+    ("qalead1", "QA Lead 1", Role.QA_LEAD, "COE - Quality Assurance"),
+    ("cm1", "Dep head CM 1", Role.CHEIF_MANAGER_COE, "COE - Quality Assurance"),
+    ("cheifmanagerqa1", "Cheif Manager QA 1", Role.CHEIF_MANAGER_QA, "COE - Quality Assurance"),
+    ("agm1", "Dep head COE 1", Role.AGM_COE, "COE - Quality Assurance"),
+    ("security1", "SA 1", Role.SECURITY_ANALYST, "COE - Quality Assurance"),
     ("appowner1", "App Owner 1", Role.APPLICATION_OWNER, "IT - Software"),
     ("depthead1", "Department Head 1", Role.DEPARTMENT_HEAD_CM, "IT - Software"),
     ("depthead2", "Department Head 2", Role.DEPARTMENT_HEAD_AGM, "IT - Software"),
@@ -32,7 +33,7 @@ DEMO_USERS = [
     # QA Request / SAST-DAST / Suppression workflows).
     ("sm1", "SM 1", Role.SM, "IT - Software"),
     ("sm2", "SM 2", Role.SM, "IT - Software"),
-    ("admin", "Administrator", Role.ADMIN, "IT - QA"),
+    ("admin", "Administrator", Role.ADMIN, "COE - Quality Assurance"),
 ]
 
 LEGACY_DEMO_NAMES = {

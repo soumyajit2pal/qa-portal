@@ -33,6 +33,7 @@ import { NewRequestModal } from "./NewRequestModal";
 import { AddDocuments } from "./AddDocuments";
 import JiraActivity from "../components/JiraActivity";
 import ConfirmModal from "../components/ConfirmModal";
+import LinkedDefects from "../components/LinkedDefects";
 
 interface RequestDetailProps {
   req: QARequestOut;
@@ -618,6 +619,8 @@ export function RequestDetail({
             </DetailField>
           </DetailSection>
 
+          <LinkedDefects query={`qa_request_id=${req.id}`} />
+
 
           {hasLinked && (
             <div style={{ marginTop: 8 }}>
@@ -832,7 +835,6 @@ export function RequestDetail({
           onClose={() => setPendingDeleteDoc(null)}
           variant="dialog"
           preventBackdropClose
-          hideCloseButton
         >
           <div style={{ fontSize: 13.5 }}>
             Delete <strong>{pendingDeleteDoc.file_name}</strong>? This cannot be undone.

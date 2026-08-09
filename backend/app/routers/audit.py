@@ -16,8 +16,9 @@ from ..deps import require_roles
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 AUDIT_ROLES = (
     Role.ADMIN,
-    Role.DEPARTMENT_HEAD_COE_CM,
-    Role.DEPARTMENT_HEAD_COE_AGM,
+    Role.CHEIF_MANAGER_COE,
+    Role.CHEIF_MANAGER_QA,
+    Role.AGM_COE,
 )
 
 

@@ -99,7 +99,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
       )}
       <form onSubmit={submit}>
         <div className="form-section">
-          <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div>
+          {/* <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div> */}
           <div className="form-row">
             <Field label="Application Name *"><input required disabled={!isAdmin} value={form.application_name} onChange={(e) => set('application_name', e.target.value)} /></Field>
             <Field label="Epic Number"><input disabled={!isAdmin} value={form.epic_number} onChange={(e) => set('epic_number', e.target.value)} /></Field>
@@ -509,7 +509,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                     ? 'Mandatory Pre-Testing Readiness checklist item(s) are not self-declared ready -- see the notice above.'
                     : undefined
                 }
-                extraControlLabel="Assign IT-QA QA Lead"
+                extraControlLabel="Assign COE - Quality Assurance QA Lead"
                 extraControl={
                   <UserAssignSelect
                     value={selectedQALead}

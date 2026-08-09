@@ -1,10 +1,8 @@
-import datetime
 import json
 import os
 import shutil
 import uuid
 from typing import Optional, List
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
@@ -1093,7 +1091,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         subtitle="QA Request (Gateway) — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
 
     )
     return StreamingResponse(

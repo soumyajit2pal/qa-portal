@@ -20,7 +20,7 @@ export default function ConfirmModal({
   title, message, confirmLabel = 'Yes', cancelLabel = 'No', busy, destructive, onConfirm, onCancel,
 }: ConfirmModalProps) {
   return (
-    <Modal title={title} onClose={onCancel} variant="dialog" preventBackdropClose hideCloseButton>
+    <Modal title={title} onClose={onCancel} variant="dialog" preventBackdropClose>
       <div>{message}</div>
       <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
         <button type="button" className={`btn ${destructive ? 'btn-danger' : 'btn-primary'}`} disabled={busy} onClick={onConfirm}>{confirmLabel}</button>

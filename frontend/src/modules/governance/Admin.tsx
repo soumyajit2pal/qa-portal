@@ -5,7 +5,7 @@ import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../componen
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
 import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch, IconFolder } from '../../components/Icons'
 import SearchableSelect from '../../components/SearchableSelect'
-import { UserOut, DepartmentOut, ApplicationSeedResult, StorageSettingsOut } from '../../types'
+import { UserOut, DepartmentOut, ApplicationSeedResult, StorageSettingsOut, ApprovalNotificationSettingsOut } from '../../types'
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -297,6 +297,90 @@ function UploadStorageCard() {
   )
 }
 
+// 2026-08 "Test Approval Workflow" refactor (spec section 10) -- Admin-only
+// thresholds controlling when a pending Stage 1/Stage 2 review decision
+// triggers a reminder vs. an escalation notification (see backend
+// app/routers/notifications.py's own reminder/escalation sweep). Mirrors
+// UploadStorageCard's own load/save/feedback pattern above; client-side
+// validation here mirrors the backend's own checks in
+// system_settings.py::update_approval_notification_settings exactly, so a
+// bad combination is caught before the round-trip instead of only surfacing
+// as a 400.
+function ApprovalNotificationSettingsCard() {
+  const [settings, setSettings] = useState<ApprovalNotificationSettingsOut | null>(null)
+  const [reminderDays, setReminderDays] = useState('2')
+  const [escalationDays, setEscalationDays] = useState('5')
+  const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    api.get<ApprovalNotificationSettingsOut>('/api/system-settings/approval-notifications').then((value) => {
+      setSettings(value)
+      setReminderDays(String(value.reminder_business_days))
+      setEscalationDays(String(value.escalation_business_days))
+    }).catch(setError)
+  }, [])
+
+  const reminderValue = Number(reminderDays)
+  const escalationValue = Number(escalationDays)
+  const validationError = !reminderDays.trim() || !escalationDays.trim()
+    ? null
+    : !Number.isFinite(reminderValue) || !Number.isFinite(escalationValue)
+      ? 'Enter whole numbers of business days'
+      : reminderValue < 1 || escalationValue < 1
+        ? 'Both thresholds must be at least 1 business day'
+        : escalationValue <= reminderValue
+          ? 'Escalation threshold must be greater than the reminder threshold'
+          : null
+
+  const unchanged = !!settings && reminderValue === settings.reminder_business_days && escalationValue === settings.escalation_business_days
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault()
+    if (validationError) { setError(new Error(validationError)); return }
+    setBusy(true); setSaved(false); setError(null)
+    try {
+      const value = await api.patch<ApprovalNotificationSettingsOut>('/api/system-settings/approval-notifications', {
+        reminder_business_days: reminderValue,
+        escalation_business_days: escalationValue,
+      })
+      setSettings(value)
+      setReminderDays(String(value.reminder_business_days))
+      setEscalationDays(String(value.escalation_business_days))
+      setSaved(true)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Card title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><IconCheckCircle /> Approval Reminders & Escalation</span>}>
+      <p className="muted small">
+        Controls when a test case sitting at a pending review decision (In Review / Review Completed) triggers an
+        in-app reminder, then an escalation notification, for whoever it's currently pending with. No email/SMS is
+        sent -- notifications are in-app only (see the bell icon in the topbar).
+      </p>
+      <form onSubmit={save} className="storage-setting-form">
+        <div className="form-row">
+          <Field label="Reminder threshold (business days)">
+            <input required type="number" min={1} value={reminderDays} onChange={(e) => { setReminderDays(e.target.value); setSaved(false) }} />
+          </Field>
+          <Field label="Escalation threshold (business days)">
+            <input required type="number" min={1} value={escalationDays} onChange={(e) => { setEscalationDays(e.target.value); setSaved(false) }} />
+          </Field>
+        </div>
+        {validationError && <p className="muted small" style={{ color: '#dc2626' }}>{validationError}</p>}
+        <div className="storage-setting-actions">
+          <button type="submit" className="btn btn-primary" disabled={busy || !!validationError || unchanged}>
+            {busy ? 'Saving…' : 'Save thresholds'}
+          </button>
+          {saved && <span className="storage-setting-saved">✓ Thresholds updated</span>}
+        </div>
+      </form>
+      <ErrorText error={error} />
+    </Card>
+  )
+}
+
 // Admin section: "add one functionality on admin section to upload excel
 // and based on data present on excel Application name will be seed" -- lets
 // an Admin bulk-load a spreadsheet of known-good Application Names straight
@@ -401,7 +485,7 @@ export default function Admin() {
   const [userSearch, setUserSearch] = useState('')
   const [accountFilter, setAccountFilter] = useState<'ALL' | 'ACTIVE' | 'DISABLED' | 'REVIEW'>('ALL')
   const [loginFilter, setLoginFilter] = useState<'ALL' | 'STANDARD' | 'LDAP'>('ALL')
-  const [section, setSection] = useState<'users' | 'departments' | 'storage' | 'applications'>('users')
+  const [section, setSection] = useState<'users' | 'departments' | 'storage' | 'applications' | 'approval-notifications'>('users')
 
   const load = useCallback(async () => {
     try {
@@ -499,6 +583,7 @@ export default function Admin() {
         <button type="button" className={section === 'departments' ? 'active' : ''} onClick={() => setSection('departments')}><IconPlus /><span><strong>Departments</strong><small>Organisation structure</small></span><em>{departments.length}</em></button>
         <button type="button" className={section === 'storage' ? 'active' : ''} onClick={() => setSection('storage')}><IconFolder /><span><strong>Storage</strong><small>Document upload location</small></span></button>
         <button type="button" className={section === 'applications' ? 'active' : ''} onClick={() => setSection('applications')}><IconCheckCircle /><span><strong>Application Data</strong><small>Approved-name bulk setup</small></span></button>
+        <button type="button" className={section === 'approval-notifications' ? 'active' : ''} onClick={() => setSection('approval-notifications')}><IconCheckCircle /><span><strong>Approval Notifications</strong><small>Reminder & escalation thresholds</small></span></button>
       </nav>
 
       {section === 'users' && <div className="access-workspace-panel">
@@ -629,6 +714,10 @@ export default function Admin() {
 
       {section === 'storage' && <div className="access-workspace-panel access-departments-section">
         <UploadStorageCard />
+      </div>}
+
+      {section === 'approval-notifications' && <div className="access-workspace-panel access-departments-section">
+        <ApprovalNotificationSettingsCard />
       </div>}
 
       {showCreate && (

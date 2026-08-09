@@ -36,11 +36,20 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
   const [error, setError] = useState('')
   const [count, setCount] = useState(value.length)
 
+  // Reported directly: pasting/uploading into Expected Result (or Steps to
+  // Reproduce) still named the file "actual-result-...png" -- this hook was
+  // originally written for just the one field and never parameterized its
+  // filename/messages by which field it's actually mounted in, so every
+  // JiraRichTextField instance shared the same literal "actual-result"
+  // prefix regardless of its own ariaLabel. Derived from ariaLabel instead,
+  // so Steps to Reproduce/Actual Result/Expected Result (and any future
+  // field) each get their own correctly-named files and messages.
+  const fieldSlug = ariaLabel.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'result'
   const { images, addImages, removeImage, pasteImages } = useRichTextImages({
-    filenamePrefix: 'actual-result',
+    filenamePrefix: fieldSlug,
     messages: {
       tooLarge: (name) => `“${name}” exceeds the 10 MB limit.`,
-      tooMany: () => `Actual Result can contain at most ${RICH_TEXT_MAX_IMAGES} images per save.`,
+      tooMany: () => `${ariaLabel} can contain at most ${RICH_TEXT_MAX_IMAGES} images per save.`,
     },
     onError: setError,
   })
@@ -81,7 +90,7 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
         <RichTextToolbar
           ariaLabel={`${ariaLabel} formatting`}
           codeButtonTitle="Code"
-          imageButtonTitle="Upload images"
+          imageButtonTitle="Add image"
           onCommand={command}
           onBeginLink={beginLink}
           onPickImage={allowImages ? () => fileRef.current?.click() : undefined}
@@ -116,7 +125,7 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
           <span className={count > maxLength ? 'over-limit' : ''}>{count}/{maxLength} · Rich text{allowImages ? ' · Paste or upload images' : ''}</span>
         </div>
       )}
-      <ErrorText error={error} title="Actual Result image could not be added" guidance="Use a supported image under 10 MB, then paste or upload it again. Your formatted result remains available." />
+      <ErrorText error={error} title={`${ariaLabel} image could not be added`} guidance="Use a supported image under 10 MB, then paste or upload it again. Your formatted result remains available." />
     </div>
   )
 }

@@ -49,6 +49,12 @@ const ChecklistConfig = lazy(() => import('./modules/governance/ChecklistConfig'
 const TestProjects = lazy(() => import('./modules/test-management/TestProjects'))
 const TestRepository = lazy(() => import('./modules/test-management/TestRepository'))
 const TestExecution = lazy(() => import('./modules/test-management/TestExecution'))
+const Defects = lazy(() => import('./modules/test-management/Defects'))
+// SRS EXE-002 "My Executions" -- the signed-in user's actionable items
+// across every authorized project.
+const MyExecutions = lazy(() => import('./modules/test-management/MyExecutions'))
+// SRS section 11 -- the 8 Test Management reporting views.
+const TestReports = lazy(() => import('./modules/test-management/TestReports'))
 
 // The chrome every signed-in page sits inside -- sidebar/topbar (Layout)
 // plus the two blocking pop-ups that can appear on top of any of them
@@ -206,6 +212,9 @@ export default function App() {
           <Route path="/test-projects" element={<ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary>} />
           <Route path="/test-repository" element={<ModuleBoundary moduleName="Test Management"><TestRepository /></ModuleBoundary>} />
           <Route path="/test-execution" element={<ModuleBoundary moduleName="Test Management"><TestExecution /></ModuleBoundary>} />
+          <Route path="/defects" element={<ModuleBoundary moduleName="Defect Management"><Defects /></ModuleBoundary>} />
+          <Route path="/my-executions" element={<ModuleBoundary moduleName="Test Management"><MyExecutions /></ModuleBoundary>} />
+          <Route path="/test-reports" element={<ModuleBoundary moduleName="Test Management"><TestReports /></ModuleBoundary>} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

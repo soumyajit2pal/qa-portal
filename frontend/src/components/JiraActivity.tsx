@@ -78,6 +78,13 @@ export function MarkdownComment({ value }: { value: string }) {
   while (index < lines.length) {
     const line = lines[index]
     if (!line.trim()) { index += 1; continue }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/)
+    if (heading) {
+      const HeadingTag = `h${Math.min(6, heading[1].length)}` as keyof React.JSX.IntrinsicElements
+      blocks.push(<HeadingTag key={`heading-${index}`}>{inlineMarkdown(heading[2], `heading-${index}`)}</HeadingTag>)
+      index += 1
+      continue
+    }
     if (line.includes('|') && index + 1 < lines.length && /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[index + 1])) {
       const cells = (entry: string) => entry.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, '|'))
       const header = cells(line)
@@ -107,7 +114,7 @@ export function MarkdownComment({ value }: { value: string }) {
     }
     const paragraph: string[] = [line]
     index += 1
-    while (index < lines.length && lines[index].trim() && !/^\s*(?:[-*]\s+|\d+\.\s+|>\s?)/.test(lines[index])) paragraph.push(lines[index++])
+    while (index < lines.length && lines[index].trim() && !/^\s*(?:#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s?)/.test(lines[index])) paragraph.push(lines[index++])
     blocks.push(<p key={`p-${index}`}>{paragraph.map((entry, paragraphIndex) => <React.Fragment key={paragraphIndex}>{inlineMarkdown(entry, `p-${index}-${paragraphIndex}`)}{paragraphIndex < paragraph.length - 1 && <br />}</React.Fragment>)}</p>)
   }
   return <div className="jira-markdown">{blocks}</div>
@@ -196,6 +203,14 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
     syncEditor()
   }
 
+  function insertTable() {
+    editorRef.current?.focus()
+    document.execCommand('insertHTML', false,
+      '<table><thead><tr><th>Column 1</th><th>Column 2</th><th>Column 3</th></tr></thead>' +
+      '<tbody><tr><td>Value</td><td>Value</td><td>Value</td></tr><tr><td>Value</td><td>Value</td><td>Value</td></tr></tbody></table><div><br></div>')
+    syncEditor()
+  }
+
   function clearComposer() {
     if (editorRef.current) editorRef.current.innerHTML = ''
     clearImages()
@@ -247,6 +262,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
                 onCommand={runCommand}
                 onBeginLink={beginLink}
                 onPickImage={() => fileInputRef.current?.click()}
+                onInsertTable={insertTable}
               />
               <RichTextImageInput inputRef={fileInputRef} onFiles={addImages} />
             </>
@@ -282,7 +298,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
             suppressContentEditableWarning
           />
           <RichTextPastedImages images={images} onRemove={removeImage} />
-          {expanded && <div className="jira-composer-actions"><span className={characterCount > 5000 ? 'over-limit' : ''}>{characterCount}/5000 · Rich text · Paste images with Ctrl/Cmd+V</span><div><button className="btn btn-sm" onClick={clearComposer}>Cancel</button><button className="btn btn-primary btn-sm" disabled={busy || characterCount > 5000 || (characterCount === 0 && images.length === 0)} onClick={postComment}>{busy ? 'Posting…' : 'Comment'}</button></div></div>}
+          {expanded && <div className="jira-composer-actions"><div><button className="btn btn-primary btn-sm" disabled={busy || characterCount > 5000 || (characterCount === 0 && images.length === 0)} onClick={postComment}>{busy ? 'Posting…' : 'Comment'}</button><button className="btn btn-sm" onClick={clearComposer}>Cancel</button></div><span className={characterCount > 5000 ? 'over-limit' : ''}>{characterCount}/5000 · Rich text · Paste images with Ctrl/Cmd+V</span></div>}
           <ErrorText error={error} title="Comment could not be posted" guidance="Correct the issue described above, then post the comment again. Your draft and pasted images remain available." />
         </div>
       </div>
@@ -295,7 +311,20 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
             <article className={`jira-activity-item ${isComment ? 'comment' : 'history'}`} key={item.id}>
               <div className={`jira-avatar ${isComment ? '' : 'system'}`}>{isComment ? initials(name) : '↻'}</div>
               <div className="jira-activity-content">
-                <div className="jira-activity-meta"><strong>{name}</strong><span>{isComment ? 'added a comment' : `${item.decision || 'updated'} · ${item.step_name || 'Workflow'}`}</span><time title={new Date(item.created_at).toLocaleString()}>{relativeTime(item.created_at)}</time></div>
+                <div className="jira-activity-meta">
+                  <strong>{name}</strong>
+                  <span>{isComment ? 'added a comment' : `${item.decision || 'updated'} · ${item.step_name || 'Workflow'}`}</span>
+                  {/* 2026-08 Test Approval Workflow refactor (APR-005) --
+                      previous_state/new_state are only populated by the Test
+                      Case approval workflow's own audit calls; every other
+                      entity type's rows leave both null, so this stays
+                      invisible everywhere else and simply falls back to the
+                      decision/step text above. */}
+                  {!isComment && item.previous_state && item.new_state && (
+                    <span className="jira-activity-transition">{item.previous_state} → {item.new_state}</span>
+                  )}
+                  <time title={new Date(item.created_at).toLocaleString()}>{relativeTime(item.created_at)}</time>
+                </div>
                 {item.comments && <div className={`jira-activity-message ${isComment ? 'comment-box' : ''}`}>{isComment ? <MarkdownComment value={item.comments} /> : item.comments}</div>}
                 {isComment && <CommentAttachments commentId={item.id} />}
               </div>

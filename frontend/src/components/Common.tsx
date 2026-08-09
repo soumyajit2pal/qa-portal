@@ -131,7 +131,9 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     // Test Management: Test Case lifecycle + Test Execution result (see
     // constants.ts TEST_CASE_STATUSES/TEST_EXECUTION_STATUSES) -- "Pass"/
     // "Fail" here are deliberately distinct keys from the legacy "Passed"/
-    // "Failed" above (different modules, different exact wording).
+    // "Failed" above (different modules, different exact wording). "Active"/
+    // "Deprecated"/"Not Started" are kept for any not-yet-refreshed cached
+    // data from before the current versioned workflow vocabularies.
     Active: "badge-green",
     Deprecated: "badge-gray",
     "Not Executed": "badge-gray",
@@ -141,6 +143,17 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     NA: "badge-gray",
     "Retest Passed": "badge-blue",
     "Not Started": "badge-gray",
+    // 2026-08 "Test Approval Workflow" revamp -- TestCaseVersion/TestCase
+    // status (constants.ts TEST_CASE_STATUSES, 7 values: Draft/In Review/
+    // Review Completed/Returned/Approved/Rejected/Archived). "Returned" and
+    // "Rejected" are already covered by the shared "Legacy / other-module
+    // statuses" entries above (badge-red each) -- not repeated here.
+    "In Review": "badge-yellow",
+    "Review Completed": "badge-yellow",
+    Archived: "badge-gray",
+    // 2026-08 revamp -- TestCycle status (constants.ts TEST_CYCLE_STATUSES:
+    // Draft/Ready/In Progress/Blocked/Completed).
+    Ready: "badge-blue",
   };
   const label = labelOverride ?? ((status && ALL_STATUS_LABELS[status]) || status || "");
   return (
@@ -312,16 +325,6 @@ interface ModalProps {
   // A brief shake on the panel gives feedback that the click did register,
   // rather than the modal just feeling unresponsive.
   preventBackdropClose?: boolean;
-  // Reported directly: "cross button and close duplicate -- wherever on
-  // confirmation modal will be close then cross button should be removed."
-  // The header's own × always just calls onClose -- on a plain confirmation/
-  // acknowledgement pop-up (see ConfirmModal/InfoModal) that's already
-  // exactly what the panel's own Yes/No/Cancel/"Got it" button does, so the
-  // × was a second control doing the identical thing. Set true only by
-  // callers that already render their own unambiguous close action; left
-  // false (× shown) everywhere else, e.g. drawer-style detail/edit panels
-  // with no other single-click way to dismiss them.
-  hideCloseButton?: boolean;
 }
 
 export function Modal({
@@ -331,7 +334,6 @@ export function Modal({
   wide,
   variant = "drawer",
   preventBackdropClose,
-  hideCloseButton,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
   // Record drawers open in the spacious centered view by default. Users can
@@ -374,11 +376,9 @@ export function Modal({
         >
           <div className="drawer-header">
             <h3>{title}</h3>
-            {!hideCloseButton && (
-              <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
-                ×
-              </button>
-            )}
+            <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close" title="Close">
+              ×
+            </button>
           </div>
           <div className="drawer-body">{children}</div>
         </div>
@@ -412,11 +412,9 @@ export function Modal({
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 21h5v-5M3 8l6-5M21 16l-6 5" /></svg>
               )}
             </button>
-            {!hideCloseButton && (
-              <button type="button" className="modal-close-btn" onClick={handleExplicitClose} aria-label="Close" title="Close">
-                ×
-              </button>
-            )}
+            <button type="button" className="modal-close-btn" onClick={handleExplicitClose} aria-label="Close" title="Close">
+              ×
+            </button>
           </div>
         </div>
         <div className="drawer-body">{children}</div>
@@ -596,7 +594,6 @@ export function ApprovalDecisionButtons({
           onClose={() => setPendingDecision(null)}
           variant="dialog"
           preventBackdropClose
-          hideCloseButton
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div className={`workflow-confirm-banner ${pendingDecision}`}>
@@ -894,7 +891,7 @@ export function ErrorText({ error, title = "Action could not be completed", guid
   if (!error || !visible) return null;
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose hideCloseButton>
+    <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose>
       <div className="action-error-dialog" role="alert">
         <div className="action-error-dialog-icon">!</div>
         <div>
@@ -1593,7 +1590,6 @@ export function RequestDocuments({
           onClose={() => setPendingDelete(null)}
           variant="dialog"
           preventBackdropClose
-          hideCloseButton
         >
           <div style={{ fontSize: 13.5 }}>
             Delete <strong>{pendingDelete.file_name}</strong>? This cannot be undone.
@@ -1717,7 +1713,7 @@ export function ChecklistEvidenceDeleteModal({
   onCancel: () => void;
 }) {
   return (
-    <Modal title="Delete checklist evidence?" onClose={onCancel} variant="dialog" preventBackdropClose hideCloseButton>
+    <Modal title="Delete checklist evidence?" onClose={onCancel} variant="dialog" preventBackdropClose>
       <p>Delete <strong>{fileName}</strong>{itemLabel ? ` ${itemLabel}` : ""}? This cannot be undone.</p>
       <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
         <button type="button" className="btn btn-danger" disabled={busy} onClick={onConfirm}>
