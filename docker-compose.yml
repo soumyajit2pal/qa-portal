@@ -36,9 +36,28 @@ services:
       DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:Oracle123@127.0.0.1:1521/?service_name=FREEPDB1}
       SECRET_KEY: ${SECRET_KEY:-mEI1OhfFatJUQi7y42GgYBfgfPXQQukFDs5cDj9Yzsp}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+      # INF-001 -- worker count (default set in the Dockerfile; overridable
+      # here per environment). DBP-001..006 -- pool sizing; defaults already
+      # match prior hardcoded behavior, only uncomment/override what you
+      # need to tune. CAC/DSH -- Redis is required for cache correctness
+      # once WEB_CONCURRENCY > 1 (see main.py's startup-lock comment and
+      # cache.py's module docstring for why); the `redis` service below is
+      # wired up by default.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      # DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
     volumes:
       - qa_portal_uploads:/app/app/uploads
+    depends_on:
+      - redis
     restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - qa_portal_redis:/data
 
   frontend:
     build:
@@ -59,3 +78,4 @@ services:
 
 volumes:
   qa_portal_uploads:
+  qa_portal_redis:

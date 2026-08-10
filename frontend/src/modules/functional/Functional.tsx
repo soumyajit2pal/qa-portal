@@ -39,12 +39,14 @@ import {
 } from "../../constants";
 import {
   FunctionalOut,
+  FunctionalListOut,
   UserOut,
   ChecklistItemOut,
   ApprovalActionOut,
   SignOffOut,
   EligibleTestCycleOut,
 } from "../../types";
+import { usePaginatedList } from "../../hooks/usePaginatedList";
 // Reused as-is from the Governance module -- the app is now a single
 // consolidated Vite app (see README "Frontend architecture"), so importing
 // across module folders is a plain relative import, no remote/federation
@@ -1637,31 +1639,40 @@ function FunctionalDetail({
 }
 
 export default function Functional() {
-  const [requests, setRequests] = useState<FunctionalOut[]>([]);
   const [users, setUsers] = useState<UserOut[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
+  // FunctionalListOut shape; opening a request fetches the full
+  // FunctionalOut record fresh via GET /api/functional-requests/{id} before
+  // FunctionalDetail (which needs every field) is shown.
   const [selected, setSelected] = useState<FunctionalOut | null>(null);
+  const [openingId, setOpeningId] = useState<number | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const load = useCallback(async () => {
-    try {
-      const [reqs, us] = await Promise.all([
-        api.get<FunctionalOut[]>("/api/functional-requests"),
-        api.get<UserOut[]>("/api/auth/users"),
-      ]);
-      setRequests(
-        statusFilter ? reqs.filter((r) => r.status === statusFilter) : reqs
-      );
-      setUsers(us);
-    } catch (err) {
-      setError(err);
-    }
-  }, [statusFilter]);
+  const {
+    items: requests, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<FunctionalListOut>("/api/functional-requests", {
+    status: statusFilter ? [statusFilter] : undefined,
+  });
 
   useEffect(() => {
-    load();
-  }, [load]);
+    api.get<UserOut[]>("/api/auth/users").then(setUsers).catch(setError);
+  }, []);
+
+  const openRequest = useCallback(async (idOrRow: number | FunctionalListOut) => {
+    const id = typeof idOrRow === "number" ? idOrRow : idOrRow.id;
+    setOpeningId(id);
+    try {
+      const full = await api.get<FunctionalOut>(`/api/functional-requests/${id}`);
+      setSelected(full);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setOpeningId(null);
+    }
+  }, []);
 
   // Deep-link support: the gateway QA Request's "Linked Requests" table
   // opens a specific request here via `?open=<request_id>`, e.g. navigating
@@ -1673,7 +1684,7 @@ export default function Functional() {
     const openId = searchParams.get("open");
     if (!openId || requests.length === 0) return;
     const match = requests.find((r) => r.request_id === openId);
-    if (match) setSelected(match);
+    if (match) openRequest(match.id);
     setSearchParams(
       (p) => {
         p.delete("open");
@@ -1681,14 +1692,14 @@ export default function Functional() {
       },
       { replace: true }
     );
-  }, [requests, searchParams, setSearchParams]);
+  }, [requests, searchParams, setSearchParams, openRequest]);
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
         title="Functional QA Requests"
-        count={requests.length}
+        count={total}
         subtitle="Combined Functional Testing, Regression Testing, Sanity Testing and UAT Support workflow --
                    raised via a QA Request (include any of these in its request types), then tracked here
                    through Department Head approval, readiness verification, execution and sign-off."
@@ -1710,9 +1721,17 @@ export default function Functional() {
       <Card>
         <Table
           rowKey="id"
-          onRowClick={(r) => setSelected(r)}
+          onRowClick={(r) => openRequest(r)}
+          server={{
+            page, pageSize, total, totalPages, hasNext, hasPrevious,
+            onPageChange: setPage, onPageSizeChange: setPageSize, loading,
+          }}
           columns={[
-            { key: "request_id", header: "Request ID" },
+            {
+              key: "request_id",
+              header: "Request ID",
+              render: (r) => (openingId === r.id ? "Opening…" : r.request_id),
+            },
             {
               key: "application_name",
               header: "Application",
@@ -1779,7 +1798,7 @@ export default function Functional() {
           onClose={() => setSelected(null)}
           onChanged={(updated) => {
             setSelected(updated);
-            load();
+            reload();
           }}
         />
       )}

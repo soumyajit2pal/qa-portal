@@ -43,6 +43,17 @@ router = APIRouter(prefix="/api/pending-approvals", tags=["pending-approvals"])
 # Performance "Requester Verification" (the requester confirming their own
 # already-approved work, not a peer approving someone else's request).
 #
+# SRS 7.2 pagination rollout -- deliberately left unpaginated. Every
+# category query below already filters down to "genuinely awaiting THIS
+# user's decision right now" (their own role/department/specific
+# assignment), which self-bounds the result: an item leaves this list the
+# moment it's acted on, so it's a live personal action queue, not a growing
+# historical register someone browses page by page (the same reasoning
+# MyExecutions.tsx's own "assigned to me" queue was left on). Silently
+# truncating this to one page could hide a genuinely pending approval from
+# the one person who needs to act on it -- a worse outcome for a governed
+# QA portal than the page staying a single unpaginated fetch.
+#
 # Test Case review (2026-08 "Test Approval Workflow" refactor, APR-007
 # "Pending Approval shall show only items on which the logged-in user can
 # act") IS covered now -- see _test_case_items below. This was flagged as a

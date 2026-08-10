@@ -2,7 +2,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
     get_current_user, require_roles, dashboard_department_scope, get_project_member_role,
@@ -102,8 +102,9 @@ def list_eligible_test_management_users(db: Session = Depends(get_db),
     )
 
 
-@router.get("", response_model=List[schemas.TestProjectOut])
-def list_test_projects(include_inactive: bool = Query(False), db: Session = Depends(get_db),
+@router.get("", response_model=pagination.Page[schemas.TestProjectOut])
+def list_test_projects(include_inactive: bool = Query(False), params: pagination.PageParams = Depends(),
+                       db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
     # Reported directly: "Test Management also restrict to Department only" --
     # same dashboard_department_scope rule as every other list endpoint
@@ -115,13 +116,30 @@ def list_test_projects(include_inactive: bool = Query(False), db: Session = Depe
     # convention as everywhere else: individual get-by-id endpoints (e.g.
     # get_test_project) are left unscoped, matching every other module's
     # own get-by-id endpoints (e.g. functional.py::get_functional).
+    #
+    # SRS 7.2 pagination rollout (task #82) -- Test Projects is a flat,
+    # already-lightweight list (TestProjectOut has no heavy nested arrays)
+    # that's never browsed through the app's real paginated <Table>
+    # (TestProjects.tsx renders it as a card gallery, naturally bounded by
+    # how many projects a department actually stands up). Wrapped in the
+    # standard Page[T] envelope purely for API-contract consistency with
+    # the rest of the app; every frontend consumer requests page_size=100
+    # and unwraps .items rather than getting a real pager UI, since this
+    # entity was never facing the unbounded-growth problem pagination
+    # exists to solve. The original two-column ordering
+    # (is_active desc, name) doesn't map onto apply_sort's single-column
+    # + id-secondary shape, so it's kept as an explicit order_by here
+    # instead of going through that helper.
     query = db.query(models.TestProject)
     if not include_inactive:
         query = query.filter(models.TestProject.is_active == True)  # noqa: E712
     scope = dashboard_department_scope(current_user)
     if scope:
         query = query.filter(models.TestProject.department == scope)
-    return query.order_by(models.TestProject.is_active.desc(), models.TestProject.name).all()
+    query = pagination.apply_search(query, params, models.TestProject.name, models.TestProject.project_key)
+    query = query.order_by(models.TestProject.is_active.desc(), models.TestProject.name)
+    result = pagination.paginate(query, params)
+    return pagination.to_page_response(result, params)
 
 
 @router.get("/{project_id}/my-access", response_model=schemas.TestProjectMyAccessOut)

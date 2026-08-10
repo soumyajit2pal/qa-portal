@@ -2,15 +2,19 @@ import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { Badge } from './Common'
-import { DefectOut } from '../types'
+import { DefectListOut, PageOut } from '../types'
 
 export default function LinkedDefects({ query, title = 'Linked Defects' }: { query: string; title?: string }) {
   const navigate = useNavigate()
-  const [items, setItems] = useState<DefectOut[]>([])
+  const [items, setItems] = useState<DefectListOut[]>([])
   useEffect(() => {
     let active = true
-    api.get<DefectOut[]>(`/api/defects?${query}`)
-      .then((rows) => { if (active) setItems(rows) })
+    // SRS 7.2 pagination rollout -- /api/defects is now paginated;
+    // `query` is always a single-entity scope (qa_request_id/cycle_id/
+    // test_case_id/execution_id), so page_size=100 covers "every defect
+    // linked to this one record" without needing a real pager UI here.
+    api.get<PageOut<DefectListOut>>(`/api/defects?${query}&page_size=100`)
+      .then((page) => { if (active) setItems(page.items) })
       .catch(() => { if (active) setItems([]) })
     return () => { active = false }
   }, [query])

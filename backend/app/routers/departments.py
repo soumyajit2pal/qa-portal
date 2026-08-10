@@ -2,12 +2,25 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import cache, models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles
 from ..constants import Role
 
 router = APIRouter(prefix="/api/departments", tags=["departments"])
+
+# CAC-001..007 -- reference data: near-static, read on almost every page load
+# (every department picker in the app), written to only rarely (Admin
+# creating/renaming/toggling a department). Cache key is versioned (`v1`) so
+# a future schema/shape change to DepartmentOut can invalidate every
+# deployment's existing cache just by bumping it, without needing an
+# explicit flush step.
+_DEPARTMENTS_CACHE_KEY = "refdata:departments:active:v1"
+_DEPARTMENTS_CACHE_TTL = 300
+
+
+def _invalidate_departments_cache() -> None:
+    cache.delete(_DEPARTMENTS_CACHE_KEY)
 
 
 @router.get("", response_model=List[schemas.DepartmentOut])
@@ -15,7 +28,13 @@ def list_departments(db: Session = Depends(get_db), current_user: models.User = 
     """Active departments only -- used by every department picker in the app
     (Admin > Create User / assign department, etc). Replaces the old hardcoded
     constants.DEPARTMENTS list."""
-    return db.query(models.Department).filter(models.Department.is_active == True).order_by(models.Department.name).all()  # noqa: E712
+    cached = cache.get_json(_DEPARTMENTS_CACHE_KEY)
+    if cached is not None:
+        return cached
+    rows = db.query(models.Department).filter(models.Department.is_active == True).order_by(models.Department.name).all()  # noqa: E712
+    result = [schemas.DepartmentOut.model_validate(row).model_dump(mode="json") for row in rows]
+    cache.set_json(_DEPARTMENTS_CACHE_KEY, result, _DEPARTMENTS_CACHE_TTL)
+    return result
 
 
 @router.get("/all", response_model=List[schemas.DepartmentOut])
@@ -36,6 +55,7 @@ def create_department(payload: schemas.DepartmentCreate, db: Session = Depends(g
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    _invalidate_departments_cache()
     return obj
 
 
@@ -60,4 +80,5 @@ def update_department(dept_id: int, payload: schemas.DepartmentUpdate, db: Sessi
         obj.is_active = data["is_active"]
     db.commit()
     db.refresh(obj)
+    _invalidate_departments_cache()
     return obj

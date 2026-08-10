@@ -1,9 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from .. import models, schemas
+from .. import models, schemas, pagination
 from ..database import get_db
 from ..audit_service import snapshot_changes, user_snapshot, write_audit
 from ..auth import (
@@ -168,15 +171,73 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
 def list_users(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Active users only -- used throughout the app for pickers (assign tester, etc.).
     Reachable by any logged-in user, so CONFIDENTIAL_ROLES are redacted from
-    every row unless the caller is an Admin -- see _redact_confidential_roles."""
+    every row unless the caller is an Admin -- see _redact_confidential_roles.
+
+    SRS 7.2 pagination rollout -- deliberately left unpaginated. 9 separate
+    call sites across the app (QARequests/index.tsx, Performance.tsx,
+    Suppression.tsx, SAST.tsx, DAST.tsx, Defects.tsx, Approvals.tsx,
+    SignOff.tsx, Functional.tsx) all use this purely as a name-lookup/
+    assignee-picker source needing the complete active directory at once,
+    same as the app's other reference-data endpoints (`/api/departments`,
+    `/api/application-names`) that were never paginated either -- see
+    `list_all_users` below for the actual browsable Admin Users table this
+    is not."""
     rows = db.query(models.User).filter(models.User.is_active == True).order_by(models.User.full_name).all()  # noqa: E712
     return [_redact_confidential_roles(u, current_user) for u in rows]
 
 
-@router.get("/users/all", response_model=list[schemas.UserOut])
-def list_all_users(db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(Role.ADMIN))):
-    """Admin section (Module 9): full user directory, including disabled accounts."""
-    return db.query(models.User).order_by(models.User.full_name).all()
+@router.get("/users/all", response_model=pagination.Page[schemas.UserOut])
+def list_all_users(
+    account_filter: Optional[str] = Query(None, description="'active'|'disabled'|'review', omitted for all"),
+    login_type: Optional[str] = None,
+    params: pagination.PageParams = Depends(),
+    db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    """Admin section (Module 9): full user directory, including disabled
+    accounts.
+
+    SRS 7.2 pagination rollout -- Admin.tsx's own three filter controls
+    (account status, login type, free-text search) all become server-side
+    here instead of the in-browser `.filter()` over the whole directory it
+    used to fetch in one shot. `account_filter` encapsulates the exact
+    active/disabled/needs-review tri-state Admin.tsx's own dropdown already
+    offered (mirrors the `queue=`/`assignment=` convention used by
+    Defects/Test Executions elsewhere in this rollout) rather than trying
+    to force it through the generic multi-value `status` param, since
+    "needs review" isn't a value of the `is_active` column at all. See
+    `user_summary` below for the account-summary strip / sidebar badge
+    counts this list can no longer compute client-side from just the
+    current page."""
+    q = db.query(models.User)
+    if account_filter == "active":
+        q = q.filter(models.User.is_active == True)  # noqa: E712
+    elif account_filter == "disabled":
+        q = q.filter(models.User.is_active == False)  # noqa: E712
+    elif account_filter == "review":
+        q = q.filter(models.User.needs_role_review == True)  # noqa: E712
+    if login_type:
+        q = q.filter(models.User.login_type == login_type)
+    # Search deliberately doesn't cover role labels (unlike Admin.tsx's old
+    # client-side search) -- `roles` is a many-to-many join, not a plain
+    # column, and role-name search is a small enough slice of this box's
+    # real usage not to justify a join here.
+    q = pagination.apply_search(q, params, models.User.full_name, models.User.username, models.User.email, models.User.department)
+    # Reported directly: "Surface accounts awaiting review first" -- a
+    # two-column order (needs_role_review desc, then name) that doesn't map
+    # onto apply_sort's single-column + id-secondary shape, so it's kept as
+    # an explicit order_by instead of going through that helper.
+    q = q.order_by(models.User.needs_role_review.desc(), models.User.full_name)
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/users/summary", response_model=schemas.UserSummaryOut)
+def user_summary(db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    total = db.query(func.count(models.User.id)).scalar() or 0
+    active_count = db.query(func.count(models.User.id)).filter(models.User.is_active == True).scalar() or 0  # noqa: E712
+    ldap_count = db.query(func.count(models.User.id)).filter(models.User.login_type == "LDAP").scalar() or 0
+    review_count = db.query(func.count(models.User.id)).filter(models.User.needs_role_review == True).scalar() or 0  # noqa: E712
+    return {"total": total, "active_count": active_count, "ldap_count": ldap_count, "review_count": review_count}
 
 
 def _validate_roles(roles: list):
@@ -384,7 +445,14 @@ def list_local_admin_users(db: Session = Depends(get_db),
     their own account, any Administrator accounts, any account flagged
     admin_managed_only, and any account holding a CONFIDENTIAL_ROLES role
     (see Role.SCALE_6_PLUS's own comment) -- mirrors the guard rails in
-    _require_own_department_target/update_local_admin_user below."""
+    _require_own_department_target/update_local_admin_user below.
+
+    SRS 7.2 pagination rollout -- deliberately left unpaginated, unlike
+    `list_all_users` above. This roster is scoped to a single department
+    (one local admin's own headcount, minus admins/confidential roles), not
+    an org-wide directory -- naturally bounded the same way Test Cycles/
+    Test Projects and Pending Approvals were left alone elsewhere in this
+    rollout, rather than the unbounded-growth case pagination exists for."""
     if not current_user.department:
         raise HTTPException(status_code=400, detail="Your own profile has no department set")
     rows = (

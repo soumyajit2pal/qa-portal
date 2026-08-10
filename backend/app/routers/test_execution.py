@@ -1,11 +1,12 @@
 import os
-from typing import List
+from typing import List, Optional
 from urllib.parse import urlparse
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload, selectinload
 
-from .. import models, schemas
+from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
     get_current_user, require_roles, get_project_member_role,
@@ -15,6 +16,26 @@ from ..deps import (
 from ..constants import Role, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
 from .. import documents as doc_store
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
+
+# PAG-005-adjacent -- list_executions below keeps the full TestExecutionOut
+# shape (unlike Functional/SAST/DAST/Test Cases, no separate lightweight
+# ListOut was introduced here; a cycle's execution count is naturally
+# bounded by how many test cases were assigned to it, not an
+# unbounded-growth list like a whole project's request/case history), but it
+# had NO eager-loading at all before this pagination pass -- every row was a
+# fresh set of lazy queries for test_case/assigned_to/assigned_by/
+# executed_by/runs/linked_defects. This is a partial mitigation (the direct,
+# most-used relationships), not a complete N+1 elimination -- test_case's
+# OWN nested relations (folder/created_by/checked_out_by/current_draft_version
+# chain, tags) still lazy-load per row, same as before this change.
+_LIST_EXECUTION_EAGER_LOADS = [
+    joinedload(models.TestExecution.test_case),
+    joinedload(models.TestExecution.assigned_to),
+    joinedload(models.TestExecution.assigned_by),
+    joinedload(models.TestExecution.executed_by),
+    selectinload(models.TestExecution.runs),
+    selectinload(models.TestExecution.linked_defects),
+]
 
 router = APIRouter(prefix="/api/test-execution", tags=["test-management"])
 
@@ -507,10 +528,25 @@ def _latest_run_or_404(db: Session, obj: models.TestExecution) -> models.TestExe
 
 
 # ---- Cycles ----
-@router.get("/projects/{project_id}/cycles", response_model=List[schemas.TestCycleOut])
-def list_cycles(project_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@router.get("/projects/{project_id}/cycles", response_model=pagination.Page[schemas.TestCycleOut])
+def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
+                 db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # SRS 7.2 pagination rollout (task #82) -- like Test Projects, Test
+    # Cycles is a flat, already-lightweight list (TestCycleOut has no heavy
+    # nested arrays) that's never browsed through the app's real paginated
+    # <Table>; every screen that lists cycles uses it as a complete
+    # picker/aggregation source (project cycle picker, MyExecutions'
+    # per-project fan-out, reports). Wrapped in Page[T] purely for
+    # API-contract consistency -- frontend consumers request
+    # page_size=100 and unwrap .items rather than getting a real pager UI.
     _get_project_or_404(db, project_id)
-    return db.query(models.TestCycle).filter_by(project_id=project_id).order_by(models.TestCycle.created_at.desc()).all()
+    q = db.query(models.TestCycle).filter_by(project_id=project_id)
+    q = pagination.apply_search(q, params, models.TestCycle.name, models.TestCycle.cycle_key)
+    q = pagination.apply_status_filter(q, params, models.TestCycle.status)
+    q = pagination.apply_sort(q, params, sortable={"name": models.TestCycle.name},
+                               default_column=models.TestCycle.created_at, id_column=models.TestCycle.id)
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
 
 
 @router.post("/projects/{project_id}/cycles", response_model=schemas.TestCycleOut)
@@ -772,10 +808,99 @@ def delete_cycle(cycle_id: int, db: Session = Depends(get_db),
 
 
 # ---- Executions (a test case's result within one cycle) ----
-@router.get("/cycles/{cycle_id}/executions", response_model=List[schemas.TestExecutionOut])
-def list_executions(cycle_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@router.get("/cycles/{cycle_id}/executions", response_model=pagination.Page[schemas.TestExecutionOut])
+def list_executions(
+    cycle_id: int,
+    assignment: Optional[str] = Query(
+        None, description="'mine', 'unassigned', or omitted for no extra assignment filter",
+    ),
+    params: pagination.PageParams = Depends(),
+    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
+):
+    """SRS 7.2 pagination rollout -- was previously "every execution slot in
+    the cycle" in one unpaginated call. `assignment` is a module-specific
+    extra filter (like Test Cases' own `folder_id`/`tag`) resolved against
+    the CURRENT user server-side, backing TestExecution.tsx's own "All /
+    Mine / Unassigned" tab bar. See TestExecutionSummaryOut below for the
+    progress bar / assignment stat / result tabs this list can no longer
+    compute client-side from the complete cycle."""
     _get_cycle_or_404(db, cycle_id)
-    return db.query(models.TestExecution).filter_by(cycle_id=cycle_id).order_by(models.TestExecution.id).all()
+    q = db.query(models.TestExecution).filter(models.TestExecution.cycle_id == cycle_id).options(*_LIST_EXECUTION_EAGER_LOADS)
+    if assignment == "mine":
+        q = q.filter(models.TestExecution.assigned_to_id == current_user.id)
+    elif assignment == "unassigned":
+        q = q.filter(models.TestExecution.assigned_to_id.is_(None))
+    q = pagination.apply_status_filter(q, params, models.TestExecution.status)
+    q = pagination.apply_sort(
+        q, params, sortable={"status": models.TestExecution.status},
+        default_column=models.TestExecution.id, id_column=models.TestExecution.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/cycles/{cycle_id}/executions/summary", response_model=schemas.TestExecutionSummaryOut)
+def get_execution_summary(cycle_id: int, db: Session = Depends(get_db),
+                           current_user: models.User = Depends(get_current_user)):
+    """The progress bar, assignment stat, "My queue" count, the All/Mine/
+    Unassigned tab bar, and the per-result-status tab bar all used to be
+    computed in the browser from the complete (unpaginated) cycle execution
+    list -- now that the main list above is paginated, none of those has
+    enough data on hand any more. Computed via SQL COUNT/GROUP BY against
+    the whole cycle regardless of which page/status/assignment filter the
+    main list currently has selected -- never a full-row fetch."""
+    _get_cycle_or_404(db, cycle_id)
+    base = db.query(models.TestExecution).filter(models.TestExecution.cycle_id == cycle_id)
+    total = base.count()
+    status_counts = {
+        status: count for status, count in
+        db.query(models.TestExecution.status, func.count(models.TestExecution.id))
+        .filter(models.TestExecution.cycle_id == cycle_id)
+        .group_by(models.TestExecution.status).all()
+    }
+    executed_count = sum(count for status, count in status_counts.items() if status != "Not Executed")
+    assigned_count = base.filter(models.TestExecution.assigned_to_id.isnot(None)).count()
+    unassigned_count = total - assigned_count
+    mine_count = base.filter(models.TestExecution.assigned_to_id == current_user.id).count()
+    total_run_count = (
+        db.query(func.count(models.TestExecutionRun.id))
+        .join(models.TestExecution, models.TestExecution.id == models.TestExecutionRun.execution_id)
+        .filter(models.TestExecution.cycle_id == cycle_id)
+        .scalar()
+    ) or 0
+    return schemas.TestExecutionSummaryOut(
+        total=total, status_counts=status_counts, executed_count=executed_count,
+        assigned_count=assigned_count, unassigned_count=unassigned_count, mine_count=mine_count,
+        total_run_count=total_run_count,
+    )
+
+
+@router.get("/cycles/{cycle_id}/executions/case-ids", response_model=List[int])
+def list_execution_case_ids(cycle_id: int, db: Session = Depends(get_db),
+                             current_user: models.User = Depends(get_current_user)):
+    """PAG-010 -- deliberately NOT paginated, same reasoning as Test Cases'
+    own `/test-cases/all`. TestExecution.tsx's "Add test cases to cycle"
+    picker needs the complete set of test_case_ids already in this cycle
+    (to exclude them from the candidate pool), not one page of the full
+    execution rows -- just the ids, so this is far cheaper than the main
+    list endpoint above even at full cycle size."""
+    _get_cycle_or_404(db, cycle_id)
+    return [
+        row[0] for row in
+        db.query(models.TestExecution.test_case_id).filter(models.TestExecution.cycle_id == cycle_id).all()
+    ]
+
+
+@router.get("/executions/{execution_id}", response_model=schemas.TestExecutionOut)
+def get_execution(execution_id: int, db: Session = Depends(get_db),
+                   current_user: models.User = Depends(get_current_user)):
+    """PAG-006-adjacent -- didn't exist before this pagination pass, because
+    the list endpoint used to hand back every execution in the cycle at
+    once so no caller ever needed to fetch just one by id. Now that the list
+    is paginated, TestExecution.tsx's own `?execution=<id>` deep-link (from
+    defect traceability) needs this to open a specific slot even when it
+    isn't on whatever page happens to be loaded."""
+    return _execution_or_404(db, execution_id)
 
 
 @router.get("/cycles/{cycle_id}/export-xlsx")

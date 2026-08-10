@@ -10,11 +10,12 @@ import {
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
 import { GATEWAY_STATUSES, GATEWAY_STATUS_LABELS, GATEWAY_PENDING_WITH } from "../constants";
-import { QARequestOut, UserOut } from "../types";
+import { QARequestListOut, QARequestOut, UserOut } from "../types";
 import { classificationSummary, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
 import { RequestDetail } from "./RequestDetail";
 import ClearableSearchInput from "../components/ClearableSearchInput";
+import { usePaginatedList } from "../hooks/usePaginatedList";
 
 // The QA Requests list page -- the intake gateway. "Raise QA Request" opens
 // the wizard (NewRequestModal); clicking a row opens the detail/edit view
@@ -24,20 +25,38 @@ export default function QARequests() {
   const location = useLocation();
   const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
-  const [requests, setRequests] = useState<QARequestOut[]>([]);
   const [users, setUsers] = useState<UserOut[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
   const [search, setSearch] = useState(
     searchParams.get("search") || searchParams.get("application_name") || ""
   );
   const [showNew, setShowNew] = useState(false);
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
+  // QARequestListOut shape now; opening a request fetches the full
+  // QARequestOut record fresh via GET /api/qa-requests/{id} before
+  // RequestDetail (which needs every field) is shown. `openingId` drives a
+  // small inline loading state on the row being opened while that fetch is
+  // in flight.
   const [selected, setSelected] = useState<QARequestOut | null>(null);
+  const [openingId, setOpeningId] = useState<number | null>(null);
   const [error, setError] = useState<unknown>(null);
   // Shown right after saving a brand-new request, as long as it's still sitting
   // in Draft (which it always is at this point -- creating a QA Request never
   // raises it) -- makes it explicit that nothing has actually been submitted
   // yet, since there's no separate "Draft saved" confirmation otherwise.
   const [draftNotice, setDraftNotice] = useState(false);
+
+  const {
+    items: requests, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<QARequestListOut>("/api/qa-requests", {
+    search,
+    status: statusFilter ? [statusFilter] : undefined,
+  });
+
+  useEffect(() => {
+    api.get<UserOut[]>("/api/auth/users").then(setUsers).catch(setError);
+  }, []);
 
   useEffect(() => {
     // Reacts to location.state on every navigation to this route -- not just
@@ -69,25 +88,18 @@ export default function QARequests() {
     );
   }, [location.search]);
 
-  const load = useCallback(async () => {
+  const openRequest = useCallback(async (idOrRow: number | QARequestListOut) => {
+    const id = typeof idOrRow === "number" ? idOrRow : idOrRow.id;
+    setOpeningId(id);
     try {
-      const qs = new URLSearchParams();
-      if (statusFilter) qs.set("status_filter", statusFilter);
-      if (search) qs.set("search", search);
-      const [reqs, us] = await Promise.all([
-        api.get<QARequestOut[]>(`/api/qa-requests?${qs.toString()}`),
-        api.get<UserOut[]>("/api/auth/users"),
-      ]);
-      setRequests(reqs);
-      setUsers(us);
+      const full = await api.get<QARequestOut>(`/api/qa-requests/${id}`);
+      setSelected(full);
     } catch (err) {
       setError(err);
+    } finally {
+      setOpeningId(null);
     }
-  }, [statusFilter, search]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  }, []);
 
   // Pending Approvals and other deep links can open the parent gateway's
   // drawer immediately instead of landing on its filtered list first.
@@ -95,11 +107,11 @@ export default function QARequests() {
     const openId = new URLSearchParams(location.search).get("open");
     if (!openId || requests.length === 0) return;
     const match = requests.find((request) => request.request_id === openId);
-    if (match) setSelected(match);
+    if (match) openRequest(match.id);
     const params = new URLSearchParams(location.search);
     params.delete("open");
     navigate(`${location.pathname}${params.toString() ? `?${params}` : ""}`, { replace: true });
-  }, [requests, location.search, location.pathname, navigate]);
+  }, [requests, location.search, location.pathname, navigate, openRequest]);
 
   function clearSearch() {
     setSearch("");
@@ -118,7 +130,7 @@ export default function QARequests() {
           REQUESTER/BUSINESS_ANALYST roles) -- not duplicated here. */}
       <PageHeader
         title="QA Requests"
-        count={requests.length}
+        count={total}
         subtitle="The intake gateway — raise a request here, then track progress on each linked Functional/SAST/DAST/Performance request from its own page."
       />
       <div className="toolbar">
@@ -146,7 +158,11 @@ export default function QARequests() {
       <Card>
         <Table
           rowKey="id"
-          onRowClick={(r) => setSelected(r)}
+          onRowClick={(r) => openRequest(r)}
+          server={{
+            page, pageSize, total, totalPages, hasNext, hasPrevious,
+            onPageChange: setPage, onPageSizeChange: setPageSize, loading,
+          }}
           columns={[
             {
               key: "request_id",
@@ -154,7 +170,7 @@ export default function QARequests() {
               // Not assigned until raised (see backend's request_id column
               // comment) -- a still-Draft row shows a placeholder instead of
               // a blank cell.
-              render: (r) => r.request_id || `Draft #${r.id}`,
+              render: (r) => (openingId === r.id ? "Opening…" : (r.request_id || `Draft #${r.id}`)),
               filterValue: (r) => r.request_id || `Draft #${r.id}`,
             },
             { key: "application_name", header: "Application" },
@@ -212,7 +228,7 @@ export default function QARequests() {
             // Land straight on the new request's detail view instead of
             // dropping the user back on the bare list.
             setShowNew(false);
-            load();
+            reload();
             setSelected(created);
             if (created.status === "DRAFT") setDraftNotice(true);
           }}
@@ -225,7 +241,7 @@ export default function QARequests() {
           onClose={() => setSelected(null)}
           onChanged={(updated) => {
             setSelected(updated);
-            load();
+            reload();
           }}
         />
       )}

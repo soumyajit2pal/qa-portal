@@ -5,7 +5,7 @@ import SearchableSelect from '../../components/SearchableSelect'
 import {
   TestProjectOut, TestCycleOut, ReportCountRow, ReportStatusCountRow,
   RepositoryHealthOut, CycleProgressOut, DefectQualityOut,
-  VersionImpactOut, ProjectPortfolioOut,
+  VersionImpactOut, ProjectPortfolioOut, PageOut,
 } from '../../types'
 
 // SRS section 11 -- the 5 Test Management reporting views. Each report is a
@@ -106,7 +106,10 @@ function CycleProgressPanel({ projectId }: { projectId: number }) {
 
   useEffect(() => {
     setCycleId(''); setData(null)
-    api.get<TestCycleOut[]>(`/api/test-execution/projects/${projectId}/cycles`).then((c) => {
+    // SRS 7.2 pagination rollout -- Page[T] wrapper (task #82); page_size=100
+    // + .items since this picker still wants the complete list.
+    api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${projectId}/cycles?page_size=100`).then((page) => {
+      const c = page.items
       setCycles(c)
       if (c.length) setCycleId(c[0].id)
     }).catch(setError)
@@ -246,7 +249,10 @@ export default function TestReports() {
 
   const load = useCallback(async () => {
     try {
-      const p = await api.get<TestProjectOut[]>('/api/test-projects')
+      // SRS 7.2 pagination rollout -- Page[T] wrapper (task #82);
+      // page_size=100 + .items since this picker still wants the complete
+      // list.
+      const p = await api.get<PageOut<TestProjectOut>>('/api/test-projects?page_size=100').then((page) => page.items)
       setProjects(p)
       if (p.length) setProjectId(p[0].id)
     } catch (err) { setError(err) }

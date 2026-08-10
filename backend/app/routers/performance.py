@@ -1,11 +1,11 @@
 import os
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from .. import models, schemas
+from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
 from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
@@ -83,16 +83,50 @@ def _require_performance_execution_owner(obj: "models.PerformanceRequest", user:
     raise HTTPException(403, "Only the assigned QA Lead or an assigned COE - Quality Assurance QA Tester can perform this action")
 
 
-@router.get("", response_model=List[schemas.PerformanceOut])
-def list_performance(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.PerformanceRequest)
-    # See list_functional's matching comment in routers/functional.py -- same
-    # reasoning, applied unconditionally.
+@router.get("", response_model=pagination.Page[schemas.PerformanceListOut])
+def list_performance(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # application_name is a real column on PerformanceRequest itself (unlike
+    # Functional/SAST/DAST, which all delegate it) -- but department/
+    # application_master_status still are, so the QARequest join/eager-load
+    # is still needed for those. isouter=True so a standalone (no
+    # qa_request_id) row isn't dropped -- see list_functional's matching
+    # comment in routers/functional.py.
+    q = db.query(models.PerformanceRequest).join(
+        models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id, isouter=True
+    ).options(
+        joinedload(models.PerformanceRequest.qa_request).joinedload(models.QARequest.application_master)
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.join(models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
-    return q.order_by(models.PerformanceRequest.created_at.desc()).all()
+        q = q.filter(models.QARequest.department == scope)
+    q = pagination.apply_search(q, params, models.PerformanceRequest.request_id, models.PerformanceRequest.application_name)
+    q = pagination.apply_status_filter(q, params, models.PerformanceRequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    # Module-specific, same reasoning as qa_requests.py/functional.py's own
+    # requester_id addition (reported directly -- Dashboard.tsx's "My
+    # Requests" tab).
+    if requester_id is not None:
+        q = q.filter(models.PerformanceRequest.requester_id == requester_id)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "created_at": models.PerformanceRequest.created_at,
+            "updated_at": models.PerformanceRequest.updated_at,
+            "status": models.PerformanceRequest.status,
+            "application_name": models.PerformanceRequest.application_name,
+        },
+        default_column=models.PerformanceRequest.created_at, id_column=models.PerformanceRequest.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/{req_id}", response_model=schemas.PerformanceOut)
+def get_performance(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # PAG-006 -- the detail endpoint the frontend fetches from when a list
+    # row is opened, now that the list above only returns PerformanceListOut.
+    return _get_or_404(db, req_id)
 
 
 # Standalone creation is DISABLED -- Performance requests can only originate

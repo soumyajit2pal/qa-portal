@@ -7,7 +7,7 @@ import {
   CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, hasRole,
   SIGNOFF_EDITABLE_STATUSES, QA_DEPARTMENT, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
 } from '../../constants'
-import { SignOffOut, UserOut, FunctionalOut, ApprovalActionOut } from '../../types'
+import { SignOffOut, UserOut, FunctionalOut, FunctionalListOut, PageOut, ApprovalActionOut } from '../../types'
 import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
@@ -58,9 +58,13 @@ function richTextRequiredError(form: Pick<SignOffForm, 'exit_criteria_notes' | '
 // which derives every auto-populated certificate field from it (see
 // NewSignOffModal::applyRequest below).
 function TestingRequestIdSearch({ requests, selected, onSelect, onClear }: {
-  requests: FunctionalOut[]
+  requests: FunctionalListOut[]
+  // The already-fully-loaded selection (PAG-006 -- fetched fresh on select,
+  // see NewSignOffModal's onSelect below), not one of the lightweight
+  // `requests` rows -- both shapes carry request_id/application_name so the
+  // "selected" display below works with either.
   selected: FunctionalOut | null
-  onSelect: (r: FunctionalOut) => void
+  onSelect: (r: FunctionalListOut) => void
   onClear: () => void
 }) {
   const [query, setQuery] = useState('')
@@ -141,9 +145,10 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   const { user } = useAuth()
   const [form, setForm] = useState<SignOffForm>(EMPTY)
   const [selectedRequest, setSelectedRequest] = useState<FunctionalOut | null>(null)
-  const [eligibleRequests, setEligibleRequests] = useState<FunctionalOut[]>([])
+  const [eligibleRequests, setEligibleRequests] = useState<FunctionalListOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const [selecting, setSelecting] = useState(false)
   // Supporting documents picked before the certificate exists yet -- there's
   // no signoff id to upload against until POST /api/signoffs returns one, so
   // these are held here and uploaded right after creation succeeds (see
@@ -193,10 +198,35 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
 
   useEffect(() => {
     if (presetRequest) { applyRequest(presetRequest); return }
-    api.get<FunctionalOut[]>('/api/functional-requests')
-      .then((rows) => setEligibleRequests(rows.filter((r) => SIGNOFF_ELIGIBLE_STATUSES.includes(r.status))))
+    // SIGNOFF_ELIGIBLE_STATUSES filtering now happens server-side via
+    // PAG-001's multi-value `status` param, instead of fetching every
+    // Functional Testing Request and filtering client-side. page_size=100
+    // is the same "good enough for a picker, not exhaustive" compatibility
+    // cap used by the other pickers built on top of a paginated endpoint
+    // (see QARequests/index.tsx's own openRequest comment for the pattern).
+    const statusQuery = SIGNOFF_ELIGIBLE_STATUSES.map((s) => `status=${encodeURIComponent(s)}`).join('&')
+    api.get<PageOut<FunctionalListOut>>(`/api/functional-requests?${statusQuery}&page_size=100`)
+      .then((p) => setEligibleRequests(p.items))
       .catch(setError)
   }, [presetRequest, applyRequest])
+
+  // PAG-006 -- `eligibleRequests` only ever holds the lightweight
+  // FunctionalListOut shape; picking one fetches the full FunctionalOut
+  // record fresh (same "fetch full detail on open" pattern as every other
+  // paginated list's own detail view) before deriving the certificate's
+  // auto-populated fields from it.
+  const selectEligibleRequest = useCallback(async (row: FunctionalListOut) => {
+    setSelecting(true)
+    setError(null)
+    try {
+      const full = await api.get<FunctionalOut>(`/api/functional-requests/${row.id}`)
+      applyRequest(full)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setSelecting(false)
+    }
+  }, [applyRequest])
 
   function clearSelection() {
     setSelectedRequest(null)
@@ -254,7 +284,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
               </div>
             </div>
           ) : (
-            <TestingRequestIdSearch requests={eligibleRequests} selected={selectedRequest} onSelect={applyRequest} onClear={clearSelection} />
+            <TestingRequestIdSearch requests={eligibleRequests} selected={selectedRequest} onSelect={selectEligibleRequest} onClear={clearSelection} />
           )}
         </Field>
         <div className="form-row">

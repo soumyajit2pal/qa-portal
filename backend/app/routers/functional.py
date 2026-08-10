@@ -4,9 +4,9 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from .. import models, schemas
+from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
 from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
@@ -76,19 +76,49 @@ def _require_assigned_tester(obj: "models.FunctionalRequest", user: models.User)
         raise HTTPException(403, "Only a COE - Quality Assurance QA Tester assigned by the QA Lead can perform this action")
 
 
-@router.get("", response_model=List[schemas.FunctionalOut])
-def list_functional(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.FunctionalRequest)
-    # Reported directly, then extended to "everywhere" (see list_requests'
-    # matching comment in routers/qa_requests.py) -- applied unconditionally.
-    # department is a delegated property (see models.FunctionalRequest.
-    # department), not a real column, so this needs a join to the parent
-    # QARequest rather than a plain .filter().
+@router.get("", response_model=pagination.Page[schemas.FunctionalListOut])
+def list_functional(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+                     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # department/application_name/epic_number/application_master_status are
+    # all delegated (read-only) properties resolved through the `qa_request`
+    # relationship (see models.FunctionalRequest), not real columns -- every
+    # filter that touches them needs the same join dashboard_department_scope
+    # already required, and every row needs qa_request (+ its own
+    # application_master) eager-loaded so FunctionalListOut's read of those
+    # properties doesn't turn into a lazy-load-per-row N+1 (PAG-007/DBP-005).
+    # isouter=True (not an inner join): qa_request_id is nullable (standalone
+    # creation is disabled now, see create_functional above, but older rows
+    # from before that -- if any -- would otherwise silently vanish from
+    # every list view under an inner join).
+    q = db.query(models.FunctionalRequest).join(
+        models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id, isouter=True
+    ).options(
+        joinedload(models.FunctionalRequest.qa_request).joinedload(models.QARequest.application_master)
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.join(models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
-    return q.order_by(models.FunctionalRequest.created_at.desc()).all()
+        q = q.filter(models.QARequest.department == scope)
+    q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_status_filter(q, params, models.FunctionalRequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    # Module-specific, same reasoning/reported issue as qa_requests.py's own
+    # requester_id addition -- lets Dashboard.tsx's "My Requests" tab filter
+    # server-side instead of over a department-wide, page_size=100-capped
+    # fetch that could silently omit a user's own older requests.
+    if requester_id is not None:
+        q = q.filter(models.FunctionalRequest.requester_id == requester_id)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "created_at": models.FunctionalRequest.created_at,
+            "updated_at": models.FunctionalRequest.updated_at,
+            "status": models.FunctionalRequest.status,
+            "application_name": models.QARequest.application_name,
+        },
+        default_column=models.FunctionalRequest.created_at, id_column=models.FunctionalRequest.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
 
 
 @router.get("/{req_id}", response_model=schemas.FunctionalOut)

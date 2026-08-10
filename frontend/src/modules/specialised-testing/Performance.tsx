@@ -13,7 +13,8 @@ import {
   PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, canManageReadinessEvidence,
   QA_DEPARTMENT, PERFORMANCE_PENDING_WITH,
 } from '../../constants'
-import { PerformanceOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { PerformanceOut, PerformanceListOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -671,21 +672,34 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 }
 
 export default function Performance() {
-  const [rows, setRows] = useState<PerformanceOut[]>([])
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
+  // PerformanceListOut shape; opening a request fetches the full
+  // PerformanceOut record fresh via GET /api/performance-requests/{id}
+  // before PerformanceDetail (which needs every field) is shown.
   const [selected, setSelected] = useState<PerformanceOut | null>(null)
+  const [openingId, setOpeningId] = useState<number | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
-  const load = useCallback(async () => {
-    try { setRows(await api.get<PerformanceOut[]>('/api/performance-requests')) } catch (err) { setError(err) }
-  }, [])
-  useEffect(() => { load() }, [load])
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<PerformanceListOut>('/api/performance-requests', {})
+
   useEffect(() => {
     // Full user list -- not just QA Engineer/Lead -- so both the Assign
     // Requester and readiness-starter fields can
     // resolve names from a single fetch.
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
+  }, [])
+
+  const openRequest = useCallback(async (idOrRow: number | PerformanceListOut) => {
+    const id = typeof idOrRow === 'number' ? idOrRow : idOrRow.id
+    setOpeningId(id)
+    try {
+      setSelected(await api.get<PerformanceOut>(`/api/performance-requests/${id}`))
+    } catch (err) { setError(err) } finally { setOpeningId(null) }
   }, [])
 
   // Deep-link support -- see the matching effect in Functional.tsx for the
@@ -695,20 +709,26 @@ export default function Performance() {
     const openId = searchParams.get('open')
     if (!openId || rows.length === 0) return
     const match = rows.find((r) => r.request_id === openId)
-    if (match) setSelected(match)
+    if (match) openRequest(match.id)
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams])
+  }, [rows, searchParams, setSearchParams, openRequest])
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="Performance Testing Requests" count={rows.length}
+        title="Performance Testing Requests" count={total}
         subtitle="Load/performance testing requests, from submission through baseline, load test execution, and sign-off. Raised via a QA Request (include Performance Testing in its request types) -- not created standalone here."
       />
       <Card>
-        <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
-          { key: 'request_id', header: 'Request ID' },
+        <Table rowKey="id" onRowClick={(r) => openRequest(r)}
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
+          columns={[
+          {
+            key: 'request_id',
+            header: 'Request ID',
+            render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
+          },
           { key: 'application_name', header: 'Application' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'engineer_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.engineer_id) || 'Not assigned', filterValue: (r) => userName(users, r.engineer_id) || '' },
@@ -726,7 +746,7 @@ export default function Performance() {
         ]} rows={rows} />
       </Card>
       {selected && (
-        <PerformanceDetail req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }} users={users} />
+        <PerformanceDetail req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); reload() }} users={users} />
       )}
     </div>
   )

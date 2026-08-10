@@ -4,7 +4,7 @@ from typing import List
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, UniqueConstraint, text, and_
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index, UniqueConstraint, text, and_
 )
 from sqlalchemy.orm import relationship, foreign
 from .database import Base
@@ -521,7 +521,11 @@ class FunctionalRequest(Base):
     __tablename__ = "qap_functional_requests"
     id = pk_column()
     request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["FUNCTIONAL"]))
-    status = Column(String(32), default=QAStatus.DRAFT, index=True)
+    # IDX-002/IDX-005: no longer index=True on its own -- superseded by the
+    # composite ix_qap_func_status_created below (same leading column, plus
+    # created_at), see the "Performance optimization indexes" block near the
+    # end of this file for the full rationale.
+    status = Column(String(32), default=QAStatus.DRAFT)
     # Set (independently of `status`) when the QA Lead fails Readiness
     # Verification with "require re-approval" ticked. `status` is always set
     # to RETURNED_BY_QA_LEAD in that case -- who actually returned it -- never
@@ -831,6 +835,14 @@ class SASTRequest(Base):
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
 
+    # PAG-005 -- the paginated list view (SASTListOut) shows a findings
+    # count, not the full findings list; routers/sast_dast.py's list_sast
+    # eager-loads `findings` via selectinload so reading this property
+    # doesn't turn into a lazy-load-per-row.
+    @property
+    def findings_count(self):
+        return len(self.findings)
+
 
 class SASTComponent(Base):
     """One repository entry for a SAST request -- its own branch/commit/tech
@@ -1035,6 +1047,11 @@ class DASTRequest(Base):
     @property
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
+
+    # See SASTRequest.findings_count above -- same idea, for DAST.
+    @property
+    def findings_count(self):
+        return len(self.findings)
 
 
 class DASTTarget(Base):
@@ -1395,7 +1412,11 @@ class ApprovalAction(Base):
     """
     __tablename__ = "qap_approval_actions"
     id = pk_column()
-    entity_type = Column(String(32), index=True)
+    # entity_type no longer index=True on its own -- superseded by the
+    # composite ix_qap_appract_entity_created below (same leading column,
+    # plus entity_id and created_at). entity_id's own single-column index is
+    # kept -- see that block's comment for why.
+    entity_type = Column(String(32))
     entity_id = Column(Integer, index=True)
     step_name = Column(String(64))
     actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
@@ -1481,7 +1502,9 @@ class AuditLog(Base):
     event_type = Column(String(40), nullable=False, index=True)
     action = Column(String(80), nullable=False, index=True)
     outcome = Column(String(20), nullable=False, index=True)
-    actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    # No longer index=True on its own -- superseded by the composite
+    # ix_qap_audit_actor_created below (same leading column, plus created_at).
+    actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     actor_username = Column(String(150), nullable=True, index=True)
     actor_name = Column(String(150), nullable=True)
     actor_roles = Column(String(500), nullable=True)
@@ -1519,7 +1542,11 @@ class RequestDocument(Base):
     request_id string>/<module>/<filename> -- see UPLOAD_ROOT in documents.py."""
     __tablename__ = "qap_module_documents"
     id = pk_column()
-    module = Column(String(20), nullable=False, index=True)
+    # module no longer index=True on its own -- superseded by the composite
+    # ix_qap_moddocs_req_uploaded below (same leading column, plus
+    # request_id and uploaded_at). request_id's own single-column index is
+    # kept -- see that block's comment for why.
+    module = Column(String(20), nullable=False)
     request_id = Column(Integer, nullable=False, index=True)
     file_name = Column(String(255), nullable=False)
     stored_path = Column(String(500), nullable=False)   # relative to UPLOAD_ROOT
@@ -1884,6 +1911,18 @@ class TestCase(Base):
     @property
     def tags(self):
         return [row.tag for row in self.tag_rows]
+
+    # PAG-005 -- the list endpoint serializes TestCaseListOut, which carries
+    # this count instead of the full `steps` array (each step's text/
+    # expected_result is only ever needed once a case is actually opened).
+    # `self.steps` (the legacy TestStep mirror, kept in sync with the
+    # current version's real TestCaseVersionStep rows by every write path --
+    # see routers/test_repository.py's _replace_draft_steps and friends) is
+    # already what TestCaseOut.steps itself reads, so this stays consistent
+    # with whatever count the full detail view would show.
+    @property
+    def steps_count(self):
+        return len(self.steps)
 
     project = relationship("TestProject", back_populates="test_cases")
     folder = relationship("TestFolder")
@@ -2421,7 +2460,11 @@ class Defect(Base):
     actual_result = Column(Text, nullable=False)
     reporter_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False, index=True)
     reported_at = Column(DateTime, default=now, nullable=False)
-    assignee_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    # No longer index=True on its own -- superseded by the composite
+    # ix_qap_defects_assignee_upd below (same leading column, plus status
+    # and updated_at) -- "my assigned defects, newest first" is exactly the
+    # Defect Management module's own personal-queue view.
+    assignee_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     assigned_team = Column(String(150), nullable=True)
     assigned_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     assigned_at = Column(DateTime, nullable=True)
@@ -2520,3 +2563,65 @@ class DefectTestCaseLink(Base):
     test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False, index=True)
     defect = relationship("Defect", back_populates="test_case_links")
     test_case = relationship("TestCase")
+
+
+# ---------------------------------------------------------------------------
+# Performance optimization indexes (IDX-001..007)
+# ---------------------------------------------------------------------------
+# Composite indexes for the query patterns every paginated list endpoint
+# actually runs: filter by department/status (RBAC scoping + PAG-001's
+# `status` param), sorted newest-first (PAG-004's stable `created_at DESC,
+# id DESC`). Grouped here at module end, rather than scattered as
+# `__table_args__` on each class, so the whole set (and the redundant
+# single-column indexes removed alongside them -- see the comment left on
+# each affected column above) can be reviewed together against IDX-005
+# ("shall not create redundant indexes whose leading columns are already
+# adequately covered by another index").
+#
+# Every name is verified <= 30 bytes (Oracle's hard identifier limit --
+# this project has hit ORA-00972 from a too-long identifier before, see
+# ORACLE_MIGRATION_2026-07.md's own note on it).
+#
+# IMPORTANT -- this app has no Alembic/migration tool (see database.py's
+# module docstring): schema changes are additive-only via
+# `Base.metadata.create_all()`, which only emits DDL for tables that don't
+# exist yet. A brand-new deployment gets these indexes automatically; an
+# EXISTING Oracle schema needs them added by hand -- see
+# backend/scripts/2026-08_add_performance_indexes.sql for the equivalent
+# manual `CREATE INDEX` statements (same convention already used for new
+# columns needing manual `ALTER TABLE`).
+Index("ix_qap_req_dept_status_created", QARequest.department, QARequest.status, QARequest.created_at)
+Index("ix_qap_func_status_created", FunctionalRequest.status, FunctionalRequest.created_at)
+Index("ix_qap_sast_status_created", SASTRequest.status, SASTRequest.created_at)
+Index("ix_qap_dast_status_created", DASTRequest.status, DASTRequest.created_at)
+Index("ix_qap_perf_status_created", PerformanceRequest.status, PerformanceRequest.created_at)
+Index("ix_qap_appract_entity_created", ApprovalAction.entity_type, ApprovalAction.entity_id, ApprovalAction.created_at)
+Index("ix_qap_tc_proj_folder_created", TestCase.project_id, TestCase.folder_id, TestCase.created_at)
+Index("ix_qap_cyc_proj_status_created", TestCycle.project_id, TestCycle.status, TestCycle.created_at)
+Index("ix_qap_readiness_func_req", ReadinessChecklistItem.functional_request_id)
+Index("ix_qap_moddocs_req_uploaded", RequestDocument.module, RequestDocument.request_id, RequestDocument.uploaded_at)
+Index("ix_qap_audit_actor_created", AuditLog.actor_id, AuditLog.created_at)
+Index("ix_qap_audit_target", AuditLog.target_type, AuditLog.target_id)
+Index("ix_qap_defects_assignee_upd", Defect.assignee_id, Defect.status, Defect.updated_at)
+
+# Deliberately NOT added, with reasons (IDX-005/IDX-006 diligence):
+#   - TestExecution(cycle_id, test_case_id): already exactly covered by the
+#     UniqueConstraint("cycle_id", "test_case_id", name="uq_qap_test_exec_
+#     cycle_case") on TestExecution above -- Oracle backs a unique
+#     constraint with a unique index on precisely those columns in that
+#     order, so a second, non-unique index on the same leading columns
+#     would be purely redundant.
+#   - "Pending Approval: approver, status, entity type" (IDX-002's own
+#     table) -- there is no dedicated PendingApproval table with an
+#     `approver` column in this schema; every pending-approval screen
+#     queries the underlying module tables (QARequest/FunctionalRequest/
+#     SASTRequest/DASTRequest/PerformanceRequest/TestCase review state)
+#     directly by status/role, which the composites above already cover.
+#   - "Assignment: assignee, status, updated date" beyond Defect -- the only
+#     other assignment-shaped column in the schema is TestExecution.
+#     assigned_to_id, which already has its own index=True and no
+#     corresponding `status`/`updated_at` pair on that same row (status
+#     lives on the row already, but there's no separate "assignment updated"
+#     timestamp distinct from the row's own created_at) to usefully compose
+#     with -- revisit if/when that module gains one.
+

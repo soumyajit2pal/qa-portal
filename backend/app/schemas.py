@@ -1,6 +1,6 @@
 import datetime
 import re
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
@@ -46,6 +46,16 @@ class UserOut(ORMModel):
     admin_managed_only: bool = False
 
     _normalize_full_name = field_validator("full_name", mode="before")(_plain_person_name)
+
+
+class UserSummaryOut(BaseModel):
+    """SRS 7.2 pagination rollout -- backs Admin.tsx's account-summary strip
+    and sidebar-nav badge, computed via SQL COUNT instead of `.length` over
+    the (now-paginated) full directory fetch."""
+    total: int
+    active_count: int
+    ldap_count: int
+    review_count: int
 
 
 class UserCreate(BaseModel):
@@ -126,14 +136,6 @@ class AuditSummary(BaseModel):
     failed: int
     authentication: int
     access_management: int
-
-
-class AuditLogPage(BaseModel):
-    rows: List[AuditLogOut]
-    total: int
-    page: int
-    page_size: int
-    summary: AuditSummary
 
 
 # ---------------- Module 1: QA Request ----------------
@@ -467,6 +469,34 @@ class QARequestOut(ORMModel):
     draft_classification: dict = {}
 
 
+# SRS 7.2 PAG-005 -- lightweight counterpart to QARequestOut for
+# GET /api/qa-requests (paginated list). Deliberately excludes every
+# wizard-resume/draft-prefill field above (draft_sast_components,
+# draft_dast_components, draft_performance, the draft_*_checked_items
+# arrays, draft_classification, remarks, supporting_doc_path) -- none of
+# it is rendered by the list table (QARequests/index.tsx), all of it only
+# matters once a specific Draft is actually reopened for editing, which
+# goes through the GET /api/qa-requests/{id} detail endpoint (still
+# QARequestOut, PAG-006) instead.
+class QARequestListOut(ORMModel):
+    id: int
+    request_id: Optional[str] = None
+    request_date: Optional[datetime.date] = None
+    department: Optional[str] = None
+    application_name: str
+    epic_number: Optional[str] = None
+    target_release_date: Optional[datetime.date] = None
+    status: str
+    requester_id: Optional[int] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    application_master_status: Optional[str] = None
+    linked_functional_requests: List[LinkedRequestRef] = []
+    linked_sast_requests: List[LinkedRequestRef] = []
+    linked_dast_requests: List[LinkedRequestRef] = []
+    linked_performance_requests: List[LinkedRequestRef] = []
+
+
 # ---- Functional Testing Request (Functional/Sanity/Regression Testing/UAT Support) ----
 class FunctionalCreate(BaseModel):
     """Standalone creation is disabled (see routers/functional.py) -- this
@@ -516,6 +546,34 @@ class LinkedTestCycleRef(ORMModel):
     status: str
     start_date: Optional[datetime.date] = None
     end_date: Optional[datetime.date] = None
+
+
+class FunctionalListOut(ORMModel):
+    """PAG-005 lightweight list schema -- exactly the fields
+    modules/functional/Functional.tsx's list table renders/filters on, plus
+    application_master_status (drives the "Pending With: Application Owner"
+    override) and department (server-side scoping/filter only, not directly
+    rendered as its own column). See FunctionalOut below for the full
+    detail-view shape fetched on open (PAG-006)."""
+    id: int
+    request_id: str
+    status: str
+    application_master_status: Optional[str] = None
+    requester_id: Optional[int] = None
+    qa_lead_id: Optional[int] = None
+    priority: Optional[str] = None
+    application_name: Optional[str] = None
+    epic_number: Optional[str] = None
+    department: Optional[str] = None
+    # Not rendered by Functional.tsx's own list table, but modules/
+    # governance/SignOff.tsx's "New Sign-off Certificate" Testing Request ID
+    # picker reuses this same paginated endpoint and shows it in its search
+    # dropdown -- cheap to include since qa_request is already eager-loaded
+    # for application_name/department above.
+    application_owner: Optional[str] = None
+    qa_request: Optional[LinkedRequestRef] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
 
 
 class FunctionalOut(ORMModel):
@@ -728,6 +786,31 @@ class SASTFindingOut(ORMModel):
     status: str
 
 
+class SASTListOut(ORMModel):
+    """PAG-005 lightweight list schema -- mirrors modules/security/SAST.tsx's
+    list table exactly (findings_count instead of the full findings list --
+    see models.SASTRequest.findings_count)."""
+    id: int
+    request_id: str
+    status: str
+    application_master_status: Optional[str] = None
+    requester_id: Optional[int] = None
+    security_lead_id: Optional[int] = None
+    priority: Optional[str] = None
+    risk_category: Optional[str] = None
+    application_name: Optional[str] = None
+    # Cheap to include -- already eager-loaded via the same joinedload(qa_request
+    # -> application_master) used for application_name/application_master_status
+    # above. Needed by Suppression.tsx's cross-module SAST/DAST request picker
+    # (department scoping + subtitle line), no extra query cost.
+    department: Optional[str] = None
+    application_owner: Optional[str] = None
+    findings_count: int = 0
+    qa_request: Optional[LinkedRequestRef] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+
 class SASTOut(ORMModel):
     id: int
     request_id: str
@@ -810,6 +893,30 @@ class DASTFindingOut(ORMModel):
     severity: str
     description: Optional[str] = None
     status: str
+
+
+class DASTListOut(ORMModel):
+    """PAG-005 lightweight list schema -- mirrors modules/security/DAST.tsx's
+    list table exactly. Deliberately does NOT include `targets` (so
+    test_credentials masking, see _dast_out in routers/sast_dast.py, is only
+    ever a concern for the detail endpoint, not this list)."""
+    id: int
+    request_id: str
+    status: str
+    application_master_status: Optional[str] = None
+    requester_id: Optional[int] = None
+    security_lead_id: Optional[int] = None
+    priority: Optional[str] = None
+    risk_category: Optional[str] = None
+    application_name: Optional[str] = None
+    # See the matching comment on SASTListOut above -- same reasoning, same
+    # eager-load, needed by Suppression.tsx's cross-module picker.
+    department: Optional[str] = None
+    application_owner: Optional[str] = None
+    findings_count: int = 0
+    qa_request: Optional[LinkedRequestRef] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
 
 
 class DASTOut(ORMModel):
@@ -929,6 +1036,29 @@ class PerformanceChecklistItemOut(ORMModel):
 
 class PerformanceChecklistItemUpdate(BaseModel):
     is_complete: bool
+
+
+class PerformanceListOut(ORMModel):
+    """PAG-005 lightweight list schema -- mirrors
+    modules/specialised-testing/Performance.tsx's list table exactly."""
+    id: int
+    request_id: str
+    status: str
+    application_master_status: Optional[str] = None
+    requester_id: Optional[int] = None
+    engineer_id: Optional[int] = None
+    priority: Optional[str] = None
+    risk_category: Optional[str] = None
+    application_name: Optional[str] = None
+    # Cheap to include -- already eager-loaded via the same joinedload(qa_request
+    # -> application_master) used for application_master_status above. Needed
+    # by Dashboard.tsx's "My Department" unified-request filter (toUnified),
+    # which silently drops any row with no department -- see the matching
+    # addition to SASTListOut/DASTListOut for the same reasoning.
+    department: Optional[str] = None
+    qa_request: Optional[LinkedRequestRef] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
 
 
 class PerformanceOut(ORMModel):
@@ -1213,12 +1343,61 @@ class DefectOut(ORMModel):
     updated_at: datetime.datetime
 
 
+class DefectListOut(ORMModel):
+    """PAG-005 lightweight list schema for `GET /api/defects` -- drops the
+    long free-text fields (description, steps_to_reproduce, expected/actual
+    result, log/request details, resolution/root-cause/fix writeups, etc.)
+    that only ever get read once a defect is actually opened (see PAG-006's
+    `GET /{defect_id}` -> `DefectOut` fetch-on-open in Defects.tsx). Keeps
+    everything the register table, the queue tabs, and every other module's
+    defect pickers (TestExecution.tsx's cycle-completion gate and
+    "link existing defect" modal) actually read off a row."""
+    id: int
+    defect_key: str
+    title: str
+    status: str
+    qa_request_id: int
+    qa_request_key: Optional[str] = None
+    cycle_id: Optional[int] = None
+    cycle_key: Optional[str] = None
+    project_id: Optional[int] = None
+    test_case_key: Optional[str] = None
+    execution_id: Optional[int] = None
+    application_name: str
+    module_feature: str
+    environment: str
+    severity: str
+    priority: str
+    reporter_id: int
+    reporter_name: Optional[str] = None
+    reported_at: datetime.datetime
+    assignee_id: Optional[int] = None
+    assignee_name: Optional[str] = None
+    assigned_team: Optional[str] = None
+    target_release: Optional[str] = None
+    expected_resolution_date: Optional[datetime.date] = None
+    reopen_count: int = 0
+    closed_at: Optional[datetime.datetime] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+
 class DefectDashboardOut(BaseModel):
     total: int
     open: int
     closed: int
     reopened: int
     deferred: int
+    # SRS 7.2 pagination rollout -- these four back Defects.tsx's queue tabs
+    # (previously client-computed via `.filter().length` over the whole,
+    # now-paginated list). Computed via dedicated SQL COUNTs, not derived
+    # from `by_status`/`by_severity` alone, since each is a compound
+    # condition (e.g. "Critical/High severity AND not terminal status") that
+    # a single-column GROUP BY can't answer on its own.
+    attention_count: int = 0
+    mine_count: int = 0
+    unlinked_count: int = 0
+    retest_count: int = 0
     by_status: dict[str, int]
     by_severity: dict[str, int]
     by_priority: dict[str, int]
@@ -1840,6 +2019,69 @@ class TestCaseOut(ORMModel):
     pending_with_user_name: Optional[str] = None
     pending_since: Optional[datetime.datetime] = None
     steps: List[TestStepOut] = []
+    # Also present on the PAG-005 list schema below (which has no `steps` at
+    # all) -- kept here too so a mutation response (checkout/checkin/review/
+    # save) has the same field the list state expects, for any consumer that
+    # still merges a full record back into a list row rather than reloading.
+    steps_count: int = 0
+
+
+class TestCaseListOut(ORMModel):
+    """PAG-005 lightweight list schema -- mirrors
+    modules/test-management/TestRepository.tsx's list table exactly.
+    `steps_count` replaces the full `steps` array (see models.TestCase.
+    steps_count) -- the list table only ever shows a count, never step
+    text/expected results."""
+    id: int
+    test_case_key: str
+    project_id: int
+    folder_id: Optional[int] = None
+    folder_name: Optional[str] = None
+    epic_id: Optional[str] = None
+    cr_number: Optional[str] = None
+    feature_id: Optional[str] = None
+    user_story_id: Optional[str] = None
+    test_type: Optional[str] = None
+    module_name: Optional[str] = None
+    test_scenario: Optional[str] = None
+    priority: Optional[str] = None
+    tags: List[str] = []
+    status: str
+    version: str = "1.0"
+    current_approved_version_id: Optional[int] = None
+    current_draft_version_id: Optional[int] = None
+    current_draft_author_id: Optional[int] = None
+    created_by_id: Optional[int] = None
+    created_by_name: Optional[str] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    checked_out_by_id: Optional[int] = None
+    checked_out_by_name: Optional[str] = None
+    checked_out_at: Optional[datetime.datetime] = None
+    pending_with_user_id: Optional[int] = None
+    pending_with_user_name: Optional[str] = None
+    pending_since: Optional[datetime.datetime] = None
+    steps_count: int = 0
+
+
+class TestCaseSummaryOut(BaseModel):
+    """SRS 7.2 pagination rollout -- Test Repository's folder tree, tag
+    filter dropdown, and project-wide "Test cases / Approved / Pending
+    review / Critical" stat bar all used to be computed client-side from the
+    complete (unpaginated) project case list. Now that the main list is a
+    paginated GET /projects/{id}/test-cases, this single aggregation
+    endpoint (GET /projects/{id}/test-cases/summary, computed via SQL GROUP
+    BY/COUNT, never a full-row fetch) is the one source for all of those
+    counts, independent of whatever page/folder/filter the main list
+    currently has selected."""
+    total: int
+    unfiled_count: int
+    folder_counts: Dict[int, int]
+    approved_count: int
+    in_review_count: int
+    review_completed_count: int
+    critical_count: int
+    tags: List[str]
 
 
 # Summary shown when importing an xlsx sheet. imported_executions remains in
@@ -2080,6 +2322,20 @@ class TestExecutionOut(ORMModel):
     # Governed Defect(s) (defects.py) linked to this slot -- see
     # LinkedGovernedDefectRef's own docstring.
     linked_defects: List[LinkedGovernedDefectRef] = []
+
+
+class TestExecutionSummaryOut(BaseModel):
+    """SRS 7.2 pagination rollout -- see routers/test_execution.py's
+    get_execution_summary docstring for what this replaces (the progress
+    bar, assignment stat, "My queue" count, and both tab bars on
+    TestExecution.tsx's cycle detail view)."""
+    total: int
+    status_counts: Dict[str, int]
+    executed_count: int
+    assigned_count: int
+    unassigned_count: int
+    mine_count: int
+    total_run_count: int
 
 
 # ---------------- Test Management Reporting (SRS section 11) ----------------

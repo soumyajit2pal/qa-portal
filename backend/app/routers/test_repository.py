@@ -1,12 +1,13 @@
 import io
 import os
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload, selectinload
 import openpyxl
 
-from .. import models, schemas
+from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
     get_current_user, require_roles, get_or_404,
@@ -19,6 +20,23 @@ from ..constants import (
 )
 from . import notifications as notify
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
+
+# PAG-005 -- every eager-load the list endpoint needs to serialize
+# TestCaseListOut without an N+1: folder/created_by/checked_out_by are
+# simple one-to-one FKs; current_draft_version is itself joined one level
+# further to whichever of assigned_reviewer/assigned_qa_lead/author its own
+# pending_with_user_name property reads (see models.TestCaseVersion); tags
+# are a real one-to-many table, selectinload'd (a second batched query, not
+# a join that would multiply the case row count).
+_LIST_CASE_EAGER_LOADS = [
+    joinedload(models.TestCase.folder),
+    joinedload(models.TestCase.created_by),
+    joinedload(models.TestCase.checked_out_by),
+    joinedload(models.TestCase.current_draft_version).joinedload(models.TestCaseVersion.assigned_reviewer),
+    joinedload(models.TestCase.current_draft_version).joinedload(models.TestCaseVersion.assigned_qa_lead),
+    joinedload(models.TestCase.current_draft_version).joinedload(models.TestCaseVersion.author),
+    selectinload(models.TestCase.tag_rows),
+]
 
 # Canonical "Test Cases - CR-XX - Template" xlsx that import_test_cases()
 # below parses -- shipped as a static, git-tracked asset (NOT the runtime
@@ -398,15 +416,120 @@ def copy_folder(folder_id: int, payload: schemas.TestFolderCopy, db: Session = D
 
 
 # ---- Test Cases ----
-@router.get("/projects/{project_id}/test-cases", response_model=List[schemas.TestCaseOut])
-def list_test_cases(project_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """Every test case in the project, folder assignment included -- the
-    Repository UI groups these into its folder tree client-side rather than
-    fetching per-folder, same convention as every other list+client-filter
-    table in this app."""
+@router.get("/projects/{project_id}/test-cases", response_model=pagination.Page[schemas.TestCaseListOut])
+def list_test_cases(
+    project_id: int,
+    folder_id: Optional[str] = Query(
+        None,
+        description="Filter to one folder's direct contents by numeric id, "
+                    "the literal 'unfiled' for folder_id IS NULL, or omitted for the whole project",
+    ),
+    priority: Optional[str] = Query(None, description="Exact-match priority filter"),
+    tag: Optional[str] = Query(None, description="Exact-match tag filter"),
+    params: pagination.PageParams = Depends(),
+    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
+):
+    """SRS 7.2 pagination rollout -- was previously "every test case in the
+    project", with the Repository UI grouping the complete result into its
+    folder tree and doing all filtering/pagination client-side. The folder
+    tree itself (GET .../folders below) stays a full, unpaginated fetch --
+    it's lightweight and structural, not a growth-unbounded list -- but this
+    endpoint (the potentially large one) is now paginated, with folder
+    selection, priority, and tag becoming server-side filters instead of an
+    in-browser .filter() over the whole project. See TestCaseSummaryOut
+    below for the folder-tree counts/tag list/project-wide stats this list
+    endpoint no longer has enough data in hand to compute on its own."""
     _get_project_or_404(db, project_id)
-    return (db.query(models.TestCase).filter_by(project_id=project_id)
-            .order_by(models.TestCase.created_at.desc()).all())
+    q = db.query(models.TestCase).filter(models.TestCase.project_id == project_id).options(*_LIST_CASE_EAGER_LOADS)
+    if folder_id == "unfiled":
+        q = q.filter(models.TestCase.folder_id.is_(None))
+    elif folder_id:
+        try:
+            folder_id_int = int(folder_id)
+        except ValueError:
+            raise HTTPException(400, "folder_id must be numeric or 'unfiled'")
+        q = q.filter(models.TestCase.folder_id == folder_id_int)
+    if priority:
+        q = q.filter(models.TestCase.priority == priority)
+    if tag:
+        q = q.join(models.TestCaseTag, models.TestCaseTag.test_case_id == models.TestCase.id).filter(models.TestCaseTag.tag == tag)
+    q = pagination.apply_search(
+        q, params,
+        models.TestCase.test_case_key, models.TestCase.test_scenario, models.TestCase.epic_id,
+        models.TestCase.cr_number, models.TestCase.feature_id, models.TestCase.user_story_id,
+        models.TestCase.module_name,
+    )
+    q = pagination.apply_status_filter(q, params, models.TestCase.status)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "test_case_key": models.TestCase.test_case_key,
+            "status": models.TestCase.status,
+            "priority": models.TestCase.priority,
+            "updated_at": models.TestCase.updated_at,
+        },
+        default_column=models.TestCase.created_at, id_column=models.TestCase.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/projects/{project_id}/test-cases/summary", response_model=schemas.TestCaseSummaryOut)
+def get_test_case_summary(project_id: int, db: Session = Depends(get_db),
+                           current_user: models.User = Depends(get_current_user)):
+    """The folder tree's per-folder/unfiled counts, the tag filter dropdown's
+    options, and the "Test cases / Approved / Pending review / Critical"
+    stat bar all used to be computed in the browser from the complete
+    (unpaginated) project case list -- now that the main list above is
+    paginated, none of those has enough data on hand any more. This is the
+    one place that recomputes all of them, via SQL COUNT/GROUP BY against
+    the whole project regardless of which page/folder/filter the main list
+    currently has selected -- never a full-row fetch."""
+    _get_project_or_404(db, project_id)
+    base = db.query(models.TestCase).filter(models.TestCase.project_id == project_id)
+    total = base.count()
+    unfiled_count = base.filter(models.TestCase.folder_id.is_(None)).count()
+    folder_counts = dict(
+        db.query(models.TestCase.folder_id, func.count(models.TestCase.id))
+        .filter(models.TestCase.project_id == project_id, models.TestCase.folder_id.isnot(None))
+        .group_by(models.TestCase.folder_id).all()
+    )
+    approved_count = base.filter(models.TestCase.current_approved_version_id.isnot(None)).count()
+    in_review_count = base.filter(models.TestCase.status == "In Review").count()
+    review_completed_count = base.filter(models.TestCase.status == "Review Completed").count()
+    critical_count = base.filter(models.TestCase.priority == "Critical").count()
+    tags = [
+        row[0] for row in db.query(models.TestCaseTag.tag)
+        .join(models.TestCase, models.TestCase.id == models.TestCaseTag.test_case_id)
+        .filter(models.TestCase.project_id == project_id)
+        .distinct().order_by(models.TestCaseTag.tag).all()
+    ]
+    return schemas.TestCaseSummaryOut(
+        total=total, unfiled_count=unfiled_count, folder_counts=folder_counts,
+        approved_count=approved_count, in_review_count=in_review_count,
+        review_completed_count=review_completed_count, critical_count=critical_count,
+        tags=tags,
+    )
+
+
+@router.get("/projects/{project_id}/test-cases/all", response_model=List[schemas.TestCaseListOut])
+def list_all_test_cases_for_project(project_id: int, db: Session = Depends(get_db),
+                                     current_user: models.User = Depends(get_current_user)):
+    """PAG-010 -- deliberately NOT paginated, unlike list_test_cases above.
+    This exists solely to source bulk-selection candidate pools that
+    genuinely need the complete set, not one page of it -- currently
+    TestExecution.tsx's "Add Test Cases to Cycle" modal, which needs every
+    Approved/non-Archived case in the project (minus whichever are already
+    in the target cycle) so "Select all" can mean all of them, and so the
+    "N testcases are unavailable" banner counts the real total pending
+    review, not just whatever page happened to be loaded. Same eager-loads
+    and response shape as the paginated endpoint -- just no page/limit."""
+    _get_project_or_404(db, project_id)
+    return (
+        db.query(models.TestCase).filter(models.TestCase.project_id == project_id)
+        .options(*_LIST_CASE_EAGER_LOADS)
+        .order_by(models.TestCase.created_at.desc()).all()
+    )
 
 
 @router.get("/projects/{project_id}/export-xlsx")

@@ -10,14 +10,15 @@ import {
   TEST_CASE_REVIEW_MANDATORY_COMMENT_DECISIONS,
 } from '../../constants'
 import {
-  TestProjectOut, TestFolderOut, TestCaseOut, TestStepIn, TestCaseImportResult, ApprovalActionOut,
+  TestProjectOut, TestFolderOut, TestCaseOut, TestCaseListOut, TestCaseSummaryOut, TestStepIn, TestCaseImportResult, ApprovalActionOut,
   TestCaseVersionSummary, TestCaseVersionCompareOut, TestProjectMyAccessOut, TestCaseVersionOut,
-  TestCaseReviewDecision, TestCaseReassignApproversIn, TestCaseBulkRecommendIn, UserOut,
+  TestCaseReviewDecision, TestCaseReassignApproversIn, TestCaseBulkRecommendIn, UserOut, PageOut,
 } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import LinkedDefects from '../../components/LinkedDefects'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 // Test Repository module -- folder tree + test case authoring/import, under
 // a selected Test Project. QA Engineer + QA Lead both author (create/edit/
@@ -792,7 +793,7 @@ function BulkApproveModal({ projectId, selectedIds, onClose, onApproved }: {
 // unlike bulk-approve's own mandatory message).
 function BulkRecommendModal({ project, selectedCases, users, onClose, onRecommended }: {
   project: TestProjectOut
-  selectedCases: TestCaseOut[]
+  selectedCases: TestCaseListOut[]
   users: UserOut[]
   onClose: () => void
   onRecommended: (testCases: TestCaseOut[], recommendedIds: number[]) => void
@@ -914,7 +915,7 @@ function BulkRecommendModal({ project, selectedCases, users, onClose, onRecommen
 // Author's own Submit for review action instead of QA Lead's approval.
 function BulkSubmitModal({ project, selectedCases, users, onClose, onSubmitted }: {
   project: TestProjectOut
-  selectedCases: TestCaseOut[]
+  selectedCases: TestCaseListOut[]
   users: UserOut[]
   onClose: () => void
   onSubmitted: (testCases: TestCaseOut[], submittedIds: number[]) => void
@@ -1802,7 +1803,7 @@ function BulkFieldCard({ title, description, enabled, onToggle, children, wide =
 
 function BulkUpdateModal({ projectId, selectedCases, folders, users, canUpdateAssignments, onClose, onUpdated }: {
   projectId: number
-  selectedCases: TestCaseOut[]
+  selectedCases: TestCaseListOut[]
   folders: TestFolderOut[]
   users: UserOut[]
   canUpdateAssignments: boolean
@@ -2096,12 +2097,21 @@ export default function TestRepository() {
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [projectId, setProjectId] = useState<number | ''>('')
   const [folders, setFolders] = useState<TestFolderOut[]>([])
-  const [cases, setCases] = useState<TestCaseOut[]>([])
+  // SRS 7.2 pagination rollout -- see TestCaseSummaryOut's own comment
+  // (types.ts) for why this exists: the folder tree's counts, the tag
+  // filter dropdown, and the project-wide stat bar all need project-wide
+  // aggregates the paginated case list below can no longer provide on its
+  // own.
+  const [summary, setSummary] = useState<TestCaseSummaryOut | null>(null)
   const [selectedFolder, setSelectedFolder] = useState<number | typeof UNFILED | ''>('')
   const [error, setError] = useState<unknown>(null)
   const [showNewFolder, setShowNewFolder] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [editingCase, setEditingCase] = useState<TestCaseOut | null | 'new'>(null)
+  // PAG-006 -- the list only ever holds the lightweight TestCaseListOut
+  // shape; opening a case fetches the full TestCaseOut (steps included)
+  // fresh via GET /test-cases/{id} before the editor modal is shown.
+  const [openingCaseId, setOpeningCaseId] = useState<number | null>(null)
   const [search, setSearch] = useState('')
   const [priorityFilter, setPriorityFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -2144,7 +2154,11 @@ export default function TestRepository() {
   }
 
   useEffect(() => {
-    api.get<TestProjectOut[]>('/api/test-projects?include_inactive=true').then((p) => {
+    // SRS 7.2 pagination rollout -- /api/test-projects is now wrapped in
+    // Page[T] for API-contract consistency (task #82); page_size=100 +
+    // .items since this project picker still wants the complete list.
+    api.get<PageOut<TestProjectOut>>('/api/test-projects?include_inactive=true&page_size=100').then((page) => {
+      const p = page.items
       setProjects(p)
       const requested = Number(searchParams.get('project'))
       if (p.length && !projectId) setProjectId(p.some((x) => x.id === requested) ? requested : p[0].id)
@@ -2162,19 +2176,18 @@ export default function TestRepository() {
     api.get<UserOut[]>('/api/test-projects/eligible-users').then(setUsers).catch(() => setUsers([]))
   }, [])
 
-  const loadProjectData = useCallback(async (pid: number) => {
-    try {
-      const [f, c] = await Promise.all([
-        api.get<TestFolderOut[]>(`/api/test-repository/projects/${pid}/folders`),
-        api.get<TestCaseOut[]>(`/api/test-repository/projects/${pid}/test-cases`),
-      ])
-      setFolders(f); setCases(c)
-    } catch (err) { setError(err) }
+  const loadFolders = useCallback(async (pid: number) => {
+    try { setFolders(await api.get<TestFolderOut[]>(`/api/test-repository/projects/${pid}/folders`)) }
+    catch (err) { setError(err) }
+  }, [])
+  const loadSummary = useCallback(async (pid: number) => {
+    try { setSummary(await api.get<TestCaseSummaryOut>(`/api/test-repository/projects/${pid}/test-cases/summary`)) }
+    catch (err) { setError(err) }
   }, [])
   useEffect(() => {
     setSelectedCaseIds(new Set())
-    if (projectId) loadProjectData(projectId)
-  }, [projectId, loadProjectData])
+    if (projectId) { loadFolders(projectId); loadSummary(projectId) } else { setFolders([]); setSummary(null) }
+  }, [projectId, loadFolders, loadSummary])
 
   useEffect(() => {
     if (!projectId) { setMyAccess(null); return }
@@ -2184,6 +2197,41 @@ export default function TestRepository() {
       .catch(() => { if (active) setMyAccess(null) })
     return () => { active = false }
   }, [projectId])
+
+  // SRS 7.2 pagination rollout -- the main case list is now server-paginated
+  // and server-filtered (folder/search/priority/status/tag all become query
+  // params instead of an in-browser .filter() over the whole project's
+  // cases). See TestCaseSummaryOut (loaded above) for the folder-tree
+  // counts/tag list/stat bar this list can no longer compute on its own.
+  const {
+    items: cases, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading: casesLoading, setPage, setPageSize, reload: reloadCases,
+  } = usePaginatedList<TestCaseListOut>(
+    projectId ? `/api/test-repository/projects/${projectId}/test-cases` : '',
+    {
+      search,
+      status: statusFilter ? [statusFilter] : undefined,
+      extra: {
+        folder_id: selectedFolder === '' ? undefined : selectedFolder === UNFILED ? 'unfiled' : String(selectedFolder),
+        priority: priorityFilter || undefined,
+        tag: tagFilter || undefined,
+      },
+    },
+  )
+  const refreshCases = useCallback(() => {
+    reloadCases()
+    if (projectId) loadSummary(projectId)
+  }, [reloadCases, loadSummary, projectId])
+  // Selection is only ever meaningful against whatever's currently loaded --
+  // switching project/folder/page/filters changes what's on screen, so any
+  // held-over selection from before would silently refer to rows the user
+  // can no longer see (or, worse, rows on a different page they never
+  // intended to act on). Cleared on every axis that changes what's visible.
+  useEffect(() => {
+    setSelectedCaseIds(new Set())
+  }, [projectId, selectedFolder, search, priorityFilter, statusFilter, tagFilter, page, pageSize])
+  function goToPage(p: number) { setPage(p) }
+  function goToPageSize(n: number) { setPageSize(n) }
 
   // Global Search deep-link: resolve the business ID independently of the
   // currently selected repository project, switch to its real project, and
@@ -2205,26 +2253,18 @@ export default function TestRepository() {
     return () => { active = false }
   }, [searchParams, setSearchParams])
 
-  const visibleCases = useMemo(() => {
-    let rows = selectedFolder === '' ? cases : selectedFolder === UNFILED
-      ? cases.filter((c) => !c.folder_id)
-      : cases.filter((c) => c.folder_id === selectedFolder)
-    const q = search.trim().toLowerCase()
-    if (q) rows = rows.filter((c) => [c.test_case_key, c.test_scenario, c.epic_id, c.cr_number, c.feature_id, c.user_story_id, c.module_name, ...(c.tags || [])].some((v) => String(v || '').toLowerCase().includes(q)))
-    if (priorityFilter) rows = rows.filter((c) => c.priority === priorityFilter)
-    if (statusFilter) rows = rows.filter((c) => c.status === statusFilter)
-    if (tagFilter) rows = rows.filter((c) => (c.tags || []).some((tag) => tag.toLowerCase() === tagFilter.toLowerCase()))
-    return rows
-  }, [cases, selectedFolder, search, priorityFilter, statusFilter, tagFilter])
+  // PAG-006 -- cases only ever holds the lightweight TestCaseListOut shape;
+  // opening one fetches the full TestCaseOut (with steps) before showing
+  // the editor modal.
+  const openCase = useCallback(async (id: number) => {
+    setOpeningCaseId(id)
+    try { setEditingCase(await api.get<TestCaseOut>(`/api/test-repository/test-cases/${id}`)) }
+    catch (err) { setError(err) } finally { setOpeningCaseId(null) }
+  }, [])
 
-  const availableTags = useMemo(() => Array.from(new Set(cases.flatMap((testCase) => testCase.tags || []))).sort((a, b) => a.localeCompare(b)), [cases])
-
-  const folderCounts = useMemo(() => {
-    const counts: Record<number, number> = {}
-    cases.forEach((c) => { if (c.folder_id) counts[c.folder_id] = (counts[c.folder_id] || 0) + 1 })
-    return counts
-  }, [cases])
-  const unfiledCount = cases.filter((c) => !c.folder_id).length
+  const availableTags = summary?.tags || []
+  const folderCounts = summary?.folder_counts || {}
+  const unfiledCount = summary?.unfiled_count || 0
   const folderTree = useMemo(() => buildFolderTree(folders), [folders])
   const selectedProject = projects.find((project) => project.id === projectId)
   const projectIsActive = !!selectedProject?.is_active
@@ -2250,7 +2290,10 @@ export default function TestRepository() {
     && (testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN'))).map((testCase) => testCase.id)
   const submittableSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
     && (testCase.status === 'Draft' || testCase.status === 'Returned')).map((testCase) => testCase.id)
-  const allVisibleSelected = visibleCases.length > 0 && visibleCases.every((testCase) => selectedCaseIds.has(testCase.id))
+  // "Visible" now means "on the current page" -- selection/bulk actions are
+  // scoped to whatever page is loaded, same tradeoff already made for Test
+  // Executions' own bulk bar (see TestExecution.tsx).
+  const allVisibleSelected = cases.length > 0 && cases.every((testCase) => selectedCaseIds.has(testCase.id))
   const selectedFolderRecord = typeof selectedFolder === 'number' ? folders.find((folder) => folder.id === selectedFolder) : undefined
   const currentViewTitle = selectedFolder === ''
     ? 'All test cases'
@@ -2275,8 +2318,8 @@ export default function TestRepository() {
   function toggleAllVisible() {
     setSelectedCaseIds((prev) => {
       const next = new Set(prev)
-      if (allVisibleSelected) visibleCases.forEach((testCase) => next.delete(testCase.id))
-      else visibleCases.forEach((testCase) => next.add(testCase.id))
+      if (allVisibleSelected) cases.forEach((testCase) => next.delete(testCase.id))
+      else cases.forEach((testCase) => next.add(testCase.id))
       return next
     })
   }
@@ -2286,7 +2329,7 @@ export default function TestRepository() {
     setBulkDeleteBusy(true); setError(null)
     try {
       await api.post(`/api/test-repository/projects/${projectId}/test-cases/bulk-delete`, { ids: Array.from(selectedCaseIds) })
-      setCases((prev) => prev.filter((testCase) => !selectedCaseIds.has(testCase.id)))
+      refreshCases()
       setSelectedCaseIds(new Set())
       setShowBulkDelete(false)
     } catch (err) { setError(err); setShowBulkDelete(false) } finally { setBulkDeleteBusy(false) }
@@ -2308,7 +2351,7 @@ export default function TestRepository() {
     setError(null)
     try {
       const updated = await api.post<TestCaseOut>(`/api/test-repository/test-cases/${id}/checkout`)
-      setCases((prev) => prev.map((c) => (c.id === id ? updated : c)))
+      reloadCases()
       setEditingCase(updated)
     } catch (err) { setError(err) }
   }
@@ -2316,8 +2359,8 @@ export default function TestRepository() {
   async function checkinCase(id: number) {
     setError(null)
     try {
-      const updated = await api.post<TestCaseOut>(`/api/test-repository/test-cases/${id}/checkin`)
-      setCases((prev) => prev.map((c) => (c.id === id ? updated : c)))
+      await api.post<TestCaseOut>(`/api/test-repository/test-cases/${id}/checkin`)
+      reloadCases()
     } catch (err) { setError(err) }
   }
 
@@ -2338,7 +2381,7 @@ export default function TestRepository() {
     <div className="tm-page">
       <ErrorText error={error} />
       <PageHeader
-        title="Test Repository" count={cases.length}
+        title="Test Repository" count={summary?.total ?? 0}
         subtitle="Design and organize reusable test cases using the Epic → Feature → Story hierarchy from your Excel template."
         actions={canAuthor && projectId && projectIsActive ? (
           <button className="btn btn-primary tm-new-test-case" onClick={() => setEditingCase('new')}>+ New Test Case</button>
@@ -2402,7 +2445,7 @@ export default function TestRepository() {
             {!repositoryStructureCollapsed && <ul className="plain-list">
               <li>
                 <button className={`link-btn ${selectedFolder === '' ? 'active' : ''}`} onClick={() => setSelectedFolder('')}>
-                  <span>▦</span> All test cases <em>{cases.length}</em>
+                  <span>▦</span> All test cases <em>{summary?.total ?? 0}</em>
                 </button>
               </li>
               <li>
@@ -2435,13 +2478,13 @@ export default function TestRepository() {
                 <h3>{currentViewTitle}</h3>
                 <p>{currentViewDescription}</p>
               </div>
-              <span>{visibleCases.length} test case{visibleCases.length !== 1 ? 's' : ''}</span>
+              <span>{total} test case{total !== 1 ? 's' : ''}</span>
             </div>
             <div className="tm-repository-summary">
-              <div><small>Test cases</small><strong>{cases.length}</strong></div>
-              <div><small>Approved</small><strong>{cases.filter((c) => !!c.current_approved_version_id).length}</strong></div>
-              <div><small>Pending review</small><strong>{cases.filter((c) => c.status === 'In Review').length}</strong></div>
-              <div><small>Critical</small><strong>{cases.filter((c) => c.priority === 'Critical').length}</strong></div>
+              <div><small>Test cases</small><strong>{summary?.total ?? 0}</strong></div>
+              <div><small>Approved</small><strong>{summary?.approved_count ?? 0}</strong></div>
+              <div><small>Pending review</small><strong>{summary?.in_review_count ?? 0}</strong></div>
+              <div><small>Critical</small><strong>{summary?.critical_count ?? 0}</strong></div>
             </div>
             <div className="tm-list-toolbar">
               <ClearableSearchInput value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear test case search" wrapperClassName="search-grow" placeholder="Search cases, epics, features, or stories…" />
@@ -2454,7 +2497,7 @@ export default function TestRepository() {
                   className={`btn btn-sm ${statusFilter === 'In Review' ? 'btn-primary' : ''}`}
                   onClick={() => setStatusFilter(statusFilter === 'In Review' ? '' : 'In Review')}
                 >
-                  Review queue ({cases.filter((c) => c.status === 'In Review').length})
+                  Review queue ({summary?.in_review_count ?? 0})
                 </button>
               )}
               {canGiveFinalApproval && (
@@ -2463,10 +2506,10 @@ export default function TestRepository() {
                   className={`btn btn-sm ${statusFilter === 'Review Completed' ? 'btn-primary' : ''}`}
                   onClick={() => setStatusFilter(statusFilter === 'Review Completed' ? '' : 'Review Completed')}
                 >
-                  Final approval queue ({cases.filter((c) => c.status === 'Review Completed').length})
+                  Final approval queue ({summary?.review_completed_count ?? 0})
                 </button>
               )}
-              <span>{visibleCases.length} result{visibleCases.length !== 1 ? 's' : ''}</span>
+              <span>{total} result{total !== 1 ? 's' : ''}</span>
             </div>
             <div className="tm-checkout-guide" role="note" aria-label="How test case editing access works">
               <span className="tm-checkout-guide-icon">↔</span>
@@ -2488,7 +2531,8 @@ export default function TestRepository() {
             )}
             <Table
               rowKey="id"
-              onRowClick={(c) => setEditingCase(c)}
+              onRowClick={(c) => openCase(c.id)}
+              server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: goToPage, onPageSizeChange: goToPageSize, loading: casesLoading }}
               columns={[
                 {
                   key: 'selection',
@@ -2497,7 +2541,7 @@ export default function TestRepository() {
                       type="checkbox"
                       checked={allVisibleSelected}
                       onChange={toggleAllVisible}
-                      aria-label={allVisibleSelected ? 'Deselect all filtered test cases' : 'Select all filtered test cases'}
+                      aria-label={allVisibleSelected ? 'Deselect all on this page' : 'Select all on this page'}
                     />
                   ) : null,
                   render: (c) => canSelectCases && projectIsActive ? (
@@ -2512,7 +2556,7 @@ export default function TestRepository() {
                   ) : null,
                   filterable: false,
                 },
-                { key: 'test_case_key', header: 'Test Case', render: (c) => <span className="tm-test-case-cell"><strong>{c.test_case_key}</strong><small>{c.test_scenario || 'Scenario not provided'}{c.module_name ? ` · ${c.module_name}` : ''}</small></span>, filterValue: (c) => `${c.test_case_key} ${c.test_scenario || ''} ${c.module_name || ''}` },
+                { key: 'test_case_key', header: 'Test Case', render: (c) => <span className="tm-test-case-cell"><strong>{openingCaseId === c.id ? 'Opening…' : c.test_case_key}</strong><small>{c.test_scenario || 'Scenario not provided'}{c.module_name ? ` · ${c.module_name}` : ''}</small></span>, filterValue: (c) => `${c.test_case_key} ${c.test_scenario || ''} ${c.module_name || ''}` },
                 { key: 'epic_id', header: 'Epic / CR / Story', render: (c) => <span className="tm-hierarchy-cell"><strong>{c.epic_id || '—'}</strong><small>{[c.cr_number, c.feature_id, c.user_story_id].filter(Boolean).join(' · ') || 'No mapping'}</small></span>, filterValue: (c) => `${c.epic_id || ''} ${c.cr_number || ''} ${c.feature_id || ''} ${c.user_story_id || ''}` },
                 { key: 'classification', header: 'Type / Priority', render: (c) => <span className="tm-classification-cell"><strong>{c.test_type || '—'}</strong>{c.priority ? <Badge status={c.priority} /> : <small>No priority</small>}</span>, filterValue: (c) => `${c.test_type || ''} ${c.priority || ''}` },
                 { key: 'tags', header: 'Tags', render: (c) => <span className="tm-case-tags">{(c.tags || []).length ? c.tags.map((tag) => <button type="button" key={tag} onClick={(event) => { event.stopPropagation(); setTagFilter(tag) }}>{tag}</button>) : <small>—</small>}</span>, filterValue: (c) => (c.tags || []).join(' ') },
@@ -2534,7 +2578,7 @@ export default function TestRepository() {
                   )
                 }, filterValue: (c) => `${TEST_CASE_STATUS_LABELS[c.status] || c.status} ${c.pending_with_user_name || TEST_CASE_PENDING_WITH[c.status] || ''}` },
                 { key: 'version', header: 'Version', render: (c) => <span className="badge badge-gray">{`v${c.version || '1.0'}`}</span>, filterValue: (c) => `v${c.version || '1.0'}` },
-                { key: 'steps', header: 'Steps', render: (c) => c.steps.length, filterable: false },
+                { key: 'steps', header: 'Steps', render: (c) => c.steps_count, filterable: false },
                 {
                   key: 'checkout',
                   header: 'Editing access',
@@ -2579,7 +2623,7 @@ export default function TestRepository() {
                   filterable: false,
                 },
               ]}
-              rows={visibleCases}
+              rows={cases}
             />
           </section>
         </div>
@@ -2598,7 +2642,7 @@ export default function TestRepository() {
           folders={folders}
           folderId={typeof selectedFolder === 'number' ? selectedFolder : ''}
           onClose={() => setShowImport(false)}
-          onImported={() => loadProjectData(projectId)}
+          onImported={() => refreshCases()}
         />
       )}
       {showBulkUpdate && projectId && projectIsActive && (
@@ -2609,9 +2653,8 @@ export default function TestRepository() {
           users={users}
           canUpdateAssignments={canBulkUpdateAssignments}
           onClose={() => setShowBulkUpdate(false)}
-          onUpdated={(updated) => {
-            const updatedById = new Map(updated.map((testCase) => [testCase.id, testCase]))
-            setCases((prev) => prev.map((testCase) => updatedById.get(testCase.id) || testCase))
+          onUpdated={() => {
+            refreshCases()
             setSelectedCaseIds(new Set())
           }}
         />
@@ -2621,14 +2664,9 @@ export default function TestRepository() {
           projectId={projectId}
           selectedIds={finalApproveSelectedIds}
           onClose={() => setShowBulkApprove(false)}
-          onApproved={(approved, approvedIds) => {
-            const approvedById = new Map(approved.map((testCase) => [testCase.id, testCase]))
-            setCases((prev) => prev.map((testCase) => approvedById.get(testCase.id) || testCase))
-            setSelectedCaseIds((prev) => {
-              const next = new Set(prev)
-              approvedIds.forEach((id) => next.delete(id))
-              return next
-            })
+          onApproved={() => {
+            refreshCases()
+            setSelectedCaseIds(new Set())
           }}
         />
       )}
@@ -2638,14 +2676,9 @@ export default function TestRepository() {
           selectedCases={cases.filter((testCase) => recommendSelectedIds.includes(testCase.id))}
           users={users}
           onClose={() => setShowBulkRecommend(false)}
-          onRecommended={(recommended, recommendedIds) => {
-            const recommendedById = new Map(recommended.map((testCase) => [testCase.id, testCase]))
-            setCases((prev) => prev.map((testCase) => recommendedById.get(testCase.id) || testCase))
-            setSelectedCaseIds((prev) => {
-              const next = new Set(prev)
-              recommendedIds.forEach((id) => next.delete(id))
-              return next
-            })
+          onRecommended={() => {
+            refreshCases()
+            setSelectedCaseIds(new Set())
           }}
         />
       )}
@@ -2655,14 +2688,9 @@ export default function TestRepository() {
           selectedCases={cases.filter((testCase) => submittableSelectedIds.includes(testCase.id))}
           users={users}
           onClose={() => setShowBulkSubmit(false)}
-          onSubmitted={(submitted, submittedIds) => {
-            const submittedById = new Map(submitted.map((testCase) => [testCase.id, testCase]))
-            setCases((prev) => prev.map((testCase) => submittedById.get(testCase.id) || testCase))
-            setSelectedCaseIds((prev) => {
-              const next = new Set(prev)
-              submittedIds.forEach((id) => next.delete(id))
-              return next
-            })
+          onSubmitted={() => {
+            refreshCases()
+            setSelectedCaseIds(new Set())
           }}
         />
       )}
@@ -2690,20 +2718,17 @@ export default function TestRepository() {
           canReview={canReview && projectIsActive}
           canGiveFinalApproval={canGiveFinalApproval && projectIsActive}
           onClose={() => setEditingCase(null)}
-          onSaved={(tc) => {
-            setCases((prev) => {
-              const exists = prev.some((c) => c.id === tc.id)
-              return exists ? prev.map((c) => (c.id === tc.id ? tc : c)) : [tc, ...prev]
-            })
+          onSaved={() => {
+            refreshCases()
             setEditingCase(null)
           }}
-          onDeleted={(id) => { setCases((prev) => prev.filter((c) => c.id !== id)); setEditingCase(null) }}
-          onReviewed={(tc) => {
-            setCases((prev) => prev.map((c) => (c.id === tc.id ? tc : c)))
+          onDeleted={() => { refreshCases(); setEditingCase(null) }}
+          onReviewed={() => {
+            refreshCases()
             setEditingCase(null)
           }}
           onCheckoutChange={(tc) => {
-            setCases((prev) => prev.map((c) => (c.id === tc.id ? tc : c)))
+            reloadCases()
             setEditingCase(tc)
           }}
         />
@@ -2722,7 +2747,7 @@ export default function TestRepository() {
           folder={folderAction.folder}
           folders={folders}
           onClose={() => setFolderAction(null)}
-          onDone={() => { setFolderAction(null); loadProjectData(projectId) }}
+          onDone={() => { setFolderAction(null); loadFolders(projectId); refreshCases() }}
         />
       )}
       {folderToRename && (

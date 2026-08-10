@@ -260,6 +260,15 @@ Point `DATABASE_URL` at your Oracle instance via an env var or `.env` file next 
 host-installed Oracle from inside Docker on Mac/Windows; on Linux use the host's real IP or
 `--add-host`).
 
+The backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`) and
+a `redis` service is included and wired up by default (`REDIS_URL`) -- required for cache
+correctness (dashboard summary + reference-data caching, see `backend/app/cache.py`) and for the
+one-time startup migration/notification-sweep to run once per deployment instead of once per
+worker (see `backend/app/main.py`'s startup-lock comment) whenever more than one worker is
+running. The app still runs fine without Redis reachable -- caching and the startup lock both
+degrade to a no-op/permissive fallback -- but then each of the 4 workers keeps its own cache and
+the startup sweep can run up to 4 times.
+
 ### Verification status
 
 This project was authored and Docker/Compose files written in a sandboxed environment with

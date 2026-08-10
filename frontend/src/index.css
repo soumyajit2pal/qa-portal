@@ -378,6 +378,10 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 }
 .table-pagination button:hover:not(:disabled) { background: var(--navy-50); }
 .table-pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+.table-page-size {
+  background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
+  font-size: 11.5px; font-weight: 600; color: var(--navy); cursor: pointer;
+}
 .empty-state .btn { margin-top: 4px; }
 
 /* Caps a table cell's rendered width so one long value (e.g. a per-type
@@ -1333,15 +1337,13 @@ tbody tr:hover { background: #f8f9fc; }
 .audit-toolbar > input { min-width: 260px; flex: 1; }
 .audit-date { display: flex; align-items: center; gap: 6px; color: #6e7588; font-size: 11px; font-weight: 650; }
 .audit-date input { width: 140px; }
-.audit-pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-top: 14px; color: #737a8d; font-size: 11px; }
-.audit-pagination > div { display: flex; gap: 7px; }
 .audit-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
 .audit-detail-grid > div { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border: 1px solid #e7e9f0; border-radius: 8px; }
 .audit-detail-grid span { color: #81889a; font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .audit-detail-grid strong { color: #303648; font-size: 12px; overflow-wrap: anywhere; }
 .audit-details-json { max-height: 360px; overflow: auto; padding: 14px; border-radius: 8px; background: #151927; color: #d9def0; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 900px) { .audit-summary-grid { grid-template-columns: repeat(2, 1fr); } .audit-detail-grid { grid-template-columns: 1fr; } }
-@media (max-width: 540px) { .audit-summary-grid { grid-template-columns: 1fr; } .audit-toolbar > input { min-width: 0; width: 100%; } .audit-pagination { align-items: stretch; flex-direction: column; } }
+@media (max-width: 540px) { .audit-summary-grid { grid-template-columns: 1fr; } .audit-toolbar > input { min-width: 0; width: 100%; } }
 .spacer { flex: 1; }
 
 .bar-chart { display: flex; flex-direction: column; gap: 10px; }

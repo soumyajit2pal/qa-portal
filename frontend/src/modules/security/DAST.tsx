@@ -7,7 +7,8 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { DASTOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -333,22 +334,22 @@ function DASTDetail({ req, onClose, onChanged, users }: {
     }
     if (!noFindings) setTab('findings')
   }
+  // See SAST.tsx's matching comment on its own addFinding/resolveFinding --
+  // same fix, same reasoning (was re-fetching the entire unpaginated list to
+  // find one row by id; now that the list is paginated it could miss the
+  // row entirely, not just waste a request).
   async function addFinding(e: React.FormEvent) {
     e.preventDefault()
     try {
       await api.post(`/api/dast-requests/${req.id}/findings`, finding)
-      const fresh = await api.get<DASTOut[]>('/api/dast-requests')
-      const updated = fresh.find((r) => r.id === req.id)
-      if (updated) onChanged(updated)
+      onChanged(await api.get<DASTOut>(`/api/dast-requests/${req.id}`))
       setFinding({ issue_id: '', severity: 'Medium', description: '' })
     } catch (err) { setError(err) }
   }
   async function resolveFinding(findingId: number) {
     try {
       await api.post(`/api/dast-requests/${req.id}/findings/${findingId}/resolve`, {})
-      const fresh = await api.get<DASTOut[]>('/api/dast-requests')
-      const updated = fresh.find((r) => r.id === req.id)
-      if (updated) onChanged(updated)
+      onChanged(await api.get<DASTOut>(`/api/dast-requests/${req.id}`))
     } catch (err) { setError(err) }
   }
 
@@ -823,21 +824,34 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 }
 
 export default function DAST() {
-  const [rows, setRows] = useState<DASTOut[]>([])
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight DASTListOut
+  // shape; opening a request fetches the full DASTOut record fresh via
+  // GET /api/dast-requests/{id} before DASTDetail (which needs every field,
+  // including unmasked test_credentials where authorized) is shown.
   const [selected, setSelected] = useState<DASTOut | null>(null)
+  const [openingId, setOpeningId] = useState<number | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
-  const load = useCallback(async () => {
-    try { setRows(await api.get<DASTOut[]>('/api/dast-requests')) } catch (err) { setError(err) }
-  }, [])
-  useEffect(() => { load() }, [load])
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<DASTListOut>('/api/dast-requests', {})
+
   useEffect(() => {
     // Full user list -- not just security analysts -- so both the Security
     // Lead assignment dropdown and the "Requester" field on the detail view
     // can resolve names from a single fetch.
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
+  }, [])
+
+  const openRequest = useCallback(async (idOrRow: number | DASTListOut) => {
+    const id = typeof idOrRow === 'number' ? idOrRow : idOrRow.id
+    setOpeningId(id)
+    try {
+      setSelected(await api.get<DASTOut>(`/api/dast-requests/${id}`))
+    } catch (err) { setError(err) } finally { setOpeningId(null) }
   }, [])
 
   // Deep-link support -- see the matching effect in Functional.tsx for the
@@ -847,20 +861,26 @@ export default function DAST() {
     const openId = searchParams.get('open')
     if (!openId || rows.length === 0) return
     const match = rows.find((r) => r.request_id === openId)
-    if (match) setSelected(match)
+    if (match) openRequest(match.id)
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams])
+  }, [rows, searchParams, setSearchParams, openRequest])
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="DAST Requests" count={rows.length}
+        title="DAST Requests" count={total}
         subtitle="Dynamic Application Security Testing requests, from submission through findings and report sign-off. Raised via a QA Request (include DAST in its request types) -- not created standalone here."
       />
       <Card>
-        <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
-          { key: 'request_id', header: 'Request ID' },
+        <Table rowKey="id" onRowClick={(r) => openRequest(r)}
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
+          columns={[
+          {
+            key: 'request_id',
+            header: 'Request ID',
+            render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
+          },
           { key: 'application_name', header: 'Application', render: (r) => r.application_name || '—' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'security_lead_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.security_lead_id) || 'Not assigned', filterValue: (r) => userName(users, r.security_lead_id) || '' },
@@ -868,7 +888,7 @@ export default function DAST() {
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '—'), filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '') },
-          { key: 'findings', header: 'Findings', render: (r) => r.findings.length, filterValue: (r) => String(r.findings.length) },
+          { key: 'findings', header: 'Findings', render: (r) => r.findings_count, filterValue: (r) => String(r.findings_count) },
           { key: 'source', header: 'Source', render: (r) => (
             r.qa_request ? (
               <span className="badge badge-blue" title="Auto-created from a QA Request">
@@ -882,7 +902,7 @@ export default function DAST() {
       </Card>
       {selected && (
         <DASTDetail
-          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }}
+          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); reload() }}
           users={users}
         />
       )}

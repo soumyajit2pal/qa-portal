@@ -2,12 +2,13 @@ import os
 from collections import Counter
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_
+from sqlalchemy.orm import Session, joinedload
 
 from .. import documents as doc_store
-from .. import models, schemas
+from .. import models, schemas, pagination
 from ..constants import ENVIRONMENTS, Role
 from ..database import get_db
 from ..deps import get_current_user, get_project_member_role, dashboard_department_scope
@@ -249,14 +250,41 @@ def _link_to_execution(db: Session, obj: models.Defect, execution: models.TestEx
         ))
 
 
-@router.get("", response_model=List[schemas.DefectOut])
+_TERMINAL_STATUSES = ("Closed", "Rejected", "Duplicate")
+_ATTENTION_SEVERITIES = ("Critical", "High")
+_RETEST_STATUSES = ("Resolved", "Retest")
+
+# SRS 7.2 pagination rollout -- every field the register table, the queue
+# tabs, and every other module's own defect pickers need off a row, without
+# lazy-loading `reporter_name`/`assignee_name`/`qa_request_key`/`cycle_key`/
+# `test_case_key` (all `@property`s on `models.Defect`) once per row.
+_LIST_DEFECT_EAGER_LOADS = [
+    joinedload(models.Defect.qa_request), joinedload(models.Defect.cycle),
+    joinedload(models.Defect.primary_test_case), joinedload(models.Defect.reporter),
+    joinedload(models.Defect.assignee),
+]
+
+
+@router.get("", response_model=pagination.Page[schemas.DefectListOut])
 def list_defects(status: Optional[str] = None, severity: Optional[str] = None,
                  priority: Optional[str] = None, cycle_id: Optional[int] = None,
                  test_case_id: Optional[int] = None, execution_id: Optional[int] = None,
                  qa_request_id: Optional[int] = None, assignee_id: Optional[int] = None,
-                 reporter_id: Optional[int] = None, db: Session = Depends(get_db),
+                 reporter_id: Optional[int] = None,
+                 queue: Optional[str] = Query(
+                     None, description="'attention'|'mine'|'unlinked'|'retest'|'closed', omitted for all -- "
+                                        "matches Defects.tsx's own queue tabs exactly",
+                 ),
+                 params: pagination.PageParams = Depends(),
+                 db: Session = Depends(get_db),
                  current_user: models.User = Depends(get_current_user)):
-    q = _scoped_defects(db, current_user)
+    # Kept as plain query params (not folded into PageParams.status) since
+    # they're single-value exact filters used by other modules' own narrow
+    # pickers (e.g. TestExecution.tsx's `?cycle_id=`), same convention as
+    # every other module's list endpoint. `params.status`/`params.search`
+    # (PAG-001/007) additionally cover the register's own multi-status and
+    # free-text search needs.
+    q = _scoped_defects(db, current_user).options(*_LIST_DEFECT_EAGER_LOADS)
     for column, value in (
         (models.Defect.status, status), (models.Defect.severity, severity),
         (models.Defect.priority, priority), (models.Defect.cycle_id, cycle_id),
@@ -267,26 +295,102 @@ def list_defects(status: Optional[str] = None, severity: Optional[str] = None,
             q = q.filter(column == value)
     if test_case_id is not None:
         q = q.join(models.DefectTestCaseLink).filter(models.DefectTestCaseLink.test_case_id == test_case_id)
-    return q.order_by(models.Defect.created_at.desc()).all()
+    if queue == "attention":
+        q = q.filter(models.Defect.severity.in_(_ATTENTION_SEVERITIES)).filter(models.Defect.status.notin_(_TERMINAL_STATUSES))
+    elif queue == "mine":
+        q = q.filter(or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id))
+    elif queue == "unlinked":
+        q = q.filter(models.Defect.execution_id.is_(None))
+    elif queue == "retest":
+        q = q.filter(models.Defect.status.in_(_RETEST_STATUSES))
+    elif queue == "closed":
+        q = q.filter(models.Defect.status == "Closed")
+    q = pagination.apply_search(
+        q, params, models.Defect.defect_key, models.Defect.title, models.Defect.application_name,
+        models.Defect.module_feature,
+    )
+    q = pagination.apply_status_filter(q, params, models.Defect.status)
+    q = pagination.apply_sort(
+        q, params, sortable={
+            "defect_key": models.Defect.defect_key, "severity": models.Defect.severity,
+            "priority": models.Defect.priority, "status": models.Defect.status,
+            "reported_at": models.Defect.reported_at,
+        }, default_column=models.Defect.created_at, id_column=models.Defect.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
 
 
 @router.get("/dashboard", response_model=schemas.DefectDashboardOut)
 def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    defects = _scoped_defects(db, current_user).all()
-    by_status = Counter(item.status for item in defects)
-    by_severity = Counter(item.severity for item in defects)
-    by_priority = Counter(item.priority for item in defects)
-    by_application = Counter(item.application_name for item in defects)
-    by_assignee = Counter(item.assignee_name or "Unassigned" for item in defects)
+    # SRS 7.2 pagination rollout -- previously fetched every scoped defect's
+    # full ORM row into Python just to run Counter() over it, an unbounded
+    # fetch that grew with the register regardless of how many rows anyone
+    # was actually looking at. by_status/by_severity/by_priority/
+    # by_application/by_assignee are now real SQL `GROUP BY` aggregates
+    # (never a full-row fetch), matching TestCaseSummaryOut/
+    # TestExecutionSummaryOut's own pattern from the Test Management slice.
+    base = _scoped_defects(db, current_user)
+
+    by_status = Counter(dict(base.with_entities(models.Defect.status, func.count(models.Defect.id)).group_by(models.Defect.status).all()))
+    by_severity = Counter(dict(base.with_entities(models.Defect.severity, func.count(models.Defect.id)).group_by(models.Defect.severity).all()))
+    by_priority = Counter(dict(base.with_entities(models.Defect.priority, func.count(models.Defect.id)).group_by(models.Defect.priority).all()))
+    by_application = Counter(dict(base.with_entities(models.Defect.application_name, func.count(models.Defect.id)).group_by(models.Defect.application_name).all()))
+    # assignee_name is a Python @property (reads .assignee.full_name), not a
+    # real column -- group by the delegated User.full_name via a join
+    # instead, coalescing NULL (unassigned) the same way the old Counter
+    # default did.
+    # Built once and reused in both with_entities and group_by below -- two
+    # separately-constructed func.coalesce(...) calls compile to two distinct
+    # bind parameters for the "Unassigned" literal (:coalesce_2, :coalesce_3
+    # etc.), and Oracle then fails ORA-00979 ("must appear in the GROUP BY
+    # clause") because it doesn't recognize the GROUP BY expression as the
+    # same one used in SELECT even though both evaluate identically. Reusing
+    # the same expression object keeps them as one bind param, which Oracle
+    # (and every other dialect) accepts.
+    assignee_label = func.coalesce(models.User.full_name, "Unassigned")
+    assignee_rows = (
+        base.outerjoin(models.User, models.Defect.assignee_id == models.User.id)
+        .with_entities(assignee_label, func.count(models.Defect.id))
+        .group_by(assignee_label).all()
+    )
+    by_assignee = Counter(dict(assignee_rows))
+    total = sum(by_status.values())
+
+    # Ageing buckets and the monthly closure trend both need a date
+    # computation per row that doesn't translate cleanly across this app's
+    # supported DB dialects (SQLite locally, Oracle in production) -- kept
+    # in Python, but selecting only the two date columns needed rather than
+    # hydrating full Defect ORM objects (avoids every joined/property field
+    # + the eager-loads a plain `.all()` on `base` would otherwise pull in).
     today = models.now().date()
     by_ageing = Counter()
-    for item in defects:
-        age = max(0, (today - item.reported_at.date()).days)
+    closure_trend = Counter()
+    for reported_at, closed_at in base.with_entities(models.Defect.reported_at, models.Defect.closed_at).all():
+        age = max(0, (today - reported_at.date()).days)
         by_ageing["0–7 days" if age <= 7 else "8–14 days" if age <= 14 else "15–30 days" if age <= 30 else "31+ days"] += 1
-    closure_trend = Counter(item.closed_at.strftime("%Y-%m") for item in defects if item.closed_at)
+        if closed_at:
+            closure_trend[closed_at.strftime("%Y-%m")] += 1
+
+    # SRS 7.2 pagination rollout -- back Defects.tsx's queue tabs, which used
+    # to be `.filter().length` over the whole unpaginated list. retest_count
+    # is free (sum of two already-grouped by_status buckets); the other
+    # three are compound conditions a single-column GROUP BY can't answer,
+    # so each gets its own indexed COUNT.
+    attention_count = base.filter(
+        models.Defect.severity.in_(_ATTENTION_SEVERITIES), models.Defect.status.notin_(_TERMINAL_STATUSES),
+    ).with_entities(func.count(models.Defect.id)).scalar() or 0
+    mine_count = base.filter(
+        or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id),
+    ).with_entities(func.count(models.Defect.id)).scalar() or 0
+    unlinked_count = base.filter(models.Defect.execution_id.is_(None)).with_entities(func.count(models.Defect.id)).scalar() or 0
+    retest_count = sum(by_status.get(s, 0) for s in _RETEST_STATUSES)
+
     return {
-        "total": len(defects), "open": sum(v for k, v in by_status.items() if k not in {"Closed", "Rejected", "Duplicate"}),
+        "total": total, "open": sum(v for k, v in by_status.items() if k not in _TERMINAL_STATUSES),
         "closed": by_status["Closed"], "reopened": by_status["Reopened"], "deferred": by_status["Deferred"],
+        "attention_count": attention_count, "mine_count": mine_count,
+        "unlinked_count": unlinked_count, "retest_count": retest_count,
         "by_status": dict(by_status), "by_severity": dict(by_severity), "by_priority": dict(by_priority),
         "by_application": dict(by_application), "by_assignee": dict(by_assignee),
         "by_ageing": dict(by_ageing), "closure_trend": dict(sorted(closure_trend.items())),
@@ -334,6 +438,21 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         date_only_headers={"Expected Resolution"}, status_headers={"Status"},
     )
     return workbook_response(workbook, "defect-management-register.xlsx")
+
+
+@router.get("/by-key/{defect_key}", response_model=schemas.DefectOut)
+def get_defect_by_key(defect_key: str, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """SRS 7.2 pagination rollout -- Defects.tsx's own `?open=<defect_key>`
+    deep-link (used both for Global Search and for the create-defect flow's
+    own "open what was just created" step) used to resolve against the
+    complete, unpaginated in-browser list; now that the list is paginated,
+    this mirrors test_repository.py's `/test-cases/by-key/{key}` pattern
+    instead. Must stay above `/{defect_id}` so FastAPI doesn't try to parse
+    the literal `by-key` segment as an integer id."""
+    obj = db.query(models.Defect).filter_by(defect_key=defect_key.strip().upper()).first()
+    if not obj:
+        raise HTTPException(404, f"Defect {defect_key} was not found")
+    return obj
 
 
 @router.get("/{defect_id}", response_model=schemas.DefectOut)

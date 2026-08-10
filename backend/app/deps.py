@@ -1,9 +1,9 @@
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from .database import get_db
 from . import models
@@ -13,7 +13,9 @@ from .constants import Role
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> models.User:
+def get_current_user(
+    request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+) -> models.User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -27,9 +29,45 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     except JWTError:
         raise credentials_exception
 
-    user = db.query(models.User).filter(models.User.username == username).first()
+    # role_assignments eagerly loaded (selectinload, a second targeted query
+    # rather than a join) so `user.roles`/`user.roles_csv` are cheap to
+    # compute below without a lazy-load-per-role-check surprise elsewhere in
+    # this same request.
+    user = (
+        db.query(models.User)
+        .options(selectinload(models.User.role_assignments))
+        .filter(models.User.username == username)
+        .first()
+    )
     if user is None or not user.is_active:
         raise credentials_exception
+    # AUD-008 -- stash the already-resolved user on the request so
+    # main.py's _write_request_audit (which runs after the response, as a
+    # BackgroundTask on this same request object) can reuse it instead of
+    # decoding the JWT and querying User a second time.
+    request.state.current_user = user
+    # ...but _write_request_audit must NOT read attributes off that object
+    # directly -- by the time it runs, `db` (this request's own session) is
+    # already closed. A DetachedInstanceError follows the very first
+    # attribute touch that isn't already resolved AND unexpired: reported
+    # directly, twice. First via `.roles_csv` -> `.role_assignments`, an
+    # unloaded relationship nothing in a plain read-only request happened to
+    # touch. Then, after that relationship was eager-loaded above, via the
+    # plainer `.username` -- a column that WAS already loaded, but got
+    # expired anyway by SQLAlchemy's default expire_on_commit=True the
+    # moment any mutating request's handler called db.commit(), which
+    # invalidates every already-loaded attribute on every object tied to
+    # that session, not just the ones a schema/property touched. Eager-
+    # loading a relationship only ever fixes the first failure mode, not
+    # the second -- there is no way to defensively "preload enough" to
+    # survive a session that may later expire everything wholesale.
+    # The only reliable fix is to never touch the ORM object across that
+    # session boundary at all: snapshot the plain values _write_request_audit
+    # actually needs into an ordinary dict, here, while `db` is unquestionably
+    # open and nothing is expired yet.
+    request.state.current_user_snapshot = {
+        "id": user.id, "username": user.username, "full_name": user.full_name, "roles_csv": user.roles_csv,
+    }
     return user
 
 

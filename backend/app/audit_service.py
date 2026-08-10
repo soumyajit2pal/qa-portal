@@ -46,6 +46,9 @@ def write_audit(
     outcome: str = "SUCCESS",
     actor: Optional[models.User] = None,
     actor_username: Optional[str] = None,
+    actor_id: Optional[int] = None,
+    actor_name: Optional[str] = None,
+    actor_roles: Optional[str] = None,
     request: Optional[Request] = None,
     method: Optional[str] = None,
     path: Optional[str] = None,
@@ -56,32 +59,51 @@ def write_audit(
     details: Optional[dict] = None,
     request_id: Optional[str] = None,
 ) -> None:
-    """Best-effort append. Audit storage must never expose credentials or break the action."""
+    """Best-effort append. Audit storage must never expose credentials or break the action.
+
+    `actor` is a live, in-session `User` ORM object -- the common case, used
+    by every caller except main.py's `_write_request_audit`. Its
+    id/username/full_name/roles are read directly here, which is only safe
+    because `actor` was loaded in (or is otherwise attached to) THIS same
+    `db` session.
+
+    `actor_id`/`actor_name`/`actor_roles` (plus the pre-existing
+    `actor_username`) exist for that one exceptional caller, which only has
+    a plain-value snapshot of a user loaded in a *different*, already-closed
+    session (see deps.py::get_current_user's own comment for exactly why
+    touching such an object's attributes here is unsafe -- reported
+    directly, twice, as DetachedInstanceError). `actor` wins over these when
+    both are supplied.
+    """
     if request_id is None and request is not None:
         request_id = getattr(request.state, "audit_request_id", None)
     user_agent = None
     if request is not None:
         user_agent = (request.headers.get("user-agent") or "")[:500] or None
-    row = models.AuditLog(
-        event_type=event_type,
-        action=action,
-        outcome=outcome,
-        actor_id=actor.id if actor else None,
-        actor_username=(actor.username if actor else actor_username),
-        actor_name=actor.full_name if actor else None,
-        actor_roles=actor.roles_csv if actor else None,
-        method=method or (request.method if request else None),
-        path=path or (request.url.path if request else None),
-        status_code=status_code,
-        target_type=target_type,
-        target_id=str(target_id) if target_id is not None else None,
-        target_name=target_name,
-        details=json.dumps(details, default=str, ensure_ascii=False) if details else None,
-        ip_address=request_ip(request) if request else None,
-        user_agent=user_agent,
-        request_id=request_id,
-    )
+    # Everything below is inside the try, not just db.add/commit -- an
+    # exception constructing AuditLog(...) (e.g. from an unsafe actor.*
+    # read) must never escape uncaught here either, or this function breaks
+    # its own "must never break the action" promise above.
     try:
+        row = models.AuditLog(
+            event_type=event_type,
+            action=action,
+            outcome=outcome,
+            actor_id=actor.id if actor else actor_id,
+            actor_username=(actor.username if actor else actor_username),
+            actor_name=(actor.full_name if actor else actor_name),
+            actor_roles=(actor.roles_csv if actor else actor_roles),
+            method=method or (request.method if request else None),
+            path=path or (request.url.path if request else None),
+            status_code=status_code,
+            target_type=target_type,
+            target_id=str(target_id) if target_id is not None else None,
+            target_name=target_name,
+            details=json.dumps(details, default=str, ensure_ascii=False) if details else None,
+            ip_address=request_ip(request) if request else None,
+            user_agent=user_agent,
+            request_id=request_id,
+        )
         db.add(row)
         db.commit()
     except Exception:

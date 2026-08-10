@@ -6,8 +6,8 @@ import { Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Com
 import SearchableSelect from '../../components/SearchableSelect'
 import { hasRole, TEST_PROJECT_ROLES } from '../../constants'
 import {
-  ApplicationMasterOut, TestProjectOut, TestCaseOut, TestCycleOut, ApprovalActionOut, DepartmentOut,
-  UserOut, TestProjectMemberOut,
+  ApplicationMasterOut, TestProjectOut, TestCaseSummaryOut, TestCycleOut, ApprovalActionOut, DepartmentOut,
+  UserOut, TestProjectMemberOut, PageOut,
 } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
@@ -496,8 +496,11 @@ export default function TestProjects() {
 
   const load = useCallback(async () => {
     try {
-      const [p, a, d, u] = await Promise.all([
-        api.get<TestProjectOut[]>('/api/test-projects?include_inactive=true'),
+      const [pPage, a, d, u] = await Promise.all([
+        // SRS 7.2 pagination rollout -- /api/test-projects is now wrapped in
+        // Page[T] for API-contract consistency (task #82); page_size=100 +
+        // .items since this gallery still wants the complete list.
+        api.get<PageOut<TestProjectOut>>('/api/test-projects?include_inactive=true&page_size=100'),
         api.get<ApplicationMasterOut[]>('/api/application-names'),
         api.get<DepartmentOut[]>('/api/departments'),
         // Test Management-scoped picker -- see constants.
@@ -505,13 +508,23 @@ export default function TestProjects() {
         // this back to the app-wide /api/auth/users list.
         api.get<UserOut[]>('/api/test-projects/eligible-users'),
       ])
+      const p = pPage.items
       setProjects(p); setApplications(a); setDepartments(d); setUsers(u)
       const stats = await Promise.all(p.map(async (project) => {
-        const [cases, cycles] = await Promise.all([
-          api.get<TestCaseOut[]>(`/api/test-repository/projects/${project.id}/test-cases`),
-          api.get<TestCycleOut[]>(`/api/test-execution/projects/${project.id}/cycles`),
+        // SRS 7.2 pagination rollout -- this only ever needed a COUNT, so it
+        // now hits TestCaseSummaryOut (a cheap SQL COUNT) instead of
+        // fetching every test case in the project just to measure
+        // `.length` (which also stopped being a bare array once the list
+        // endpoint itself became paginated -- see routers/test_repository.py).
+        // Cycles has no dedicated summary endpoint (it's a small, bounded
+        // list per project -- see routers/test_execution.py::list_cycles);
+        // Page[T]'s own `.total` (a real COUNT, unaffected by page_size)
+        // stands in for a dedicated summary here.
+        const [caseSummary, cyclesPage] = await Promise.all([
+          api.get<TestCaseSummaryOut>(`/api/test-repository/projects/${project.id}/test-cases/summary`),
+          api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${project.id}/cycles?page_size=25`),
         ])
-        return [project.id, { cases: cases.length, cycles: cycles.length }] as const
+        return [project.id, { cases: caseSummary.total, cycles: cyclesPage.total }] as const
       }))
       setSummaries(Object.fromEntries(stats))
     } catch (err) { setError(err) }

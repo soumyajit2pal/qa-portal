@@ -7,7 +7,8 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { SASTOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 // One "SAST component" = one repository, with its own branch/commit/tech
 // stack/build number -- the "+" adds a whole new one of these (not just
@@ -304,22 +305,24 @@ function SASTDetail({ req, onClose, onChanged, users }: {
     }
     if (!noFindings) setTab('findings')
   }
+  // Previously re-fetched the ENTIRE /api/sast-requests list just to find
+  // this one row by id and discard the rest -- besides the obvious waste,
+  // now that that endpoint is paginated (PAG-001..010) it would silently
+  // break too: this request's row might not even be on the default first
+  // page. A direct GET of the single record is both the fix and the
+  // simplification (PAG-006's own "detail endpoint" pattern).
   async function addFinding(e: React.FormEvent) {
     e.preventDefault()
     try {
       await api.post(`/api/sast-requests/${req.id}/findings`, finding)
-      const fresh = await api.get<SASTOut[]>('/api/sast-requests')
-      const updated = fresh.find((r) => r.id === req.id)
-      if (updated) onChanged(updated)
+      onChanged(await api.get<SASTOut>(`/api/sast-requests/${req.id}`))
       setFinding({ issue_id: '', severity: 'Medium', description: '' })
     } catch (err) { setError(err) }
   }
   async function resolveFinding(findingId: number) {
     try {
       await api.post(`/api/sast-requests/${req.id}/findings/${findingId}/resolve`, {})
-      const fresh = await api.get<SASTOut[]>('/api/sast-requests')
-      const updated = fresh.find((r) => r.id === req.id)
-      if (updated) onChanged(updated)
+      onChanged(await api.get<SASTOut>(`/api/sast-requests/${req.id}`))
     } catch (err) { setError(err) }
   }
 
@@ -808,21 +811,34 @@ function userName(users: UserOut[], id?: number | null): string | null {
 }
 
 export default function SAST() {
-  const [rows, setRows] = useState<SASTOut[]>([])
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight SASTListOut
+  // shape; opening a request fetches the full SASTOut record fresh via
+  // GET /api/sast-requests/{id} before SASTDetail (which needs every field)
+  // is shown.
   const [selected, setSelected] = useState<SASTOut | null>(null)
+  const [openingId, setOpeningId] = useState<number | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
-  const load = useCallback(async () => {
-    try { setRows(await api.get<SASTOut[]>('/api/sast-requests')) } catch (err) { setError(err) }
-  }, [])
-  useEffect(() => { load() }, [load])
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<SASTListOut>('/api/sast-requests', {})
+
   useEffect(() => {
     // Full user list -- not just security analysts -- so both the Security
     // Lead assignment dropdown and the "Requester" field on the detail view
     // can resolve names from a single fetch.
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
+  }, [])
+
+  const openRequest = useCallback(async (idOrRow: number | SASTListOut) => {
+    const id = typeof idOrRow === 'number' ? idOrRow : idOrRow.id
+    setOpeningId(id)
+    try {
+      setSelected(await api.get<SASTOut>(`/api/sast-requests/${id}`))
+    } catch (err) { setError(err) } finally { setOpeningId(null) }
   }, [])
 
   // Deep-link support -- see the matching effect in Functional.tsx for the
@@ -832,20 +848,26 @@ export default function SAST() {
     const openId = searchParams.get('open')
     if (!openId || rows.length === 0) return
     const match = rows.find((r) => r.request_id === openId)
-    if (match) setSelected(match)
+    if (match) openRequest(match.id)
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams])
+  }, [rows, searchParams, setSearchParams, openRequest])
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="SAST Requests" count={rows.length}
+        title="SAST Requests" count={total}
         subtitle="Static Application Security Testing requests, from submission through findings and report sign-off. Raised via a QA Request (include SAST in its request types) -- not created standalone here."
       />
       <Card>
-        <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
-          { key: 'request_id', header: 'Request ID' },
+        <Table rowKey="id" onRowClick={(r) => openRequest(r)}
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
+          columns={[
+          {
+            key: 'request_id',
+            header: 'Request ID',
+            render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
+          },
           { key: 'application_name', header: 'Application' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'security_lead_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.security_lead_id) || 'Not assigned', filterValue: (r) => userName(users, r.security_lead_id) || '' },
@@ -853,7 +875,7 @@ export default function SAST() {
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '—'), filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '') },
-          { key: 'findings', header: 'Findings', render: (r) => r.findings.length, filterValue: (r) => String(r.findings.length) },
+          { key: 'findings', header: 'Findings', render: (r) => r.findings_count, filterValue: (r) => String(r.findings_count) },
           { key: 'source', header: 'Source', render: (r) => (
             r.qa_request ? (
               <span className="badge badge-blue" title="Auto-created from a QA Request">
@@ -867,7 +889,7 @@ export default function SAST() {
       </Card>
       {selected && (
         <SASTDetail
-          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }}
+          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); reload() }}
           users={users}
         />
       )}

@@ -4,9 +4,9 @@ from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
-from .. import models, schemas
+from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
 from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
@@ -641,20 +641,62 @@ def _add_finding(db: Session, obj, payload, current_user):
 
 
 # ---------------- Module 4: SAST ----------------
-@router.get("/api/sast-requests", response_model=List[schemas.SASTOut])
-def list_sast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.SASTRequest)
-    # See list_functional's matching comment in routers/functional.py -- same
-    # reasoning, applied unconditionally (reported directly, then extended to
-    # "everywhere"). department is a delegated property (models.SASTRequest.
-    # department), not a real column, hence the join rather than a plain
-    # .filter(); standalone SAST requests (no qa_request_id) are excluded by
-    # this inner join, same as they already resolve to department=None today.
+@router.get("/api/sast-requests", response_model=pagination.Page[schemas.SASTListOut])
+def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+              db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # department/application_name/application_master_status are delegated
+    # properties (models.SASTRequest.department etc.), not real columns --
+    # every filter/read that touches them needs qa_request (+ its own
+    # application_master) eager-loaded, same reasoning as list_functional in
+    # routers/functional.py. findings is selectinload'd (a second, batched
+    # query) rather than joinedload'd (which would multiply row count via
+    # the one-to-many join) so SASTListOut.findings_count doesn't lazy-load
+    # per row. isouter=True on the QARequest join so a standalone (no
+    # qa_request_id) SAST request isn't dropped for every caller, not just
+    # scoped ones -- the original code only joined at all when `scope` was
+    # set, so this preserves that "never silently excluded" behavior now
+    # that the join always happens (needed for search/sort on the delegated
+    # fields).
+    q = db.query(models.SASTRequest).join(
+        models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id, isouter=True
+    ).options(
+        joinedload(models.SASTRequest.qa_request).joinedload(models.QARequest.application_master),
+        selectinload(models.SASTRequest.findings),
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
-    return q.order_by(models.SASTRequest.created_at.desc()).all()
+        q = q.filter(models.QARequest.department == scope)
+    q = pagination.apply_search(q, params, models.SASTRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_status_filter(q, params, models.SASTRequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    # Module-specific, same reasoning as qa_requests.py/functional.py's own
+    # requester_id addition (reported directly -- Dashboard.tsx's "My
+    # Requests" tab).
+    if requester_id is not None:
+        q = q.filter(models.SASTRequest.requester_id == requester_id)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "created_at": models.SASTRequest.created_at,
+            "updated_at": models.SASTRequest.updated_at,
+            "status": models.SASTRequest.status,
+            "application_name": models.QARequest.application_name,
+        },
+        default_column=models.SASTRequest.created_at, id_column=models.SASTRequest.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/api/sast-requests/{req_id}", response_model=schemas.SASTOut)
+def get_sast(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # PAG-006 -- the detail endpoint the frontend fetches from when a list
+    # row is opened, now that the list above only returns SASTListOut. Also
+    # closes a real gap: this endpoint did not exist before (every other
+    # module already had one), and frontend code that re-fetched the entire
+    # unpaginated list just to find one row by id (see SAST.tsx's own
+    # addFinding/resolveFinding) now uses this instead.
+    return _get_or_404(db, models.SASTRequest, req_id, "SAST")
 
 
 # Standalone SAST request creation is DISABLED per request -- SAST requests
@@ -1117,17 +1159,48 @@ def _dast_out(obj: models.DASTRequest, current_user: models.User) -> schemas.DAS
     return out
 
 
-@router.get("/api/dast-requests", response_model=List[schemas.DASTOut])
-def list_dast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.DASTRequest)
-    # See list_sast's matching comment just above -- identical reasoning,
-    # applied unconditionally.
+@router.get("/api/dast-requests", response_model=pagination.Page[schemas.DASTListOut])
+def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+              db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # See list_sast's matching comment just above -- identical reasoning.
+    # DASTListOut has no `targets` field at all (see its own docstring in
+    # schemas.py), so _dast_out's per-row credential-masking below is only
+    # ever needed for the single-record detail endpoint, not this list.
+    q = db.query(models.DASTRequest).join(
+        models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id, isouter=True
+    ).options(
+        joinedload(models.DASTRequest.qa_request).joinedload(models.QARequest.application_master),
+        selectinload(models.DASTRequest.findings),
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
-    rows = q.order_by(models.DASTRequest.created_at.desc()).all()
-    return [_dast_out(r, current_user) for r in rows]
+        q = q.filter(models.QARequest.department == scope)
+    q = pagination.apply_search(q, params, models.DASTRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_status_filter(q, params, models.DASTRequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    # Module-specific, same reasoning as qa_requests.py/functional.py's own
+    # requester_id addition (reported directly -- Dashboard.tsx's "My
+    # Requests" tab).
+    if requester_id is not None:
+        q = q.filter(models.DASTRequest.requester_id == requester_id)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "created_at": models.DASTRequest.created_at,
+            "updated_at": models.DASTRequest.updated_at,
+            "status": models.DASTRequest.status,
+            "application_name": models.QARequest.application_name,
+        },
+        default_column=models.DASTRequest.created_at, id_column=models.DASTRequest.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/api/dast-requests/{req_id}", response_model=schemas.DASTOut)
+def get_dast(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # PAG-006, same reasoning as get_sast above -- did not exist before.
+    return _dast_out(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
 
 
 @router.post("/api/dast-requests", response_model=schemas.DASTOut)

@@ -1,8 +1,19 @@
-import { QARequestOut, UserOut } from '../types'
+import { LinkedRequestRef, QARequestOut, UserOut } from '../types'
 
 export function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
+}
+
+// Only reads the 4 linked_*_requests arrays -- shared structurally by both
+// the full QARequestOut (detail view) and the lightweight QARequestListOut
+// (paginated list, PAG-005), so this accepts either without the caller
+// needing to cast.
+interface ClassifiableRequest {
+  linked_functional_requests: LinkedRequestRef[]
+  linked_sast_requests: LinkedRequestRef[]
+  linked_dast_requests: LinkedRequestRef[]
+  linked_performance_requests: LinkedRequestRef[]
 }
 
 // Priority/Risk is per-request-type now (see models.FunctionalRequest for
@@ -10,7 +21,7 @@ export function userName(users: UserOut[], id?: number | null): string | null {
 // mirrors backend routers/reports.py::qa_request_summary's "Type:
 // Priority/Risk" breakdown, listing one entry per type actually linked to
 // this QA Request.
-export function classificationSummary(req: QARequestOut): string {
+export function classificationSummary(req: ClassifiableRequest): string {
   const f = req.linked_functional_requests?.[0]
   const s = req.linked_sast_requests?.[0]
   const d = req.linked_dast_requests?.[0]

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { Badge, ErrorText, Field, Modal, Table } from '../../components/Common'
@@ -7,12 +7,13 @@ import JiraRichTextField from '../../components/JiraRichTextField'
 import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import {
-  ApprovalActionOut, DefectDashboardOut, DefectOut, DepartmentOut, QARequestOut,
+  ApprovalActionOut, DefectDashboardOut, DefectListOut, DefectOut, DepartmentOut, PageOut, QARequestListOut,
   RequestDocumentOut, TestCycleOut, TestExecutionOut, TestProjectOut, UserOut,
   TestProjectMyAccessOut,
 } from '../../types'
 import { useAuth } from '../../context/AuthContext'
 import { ENVIRONMENTS } from '../../constants'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 const STATUSES = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Closed']
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
@@ -77,7 +78,7 @@ function useStagedEvidence(opts: { uploadPath: (defectId: number) => string; ver
 
 function CreateDefectModal({ contexts, requests, initialExecutionId, standalone = false, onClose, onCreated }: {
   contexts: ExecutionContext[]
-  requests: QARequestOut[]
+  requests: QARequestListOut[]
   initialExecutionId?: number
   standalone?: boolean
   onClose: () => void
@@ -230,7 +231,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
 }
 
 function TransitionModal({ defect, target, users, departments, requestDepartment, defects, onClose, onChanged }: {
-  defect: DefectOut; target: string; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectOut[]
+  defect: DefectOut; target: string; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]
   onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
   const [values, setValues] = useState<Record<string, any>>(
@@ -440,7 +441,7 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
 }
 
 function DefectDetail({ defect, users, departments, requestDepartment, defects, contexts, access, onClose, onChanged }: {
-  defect: DefectOut; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectOut[]; contexts: ExecutionContext[]; access?: TestProjectMyAccessOut; onClose: () => void; onChanged: (defect: DefectOut) => void
+  defect: DefectOut; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]; contexts: ExecutionContext[]; access?: TestProjectMyAccessOut; onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
   const navigate = useNavigate()
   const { user } = useAuth()
@@ -537,14 +538,15 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
 export default function Defects() {
   const { user } = useAuth()
   const [searchParams, setSearchParams] = useSearchParams()
-  const [defects, setDefects] = useState<DefectOut[]>([])
   const [dashboard, setDashboard] = useState<DefectDashboardOut | null>(null)
-  const [requests, setRequests] = useState<QARequestOut[]>([])
+  const [requests, setRequests] = useState<QARequestListOut[]>([])
   const [contexts, setContexts] = useState<ExecutionContext[]>([])
   const [users, setUsers] = useState<UserOut[]>([])
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
   const [accessByProject, setAccessByProject] = useState<Record<number, TestProjectMyAccessOut>>({})
+  const [duplicateCandidates, setDuplicateCandidates] = useState<DefectListOut[]>([])
   const [selected, setSelected] = useState<DefectOut | null>(null)
+  const [openingDefectId, setOpeningDefectId] = useState<number | null>(null)
   const [createMode, setCreateMode] = useState<'' | 'execution' | 'standalone'>('')
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
@@ -553,6 +555,38 @@ export default function Defects() {
   const [queue, setQueue] = useState<'all' | 'attention' | 'mine' | 'unlinked' | 'retest' | 'closed'>('all')
   const [error, setError] = useState<unknown>(null)
   const initialExecutionId = Number(searchParams.get('execution')) || undefined
+
+  // SRS 7.2 pagination rollout -- the register is now server-paginated and
+  // server-filtered (search/status/severity/priority/queue all become query
+  // params instead of an in-browser .filter() over the whole register). See
+  // DefectDashboardOut (loaded below) for the queue-tab/health-strip counts
+  // this list can no longer compute on its own from just the current page.
+  const {
+    items: defects, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading: defectsLoading, setPage, setPageSize, reload: reloadDefects,
+  } = usePaginatedList<DefectListOut>('/api/defects', {
+    search,
+    status: status ? [status] : undefined,
+    extra: { severity: severity || undefined, priority: priority || undefined, queue: queue === 'all' ? undefined : queue },
+  })
+
+  const loadDashboard = useCallback(() => {
+    api.get<DefectDashboardOut>('/api/defects/dashboard').then(setDashboard).catch(setError)
+  }, [])
+  const refreshDefects = useCallback(() => { reloadDefects(); loadDashboard() }, [reloadDefects, loadDashboard])
+
+  // PAG-006 -- the register only ever holds the lightweight DefectListOut
+  // shape; opening a row (by id) or resolving the `?open=<defect_key>`
+  // deep-link (Global Search, notifications, LinkedDefects.tsx, and this
+  // page's own "open what was just created" step) fetches the full
+  // DefectOut before showing the detail panel.
+  const openDefect = useCallback(async (keyOrId: number | string) => {
+    if (typeof keyOrId === 'number') setOpeningDefectId(keyOrId)
+    try {
+      const path = typeof keyOrId === 'number' ? `/api/defects/${keyOrId}` : `/api/defects/by-key/${encodeURIComponent(keyOrId)}`
+      setSelected(await api.get<DefectOut>(path))
+    } catch (err) { setError(err) } finally { setOpeningDefectId(null) }
+  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -563,55 +597,76 @@ export default function Defects() {
       // candidates from whichever department is actually selected, not just
       // QA. See TransitionModal's departmentUsers filter, which narrows this
       // full list down to the selected assigned_team at assignment time.
-      const [items, stats, qaRequests, allUsers, projects, activeDepartments] = await Promise.all([
-        api.get<DefectOut[]>('/api/defects'), api.get<DefectDashboardOut>('/api/defects/dashboard'),
-        api.get<QARequestOut[]>('/api/qa-requests'), api.get<UserOut[]>('/api/auth/users'),
-        api.get<TestProjectOut[]>('/api/test-projects'), api.get<DepartmentOut[]>('/api/departments'),
+      const [qaRequests, allUsers, projects, activeDepartments, duplicates] = await Promise.all([
+        // SRS PAG-002 -- /api/qa-requests is now paginated (max page_size
+        // 100); this picker (linking a new defect to its QA Request, and
+        // reading the responsible department off one) wants "effectively
+        // all of them" rather than one page, so it asks for the max size
+        // directly instead of going through hooks/usePaginatedList.
+        api.get<PageOut<QARequestListOut>>('/api/qa-requests?page_size=100').then((p) => p.items),
+        api.get<UserOut[]>('/api/auth/users'),
+        // SRS 7.2 pagination rollout -- Test Projects/Cycles are now
+        // wrapped in Page[T] for API-contract consistency (task #82);
+        // page_size=100 + .items since this picker still wants the
+        // complete list, not a real pager UI.
+        api.get<PageOut<TestProjectOut>>('/api/test-projects?page_size=100').then((p) => p.items),
+        api.get<DepartmentOut[]>('/api/departments'),
+        // Candidate pool for TransitionModal's "Original Defect ID" picker
+        // (marking a defect Duplicate) -- SearchableSelect has no async/
+        // server-search mode, so this is capped at the same page_size=100
+        // "effectively all of them" compromise used by the QA Requests
+        // picker above, not a true unpaginated PAG-010 candidate set (the
+        // defect register has real unbounded growth, unlike Test Cases'
+        // folder tree).
+        api.get<PageOut<DefectListOut>>('/api/defects?page_size=100').then((p) => p.items),
       ])
-      setDefects(items); setDashboard(stats); setRequests(qaRequests); setUsers(allUsers); setDepartments(activeDepartments)
+      setRequests(qaRequests); setUsers(allUsers); setDepartments(activeDepartments); setDuplicateCandidates(duplicates)
+      loadDashboard()
       const accessRows = await Promise.all(projects.map((project) => api.get<TestProjectMyAccessOut>(`/api/test-projects/${project.id}/my-access`)))
       setAccessByProject(Object.fromEntries(accessRows.map((access) => [access.project_id, access])))
       const contextGroups = await Promise.all(projects.filter((project) => project.is_active).map(async (project) => {
-        const cycles = await api.get<TestCycleOut[]>(`/api/test-execution/projects/${project.id}/cycles`)
+        const cycles = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${project.id}/cycles?page_size=100`).then((p) => p.items)
         const rows = await Promise.all(cycles.map(async (cycle) => {
-          const executions = await api.get<TestExecutionOut[]>(`/api/test-execution/cycles/${cycle.id}/executions`)
-          return executions.filter((execution) => ['Fail', 'Blocked'].includes(execution.status)).map((execution) => ({ project, cycle, execution }))
+          // SRS 7.2 pagination rollout -- the underlying endpoint is now
+          // paginated; the Fail/Blocked filter is now a server-side
+          // `status` query param instead of fetching every execution in
+          // the cycle just to filter it away in the browser. page_size=100
+          // is a practical ceiling for "failing testcases in one cycle to
+          // pick from when linking a new defect."
+          const executions = await api.get<PageOut<TestExecutionOut>>(
+            `/api/test-execution/cycles/${cycle.id}/executions?status=Fail&status=Blocked&page_size=100`,
+          )
+          return executions.items.map((execution) => ({ project, cycle, execution }))
         }))
         return rows.flat()
       }))
       setContexts(contextGroups.flat())
       const openKey = searchParams.get('open')
-      if (openKey) setSelected(items.find((item) => item.defect_key === openKey || String(item.id) === openKey) || null)
+      if (openKey) openDefect(openKey)
       if (initialExecutionId) setCreateMode('execution')
     } catch (err) { setError(err) }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load() }, [load])
 
-  const queueCounts = useMemo(() => ({
-    all: defects.length,
-    attention: defects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && !['Closed', 'Rejected', 'Duplicate'].includes(defect.status)).length,
-    mine: defects.filter((defect) => defect.assignee_id === user?.id || defect.reporter_id === user?.id).length,
-    unlinked: defects.filter((defect) => !defect.execution_id).length,
-    retest: defects.filter((defect) => ['Resolved', 'Retest'].includes(defect.status)).length,
-    closed: defects.filter((defect) => defect.status === 'Closed').length,
-  }), [defects, user?.id])
-  const visible = useMemo(() => defects.filter((defect) => {
-    const text = `${defect.defect_key} ${defect.title} ${defect.qa_request_key} ${defect.cycle_key} ${defect.test_case_key} ${defect.application_name} ${defect.module_feature} ${defect.assignee_name} ${defect.assigned_team} ${defect.reporter_name}`.toLowerCase()
-    const inQueue = queue === 'all'
-      || (queue === 'attention' && ['Critical', 'High'].includes(defect.severity) && !['Closed', 'Rejected', 'Duplicate'].includes(defect.status))
-      || (queue === 'mine' && (defect.assignee_id === user?.id || defect.reporter_id === user?.id))
-      || (queue === 'unlinked' && !defect.execution_id)
-      || (queue === 'retest' && ['Resolved', 'Retest'].includes(defect.status))
-      || (queue === 'closed' && defect.status === 'Closed')
-    return inQueue && (!search || text.includes(search.toLowerCase())) && (!status || defect.status === status) && (!severity || defect.severity === severity) && (!priority || defect.priority === priority)
-  }), [defects, search, status, severity, priority, queue, user?.id])
+  // Queue-tab/health-strip counts now come straight off the SQL-aggregated
+  // DefectDashboardOut (loaded independently of the current queue/search/
+  // status/severity/priority filters), not from `.filter().length` over
+  // whatever the paginated list happens to hold.
+  const queueCounts = {
+    all: dashboard?.total || 0,
+    attention: dashboard?.attention_count || 0,
+    mine: dashboard?.mine_count || 0,
+    unlinked: dashboard?.unlinked_count || 0,
+    retest: dashboard?.retest_count || 0,
+    closed: dashboard?.closed || 0,
+  }
   const hasFilters = !!(search || status || severity || priority)
   const clearFilters = () => { setSearch(''); setStatus(''); setSeverity(''); setPriority('') }
   const ageInDays = (reportedAt: string) => Math.max(0, Math.floor((Date.now() - new Date(reportedAt).getTime()) / 86400000))
-  function update(saved: DefectOut) { setDefects((current) => current.map((item) => item.id === saved.id ? saved : item)); setSelected(saved); api.get<DefectDashboardOut>('/api/defects/dashboard').then(setDashboard) }
+  function update(saved: DefectOut) { refreshDefects(); setSelected(saved) }
   return <div className="tm-page defect-page">
     <header className="defect-command-header">
-      <div className="defect-command-copy"><span>QUALITY CONTROL · DEFECT OPERATIONS</span><div><h2>Defect Management</h2><b>{defects.length}</b></div><p>Prioritize risk, maintain execution traceability, and move every defect through a governed resolution workflow.</p></div>
+      <div className="defect-command-copy"><span>QUALITY CONTROL · DEFECT OPERATIONS</span><div><h2>Defect Management</h2><b>{dashboard?.total || 0}</b></div><p>Prioritize risk, maintain execution traceability, and move every defect through a governed resolution workflow.</p></div>
       <div className="defect-command-actions"><button className="btn" onClick={() => api.downloadFile('/api/defects/export-xlsx', 'defect-management-register.xlsx')}>Export register</button><button className="btn" onClick={() => setCreateMode('standalone')}>+ Open defect</button><button className="btn btn-primary" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ From Failed / Blocked</button></div>
     </header>
     <ErrorText error={error} title="Defect Management could not be loaded" />
@@ -625,18 +680,22 @@ export default function Defects() {
     <section className="defect-stage-strip"><div className="defect-stage-heading"><span>Lifecycle distribution</span><small>Select a stage to filter the register</small></div><div>{STATUSES.slice(0, 6).map((stage) => <button key={stage} className={status === stage ? 'active' : ''} onClick={() => setStatus(status === stage ? '' : stage)}><span>{stage}</span><strong>{dashboard?.by_status?.[stage] || 0}</strong></button>)}</div></section>
     <section className="defect-workspace-card">
       <nav className="defect-queue-tabs" aria-label="Defect queues">{([['all', 'All defects'], ['attention', 'Needs attention'], ['mine', 'My work'], ['unlinked', 'Unlinked'], ['retest', 'Ready for retest'], ['closed', 'Closed']] as const).map(([key, label]) => <button key={key} className={queue === key ? 'active' : ''} onClick={() => setQueue(key)}><span>{label}</span><b>{queueCounts[key]}</b></button>)}</nav>
-      <div className="defect-register-head"><div><span>DEFECT REGISTER</span><h3>{visible.length} {visible.length === 1 ? 'record' : 'records'} in this view</h3></div>{dashboard && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
-      <div className="defect-toolbar"><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search ID, title, request, cycle, testcase, application or owner…" /></label><select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><select value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
-      <Table<DefectOut> tableId="defect-management" rowKey="id" rows={visible} onRowClick={(defect) => { setSelected(defect); setSearchParams({ open: defect.defect_key }) }} columns={[
-        { key: 'title', header: 'Defect', render: (defect) => <span className="defect-title-cell"><span><button className="link-btn" onClick={(event) => { event.stopPropagation(); setSelected(defect) }}>{defect.defect_key}</button><small>{defect.application_name}</small></span><strong>{defect.title}</strong><small>{defect.module_feature}</small></span> },
+      <div className="defect-register-head"><div><span>DEFECT REGISTER</span><h3>{total} {total === 1 ? 'record' : 'records'} in this view</h3></div>{dashboard && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
+      <div className="defect-toolbar"><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search ID, title, application or module…" /></label><select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><select value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
+      <Table<DefectListOut>
+        tableId="defect-management" rowKey="id" rows={defects}
+        onRowClick={(defect) => { openDefect(defect.id); setSearchParams({ open: defect.defect_key }) }}
+        server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading: defectsLoading }}
+        columns={[
+        { key: 'title', header: 'Defect', render: (defect) => <span className="defect-title-cell"><span><button className="link-btn" onClick={(event) => { event.stopPropagation(); openDefect(defect.id) }}>{openingDefectId === defect.id ? 'Opening…' : defect.defect_key}</button><small>{defect.application_name}</small></span><strong>{defect.title}</strong><small>{defect.module_feature}</small></span> },
         { key: 'severity', header: 'Risk', render: (defect) => <span className="defect-risk-cell"><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><small>{defect.priority}</small></span> },
         { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} /><small>{defect.assignee_name || 'Unassigned'}</small><small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small></span> },
         { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id ? 'incomplete' : ''}`}><strong>{defect.qa_request_key || `Request #${defect.qa_request_id}`}</strong><small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small></span> },
         { key: 'reported_at', header: 'Reported / Age', render: (defect) => <span className="defect-age-cell"><strong>{new Date(defect.reported_at).toLocaleDateString()}</strong><small>{ageInDays(defect.reported_at)}d open · {defect.reporter_name}</small></span> },
       ]} />
-      {!visible.length && <div className="tm-empty"><strong>{defects.length ? 'No defects match this view' : 'No governed defects yet'}</strong><span>{defects.length ? 'Change the queue or clear filters to see more records.' : 'Open a defect now, or report one directly from a Failed/Blocked execution.'}</span></div>}
+      {!defects.length && <div className="tm-empty"><strong>{dashboard?.total ? 'No defects match this view' : 'No governed defects yet'}</strong><span>{dashboard?.total ? 'Change the queue or clear filters to see more records.' : 'Open a defect now, or report one directly from a Failed/Blocked execution.'}</span></div>}
     </section>
-    {createMode && <CreateDefectModal standalone={createMode === 'standalone'} contexts={contexts} requests={requests} initialExecutionId={initialExecutionId} onClose={() => { setCreateMode(''); setSearchParams({}) }} onCreated={(created) => { setDefects((current) => [created, ...current]); setCreateMode(''); setSelected(created); setSearchParams({ open: created.defect_key }); api.get<DefectDashboardOut>('/api/defects/dashboard').then(setDashboard) }} />}
-    {selected && <DefectDetail defect={selected} users={users} departments={departments} requestDepartment={requests.find((request) => request.id === selected.qa_request_id)?.department} defects={defects} contexts={contexts} access={selected.project_id ? accessByProject[selected.project_id] : undefined} onClose={() => { setSelected(null); setSearchParams({}) }} onChanged={update} />}
+    {createMode && <CreateDefectModal standalone={createMode === 'standalone'} contexts={contexts} requests={requests} initialExecutionId={initialExecutionId} onClose={() => { setCreateMode(''); setSearchParams({}) }} onCreated={(created) => { refreshDefects(); setCreateMode(''); setSelected(created); setSearchParams({ open: created.defect_key }) }} />}
+    {selected && <DefectDetail defect={selected} users={users} departments={departments} requestDepartment={requests.find((request) => request.id === selected.qa_request_id)?.department} defects={duplicateCandidates} contexts={contexts} access={selected.project_id ? accessByProject[selected.project_id] : undefined} onClose={() => { setSelected(null); setSearchParams({}) }} onChanged={update} />}
   </div>
 }

@@ -2,14 +2,15 @@ import datetime
 from collections import Counter
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import models, cache
 from ..database import get_db
 from ..deps import get_current_user, dashboard_department_scope
 from ..constants import (
     Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
-    QA_DEPARTMENT,
+    QA_DEPARTMENT, QA_REQUEST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
@@ -390,6 +391,112 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
             "risk_distribution": risk_counts,
         },
     }
+
+
+# DSH-001..004 -- (type, created_at column, status column, terminal-status
+# list) for each of the 4 child request types CommandCentre's own
+# "Active requests (org-wide)" stat card counts -- mirrors
+# frontend/src/Dashboard.tsx's TERMINAL_STATUSES_BY_TYPE/isActiveRequest
+# exactly (a request is "active" if its status isn't DRAFT and isn't in its
+# own type's terminal list). The QA Request gateway itself is deliberately
+# excluded, same as Dashboard.tsx's own unifiedRequests -- it's an intake
+# wrapper, not an additional testing work item, and including it would
+# inflate this count by one per parent.
+_ACTIVE_REQUEST_MODELS = [
+    (models.FunctionalRequest, QA_REQUEST_TERMINAL_STATUSES),
+    (models.SASTRequest, SAST_DAST_TERMINAL_STATUSES),
+    (models.DASTRequest, SAST_DAST_TERMINAL_STATUSES),
+    (models.PerformanceRequest, PERFORMANCE_TERMINAL_STATUSES),
+]
+
+
+@router.get("/summary")
+def dashboard_summary(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """DSH-001..004 -- consolidates the handful of derived numbers
+    CommandCentre used to compute in the browser (see Dashboard.tsx's own
+    comment on the fetch this replaces) by pulling all 5 request types'
+    "complete" lists (page_size=100 -- not even reliably complete past 100
+    of a single type) just to run a few `.filter().length` calls over them.
+    `project-wise`/`3w` above already cover the rest of CommandCentre's
+    stats via their own dedicated endpoints; this fills the remaining gap
+    (the "Active requests" stat card, the "critical pending" tag on the
+    approvals card, the "nearing release" footline, and the QA Lifecycle
+    Health stepper) with real SQL `COUNT`/`GROUP BY`, never a full-row
+    fetch.
+
+    `active_requests_count`/`child_requests_total` respect `date_from`/
+    `date_to` (created_at-scoped, mirroring project-wise/3w's own
+    convention). `nearing_release_count`/`critical_pending_count`/
+    `functional_status_counts` deliberately do not -- matching
+    CommandCentre's own pre-existing behavior, where those three were never
+    range-filtered client-side either.
+
+    DSH-005/006 -- read-through Redis cache, 60s TTL, keyed by department
+    scope + the two date params (this summary's only real inputs) so one
+    department's cached response is never served to another. See
+    `cache.py`'s own module docstring for why this degrades to "just
+    compute it every time" rather than erroring when Redis isn't
+    configured/reachable -- `cache.get_json`/`set_json` never raise."""
+    scope = dashboard_department_scope(current_user)
+    cache_key = f"dashboard:summary:v1:{scope or 'all'}:{date_from or ''}:{date_to or ''}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    child_requests_total = 0
+    active_requests_count = 0
+    for model, terminal_statuses in _ACTIVE_REQUEST_MODELS:
+        q = _join_qa_department(_in_period(db.query(model), model.created_at, date_from, date_to), model, scope)
+        child_requests_total += q.count()
+        active_requests_count += q.filter(model.status.notin_(list(terminal_statuses) + ["DRAFT"])).count()
+
+    # Not range-filtered -- see docstring above. target_release_date is a
+    # plain Date column (no time component), so this compares against
+    # today's date rather than the full now() datetime `_date_bounds` uses
+    # elsewhere in this file.
+    today = models.now().date()
+    nearing_release_q = db.query(models.QARequest).filter(
+        models.QARequest.target_release_date.isnot(None),
+        models.QARequest.target_release_date >= today,
+        models.QARequest.target_release_date <= today + datetime.timedelta(days=14),
+    )
+    if scope:
+        nearing_release_q = nearing_release_q.filter(models.QARequest.department == scope)
+    nearing_release_count = nearing_release_q.count()
+
+    critical_pending_q = db.query(models.FunctionalRequest).filter(
+        models.FunctionalRequest.status.in_([
+            QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.READINESS_VERIFICATION,
+            QAStatus.QA_SIGNOFF_PENDING, QAStatus.REQUESTER_VERIFICATION,
+        ]),
+        models.FunctionalRequest.priority == "Critical",
+    )
+    critical_pending_q = _join_qa_department(critical_pending_q, models.FunctionalRequest, scope)
+    critical_pending_count = critical_pending_q.count()
+
+    # QA Lifecycle Health (LifecycleStepper) only ever reads each row's own
+    # `status` -- a GROUP BY count dict feeds its existing client-side
+    # stage-bucketing (STATUS_STAGE_INDEX in Dashboard.tsx) exactly as well
+    # as full rows would, without fetching them. Kept as raw per-status
+    # counts (not pre-bucketed into the 6 lifecycle stages here) so the
+    # stage grouping stays defined in exactly one place -- Dashboard.tsx's
+    # own STATUS_STAGE_INDEX -- instead of two copies that could drift.
+    functional_status_q = _join_qa_department(db.query(models.FunctionalRequest), models.FunctionalRequest, scope)
+    functional_status_counts = dict(
+        functional_status_q.with_entities(models.FunctionalRequest.status, func.count(models.FunctionalRequest.id))
+        .group_by(models.FunctionalRequest.status).all()
+    )
+
+    result = {
+        "child_requests_total": child_requests_total,
+        "active_requests_count": active_requests_count,
+        "nearing_release_count": nearing_release_count,
+        "critical_pending_count": critical_pending_count,
+        "functional_status_counts": functional_status_counts,
+    }
+    cache.set_json(cache_key, result, ttl_seconds=60)
+    return result
 
 
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------

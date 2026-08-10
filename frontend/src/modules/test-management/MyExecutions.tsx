@@ -4,7 +4,7 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, TableColumn, ErrorText, PageHeader, Badge } from '../../components/Common'
 import { TEST_EXECUTION_STATUSES, executionStatusGate } from '../../constants'
-import { TestProjectOut, TestCycleOut, TestExecutionOut, TestRunDefectOut } from '../../types'
+import { TestProjectOut, TestCycleOut, TestExecutionOut, TestRunDefectOut, PageOut } from '../../types'
 
 // SRS EXE-002 -- "the signed-in user's actionable items across authorized
 // projects, five per page." Nothing on the backend aggregates this today
@@ -141,15 +141,27 @@ export default function MyExecutions() {
     setLoading(true)
     setError(null)
     try {
-      const projects = await api.get<TestProjectOut[]>('/api/test-projects')
+      // SRS 7.2 pagination rollout -- both endpoints are now wrapped in
+      // Page[T] for API-contract consistency (task #82); page_size=100 +
+      // .items since this fan-out still needs the complete list.
+      const projects = await api.get<PageOut<TestProjectOut>>('/api/test-projects?page_size=100').then((p) => p.items)
       const activeProjects = projects.filter((p) => p.is_active && !p.is_archived)
       const perProject = await Promise.all(activeProjects.map(async (project) => {
-        const cycles = await api.get<TestCycleOut[]>(`/api/test-execution/projects/${project.id}/cycles`)
+        const cycles = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${project.id}/cycles?page_size=100`).then((p) => p.items)
         const executableCycles = cycles.filter((cycle) => cycle.status === 'In Progress')
         const perCycle = await Promise.all(executableCycles.map(async (cycle) => {
-          const executions = await api.get<TestExecutionOut[]>(`/api/test-execution/cycles/${cycle.id}/executions`)
-          return executions
-            .filter((execution) => execution.assigned_to_id === user.id)
+          // SRS 7.2 pagination rollout -- the underlying endpoint is now
+          // paginated; `assignment=mine` (added for TestExecution.tsx's own
+          // assignment tab) does the "assigned to the signed-in user"
+          // filter server-side instead of fetching every execution in the
+          // cycle just to filter it away in the browser. page_size=100 is a
+          // practical ceiling -- one person holding >100 assigned testcases
+          // in a single cycle isn't a realistic case this page needs to
+          // handle.
+          const executions = await api.get<PageOut<TestExecutionOut>>(
+            `/api/test-execution/cycles/${cycle.id}/executions?assignment=mine&page_size=100`,
+          )
+          return executions.items
             .map((execution): MyExecutionRow => ({ id: execution.id, execution, project, cycle }))
         }))
         return perCycle.flat()

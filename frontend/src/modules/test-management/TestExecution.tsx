@@ -5,12 +5,13 @@ import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import { hasRole, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate } from '../../constants'
-import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, QARequestOut, TestProjectMyAccessOut, DefectOut } from '../../types'
+import { TestProjectOut, TestCaseOut, TestCaseListOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import LinkedDefects from '../../components/LinkedDefects'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
@@ -19,7 +20,7 @@ const CAN_EXEC_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHEIF_MANAGER_QA']
 
 function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
   projectId: number
-  requests: QARequestOut[]
+  requests: QARequestListOut[]
   users: UserOut[]
   editing?: TestCycleOut | null
   onClose: () => void
@@ -125,14 +126,18 @@ function CycleStatusControl({ cycle, onChanged, onError }: {
   const [blockingReason, setBlockingReason] = useState('')
   const [remarks, setRemarks] = useState('')
   const [dialogError, setDialogError] = useState<unknown>(null)
-  const [completionDefects, setCompletionDefects] = useState<DefectOut[]>([])
+  const [completionDefects, setCompletionDefects] = useState<DefectListOut[]>([])
   const [loadingCompletion, setLoadingCompletion] = useState(false)
 
   useEffect(() => {
     if (!showComplete) return
     setLoadingCompletion(true); setDialogError(null)
-    api.get<DefectOut[]>(`/api/defects?cycle_id=${cycle.id}`)
-      .then(setCompletionDefects)
+    // SRS 7.2 pagination rollout -- /api/defects is now paginated;
+    // page_size=100 is a practical ceiling for "defects linked to one Test
+    // Cycle" (bounded by the cycle's own case count, not unbounded
+    // register-wide growth).
+    api.get<PageOut<DefectListOut>>(`/api/defects?cycle_id=${cycle.id}&page_size=100`)
+      .then((p) => setCompletionDefects(p.items))
       .catch(setDialogError)
       .finally(() => setLoadingCompletion(false))
   }, [showComplete, cycle.id])
@@ -238,7 +243,7 @@ function CycleStatusControl({ cycle, onChanged, onError }: {
 
 function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCandidates, onClose, onAdded }: {
   cycleId: number
-  allCases: TestCaseOut[]
+  allCases: TestCaseListOut[]
   existingCaseIds: Set<number>
   canAssign: boolean
   runnerCandidates: UserOut[]
@@ -254,7 +259,7 @@ function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCa
   // (which only happens when there's no draft override and the approved
   // version itself was archived) -- matches the backend's own check in
   // add_test_cases_to_cycle.
-  const isSelectable = (c: TestCaseOut) => !!c.current_approved_version_id && c.status !== 'Archived'
+  const isSelectable = (c: TestCaseListOut) => !!c.current_approved_version_id && c.status !== 'Archived'
   const candidates = useMemo(() => allCases.filter((c) => isSelectable(c) && !existingCaseIds.has(c.id)), [allCases, existingCaseIds])
   const awaitingApproval = useMemo(() => allCases.filter((c) => !isSelectable(c) && !existingCaseIds.has(c.id)), [allCases, existingCaseIds])
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -312,7 +317,7 @@ function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCa
               {allCandidatesSelected ? 'Clear all' : `Select all (${candidates.length})`}
             </button>
           </div>
-          <Table<TestCaseOut>
+          <Table<TestCaseListOut>
             tableId="add-testcases-to-cycle"
             rowKey="id"
             rows={candidates}
@@ -443,12 +448,21 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
 function LinkExistingDefectModal({ execution, onClose, onLinked }: {
   execution: TestExecutionOut; onClose: () => void; onLinked: () => void
 }) {
-  const [defects, setDefects] = useState<DefectOut[]>([])
+  const [defects, setDefects] = useState<DefectListOut[]>([])
   const [defectId, setDefectId] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   useEffect(() => {
-    api.get<DefectOut[]>('/api/defects').then((items) => setDefects(items.filter((item) => !item.execution_id && !['Closed', 'Rejected', 'Duplicate'].includes(item.status)))).catch(setError)
+    // SRS 7.2 pagination rollout -- `queue=unlinked` (execution_id IS NULL)
+    // plus the explicit non-terminal status list reproduce the previous
+    // client-side `!item.execution_id && !['Closed','Rejected',
+    // 'Duplicate'].includes(item.status)` filter entirely server-side.
+    // page_size=100 is a practical ceiling for this picker, same compromise
+    // as Defects.tsx's own duplicate-defect candidate pool.
+    const openStatuses = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+    const qs = new URLSearchParams({ queue: 'unlinked', page_size: '100' })
+    openStatuses.forEach((s) => qs.append('status', s))
+    api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}`).then((p) => setDefects(p.items)).catch(setError)
   }, [])
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -1195,8 +1209,14 @@ export default function TestExecution() {
   const [projectId, setProjectId] = useState<number | ''>('')
   const [cycles, setCycles] = useState<TestCycleOut[]>([])
   const [cycleId, setCycleId] = useState<number | ''>('')
-  const [cases, setCases] = useState<TestCaseOut[]>([])
-  const [executions, setExecutions] = useState<TestExecutionOut[]>([])
+  const [cases, setCases] = useState<TestCaseListOut[]>([])
+  // SRS 7.2 pagination rollout -- the folder-tree-style "everything at
+  // once" fetch is gone; existingCaseIds and executionSummary now come from
+  // their own small dedicated endpoints (see loadExecutionExtras below)
+  // instead of being derived from the complete (now paginated) execution
+  // list.
+  const [existingCaseIds, setExistingCaseIds] = useState<Set<number>>(new Set())
+  const [executionSummary, setExecutionSummary] = useState<TestExecutionSummaryOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [showNewCycle, setShowNewCycle] = useState(false)
   const [editingCycle, setEditingCycle] = useState<TestCycleOut | null>(null)
@@ -1217,11 +1237,15 @@ export default function TestExecution() {
   const [users, setUsers] = useState<UserOut[]>([])
   const [exportingCycle, setExportingCycle] = useState(false)
   const [unlinkingCycleLink, setUnlinkingCycleLink] = useState(false)
-  const [qaRequests, setQaRequests] = useState<QARequestOut[]>([])
+  const [qaRequests, setQaRequests] = useState<QARequestListOut[]>([])
   const [linkingExistingExecution, setLinkingExistingExecution] = useState<TestExecutionOut | null>(null)
 
   useEffect(() => {
-    api.get<TestProjectOut[]>('/api/test-projects?include_inactive=true').then((p) => {
+    // SRS 7.2 pagination rollout -- /api/test-projects is now wrapped in
+    // Page[T] for API-contract consistency (task #82); page_size=100 +
+    // .items since this project picker still wants the complete list.
+    api.get<PageOut<TestProjectOut>>('/api/test-projects?include_inactive=true&page_size=100').then((page) => {
+      const p = page.items
       setProjects(p)
       const requested = Number(searchParams.get('project'))
       if (p.length && !projectId) setProjectId(p.some((x) => x.id === requested) ? requested : p[0].id)
@@ -1233,7 +1257,10 @@ export default function TestExecution() {
     // Test Management-scoped picker (Cycle owner, runner assignment) -- see
     // constants.TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS on the backend.
     api.get<UserOut[]>('/api/test-projects/eligible-users').then(setUsers).catch(setError)
-    api.get<QARequestOut[]>('/api/qa-requests').then(setQaRequests).catch(setError)
+    // SRS PAG-002 -- /api/qa-requests is now paginated (max page_size 100);
+    // this Cycle-creation picker wants "effectively all of them," so it
+    // asks for the max size directly rather than one page at a time.
+    api.get<PageOut<QARequestListOut>>('/api/qa-requests?page_size=100').then((p) => setQaRequests(p.items)).catch(setError)
   }, [])
 
   useEffect(() => {
@@ -1247,10 +1274,18 @@ export default function TestExecution() {
 
   const loadCycles = useCallback(async (pid: number) => {
     try {
-      const [c, cs] = await Promise.all([
-        api.get<TestCycleOut[]>(`/api/test-execution/projects/${pid}/cycles`),
-        api.get<TestCaseOut[]>(`/api/test-repository/projects/${pid}/test-cases`),
+      const [cPage, cs] = await Promise.all([
+        // SRS 7.2 pagination rollout -- Page[T] wrapper (task #82);
+        // page_size=100 + .items since the cycle sidebar still wants the
+        // complete list.
+        api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${pid}/cycles?page_size=100`),
+        // PAG-010 -- the unpaginated candidate-pool endpoint, not the
+        // paginated browsing list TestRepository.tsx itself now uses. This
+        // modal's "Add test cases to cycle" picker needs every eligible
+        // case in the project at once (bulk multi-select), not one page.
+        api.get<TestCaseListOut[]>(`/api/test-repository/projects/${pid}/test-cases/all`),
       ])
+      const c = cPage.items
       setCycles(c); setCases(cs)
       const requestedCycle = Number(searchParams.get('cycle'))
       setCycleId(c.some((cycle) => cycle.id === requestedCycle) ? requestedCycle : (c.length ? c[0].id : ''))
@@ -1258,30 +1293,61 @@ export default function TestExecution() {
   }, [searchParams])
   useEffect(() => { if (projectId) loadCycles(projectId) }, [projectId, loadCycles])
 
-  const loadExecutions = useCallback(async (cid: number) => {
+  // SRS 7.2 pagination rollout -- the main execution list is now
+  // server-paginated/server-filtered (status/assignment become query params
+  // instead of an in-browser .filter() over the whole cycle).
+  const {
+    items: executions, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading: executionsLoading, setPage, setPageSize, reload: reloadExecutions,
+  } = usePaginatedList<TestExecutionOut>(
+    cycleId ? `/api/test-execution/cycles/${cycleId}/executions` : '',
+    {
+      status: resultFilter ? [resultFilter] : undefined,
+      // Preserves the original ascending-by-id (add order) list order --
+      // every other paginated list in this app defaults to newest-first,
+      // which would reorder testcases within a cycle unexpectedly here.
+      sortOrder: 'asc',
+      extra: { assignment: assignmentFilter !== 'all' ? assignmentFilter : undefined },
+    },
+  )
+  const loadExecutionExtras = useCallback(async (cid: number) => {
     try {
-      const e = await api.get<TestExecutionOut[]>(`/api/test-execution/cycles/${cid}/executions`)
-      setExecutions(e)
+      const [ids, summaryData] = await Promise.all([
+        api.get<number[]>(`/api/test-execution/cycles/${cid}/executions/case-ids`),
+        api.get<TestExecutionSummaryOut>(`/api/test-execution/cycles/${cid}/executions/summary`),
+      ])
+      setExistingCaseIds(new Set(ids))
+      setExecutionSummary(summaryData)
     } catch (err) { setError(err) }
   }, [])
+  const refreshExecutions = useCallback(() => {
+    reloadExecutions()
+    if (cycleId) loadExecutionExtras(cycleId)
+  }, [reloadExecutions, loadExecutionExtras, cycleId])
   useEffect(() => {
     if (cycleId) {
-      loadExecutions(cycleId)
+      loadExecutionExtras(cycleId)
       api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => setCycleActivity([]))
-    } else { setExecutions([]); setCycleActivity([]) }
-  }, [cycleId, loadExecutions])
-  // Defect traceability deep-link: first resolve the owning project/cycle via
-  // their query parameters, then open the exact execution record once that
-  // cycle's rows have loaded. Consume only `execution` so project and cycle
-  // remain selected after the result drawer is closed.
+    } else { setExistingCaseIds(new Set()); setExecutionSummary(null); setCycleActivity([]) }
+  }, [cycleId, loadExecutionExtras])
+  // Defect traceability deep-link -- fetches the specific execution by id
+  // directly (PAG-006-style) rather than searching the loaded page, since
+  // the target row may not be on whatever page/filter happens to be active.
   useEffect(() => {
     const requestedExecution = Number(searchParams.get('execution'))
-    if (!requestedExecution || !executions.length) return
-    const target = executions.find((execution) => execution.id === requestedExecution)
-    if (!target) return
-    setEditingExecution(target)
+    if (!requestedExecution) return
+    let active = true
+    api.get<TestExecutionOut>(`/api/test-execution/executions/${requestedExecution}`)
+      .then((target) => { if (active) setEditingExecution(target) })
+      .catch((err) => { if (active) setError(err) })
     setSearchParams((params) => { params.delete('execution'); return params }, { replace: true })
-  }, [executions, searchParams, setSearchParams])
+    return () => { active = false }
+  }, [searchParams, setSearchParams])
+  // Selection is only ever meaningful against whatever's currently loaded --
+  // same reasoning as Test Repository's own equivalent effect.
+  useEffect(() => {
+    setSelectedExecutionIds(new Set())
+  }, [resultFilter, assignmentFilter, page, pageSize])
   useEffect(() => {
     setSelectedExecutionIds(new Set())
     setShowBulkExecution(false)
@@ -1289,29 +1355,27 @@ export default function TestExecution() {
     setShowActivity(false)
   }, [cycleId, projectId])
 
-  const existingCaseIds = useMemo(() => new Set(executions.map((e) => e.test_case_id)), [executions])
-  const summary = useMemo(() => {
-    const counts: Record<string, number> = {}
-    executions.forEach((e) => { counts[e.status] = (counts[e.status] || 0) + 1 })
-    return counts
-  }, [executions])
+  // SRS 7.2 pagination rollout -- every one of these used to be computed
+  // in-browser from the complete (unpaginated) cycle execution list; now
+  // they all come from executionSummary (see loadExecutionExtras above),
+  // which stays accurate regardless of which page/status/assignment filter
+  // the main list currently has selected. "Visible" now means "on the
+  // current page" -- the list itself already IS the filtered/paginated
+  // result (status/assignment are server-side query params now), so no
+  // separate `filteredExecutions` client-filter step is needed any more.
   const cycleAuditActivity = useMemo(() => cycleActivity.filter((item) => (
     item.decision === 'Commented'
     || ['Cycle', 'Cycle Details', 'Lifecycle', 'Request Link'].includes(item.step_name || '')
   )), [cycleActivity])
-  const filteredExecutions = executions.filter((execution) => (
-    (!resultFilter || execution.status === resultFilter)
-    && (assignmentFilter === 'all'
-      || (assignmentFilter === 'mine' && execution.assigned_to_id === user?.id)
-      || (assignmentFilter === 'unassigned' && !execution.assigned_to_id))
-  ))
-  const executedCount = executions.filter((e) => e.status !== 'Not Executed').length
-  const passCount = (summary.Pass || 0) + (summary['Retest Passed'] || 0)
+  const filteredExecutions = executions
+  const executedCount = executionSummary?.executed_count ?? 0
+  const passCount = (executionSummary?.status_counts.Pass || 0) + (executionSummary?.status_counts['Retest Passed'] || 0)
   const passRate = executedCount ? Math.round((passCount / executedCount) * 100) : 0
-  const assignedCount = executions.filter((execution) => !!execution.assigned_to_id).length
-  const unassignedCount = executions.length - assignedCount
-  const myAssignmentCount = executions.filter((execution) => execution.assigned_to_id === user?.id).length
-  const totalRunCount = executions.reduce((total, execution) => total + (execution.run_count || execution.runs?.length || 0), 0)
+  const assignedCount = executionSummary?.assigned_count ?? 0
+  const unassignedCount = executionSummary?.unassigned_count ?? 0
+  const myAssignmentCount = executionSummary?.mine_count ?? 0
+  const totalRunCount = executionSummary?.total_run_count ?? 0
+  const cycleExecutionTotal = executionSummary?.total ?? 0
   const selectedCycle = cycles.find((c) => c.id === cycleId)
   const cycleIsLocked = !!selectedCycle && TEST_CYCLE_LOCKED_STATUSES.includes(selectedCycle.status)
   const cycleIsCompleted = selectedCycle?.status === 'Completed'
@@ -1358,7 +1422,7 @@ export default function TestExecution() {
       const saved = await api.patch<TestExecutionOut>(`/api/test-execution/executions/${execution.id}/assign`, {
         assigned_to_id: value ? Number(value) : null,
       })
-      setExecutions((current) => current.map((item) => item.id === saved.id ? saved : item))
+      refreshExecutions()
       setEditingExecution((current) => current?.id === saved.id ? saved : current)
       if (cycleId) api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
     } catch (err) { setError(err) }
@@ -1368,12 +1432,11 @@ export default function TestExecution() {
     if (!cycleId || !bulkAssigneeId || selectedExecutionIds.size === 0) return
     setBulkAssigning(true); setError(null)
     try {
-      const saved = await api.post<TestExecutionOut[]>(`/api/test-execution/cycles/${cycleId}/executions/bulk-assign`, {
+      await api.post<TestExecutionOut[]>(`/api/test-execution/cycles/${cycleId}/executions/bulk-assign`, {
         execution_ids: Array.from(selectedExecutionIds),
         assigned_to_id: Number(bulkAssigneeId),
       })
-      const savedById = new Map(saved.map((execution) => [execution.id, execution]))
-      setExecutions((current) => current.map((execution) => savedById.get(execution.id) || execution))
+      refreshExecutions()
       setSelectedExecutionIds(new Set())
       api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
     } catch (err) { setError(err) } finally { setBulkAssigning(false) }
@@ -1389,7 +1452,6 @@ export default function TestExecution() {
       const remaining = cycles.filter((c) => c.id !== cycle.id)
       setCycles(remaining)
       setCycleId(remaining[0]?.id || '')
-      setExecutions([])
       setCycleToDelete(null)
     } catch (err) { setError(err); setCycleToDelete(null) } finally { setDeletingCycle(false) }
   }
@@ -1420,7 +1482,7 @@ export default function TestExecution() {
     <div className="tm-page">
       <ErrorText error={error} />
       <PageHeader
-        title="Test Execution" count={executions.length}
+        title="Test Execution" count={cycleExecutionTotal}
         subtitle="Organize test cycles, execute step-by-step, capture evidence, and connect failures to defects."
         actions={(
           <div style={{ display: 'flex', gap: 8 }}>
@@ -1513,25 +1575,25 @@ export default function TestExecution() {
                 </div>
               </div>
               <div className="tm-execution-kpis">
-                <div><small>Progress</small><strong>{executedCount}<span> / {executions.length}</span></strong><i><b style={{ width: `${executions.length ? (executedCount / executions.length) * 100 : 0}%` }} /></i></div>
+                <div><small>Progress</small><strong>{executedCount}<span> / {cycleExecutionTotal}</span></strong><i><b style={{ width: `${cycleExecutionTotal ? (executedCount / cycleExecutionTotal) * 100 : 0}%` }} /></i></div>
                 <div><small>Pass rate</small><strong>{passRate}%</strong><span>{passCount} passed</span></div>
-                <div className={(summary.Fail || summary.Blocked) ? 'needs-attention' : ''}><small>Needs attention</small><strong>{(summary.Fail || 0) + (summary.Blocked || 0)}</strong><span>{summary.Fail || 0} failed · {summary.Blocked || 0} blocked</span></div>
-                <div className={unassignedCount ? 'needs-attention' : ''}><small>Assignment</small><strong>{assignedCount}<span> / {executions.length}</span></strong><span>{unassignedCount ? `${unassignedCount} unassigned` : 'Fully assigned'}</span></div>
+                <div className={((executionSummary?.status_counts.Fail || 0) || (executionSummary?.status_counts.Blocked || 0)) ? 'needs-attention' : ''}><small>Needs attention</small><strong>{(executionSummary?.status_counts.Fail || 0) + (executionSummary?.status_counts.Blocked || 0)}</strong><span>{executionSummary?.status_counts.Fail || 0} failed · {executionSummary?.status_counts.Blocked || 0} blocked</span></div>
+                <div className={unassignedCount ? 'needs-attention' : ''}><small>Assignment</small><strong>{assignedCount}<span> / {cycleExecutionTotal}</span></strong><span>{unassignedCount ? `${unassignedCount} unassigned` : 'Fully assigned'}</span></div>
                 <div><small>My queue</small><strong>{myAssignmentCount}</strong><span>Assigned to me</span></div>
                 <div><small>Total attempts</small><strong>{totalRunCount}</strong><span>Complete run history</span></div>
               </div>
               <section className="tm-testcase-workbench">
               <div className="tm-workbench-head">
-                <div><small>Execution scope</small><h4>Cycle Testcases <span>{filteredExecutions.length} of {executions.length}</span></h4></div>
+                <div><small>Execution scope</small><h4>Cycle Testcases <span>{total} of {cycleExecutionTotal}</span></h4></div>
                 <div className="tm-assignment-filters">
-                  <button className={assignmentFilter === 'all' ? 'active' : ''} onClick={() => setAssignmentFilter('all')}>All <em>{executions.length}</em></button>
+                  <button className={assignmentFilter === 'all' ? 'active' : ''} onClick={() => setAssignmentFilter('all')}>All <em>{cycleExecutionTotal}</em></button>
                   <button className={assignmentFilter === 'mine' ? 'active' : ''} onClick={() => setAssignmentFilter('mine')}>Mine <em>{myAssignmentCount}</em></button>
                   <button className={assignmentFilter === 'unassigned' ? 'active' : ''} onClick={() => setAssignmentFilter('unassigned')}>Unassigned <em>{unassignedCount}</em></button>
                 </div>
               </div>
               <div className="tm-result-tabs">
-                <button className={!resultFilter ? 'active' : ''} onClick={() => setResultFilter('')}>All <span>{executions.length}</span></button>
-                {TEST_EXECUTION_STATUSES.map((s) => <button key={s} className={resultFilter === s ? 'active' : ''} onClick={() => setResultFilter(s)}>{s} <span>{summary[s] || 0}</span></button>)}
+                <button className={!resultFilter ? 'active' : ''} onClick={() => setResultFilter('')}>All <span>{cycleExecutionTotal}</span></button>
+                {TEST_EXECUTION_STATUSES.map((s) => <button key={s} className={resultFilter === s ? 'active' : ''} onClick={() => setResultFilter(s)}>{s} <span>{executionSummary?.status_counts[s] || 0}</span></button>)}
               </div>
               {selectedCycle && <LinkedDefects query={`cycle_id=${selectedCycle.id}`} title="Cycle Defects" />}
               {canExec && projectIsActive && !cycleIsLocked && (
@@ -1560,12 +1622,13 @@ export default function TestExecution() {
               <Table<TestExecutionOut>
                 rowKey="id"
                 onRowClick={setEditingExecution}
+                server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading: executionsLoading }}
                 columns={[
                   { key: 'select', header: <input type="checkbox" aria-label="Select all visible testcases" checked={allVisibleSelected} disabled={!selectableExecutions.length} onChange={toggleVisibleExecutions} onClick={(event) => event.stopPropagation()} />, filterable: false, render: (execution) => <input type="checkbox" aria-label={`Select ${execution.test_case?.test_case_key || `testcase ${execution.test_case_id}`}`} checked={selectedExecutionIds.has(execution.id)} disabled={!canSelectRow(execution)} title={canSelectRow(execution) ? 'Select for bulk lifecycle actions' : execution.assigned_to_id ? `Assigned to ${execution.assigned_to_name || 'another runner'}` : 'Assign a runner before execution'} onChange={() => toggleExecutionSelection(execution.id)} onClick={(event) => event.stopPropagation()} /> },
                   { key: 'test_case', header: 'Test Case', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.test_case?.test_case_key || `#${e.test_case_id}`}</strong><small>{[e.test_case?.module_name, `pinned v${e.pinned_version_label || e.test_case?.version || '1.0'}`].filter(Boolean).join(' · ')}{e.is_pinned_stale && <span className="badge badge-yellow" style={{ marginLeft: 6 }} title="A newer Approved version exists">Stale</span>}</small></span>, filterValue: (e) => `${e.test_case?.test_case_key || e.test_case_id} ${e.test_case?.module_name || ''}` },
                   { key: 'scenario', header: 'Scenario', render: (e) => e.test_case?.test_scenario || '—', filterValue: (e) => e.test_case?.test_scenario || '' },
                   { key: 'assigned_to_name', header: 'Assigned To', render: (e) => canManageRunners && projectIsActive && !cycleIsLocked ? <div className="tm-table-assignee" onClick={(event) => event.stopPropagation()}><UserAssignSelect value={e.assigned_to_id ? String(e.assigned_to_id) : ''} onChange={(value) => assignRunner(e, value)} users={runnerCandidates} placeholder="Assign runner…" />{e.assigned_to_id && <button type="button" title="Unassign" onClick={() => assignRunner(e, '')}>×</button>}</div> : <span className={e.assigned_to_name ? '' : 'muted'}>{e.assigned_to_name || 'Unassigned'}</span>, filterValue: (e) => e.assigned_to_name || 'Unassigned' },
-                  { key: 'quick_run', header: 'Actions', filterable: false, render: (execution) => <InlineExecutionActions execution={execution} canExecute={canExecuteRow(execution)} onLinkExisting={setLinkingExistingExecution} onError={setError} onChanged={(saved) => setExecutions((current) => current.map((item) => item.id === saved.id ? saved : item))} /> },
+                  { key: 'quick_run', header: 'Actions', filterable: false, render: (execution) => <InlineExecutionActions execution={execution} canExecute={canExecuteRow(execution)} onLinkExisting={setLinkingExistingExecution} onError={setError} onChanged={() => refreshExecutions()} /> },
                   { key: 'run_count', header: 'Runs', render: (e) => <span className={`tm-run-count ${e.run_count ? 'has-runs' : ''}`}>{e.run_count || 0}</span> },
                   { key: 'status', header: 'Latest Result', render: (e) => <Badge status={e.status} /> },
                   { key: 'defects', header: 'Defects', render: (e) => { const defects = (e.runs || []).flatMap((run) => run.defects || []); return defects.length ? <span className="tm-table-defects">{defects.slice(-2).map((defect) => defect.defect_key).join(', ')}{defects.length > 2 ? ` +${defects.length - 2}` : ''}</span> : '—' }, filterValue: (e) => (e.runs || []).flatMap((run) => run.defects || []).map((defect) => defect.defect_key).join(' ') },
@@ -1597,7 +1660,7 @@ export default function TestExecution() {
           onSaved={(c) => { setCycles((prev) => [c, ...prev]); setCycleId(c.id); setShowNewCycle(false) }}
         />
       )}
-      {linkingExistingExecution && cycleId && <LinkExistingDefectModal execution={linkingExistingExecution} onClose={() => setLinkingExistingExecution(null)} onLinked={async () => { setExecutions(await api.get<TestExecutionOut[]>(`/api/test-execution/cycles/${cycleId}/executions`)); setLinkingExistingExecution(null) }} />}
+      {linkingExistingExecution && cycleId && <LinkExistingDefectModal execution={linkingExistingExecution} onClose={() => setLinkingExistingExecution(null)} onLinked={() => { refreshExecutions(); setLinkingExistingExecution(null) }} />}
       {editingCycle && projectId && projectIsActive && (
         <CycleModal
           projectId={projectId}
@@ -1616,7 +1679,7 @@ export default function TestExecution() {
           canAssign={canManageRunners}
           runnerCandidates={runnerCandidates}
           onClose={() => setShowAddCases(false)}
-          onAdded={(execs) => { setExecutions((prev) => [...prev, ...execs]); setShowAddCases(false) }}
+          onAdded={() => { refreshExecutions(); setShowAddCases(false) }}
         />
       )}
       {showBulkExecution && cycleId && selectedExecutions.length > 0 && (
@@ -1624,9 +1687,8 @@ export default function TestExecution() {
           cycleId={Number(cycleId)}
           executions={selectedExecutions}
           onClose={() => { setShowBulkExecution(false); setSelectedExecutionIds(new Set()) }}
-          onExecuted={(saved) => {
-            const savedById = new Map(saved.map((execution) => [execution.id, execution]))
-            setExecutions((current) => current.map((execution) => savedById.get(execution.id) || execution))
+          onExecuted={() => {
+            refreshExecutions()
             api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
           }}
         />
@@ -1637,9 +1699,8 @@ export default function TestExecution() {
           cycleKey={selectedCycle.cycle_key}
           executions={bulkRemoveExecutions}
           onClose={() => { setBulkRemoveExecutions(null); setSelectedExecutionIds(new Set()) }}
-          onRemoved={(result) => {
-            const removedIds = new Set(result.removed_execution_ids)
-            setExecutions((current) => current.filter((execution) => !removedIds.has(execution.id)))
+          onRemoved={() => {
+            refreshExecutions()
             api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
           }}
         />
@@ -1651,17 +1712,17 @@ export default function TestExecution() {
           canAssign={canManageRunners && projectIsActive && !cycleIsLocked}
           runnerCandidates={runnerCandidates}
           onAssigned={(saved) => {
-            setExecutions((current) => current.map((item) => item.id === saved.id ? saved : item))
+            refreshExecutions()
             setEditingExecution(saved)
             if (cycleId) api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
           }}
           onClose={() => setEditingExecution(null)}
-          onSaved={(e) => {
-            setExecutions((prev) => prev.map((x) => (x.id === e.id ? e : x)))
+          onSaved={() => {
+            refreshExecutions()
             setEditingExecution(null)
             if (cycleId) api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
           }}
-          onRemoved={(id) => { setExecutions((prev) => prev.filter((x) => x.id !== id)); setEditingExecution(null) }}
+          onRemoved={() => { refreshExecutions(); setEditingExecution(null) }}
         />
       )}
       {cycleToDelete && (

@@ -4,6 +4,21 @@
 // ad-hoc, purely-local shapes (form state, etc.) are typed inline in each
 // page rather than centralized here.
 
+// PAG-003 -- the standard envelope every server-paginated list endpoint
+// returns (see backend/app/pagination.py's `Page[T]`/`to_page_response`).
+// Consumed by hooks/usePaginatedList.ts; matches 1:1 with the backend
+// Pydantic model so response_model=Page[SomeListOut] on the Python side
+// needs no translation here.
+export interface PageOut<T> {
+  items: T[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+  has_next: boolean
+  has_previous: boolean
+}
+
 export interface UserOut {
   id: number
   username: string
@@ -23,6 +38,15 @@ export interface UserOut {
   // rosters (DepartmentAdmin.tsx) and only a System Admin (Admin.tsx) can
   // reassign their role(s) or activate/deactivate them.
   admin_managed_only: boolean
+}
+
+// SRS 7.2 pagination rollout -- backs Admin.tsx's account-summary strip and
+// sidebar-nav badge (see backend UserSummaryOut).
+export interface UserSummaryOut {
+  total: number
+  active_count: number
+  ldap_count: number
+  review_count: number
 }
 
 export interface AuditLogOut {
@@ -47,17 +71,13 @@ export interface AuditLogOut {
   created_at: string
 }
 
-export interface AuditLogPage {
-  rows: AuditLogOut[]
+// SRS 7.2 pagination rollout -- backs AuditLog.tsx's summary strip, fetched
+// separately from the (now shared-Page[T]-shaped) list itself.
+export interface AuditSummary {
   total: number
-  page: number
-  page_size: number
-  summary: {
-    total: number
-    failed: number
-    authentication: number
-    access_management: number
-  }
+  failed: number
+  authentication: number
+  access_management: number
 }
 
 // Departments are DB-backed (see backend app/models.py Department, managed
@@ -183,6 +203,30 @@ export interface ChecklistItemDocumentOut extends QARequestDocumentOut {
 // real workflow state lives on whichever linked child request(s) below were
 // auto-raised (see FunctionalOut for the Functional/Sanity/Regression
 // Testing/UAT Support bucket's own full lifecycle).
+// PAG-005 lightweight counterpart to QARequestOut, returned by the
+// paginated GET /api/qa-requests list -- see backend/app/schemas.py's
+// QARequestListOut for exactly which fields this omits and why. Opening a
+// request (QARequests/index.tsx) fetches the full QARequestOut via
+// GET /api/qa-requests/{id} before showing RequestDetail (PAG-006).
+export interface QARequestListOut {
+  id: number
+  request_id?: string | null
+  request_date?: string | null
+  department?: string | null
+  application_name: string
+  epic_number?: string | null
+  target_release_date?: string | null
+  status: string
+  requester_id?: number | null
+  created_at: string
+  updated_at: string
+  application_master_status?: string | null
+  linked_functional_requests: LinkedRequestRef[]
+  linked_sast_requests: LinkedRequestRef[]
+  linked_dast_requests: LinkedRequestRef[]
+  linked_performance_requests: LinkedRequestRef[]
+}
+
 export interface QARequestOut {
   id: number
   // Only assigned once this gateway is actually raised -- null while Draft.
@@ -241,6 +285,24 @@ export interface QARequestOut {
 // Carries the full Draft -> SM -> Department Head -> QA Lead -> ... ->
 // Closed lifecycle that used to live directly on QARequestOut. Descriptive
 // fields are delegated (read-only) from the linked qa_request.
+// PAG-005 lightweight list schema -- mirrors backend schemas.FunctionalListOut.
+export interface FunctionalListOut {
+  id: number
+  request_id: string
+  status: string
+  application_master_status?: string | null
+  requester_id?: number | null
+  qa_lead_id?: number | null
+  priority?: string | null
+  application_name?: string | null
+  epic_number?: string | null
+  department?: string | null
+  application_owner?: string | null
+  qa_request?: LinkedRequestRef | null
+  created_at: string
+  updated_at: string
+}
+
 export interface FunctionalOut {
   id: number
   request_id: string
@@ -351,6 +413,27 @@ export interface SASTComponentIn {
   build_number?: string | null
 }
 
+// PAG-005 lightweight list schema -- mirrors backend schemas.SASTListOut.
+export interface SASTListOut {
+  id: number
+  request_id: string
+  status: string
+  application_master_status?: string | null
+  requester_id?: number | null
+  security_lead_id?: number | null
+  priority?: string | null
+  risk_category?: string | null
+  application_name?: string | null
+  // Cheap to include -- already eager-loaded server-side. Needed by
+  // Suppression.tsx's cross-module SAST/DAST request picker.
+  department?: string | null
+  application_owner?: string | null
+  findings_count: number
+  qa_request?: LinkedRequestRef | null
+  created_at: string
+  updated_at: string
+}
+
 export interface SASTOut {
   id: number
   request_id: string
@@ -424,6 +507,26 @@ export interface DASTTargetIn {
   test_credentials?: string | null
 }
 
+// PAG-005 lightweight list schema -- mirrors backend schemas.DASTListOut.
+export interface DASTListOut {
+  id: number
+  request_id: string
+  status: string
+  application_master_status?: string | null
+  requester_id?: number | null
+  security_lead_id?: number | null
+  priority?: string | null
+  risk_category?: string | null
+  application_name?: string | null
+  // See the matching comment on SASTListOut above -- same reasoning.
+  department?: string | null
+  application_owner?: string | null
+  findings_count: number
+  qa_request?: LinkedRequestRef | null
+  created_at: string
+  updated_at: string
+}
+
 export interface DASTOut {
   id: number
   request_id: string
@@ -468,7 +571,11 @@ export interface DASTOut {
 
 // A combined SAST/DAST record used by the Suppression "Request ID"
 // autosuggest, which searches both together (see modules/security/Suppression.tsx).
-export type CombinedSecurityRequest = (SASTOut | DASTOut) & { _kind: 'SAST' | 'DAST' }
+// Uses the lightweight PAG-005 list schemas -- the picker only ever needs to
+// browse/filter/display a candidate, never a full record (see
+// SASTListOut/DASTListOut, which include department/application_owner for
+// exactly this consumer).
+export type CombinedSecurityRequest = (SASTListOut | DASTListOut) & { _kind: 'SAST' | 'DAST' }
 
 // ---------------- Performance Testing ----------------
 export interface PerformanceChecklistItemOut {
@@ -480,6 +587,25 @@ export interface PerformanceChecklistItemOut {
   is_complete: boolean
   approved_by_id?: number | null
   approved_at?: string | null
+}
+
+// PAG-005 lightweight list schema -- mirrors backend schemas.PerformanceListOut.
+export interface PerformanceListOut {
+  id: number
+  request_id: string
+  status: string
+  application_master_status?: string | null
+  requester_id?: number | null
+  engineer_id?: number | null
+  priority?: string | null
+  risk_category?: string | null
+  application_name?: string | null
+  // Cheap to include -- already eager-loaded server-side. Needed by
+  // Dashboard.tsx's "My Department" unified-request filter.
+  department?: string | null
+  qa_request?: LinkedRequestRef | null
+  created_at: string
+  updated_at: string
 }
 
 export interface PerformanceOut {
@@ -603,6 +729,21 @@ export interface ProjectWiseMetrics {
 export interface ProjectWiseOut {
   metrics: ProjectWiseMetrics
   charts: { risk_distribution: Record<string, number> }
+}
+
+// DSH-001..004 -- backed by GET /api/dashboard/summary (see dashboard.py's
+// own docstring). Consolidates the 4 numbers Dashboard.tsx's Command Centre
+// tab used to derive client-side from 5 full page_size=100 request-list
+// fetches, plus the raw per-status Functional counts (kept as a flat dict,
+// not pre-bucketed into lifecycle stages, so Dashboard.tsx's own
+// STATUS_STAGE_INDEX/lifecycleDistribution() stays the single source of
+// truth for stage grouping).
+export interface DashboardSummaryOut {
+  child_requests_total: number
+  active_requests_count: number
+  nearing_release_count: number
+  critical_pending_count: number
+  functional_status_counts: Record<string, number>
 }
 
 export interface ThreeWItem {
@@ -819,6 +960,9 @@ export interface TestCaseOut {
   checked_out_by_name?: string | null
   checked_out_at?: string | null
   steps: TestStepOut[]
+  // Also present on the PAG-005 list schema below (which has no `steps` at
+  // all) -- see schemas.TestCaseOut's matching comment.
+  steps_count: number
   // 2026-08 Test Approval Workflow refactor -- who the case is currently
   // "Pending with" (APR-006/section 9), bridged through current_draft_version;
   // null when the case isn't awaiting anyone (Draft with no submission, or
@@ -826,6 +970,54 @@ export interface TestCaseOut {
   pending_with_user_id?: number | null
   pending_with_user_name?: string | null
   pending_since?: string | null
+}
+
+// PAG-005 lightweight list schema -- mirrors backend schemas.TestCaseListOut.
+export interface TestCaseListOut {
+  id: number
+  test_case_key: string
+  project_id: number
+  folder_id?: number | null
+  folder_name?: string | null
+  epic_id?: string | null
+  cr_number?: string | null
+  feature_id?: string | null
+  user_story_id?: string | null
+  test_type?: string | null
+  module_name?: string | null
+  test_scenario?: string | null
+  priority?: string | null
+  tags: string[]
+  status: string
+  version?: string
+  current_approved_version_id?: number | null
+  current_draft_version_id?: number | null
+  current_draft_author_id?: number | null
+  created_by_id?: number | null
+  created_by_name?: string | null
+  created_at: string
+  updated_at: string
+  checked_out_by_id?: number | null
+  checked_out_by_name?: string | null
+  checked_out_at?: string | null
+  steps_count: number
+  pending_with_user_id?: number | null
+  pending_with_user_name?: string | null
+  pending_since?: string | null
+}
+
+// Mirrors backend schemas.TestCaseSummaryOut -- see its own docstring for
+// why this exists (the folder tree/tag dropdown/stat bar all need
+// project-wide aggregates the paginated list above can no longer provide).
+export interface TestCaseSummaryOut {
+  total: number
+  unfiled_count: number
+  folder_counts: Record<number, number>
+  approved_count: number
+  in_review_count: number
+  review_completed_count: number
+  critical_count: number
+  tags: string[]
 }
 
 export type TestCaseVersionStepOut = TestStepIn & { id: number; version_id: number }
@@ -1024,6 +1216,20 @@ export interface TestExecutionOut {
   linked_defects?: LinkedGovernedDefectRef[]
 }
 
+// Mirrors backend schemas.TestExecutionSummaryOut -- see its own docstring
+// (the progress bar/assignment stat/tab bars TestExecution.tsx's cycle
+// detail view needs project-wide aggregates for, now that the main
+// execution list is paginated).
+export interface TestExecutionSummaryOut {
+  total: number
+  status_counts: Record<string, number>
+  executed_count: number
+  assigned_count: number
+  unassigned_count: number
+  mine_count: number
+  total_run_count: number
+}
+
 export interface LinkedGovernedDefectRef {
   id: number
   defect_key: string
@@ -1147,12 +1353,50 @@ export interface DefectOut {
   updated_at: string
 }
 
+// SRS 7.2 pagination rollout -- lightweight list schema for `GET /api/defects`
+// (PAG-005); Defects.tsx fetches the full `DefectOut` via `GET /{id}` only
+// when a row is actually opened (PAG-006).
+export interface DefectListOut {
+  id: number
+  defect_key: string
+  title: string
+  status: string
+  qa_request_id: number
+  qa_request_key?: string | null
+  cycle_id?: number | null
+  cycle_key?: string | null
+  project_id?: number | null
+  test_case_key?: string | null
+  execution_id?: number | null
+  application_name: string
+  module_feature: string
+  environment: string
+  severity: string
+  priority: string
+  reporter_id: number
+  reporter_name?: string | null
+  reported_at: string
+  assignee_id?: number | null
+  assignee_name?: string | null
+  assigned_team?: string | null
+  target_release?: string | null
+  expected_resolution_date?: string | null
+  reopen_count: number
+  closed_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface DefectDashboardOut {
   total: number
   open: number
   closed: number
   reopened: number
   deferred: number
+  attention_count: number
+  mine_count: number
+  unlinked_count: number
+  retest_count: number
   by_status: Record<string, number>
   by_severity: Record<string, number>
   by_priority: Record<string, number>

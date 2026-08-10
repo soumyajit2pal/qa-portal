@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import models, schemas, pagination
 from .. import documents as doc_store
 from .. import application_names as app_names
 from ..database import get_db
@@ -306,17 +306,30 @@ def _unstash_draft_details(raw: Optional[str]):
     )
 
 
-@router.get("", response_model=List[schemas.QARequestOut])
-def list_requests(status_filter: Optional[str] = None, department: Optional[str] = None,
-                   application_name: Optional[str] = None, search: Optional[str] = None,
+@router.get("", response_model=pagination.Page[schemas.QARequestListOut])
+def list_requests(params: pagination.PageParams = Depends(),
+                   application_name: Optional[str] = None,
+                   requester_id: Optional[int] = None,
                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """SRS 7.2 (PAG-001..009) -- server-side paginated, database-filtered
+    list. `application_name` stays as its own module-specific param (an
+    exact "starts narrowing this one field" filter some callers rely on,
+    e.g. NewRequestModal's own duplicate-application lookups) alongside the
+    PAG-001 standard `search`/`status`/`department` params carried on
+    `params`. `requester_id` is likewise module-specific (this table's
+    `requester_id` is a real column, not something PAG-001's generic filters
+    cover) -- added so Dashboard.tsx's "My Requests" tab can ask the
+    database for "requests I raised" directly instead of fetching a
+    department-wide page and filtering client-side, which silently dropped
+    a user's own older requests once their department's total volume for a
+    request type crossed the page_size=100 ceiling (reported directly)."""
     q = db.query(models.QARequest)
-    if status_filter:
-        q = q.filter(models.QARequest.status == status_filter)
-    if department:
-        q = q.filter(models.QARequest.department == department)
+    q = pagination.apply_status_filter(q, params, models.QARequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
     if application_name:
         q = q.filter(models.QARequest.application_name.ilike(f"%{application_name}%"))
+    if requester_id is not None:
+        q = q.filter(models.QARequest.requester_id == requester_id)
     # Reported directly: "In dashboard, every-where show data from which
     # department user belong to only" -- then, immediately after, extended to
     # "QA Requests, Functional Requests, SAST, DAST, Suppression, Performance
@@ -327,20 +340,16 @@ def list_requests(status_filter: Optional[str] = None, department: Optional[str]
     # dashboard_department_scope's own docstring in deps.py for exactly which
     # roles this does and doesn't apply to (the QA/Security/Executive-COE
     # roles stay unrestricted; every other role, Admin and Department Head
-    # included, is confined to their own department).
+    # included, is confined to their own department). Applied before
+    # pagination.paginate() below so PAG-009's "the total count shall
+    # include only records the current user is authorized to access" holds.
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.filter(models.QARequest.department == scope)
-    if search:
-        # Broad "requests or IDs" search (topbar search box and the
-        # QA Requests list's own search field) -- matches Request ID,
-        # Application Name, or Epic Number, not just application name.
-        like = f"%{search}%"
-        q = q.filter(or_(
-            models.QARequest.request_id.ilike(like),
-            models.QARequest.application_name.ilike(like),
-            models.QARequest.epic_number.ilike(like),
-        ))
+    # Broad "requests or IDs" search (topbar search box and the QA Requests
+    # list's own search field) -- matches Request ID, Application Name, or
+    # Epic Number, not just application name.
+    q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.application_name, models.QARequest.epic_number)
     if not current_user.has_role(Role.ADMIN):
         # Draft and Cancelled gateways are both scratch work that was never
         # actually raised (Cancelled is only ever reached FROM Draft -- see
@@ -351,7 +360,15 @@ def list_requests(status_filter: Optional[str] = None, department: Optional[str]
             models.QARequest.status.notin_(_GATEWAY_PRIVATE_STATUSES),
             models.QARequest.requester_id == current_user.id,
         ))
-    return q.order_by(models.QARequest.created_at.desc()).all()
+    q = pagination.apply_sort(q, params, sortable={
+        "created_at": models.QARequest.created_at,
+        "updated_at": models.QARequest.updated_at,
+        "application_name": models.QARequest.application_name,
+        "status": models.QARequest.status,
+        "target_release_date": models.QARequest.target_release_date,
+    }, default_column=models.QARequest.created_at, id_column=models.QARequest.id)
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
 
 
 @router.get("/{req_id}", response_model=schemas.QARequestOut)

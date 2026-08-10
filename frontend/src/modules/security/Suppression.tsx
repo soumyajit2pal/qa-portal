@@ -6,7 +6,7 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisi
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
-import { SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut } from '../../types'
+import { SASTListOut, DASTListOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -109,15 +109,22 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
   const { user } = useAuth()
   const [form, setForm] = useState<SuppressionForm>(EMPTY_FORM)
   const [selectedRef, setSelectedRef] = useState<CombinedSecurityRequest | null>(null)
-  const [sastRequests, setSastRequests] = useState<SASTOut[]>([])
-  const [dastRequests, setDastRequests] = useState<DASTOut[]>([])
+  const [sastRequests, setSastRequests] = useState<SASTListOut[]>([])
+  const [dastRequests, setDastRequests] = useState<DASTListOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   function set<K extends keyof SuppressionForm>(k: K, v: SuppressionForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   useEffect(() => {
-    Promise.all([api.get<SASTOut[]>('/api/sast-requests'), api.get<DASTOut[]>('/api/dast-requests')])
-      .then(([sast, dast]) => { setSastRequests(sast); setDastRequests(dast) })
+    // Picker candidates only -- fetches the lightweight PAG-005 list shape,
+    // large page_size since this is a client-side-filtered autosuggest, not
+    // a paginated table (see inScope/hasReachedScanning/isNotYetCompleted
+    // below).
+    Promise.all([
+      api.get<PageOut<SASTListOut>>('/api/sast-requests?page_size=100'),
+      api.get<PageOut<DASTListOut>>('/api/dast-requests?page_size=100'),
+    ])
+      .then(([sast, dast]) => { setSastRequests(sast.items); setDastRequests(dast.items) })
       .catch(() => { /* autosuggest is a convenience -- fields stay manually editable if this fails */ })
   }, [])
 
@@ -127,7 +134,7 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
   // same-department scoping already used for SM/Department Head decisions
   // elsewhere in the app). An Admin isn't scoped -- they can see everything,
   // same as their override elsewhere.
-  function inScope(r: SASTOut | DASTOut): boolean {
+  function inScope(r: SASTListOut | DASTListOut): boolean {
     if (hasRole(user, 'ADMIN')) return true
     return r.requester_id === user?.id || (!!user?.department && r.department === user.department)
   }
@@ -136,7 +143,7 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
   // suppress yet while the linked request hasn't even started scanning, so
   // it's excluded from the picker entirely (mirrors the backend's
   // _require_linked_request check in routers/suppression.py).
-  function hasReachedScanning(r: SASTOut | DASTOut): boolean {
+  function hasReachedScanning(r: SASTListOut | DASTListOut): boolean {
     return !SAST_DAST_PRE_SCANNING_STATUSES.includes(r.status)
   }
 
@@ -144,7 +151,7 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
   // declared Security Complete (or later), it's finalized, so a new
   // suppression can no longer be raised against it either (same backend
   // check, mirrored here so it never even shows up as a choice).
-  function isNotYetCompleted(r: SASTOut | DASTOut): boolean {
+  function isNotYetCompleted(r: SASTListOut | DASTListOut): boolean {
     return !SAST_DAST_COMPLETED_STATUSES.includes(r.status)
   }
 
@@ -158,7 +165,12 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
 
   function selectRequest(r: CombinedSecurityRequest) {
     setSelectedRef(r)
-    const label = r._kind === 'SAST' ? (r as SASTOut).application_name : (r as DASTOut).targets?.[0]?.application_url
+    // Both SAST and DAST list rows carry application_name (delegated from
+    // the QA Request gateway) -- previously DAST used targets[0].application_url
+    // instead, but targets isn't part of the lightweight PAG-005 list schema
+    // (see DASTListOut), and application_name is already what DAST.tsx's own
+    // list table displays for the same row, so this is consistent.
+    const label = r.application_name
     setForm((f) => ({
       ...f,
       scan_type: r._kind,

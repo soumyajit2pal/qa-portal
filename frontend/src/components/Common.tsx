@@ -928,6 +928,30 @@ export interface TableColumn<T> {
   filterValue?: (row: T) => string;
 }
 
+// SRS 7.2 (PAG-001..010) -- when a list is server-paginated (see
+// hooks/usePaginatedList.ts), `rows` holds only the CURRENT page's items,
+// not the whole dataset, so Table can no longer do its own client-side
+// filtering/slicing over `rows` -- there's nothing left in the browser to
+// filter beyond what the server already sent. Passing this prop switches
+// Table into that mode: the per-column filter popovers are hidden (exact-
+// match filtering over one page of 25 rows would silently hide records the
+// filter never even saw, which is worse than no filter at all -- the
+// module-specific search/status/department controls each list page already
+// renders above its Table are the real filter UI in this mode), and the
+// footer's pagination controls/counts are driven by these values instead of
+// by `rows.length`.
+export interface TableServerPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+  onPageChange: (page: number) => void;
+  onPageSizeChange?: (pageSize: number) => void;
+  loading?: boolean;
+}
+
 interface TableProps<T> {
   columns: TableColumn<T>[];
   rows: T[];
@@ -938,12 +962,18 @@ interface TableProps<T> {
   // items only per page" requirement. Left as an overridable prop (rather
   // than a hardcoded constant) purely as an escape hatch for some future
   // call site that genuinely needs a different page size, not because any
-  // current one does.
+  // current one does. Ignored when `server` is set -- `server.pageSize`
+  // governs instead.
   pageSize?: number;
   // Optional stable identifier for pages containing multiple similar tables.
   // When omitted, the route and column keys form the preference key.
   tableId?: string;
+  // See TableServerPagination above. Omitted (the default): Table behaves
+  // exactly as before, filtering/paginating `rows` entirely client-side.
+  server?: TableServerPagination;
 }
+
+const SERVER_PAGE_SIZE_OPTIONS = [25, 50, 100];
 
 export function Table<T extends Record<string, any>>({
   columns,
@@ -952,6 +982,7 @@ export function Table<T extends Record<string, any>>({
   onRowClick,
   pageSize = 5,
   tableId,
+  server,
 }: TableProps<T>) {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
@@ -1152,7 +1183,10 @@ export function Table<T extends Record<string, any>>({
   );
 
   const filteredRows = useMemo(() => {
-    if (activeFilters.length === 0) return rows;
+    // In server mode `rows` is already just this page's data, filtered and
+    // sorted by the backend (PAG-007) -- there's nothing left to filter
+    // client-side, and the per-column filter icons are hidden below anyway.
+    if (server || activeFilters.length === 0) return rows;
     return rows.filter((row) =>
       activeFilters.every(([key, value]) => {
         const col = availableColumns.find((c) => c.key === key);
@@ -1161,7 +1195,7 @@ export function Table<T extends Record<string, any>>({
       })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, filters, availableColumns]);
+  }, [rows, filters, availableColumns, server]);
 
   // Reset to page 1 whenever the filtered set changes shape (a new filter
   // typed, or the underlying row count changes, e.g. fresh data loaded) --
@@ -1171,20 +1205,23 @@ export function Table<T extends Record<string, any>>({
   // pass a freshly-computed array (e.g. `rows={items.slice(0, 8)}`) on every
   // render, and resetting on identity rather than content would snap back
   // to page 1 on any unrelated parent re-render, not just an actual data
-  // change.
+  // change. Not relevant in server mode -- the caller (usePaginatedList)
+  // already resets its own `page` state when a filter changes.
   useEffect(() => {
+    if (server) return;
     setPage(1);
-  }, [filters, rows.length]);
+  }, [filters, rows.length, server]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const totalPages = server ? Math.max(1, server.totalPages) : Math.max(1, Math.ceil(filteredRows.length / pageSize));
   // Clamp separately from the reset above -- covers the case where `page`
   // was already >1 and filteredRows.length shrinks for a reason that didn't
   // go through the filters/rows reset (e.g. pageSize itself changing).
-  const currentPage = Math.min(page, totalPages);
+  const currentPage = server ? server.page : Math.min(page, totalPages);
+  const effectivePageSize = server ? server.pageSize : pageSize;
   const pagedRows = useMemo(
     () =>
-      filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [filteredRows, currentPage, pageSize]
+      server ? rows : filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [server, rows, filteredRows, currentPage, pageSize]
   );
 
   function clearFilters() {
@@ -1251,7 +1288,7 @@ export function Table<T extends Record<string, any>>({
               <th key={c.key}>
                 <div className="th-cell">
                   <span>{c.header}</span>
-                  {c.filterable !== false && (
+                  {!server && c.filterable !== false && (
                     <button
                       type="button"
                       className={`th-filter-btn ${
@@ -1309,8 +1346,52 @@ export function Table<T extends Record<string, any>>({
           ))}
         </tbody>
       </table>
-      {filteredRows.length > 0 &&
-        (activeFilters.length > 0 || totalPages > 1) && (
+      {server
+        ? (server.total > 0 && (server.totalPages > 1 || server.onPageSizeChange)) && (
+          <div className="table-footer">
+            <div className="table-footer-filters">
+              {server.loading && <span>Loading…</span>}
+            </div>
+            <div className="table-pagination">
+              <span>
+                {(server.page - 1) * server.pageSize + 1}–
+                {Math.min(server.page * server.pageSize, server.total)} of{" "}
+                {server.total}
+              </span>
+              {server.onPageSizeChange && (
+                <select
+                  className="table-page-size"
+                  value={server.pageSize}
+                  onChange={(e) => server.onPageSizeChange!(Number(e.target.value))}
+                  aria-label="Rows per page"
+                >
+                  {SERVER_PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>{size} / page</option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                disabled={!server.hasPrevious || server.loading}
+                onClick={() => server.onPageChange(server.page - 1)}
+              >
+                ‹ Prev
+              </button>
+              <span>
+                Page {server.page} of {server.totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={!server.hasNext || server.loading}
+                onClick={() => server.onPageChange(server.page + 1)}
+              >
+                Next ›
+              </button>
+            </div>
+          </div>
+        )
+        : filteredRows.length > 0 &&
+          (activeFilters.length > 0 || totalPages > 1) && (
           <div className="table-footer">
             <div className="table-footer-filters">
               {activeFilters.length > 0 && (
@@ -1327,8 +1408,8 @@ export function Table<T extends Record<string, any>>({
             {totalPages > 1 && (
               <div className="table-pagination">
                 <span>
-                  {(currentPage - 1) * pageSize + 1}–
-                  {Math.min(currentPage * pageSize, filteredRows.length)} of{" "}
+                  {(currentPage - 1) * effectivePageSize + 1}–
+                  {Math.min(currentPage * effectivePageSize, filteredRows.length)} of{" "}
                   {filteredRows.length}
                 </span>
                 <button

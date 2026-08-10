@@ -29,6 +29,9 @@ export default function DepartmentAdmin() {
   const [error, setError] = useState<unknown>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
 
+  // SRS 7.2 pagination rollout -- deliberately left unpaginated (see
+  // routers/auth.py::list_local_admin_users' own docstring). This roster is
+  // scoped to one department's own headcount, not an org-wide directory.
   const load = useCallback(async () => {
     try { setUsers(await api.get<UserOut[]>('/api/auth/local-admin/users')) } catch (err) { setError(err) }
   }, [])

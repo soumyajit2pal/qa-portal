@@ -1644,3 +1644,684 @@ losing its SQLAlchemy-side definition. A comment in `Common.tsx` mentions a
 `.security-checklist-row-scoped` rule "below" that does not actually exist under that exact selector --
 left alone since it's prose describing intent/behavior achieved through other existing rules, not a real
 orphaned CSS rule to delete.
+
+## 37. Performance optimization Phase 4, part 1 -- Oracle pool config, API error/correlation standard, audit efficiency
+
+**Context:** first slice of a much larger "QA Portal Performance Optimization" requirement document (server-side
+pagination/dashboard summary is its own separate, still-in-progress body of work -- see the pagination rollout
+tasks). This slice covers the parts implementable as pure code in this environment, with no live Oracle instance,
+Redis, or multi-worker deployment to validate against: DBP-001..006 (connection pool), Section 8 API standards
+(correlation id, standard error envelope), and AUD-001/005/008 (audit classification, structured content, redundant
+lookup removal). The async-audit-via-message-broker item (AUD-003) was explicitly deferred by the user ("stay SYNC")
+since the existing `BackgroundTask`-based audit write (added earlier, see main.py's `application_audit_middleware`)
+already keeps audit writes off the response's critical path without needing new infrastructure.
+
+**DBP-001..006 (`database.py`):** the engine's pool settings (`pool_size`, `max_overflow`, previously hardcoded to
+10/20) are now environment-configurable via `DB_POOL_SIZE`/`DB_MAX_OVERFLOW`/`DB_POOL_TIMEOUT`/`DB_POOL_RECYCLE`/
+`DB_POOL_PRE_PING`, all documented in `.env.example` with the defaults matching prior hardcoded behavior exactly (no
+behavior change until someone sets one). Also added `DB_QUERY_TIMEOUT_MS` (default 0 = disabled), wired to
+python-oracledb's per-connection `call_timeout` via a SQLAlchemy `connect` event -- caps how long a single query can
+hold a pooled connection.
+
+**Section 8 (`main.py`):**
+- Added `X-Request-ID` alongside the pre-existing `X-Audit-Request-ID` response header (same value) -- the former is
+  the more conventional header name a client would expect; the latter is kept for any existing caller relying on it.
+- Added exception handlers for `StarletteHTTPException` and `RequestValidationError` so every error response (not
+  just unhandled 500s, which already had this via `unhandled_exception_handler`) carries a `request_id` and
+  `status_code` alongside the existing `detail` key. `detail` was kept as-is (not renamed/nested) since
+  `frontend/src/api.ts`'s error parsing and every router's `raise HTTPException(detail=...)` already depend on it;
+  the new fields are purely additive.
+
+**AUD-001/005/008 (`main.py`, `deps.py`):**
+- AUD-008: `deps.get_current_user` now stashes the resolved `User` on `request.state.current_user` after decoding
+  the JWT and querying it once. `main.py::_write_request_audit` (which runs as a `BackgroundTask` on that same
+  `Request` object, after the response is sent) now reuses that instead of decoding the JWT and querying `User` a
+  second time on every single API request. Requests that never went through `get_current_user` (login, invalid/
+  missing/expired token) still fall back to the original decode-and-query path.
+- AUD-001/005: added `_classify_module()`, a path-prefix lookup (`/api/qa-requests` -> `QA_REQUEST`,
+  `/api/defects` -> `DEFECT`, etc., 26 modules covering every registered router) and folded `module`/`method`/`path`
+  into the audit `details` JSON alongside the existing `duration_ms`/`error_type`. Deliberately did NOT touch
+  `event_type` itself (stays exactly `ACCESS` / `DATA_CHANGE` / `ACCESS_MANAGEMENT`) -- `AuditLog.tsx`'s event-type
+  filter dropdown is hardcoded to that 3-value set, and `details` is already rendered as free-form JSON in the audit
+  detail panel, so enriching it is safe/additive while changing `event_type` would have required a matching
+  frontend change.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. No frontend changes in this slice.
+
+## 38. Performance optimization Phase 4, part 2 -- Redis cache infrastructure, multi-worker deployment, reference-data caching
+
+**Context:** continues section 37. Covers INF-001..006 (multi-worker), CAC-001..007 (reference-data caching), and the
+Redis infrastructure both depend on -- the user's explicit decision was "Add Redis now for both" (Dashboard summary
+caching, still pending -- see the separate pagination/dashboard tasks -- and reference-data caching, done here),
+superseding an earlier in-process-cache plan once INF-001's 4-worker target made an in-process cache
+cross-worker-inconsistent by construction.
+
+**`backend/app/cache.py` (new):** a thin Redis wrapper (`get_json`/`set_json`/`delete`/`delete_prefix`/
+`try_acquire_lock`/`ping`/`available`) that is a safe no-op in every "Redis isn't there" case -- package not
+installed, `REDIS_URL` unset, or the server unreachable -- logging once and returning harmless defaults (`None`/
+`False`/`0`) rather than raising, exactly as CAC-006 requires. Verified this degrade path directly in-sandbox (no
+`redis` package and no live Redis available here): every function returned its safe default with one warning logged,
+nothing raised. Every key is namespaced under `qa_portal:` so a shared Redis instance can't collide with another
+app's keys. `requirements.txt` gained `redis==5.0.8` (optional at runtime, real once `REDIS_URL` is set).
+
+**INF-001..006 (`backend/Dockerfile`, `docker-compose.yml`, `main.py`):**
+- `Dockerfile`'s `CMD` now runs `uvicorn --workers ${WEB_CONCURRENCY}` (default 4, shell-form so the env var expands,
+  `exec`'d so uvicorn stays PID 1 for clean `SIGTERM` shutdown).
+- `docker-compose.yml` gained a `redis:7-alpine` service (with a named volume) and wired `WEB_CONCURRENCY`/
+  `REDIS_URL` into the backend service's environment, plus commented DB-pool overrides for reference.
+- Multiple workers means `main.py`'s module-level startup code runs once per worker process, not once per
+  deployment -- `load_storage_settings` (sets this worker's own in-memory upload-root config) still runs in every
+  worker since that's genuinely process-local, but `migrate_legacy_document_layout` and the two overdue-notification
+  sweeps (`sweep_overdue_approvals`/`sweep_overdue_defects`) are one-time-per-deployment side effects (file moves,
+  `Notification` row creation) that would otherwise fire once per worker -- e.g. 4 duplicate overdue-notification
+  batches on a fresh 4-worker boot. Gated behind `cache.try_acquire_lock("startup-migrations-and-sweeps")`: with
+  Redis reachable, only the first worker to start does this work; without Redis it's permissive (every worker
+  proceeds, same as before this lock existed) rather than silently skipping real startup work in an unconfigured
+  environment.
+- `GET /api/health` (INF-003) now checks live DB connectivity (`SELECT 1 FROM DUAL`) and reports last-known Redis
+  connection state, returning `{"status": "ok"|"degraded", "database": "ok"|"unreachable", "cache": "connected"|
+  "disabled"|"unreachable"}` instead of a bare `{"status": "ok"}`.
+- `README.md`'s Docker Compose section documents the new `WEB_CONCURRENCY`/`redis` defaults and what happens without
+  Redis reachable.
+
+**CAC-001..007 (`departments.py`, `applications.py`, `checklist_config.py`):** cached the three clearest
+near-static/read-heavy/write-rare reference-data endpoints: `GET /api/departments` (active departments, read by every
+department picker), `GET /api/application-names` (approved names, the QA Request wizard's dropdown), and
+`GET /api/checklist-config/{module}` (active checklist items, read on every wizard step and most readiness-checklist
+screens -- cached per-module, not one blanket key, so editing one module doesn't invalidate another's). Each follows
+the same pattern: read-through cache with a 300s TTL and a versioned key (`...:v1`, `...:v1:{module}`) so a future
+schema change can be invalidated fleet-wide by bumping the version; every mutation endpoint for that data (create/
+update/toggle-active for departments, every approve/reject/bulk-seed path for application names, create/update/
+delete/restore-defaults for checklist items) calls a matching `_invalidate_*_cache()` right after `db.commit()`
+(CAC-004). Deliberately did NOT cache `GET /api/departments/all`, `/api/application-names/pending*`, or
+`/api/checklist-config/{module}/all` -- these are Admin-only management views (low traffic, and correctness there
+matters more than shaving a DB round-trip off a rarely-hit screen). Users/roles/test-projects (also listed as
+CAC-001 candidates) were left uncached in this pass -- they're higher-traffic-per-write and/or already covered by
+the pagination rollout's own per-request caching strategy; revisit once that rollout reaches them.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. `cache.py`'s no-Redis degrade path exercised
+directly (see above). No frontend changes in this slice.
+
+## 39. Performance optimization Phase 4, part 3 -- database indexes (IDX-001..007)
+
+**Context:** completes the sandbox-implementable slice of the performance optimization document (the remaining
+items -- AUD-003 async audit broker, DSH dashboard summary endpoint, and the full PAG-001..010 pagination rollout --
+are tracked separately; DSH/PAG are still in progress, AUD-003 was explicitly descoped by the user to stay SYNC).
+No live Oracle instance is available in this sandbox (same constraint noted throughout this project), so this pass
+is a careful manual review against IDX-002's candidate column list and every existing model definition, in place of
+IDX-001's "finalize using actual Oracle execution plans" -- flagged here explicitly so the DBA/infra team knows to
+validate with real execution plans (IDX-001, IDX-006, IDX-007) before/after deploying, per the requirement.
+
+**`backend/app/models.py`:** added 13 composite indexes covering IDX-002's candidate list (QA Request, Functional/
+SAST/DAST/Performance Request, Approval History, Test Case, Test Cycle, Checklist Item, Document, Audit Event,
+Defect assignment) -- see the "Performance optimization indexes" block near the end of the file for the full list
+and reasoning. Two candidates were deliberately NOT added, with the reasoning left inline: TestExecution(cycle_id,
+test_case_id) is already exactly covered by that table's existing `UniqueConstraint("cycle_id", "test_case_id")` --
+Oracle backs a unique constraint with a unique index on precisely those columns, so a second index would be purely
+redundant (IDX-005); and "Pending Approval: approver, status, entity_type" has no corresponding table -- there is no
+dedicated PendingApproval/approver-scoped table in this schema, every pending-approval screen queries the underlying
+module tables directly by status, which the new composites already cover.
+
+**IDX-005 (duplicate-index prevention):** 5 of the 13 composites share their leading column with a pre-existing
+single-column `index=True` on that same column (FunctionalRequest.status, ApprovalAction.entity_type,
+AuditLog.actor_id, RequestDocument.module, Defect.assignee_id) -- since a composite index can already serve any
+query the single-column index served (same leading column), keeping both would be exactly the redundant pair
+IDX-005 prohibits. Removed `index=True` from each of those 5 columns, with a comment left on each pointing at the
+composite that supersedes it. Every other existing single-column index (QARequest.status, ApprovalAction.entity_id,
+RequestDocument.request_id, Defect.status, AuditLog's several others, etc.) was deliberately left alone -- none of
+them share a leading column with a new composite, so removing them would lose real query coverage (e.g.
+QARequest.status is still useful for an admin-wide status filter with no department scoping, which the new
+`(department, status, created_at)` composite -- department-leading -- can't serve as an equality-only lookup).
+
+**Oracle identifier length:** every new index name was verified <= 30 bytes before use (this project has hit
+ORA-00972 from a too-long identifier once already, see section 2) -- computed and checked programmatically rather
+than by eye, given how easy that is to get wrong by a character or two.
+
+**`backend/scripts/2026-08_add_performance_indexes.sql` (new):** this app has no Alembic/migration tool (see
+`database.py`'s own docstring) -- `Base.metadata.create_all()` only emits DDL for tables that don't exist yet, so a
+brand-new deployment gets these indexes automatically but an EXISTING Oracle schema needs them added by hand, same
+convention already used for new columns needing a manual `ALTER TABLE`. This script has the equivalent `CREATE
+INDEX` statements, each guarded to be a safe no-op on re-run, plus commented-out (opt-in, not automatic) `DROP
+INDEX` statements for the 5 now-superseded single-column indexes and an IDX-007 reminder to refresh optimizer
+statistics afterward per the approved DBA procedure.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. No `sqlalchemy` package is available in this
+sandbox (same constraint noted for `cache.py`'s Redis testing above), so unlike a normal change here there was no
+way to actually import `models` and confirm `Base.metadata` builds the 13 new `Index(...)` objects without a name
+collision or bad column reference -- that was instead checked by careful manual review: every column referenced by
+name against the live model source, and every index name's length verified programmatically (see above). Please run
+`python -c "from app import models"` against a real environment with `sqlalchemy` installed before deploying, as a
+final sanity check this review didn't miss. No frontend changes in this slice.
+
+## 40. Performance optimization Phase 3 -- pagination rollout for Functional, SAST, DAST, Performance (PAG-005/006)
+
+**Context:** continues the PAG-001..010 rollout (task tracked separately from Phase 4's DBP/CAC/IDX work above),
+following the same reference pattern already established for QA Requests: a lightweight `*ListOut` schema for the
+list endpoint (PAG-005), and a "fetch full detail on open" pattern on the frontend (PAG-006) so the detail modal's
+dozens of rarely-needed fields never have to ride along in a paginated list response.
+
+**`backend/app/schemas.py`:** added `FunctionalListOut`, `SASTListOut`, `DASTListOut`, `PerformanceListOut` --
+each mirrors its own list table's exact column needs, not the full `*Out` shape. `SASTListOut`/`DASTListOut`
+include a new `findings_count: int` field instead of the full `findings` array (see `models.py` below).
+`DASTListOut` deliberately excludes `targets` (so DAST's credential-masking, `_dast_out` in
+`routers/sast_dast.py`, stays a concern only for the single-record detail endpoint, never the list). All four
+also carry `department`/`application_owner` where relevant even though the list tables don't always render them
+-- both are already eager-loaded (see below) at zero extra query cost, and are needed by cross-module consumers
+that browse these lists without opening any individual record (Dashboard.tsx's "My Department" filter,
+Suppression.tsx's SAST/DAST request picker -- see both further down).
+
+**`backend/app/models.py`:** added a `findings_count` `@property` (`len(self.findings)`) to both `SASTRequest`
+and `DASTRequest`, with a comment noting the list router eager-loads `findings` via `selectinload` (a second
+batched query, not a per-row lazy-load) specifically so this property doesn't trigger an N+1.
+
+**`backend/app/routers/functional.py`, `sast_dast.py`, `performance.py`:** each list endpoint (`list_functional`,
+`list_sast`, `list_dast`, `list_performance`) rewritten onto the shared `pagination` module (same
+`apply_search`/`apply_status_filter`/`apply_department_filter`/`apply_sort`/`paginate`/`to_page_response` used by
+QA Requests), each with `joinedload(*.qa_request).joinedload(QARequest.application_master)` -- all four request
+types delegate `department`/`application_name`/`application_master_status` etc. via Python `@property` reading
+`self.qa_request`, so a list without this eager-load would N+1 once per row. `list_sast`/`list_dast` additionally
+`selectinload(*.findings)` for the new `findings_count` property. **Every join converted from the previous
+conditional `if scope: q = q.join(...)` to an unconditional `isouter=True` (LEFT JOIN)** -- search/sort on a
+delegated field needs the join unconditionally, but an INNER join would have silently dropped every
+standalone/legacy row with `qa_request_id IS NULL` for ALL users, not just scoped ones. Caught and fixed before
+shipping, explicitly commented in each router.
+
+**New detail endpoints:** `GET /api/sast-requests/{req_id}` and `GET /api/dast-requests/{req_id}` did not exist
+in the codebase at all before this slice -- added as new endpoints (DAST's applies the same `_dast_out` credential
+masking the existing endpoints already use). `GET /api/performance-requests/{req_id}` also added, reusing the
+existing `_get_or_404` helper that was already there.
+
+**`frontend/src/types.ts`:** added matching `FunctionalListOut`, `SASTListOut`, `DASTListOut`, `PerformanceListOut`
+interfaces. `CombinedSecurityRequest` (Suppression.tsx's cross-module SAST/DAST picker type) changed from
+`(SASTOut | DASTOut) & {_kind}` to `(SASTListOut | DASTListOut) & {_kind}`.
+
+**`frontend/src/modules/functional/Functional.tsx`, `security/SAST.tsx`, `security/DAST.tsx`,
+`specialised-testing/Performance.tsx`:** each list component rewritten onto `usePaginatedList<XListOut>` +
+an `openRequest`/`openEligibleRequest`-style async callback that does `GET /{id}` for the full record before
+showing the detail modal, matching QA Requests' reference implementation exactly (PAG-006). Request ID column
+shows "Opening…" while a row's detail fetch is in flight. `onChanged`/`onSaved` handlers now call `reload()`
+(re-fetches the current page) instead of the old unpaginated `load()`.
+
+**Pre-existing bug fixed in `SAST.tsx`/`DAST.tsx`:** `addFinding`/`resolveFinding` previously re-fetched the
+*entire* unpaginated list and did `.find(r => r.id === req.id)` just to refresh one row, discarding the rest.
+Harmless while the list was unpaginated; would have started silently failing to refresh whenever the target row
+wasn't on the paginated list's first page. Replaced with a direct `GET /api/{sast,dast}-requests/{id}` call using
+the newly-added detail endpoints.
+
+**`frontend/src/modules/governance/SignOff.tsx`:** its `TestingRequestIdSearch` picker needed fields beyond
+`FunctionalListOut` (full form-prefill needs `cr_number`/`technology_stack`/`release_version`/`build_number`/
+`environment`/`target_promotion_environment`, none of which belong in a lightweight list schema). Resolved the
+same way as PAG-006 itself: added a `selectEligibleRequest` callback that fetches the full `FunctionalOut` via
+`GET /{id}` before prefilling the certificate form, rather than bloating the list schema for one rarely-used
+consumer. The picker's own eligible-request fetch also switched to server-side multi-value `status` query params
+instead of client-side filtering an unpaginated list.
+
+**`frontend/src/modules/security/Suppression.tsx`:** `NewSuppressionModal`'s cross-module SAST/DAST autosuggest
+(`Promise.all([api.get('/api/sast-requests'), api.get('/api/dast-requests')])`) would have silently broken once
+those endpoints returned `Page<XListOut>` instead of a bare array. Fixed to fetch `PageOut<SASTListOut>`/
+`PageOut<DASTListOut>` with `page_size=100` and unwrap `.items` (this picker filters/searches client-side across
+the whole candidate set rather than being a paginated table itself, so a large page size is correct here, not a
+`usePaginatedList` table). `selectRequest`'s DAST label previously read `targets?.[0]?.application_url`, which
+isn't part of the lightweight list schema (`DASTListOut` deliberately excludes `targets`) -- switched to
+`application_name`, which is already delegated and is what DAST's own list table displays for the same row.
+
+**`frontend/src/Dashboard.tsx`:** the remaining `SASTOut[]`/`DASTOut[]`/`PerformanceOut[]` fetches (feeding
+`CommandCentre`/`MyRequestsTab`'s unified "My Requests & My Department" table, alongside the already-fixed
+`functionalRequests`) switched to `PageOut<XListOut>` + `page_size=100` + `.items` unwrap. `toUnifiedDast`
+simplified to match (drops the now-unavailable `targets[0].application_url` fallback, same reasoning as
+Suppression.tsx above). Discovered while checking `toUnified`'s generic row shape against `PerformanceListOut`:
+Performance's list schema had no `department` field at all (only `application_master_status` was delegated into
+it), which would have silently emptied Performance out of the "My Department" filter for every user (the filter
+is a strict `r.department === user.department` equality check) -- added `department` to `PerformanceListOut`
+(backend + frontend) since it's already eager-loaded by `list_performance`'s existing join, same zero-cost
+reasoning as the SAST/DAST `department`/`application_owner` additions above.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean together
+(one real mistake caught by `tsc` during this pass -- a botched edit in `Suppression.tsx`'s `selectRequest` that
+dropped the `setForm((f) => ({` wrapper line, immediately fixed). Documents and outputs copies re-synced and
+confirmed identical via `diff -rq` (only the standard `.env`/`logs`/`uploads` leftovers differ).
+
+## 41. Performance optimization Phase 3 -- pagination rollout for Test Management (Test Projects, Test Cases, Test Cycles, Test Executions)
+
+**Context:** continues the PAG-001..010 rollout (task #60). Unlike the flat-table modules covered in section 40,
+two of these four entities turned out not to be simple "browse a table" screens: Test Cases (Repository) renders
+as a folder tree that needs the full case list to build, and Test Executions (per Cycle) drives bulk
+select-all/select-visible actions plus per-status summary tabs and assignment tabs, all computed client-side from
+the full in-cycle list. Given the choice between skipping pagination on these two, bolting on pagination while
+keeping full-fetch behavior, or a genuine redesign, the explicit decision was to redesign both for real server
+pagination.
+
+**The pattern adopted for both Test Cases and Test Executions:** three complementary backend primitives replace
+"fetch everything, compute stats/counts/trees client-side":
+
+1. A paginated, server-filtered main list (`GET .../test-cases`, `GET .../executions`), using a new lightweight
+   list schema (`TestCaseListOut` drops `pre_condition`/`description`/`steps` in favor of `steps_count`) paired
+   with PAG-006's "fetch full detail on open" pattern -- opening a row now does `GET /{id}` for the full record
+   before showing its edit/detail modal, via a new `openingCaseId`/`openingId`-style in-flight state.
+2. A dedicated summary/aggregate endpoint (`GET .../test-cases/summary`, `GET .../executions/summary`), computed
+   via SQL `COUNT`/`GROUP BY`, replacing every client-side `.filter().length` that used to feed folder counts,
+   tag lists, status tabs, assignment-tab counts, and the "total run count" stat -- never a full-row fetch.
+3. A deliberately unpaginated bulk-candidate endpoint for the one workflow that genuinely needs the complete
+   candidate set at once (PAG-010): `GET .../test-cases/all` (folder tree + Test Execution's "Add Test Cases to
+   Cycle" picker) and `GET .../executions/case-ids` (the same modal's "already in this cycle" exclusion set).
+
+**Selection state under pagination:** "visible" now means "on the current page." Both screens clear any held
+multi-select whenever the page, filters, or scope (project/folder/cycle) changes, matching the precedent already
+set for SAST/DAST's own bulk bars in section 40.
+
+**Mutation handling under pagination:** every mutation (create/update/delete/bulk action) now triggers a
+`reload()` of the current page (+ a summary reload where relevant) instead of trying to patch a full-detail API
+response into a lightweight list row's local state -- sidesteps `TestCaseOut` vs `TestCaseListOut` type mismatches
+entirely.
+
+**`backend/app/models.py`:** added a `steps_count` property to `TestCase` (`len(self.steps)`) backing the new
+list schema's count field.
+
+**`backend/app/schemas.py`:** added `TestCaseListOut`, `TestCaseSummaryOut`, `TestExecutionSummaryOut`; added
+`steps_count` to the existing `TestCaseOut`.
+
+**`backend/app/routers/test_repository.py`:** `list_test_cases` rewritten onto `pagination.Page[TestCaseListOut]`
+with `folder_id`/`priority`/`tag` filters, search across the case's key/scenario/epic/CR/feature/user-story/module
+fields, status filter, and sort on key/status/priority/updated_at. Added `GET .../test-cases/summary` and the
+PAG-010 `GET .../test-cases/all`.
+
+**`backend/app/routers/test_execution.py`:** `list_executions` rewritten onto `pagination.Page[TestExecutionOut]`
+with an `assignment=mine|unassigned` filter, status filter, and stable id-ordered sort. Added
+`GET .../executions/summary`, the PAG-010 `GET .../executions/case-ids`, and a new `GET /executions/{id}` (needed
+once the list itself stopped being a bare array the old `?execution=<id>` deep-link could search client-side).
+
+**Test Projects + Test Cycles (task #82):** unlike Test Cases/Executions, neither of these two entities is ever
+consumed through the app's real paginated `<Table server={...}>` pattern anywhere in the app -- Test Projects
+renders as a card gallery in `TestProjects.tsx`, and Test Cycles is always fetched as a complete picker/aggregation
+source (cycle sidebar, reports, MyExecutions' cross-project fan-out). Both are also naturally bounded by real-world
+department/project size, unlike the genuinely unbounded lists pagination exists for. Rather than force a UI
+redesign neither entity needs, `list_test_projects` and `list_cycles` were wrapped in the standard
+`pagination.Page[T]` envelope purely for API-contract consistency with the rest of the app (the original
+`is_active desc, name` two-column ordering on Test Projects doesn't map onto `apply_sort`'s single-column +
+id-secondary shape, so it's kept as an explicit `order_by` rather than going through that helper). Every frontend
+consumer of these two endpoints now requests `page_size=100` (or, for `TestProjects.tsx`'s per-project cycle-count
+stat card, `page_size=25` + reads `.total` -- a real COUNT unaffected by page size, standing in for a dedicated
+cycles-summary endpoint that doesn't exist) and unwraps `.items` instead of treating the response as a bare array.
+11 call sites across `MyExecutions.tsx`, `TestExecution.tsx`, `TestProjects.tsx`, `TestRepository.tsx`,
+`TestReports.tsx`, and `Defects.tsx` were found via grep and updated the same way.
+
+**Known accepted scope cut:** `TestExecution.tsx`'s `_LIST_EXECUTION_EAGER_LOADS` eager-loads `test_case` itself
+but not that test case's own nested relations, which still lazy-load per row -- documented in the router as a
+partial N+1 mitigation rather than a full fix, since those nested fields aren't used by the execution list view.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean together
+(one real mistake caught by `tsc` -- a leftover pre-rename `c` reference in `TestExecution.tsx`'s `loadCycles`,
+immediately fixed). Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the
+standard `.env`/`logs`/`uploads` leftovers differ).
+
+## 42. Performance optimization Phase 3 -- pagination rollout for Defects, Pending Approvals, Approval History
+
+**Context:** continues the PAG-001..010 rollout (task #61). Defect Management's register (`Defects.tsx`) has the
+same "queue tabs computed from the whole list" shape as Test Executions did in section 41, plus its own
+Counter-over-`.all()` `/api/defects/dashboard` endpoint; Pending Approvals and Approval Workflow Log are two very
+different screens sharing one underlying `ApprovalAction` feed, and only one of them turned out to need
+pagination at all.
+
+**`backend/app/schemas.py` / `routers/defects.py`:** added `DefectListOut` (PAG-005 -- drops description, steps/
+expected/actual result, log/request details, resolution/root-cause/fix writeups, etc., everything only read once
+a defect is actually opened). `list_defects` (`GET /api/defects`) rewritten onto `pagination.Page[DefectListOut]`
+with a new `queue=attention|mine|unlinked|retest|closed` param mirroring Test Executions' own `assignment=mine`
+convention, plus the existing single-value `status`/`severity`/`priority`/`cycle_id`/etc. filters kept as-is and
+PAG-001's own multi-value `status`/`search` layered on top. Added `_LIST_DEFECT_EAGER_LOADS` (qa_request/cycle/
+primary_test_case/reporter/assignee) so the list's `@property`-backed `qa_request_key`/`cycle_key`/`test_case_key`/
+`reporter_name`/`assignee_name` fields don't N+1. Added `GET /api/defects/by-key/{defect_key}` (mirrors
+`test_repository.py`'s own `/test-cases/by-key/{key}` pattern) so Defects.tsx's `?open=<defect_key>` deep-link can
+resolve a single record without the old full-list `.find()`.
+
+**`defect_dashboard`** (`GET /api/defects/dashboard`) rewritten from a full `_scoped_defects(...).all()` fetch +
+Python `Counter()` into real SQL `GROUP BY` aggregates for `by_status`/`by_severity`/`by_priority`/
+`by_application`/`by_assignee` (the last via an `outerjoin` + `coalesce(User.full_name, 'Unassigned')`, since
+`assignee_name` is a Python property, not a column) -- matching `TestCaseSummaryOut`/`TestExecutionSummaryOut`'s
+own "SQL COUNT/GROUP BY, never a full-row fetch" discipline from section 41. `by_ageing`/`closure_trend` stay
+computed in Python (the age-bucket computation doesn't translate cleanly across this app's SQLite/Oracle dialect
+split) but now select only `(reported_at, closed_at)` instead of hydrating full `Defect` ORM rows. Four new fields
+-- `attention_count`, `mine_count`, `unlinked_count`, `retest_count` -- back Defects.tsx's queue tabs, which used
+to be `.filter().length` over the whole (now-paginated) list; `retest_count` is free (sum of two already-grouped
+`by_status` buckets), the other three are compound conditions needing their own indexed `COUNT`.
+
+**`frontend/src/modules/test-management/Defects.tsx`:** rewritten onto `usePaginatedList<DefectListOut>` +
+`server={{...}}` table, PAG-006 `openDefect(id | defect_key)` fetch-on-open (shows "Opening…" on the clicked row),
+and the queue-tab/health-strip counts read straight off `DefectDashboardOut` instead of client-side `.filter()`.
+The one picker that still needed a broad candidate set -- `TransitionModal`'s "Original Defect ID" duplicate
+picker (`SearchableSelect` has no async/server-search mode) -- is now sourced from a dedicated
+`page_size=100`-capped fetch, documented as the same "effectively all of them" compromise used by every other
+full-list `SearchableSelect` picker in this rollout, explicitly *not* a PAG-010 unpaginated endpoint (the defect
+register has real unbounded growth, unlike Test Cases' folder tree).
+
+**Downstream consumers of `/api/defects` fixed:** `TestExecution.tsx`'s cycle-completion gate (now
+`PageOut<DefectListOut>?cycle_id=...&page_size=100`) and its `LinkExistingDefectModal` (now
+`queue=unlinked&status=<every non-terminal status>&page_size=100`, reproducing the old client-side
+`!execution_id && status not in (Closed,Rejected,Duplicate)` filter server-side); `components/LinkedDefects.tsx`
+(now `PageOut<DefectListOut>` + `page_size=100` + `.items`, used by every module's own "defects linked to this
+record" panel).
+
+**Pending Approvals (`GET /api/pending-approvals`) -- deliberately left unpaginated.** Investigated as part of
+task #61 but not converted: every one of its ~7 category queries already filters to "genuinely awaiting THIS
+user's decision right now," which self-bounds the result the same way `MyExecutions.tsx`'s own "assigned to me"
+queue does -- an item leaves the list the moment it's acted on, so it's a live personal action queue, not a
+growing historical register. Silently truncating it to one page could hide a real pending approval from the one
+person who needs to act on it, a worse outcome for a governed QA portal than one unpaginated fetch. Documented
+directly in `routers/pending_approvals.py`'s own module docstring.
+
+**Approval Workflow Log / Approval History (`routers/approvals.py`) -- split into two endpoints instead of
+changing the existing one.** `GET /api/approvals` (bare array) has ~13 call sites across the app
+(`Defects.tsx`, `TestRepository.tsx`, `TestProjects.tsx`, `TestExecution.tsx` alone has 9, `JiraActivity`'s own
+per-entity feed, `Dashboard.tsx`'s Recent Activity widget) that all pass an explicit `entity_type`+`entity_id`
+pair -- each of those feeds is inherently bounded (one record's own approval history never grows past what that
+one record could accumulate), so wrapping the existing endpoint in `Page[T]` would have broken all 13 for no
+benefit. Instead, the shared filtering/scoping logic (department scope via `resolve_entity_department`, the
+Draft/Cancelled QA_REQUEST hiding, the 500-row cap) was extracted into `_filtered_approval_rows()`, and a new
+`GET /api/approvals/history` endpoint -- `pagination.Page[ApprovalActionOut]`, `entity_type`-only filter, no
+`entity_id` -- was added purely for `modules/governance/Approvals.tsx`'s "Approval Workflow Log," the one screen
+that genuinely browses this feed page by page. `GET /api/approvals` itself is completely unchanged. Department
+scoping can't be pushed into the SQL query itself for either endpoint -- `ApprovalAction.entity_type` is
+heterogeneous (QA_REQUEST/SAST/DAST/.../DEFECT, each resolved via `resolve_entity_department`'s own per-row
+lookup against a different table, not one joinable column) -- so `list_approval_history` paginates the
+already-Python-filtered result rather than running a true SQL `COUNT`/`OFFSET`; its `total`/`total_pages` reflect
+the same 500-row ceiling `list_approvals` already had before this endpoint existed, not a true unbounded count.
+Properly fixing that would mean denormalizing a `department` column onto `ApprovalAction` at write-time across
+every router that creates one -- called out as out of scope for this rollout, same reasoning as Test
+Cases/Executions' own documented scope cuts in section 41.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean together.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`logs`/`uploads` leftovers differ).
+
+## 43. Performance optimization Phase 3 -- pagination rollout for Documents, Users, Audit Log
+
+**Context:** continues the PAG-001..010 rollout (task #62).
+
+**Documents -- investigated, no change needed.** There is no standalone "Documents" browsing screen anywhere in
+the app; every `GET .../documents`/`.../attachments` endpoint (`qa_requests.py`, `functional.py`, `sast_dast.py`,
+`performance.py`, `signoff.py`, `suppression.py`, `defects.py`, `approvals.py`'s comment attachments,
+`test_execution.py`'s run/result images) is scoped to exactly one parent record's own uploads -- inherently
+bounded by how many files one QA Request/defect/comment could ever accumulate, not a candidate for the
+unbounded-growth problem pagination exists to solve.
+
+**Users.** `backend/app/routers/auth.py` has three separate user-list endpoints with very different growth
+shapes:
+- `GET /api/auth/users` (active-only) -- left unpaginated. 9 separate call sites across the app use it purely as
+  a name-lookup/assignee-picker source needing the complete active directory at once, the same reference-data
+  role `/api/departments`/`/api/application-names` already play. Documented directly in the endpoint's own
+  docstring.
+- `GET /api/auth/users/all` (Admin Users, `Admin.tsx`) -- the one genuine org-wide browse table, and the one that
+  was actually doing the "fetch everything, filter/paginate client-side" thing this whole rollout replaces.
+  Rewritten onto `pagination.Page[UserOut]` with a new `account_filter=active|disabled|review` param
+  (encapsulating Admin.tsx's existing tri-state dropdown exactly, mirroring the `queue=`/`assignment=` convention
+  from Defects/Test Executions) plus `login_type` and `search` (full_name/username/email/department -- role-label
+  search dropped, since `roles` is a many-to-many join, not a plain column). Added `GET /api/auth/users/summary`
+  (`UserSummaryOut`: total/active_count/ldap_count/review_count, four indexed `COUNT`s) backing the account-summary
+  strip and sidebar badge Admin.tsx used to compute via `.filter().length` over the whole directory.
+  `Admin.tsx` rewritten onto `usePaginatedList<UserOut>` + `server={{...}}` table; every inline mutation
+  (department/roles/admin_managed_only/is_active toggle, create user, password reset) now calls a shared
+  `refreshUsers()` (reload current page + summary) instead of patching a locally-held full array.
+- `GET /api/auth/local-admin/users` (Department Coordinator roster, `DepartmentAdmin.tsx`) -- deliberately left
+  unpaginated. Scoped to one department's own headcount (excluding admins/confidential roles), naturally bounded
+  the same way Test Cycles/Test Projects and Pending Approvals were left alone earlier in this rollout. Documented
+  in both the endpoint's own docstring and a matching comment in `DepartmentAdmin.tsx`.
+
+**Audit Log (`backend/app/routers/audit.py`, `frontend/src/modules/governance/AuditLog.tsx`).** Unlike almost
+everything else in this rollout, `GET /api/audit` already did real SQL `OFFSET`/`LIMIT` pagination with a genuine
+`COUNT` -- it just predated `pagination.py` and had its own bespoke contract (`page_size` default 5, range 5-200,
+a `{rows, total, page, page_size, summary}` envelope) instead of the shared one. Migrated for consistency, not
+correctness: `list_audit_logs` now takes `pagination.PageParams` and returns `pagination.Page[AuditLogOut]`
+(standard 25/50/100 `page_size`); the three summary counts (`failed`/`authentication`/`access_management`) moved
+to a new `GET /api/audit/summary` endpoint accepting the same filters, matching the `DefectDashboardOut`/
+`TestCaseSummaryOut`/`UserSummaryOut` pattern used everywhere else in this rollout. `event_type`/`outcome` stay
+plain query params (two independent dimensions, don't map onto `apply_status_filter`'s single-column IN-filter
+shape). The now-dead `schemas.AuditLogPage`/`frontend/src/types.ts`'s `AuditLogPage` (superseded by `Page[T]`) and
+its own hand-rolled Previous/Next footer (`AuditLog.tsx`'s `.audit-pagination` CSS, now unused) were removed;
+`AuditLog.tsx` rewritten onto `usePaginatedList<AuditLogOut>` + `<Table server={{...}}>`, the same pattern as
+every other paginated screen in the app.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean together.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`logs`/`uploads` leftovers differ).
+
+## 44. PAG-010 verification -- export endpoints confirmed unrestricted
+
+**Context:** task #63 of the PAG-001..010 rollout -- an explicit audit (not a code change) confirming that no
+export/CSV/XLSX-generation endpoint was accidentally capped to one page while converting its sibling *list*
+endpoint to `pagination.Page[T]` throughout sections 40-43.
+
+**Audited:** every route whose path contains "export" across `audit.py`, `defects.py`, `functional.py`,
+`performance.py`, `qa_requests.py`, `sast_dast.py` (SAST + DAST), `signoff.py`, `suppression.py`,
+`test_execution.py`, `test_repository.py` -- 11 endpoints total. Each one still runs an unrestricted `.all()`
+fetch of its fully-filtered/scoped query (the same `_filtered_query()`/`_scoped_defects()`-style helpers their
+now-paginated list siblings also use, just without `pagination.paginate()` applied on top) -- confirmed PAG-010
+compliant, none accidentally truncated.
+
+**Noted, not changed:** `reports.py::audit_evidence` (the separate Reports/Export Centre "Audit Evidence Report,"
+unrelated to both this rollout's `routers/audit.py` and the removed Test Management "Audit Evidence" view from
+sections 33-37) has a pre-existing hardcoded `.limit(1000)` on its `ApprovalAction` query -- present before this
+rollout began, not introduced or touched by it. Left as-is; changing a report's own data-completeness semantics
+without being asked is out of scope for a pagination-consistency pass.
+
+**Verified:** read-only audit via `grep`/targeted reads, no code changes this section.
+
+## 45. Dashboard summary endpoint + Redis caching + invalidation (DSH-001..007)
+
+**Context:** a separate Performance Optimization initiative (DSH-001..007), following the pagination rollout
+(sections 40-44). `Dashboard.tsx`'s Command Centre tab had its own in-repo comment already naming the intended
+fix: computing four derived numbers -- active/child request counts, nearing-release count, critical-pending
+count -- plus the Functional lifecycle breakdown, by fetching 4-5 complete `page_size=100` request collections
+into the browser and filtering/counting them client-side, every time the tab was viewed.
+
+**Backend (`routers/dashboard.py`):** added `GET /api/dashboard/summary`, returning
+`{child_requests_total, active_requests_count, nearing_release_count, critical_pending_count,
+functional_status_counts}`. `child_requests_total`/`active_requests_count` are computed via `COUNT()` over each
+of the four child-request models (Functional/SAST/DAST/Performance), respecting `date_from`/`date_to` and
+department scope the same way `project-wise`/`3w` already do. `nearing_release_count` (QARequest with
+`target_release_date` in the next 14 days) and `critical_pending_count` (Critical-priority Functional requests
+at one of the 4 pending-approval statuses) deliberately do *not* apply the date range, matching CommandCentre's
+own pre-existing all-time behavior for those two numbers (the "Raised" range filter was found to be dead/
+hardcoded to `'all'` with no UI control, so this only matters if that control is ever reintroduced).
+`functional_status_counts` is a raw `GROUP BY status` dict, not pre-bucketed into the 6 lifecycle stages --
+`Dashboard.tsx`'s own `STATUS_STAGE_INDEX`/`lifecycleDistribution()` stays the single source of truth for stage
+grouping, avoiding a second, driftable copy of that mapping on the backend.
+
+**Caching (DSH-005/006):** read-through Redis cache via `cache.py` (`get_json`/`set_json`, 60s TTL), keyed
+`dashboard:summary:v1:{department-scope}:{date_from}:{date_to}` so every distinct scope/range combination caches
+independently. Degrades to computing on every request if Redis is absent/unreachable -- `cache.py` was already
+designed for that.
+
+**Invalidation (DSH-007, `main.py`):** rather than threading a `cache.delete_prefix()` call through the ~30
+individual create/transition/update endpoints spread across `qa_requests.py`/`functional.py`/`sast_dast.py`/
+`performance.py` (high blast radius, easy to miss one), hooked into the existing `application_audit_middleware`
+-- which already runs on every `/api` request and already classifies each request's module for audit logging.
+Added `_DASHBOARD_SUMMARY_INVALIDATING_MODULES = {QA_REQUEST, FUNCTIONAL_REQUEST, SAST_REQUEST, DAST_REQUEST,
+PERFORMANCE_REQUEST}`; after a successful (`status_code < 400`) POST/PUT/PATCH/DELETE against any of those
+modules, the middleware calls `cache.delete_prefix("dashboard:summary:")` once, invalidating every cached
+scope/range variant together rather than trying to work out which one variant a given write could have affected.
+Runs inline on the request path (not via `BackgroundTask`) since `delete_prefix` is a fast, never-raising
+best-effort call by its own contract.
+
+**Frontend (`Dashboard.tsx`):** `CommandCentre` now fetches `/api/dashboard/summary` alongside its existing
+`project-wise`/`3w`/`approvals` calls and reads `activeRequestsCount`/`nearingRelease`/`criticalPending`/the
+4th stat card's footline straight off the response, instead of deriving them from `requests`/
+`functionalRequests`/`sastRequests`/`dastRequests`/`performanceRequests` props. `LifecycleStepper` and
+`lifecycleDistribution()` were changed to take a `Record<string, number>` status-count dict
+(`summary.functional_status_counts`) instead of a full row array. `CommandCentre` no longer takes those five
+request-list props at all -- they're still fetched once at the `Dashboard` level (unchanged) because
+`MyRequestsTab` still needs the real rows for its own genuine "browse my/my department's requests" table, which
+was explicitly out of scope for this summary endpoint. Added `DashboardSummaryOut` to `types.ts`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
+`.env`/`logs`/`uploads`/`venv` leftovers differ).
+
+## 46. Fix ORA-00979 on `GET /api/defects/dashboard`'s by-assignee aggregate
+
+**Reported directly** (live Oracle error, not caught locally -- this app has no live Oracle in the sandbox used
+for the rest of this session's verification):
+
+```
+ORA-00979: "QAP_USERS"."FULL_NAME": must appear in the GROUP BY clause or be used in an aggregate function
+[SQL: SELECT coalesce(qap_users.full_name, :coalesce_2) AS coalesce_1, count(qap_defects.id) AS count_1
+FROM qap_defects JOIN qap_requests ... LEFT OUTER JOIN qap_users ...
+GROUP BY coalesce(qap_users.full_name, :coalesce_3)]
+```
+
+**Root cause:** section 42's `defect_dashboard` rewrite (`by_assignee`) called `func.coalesce(models.User.full_name,
+"Unassigned")` twice -- once building the `.with_entities(...)` select list, once building `.group_by(...)`. Each
+call constructs its own bind parameter for the `"Unassigned"` literal (`:coalesce_2` vs `:coalesce_3` above), so
+even though the two expressions are textually/semantically identical, oracledb's thin driver doesn't recognize
+the `GROUP BY` clause as covering the `SELECT` list's `full_name` reference and rejects the query. SQLite (used
+for local/sandbox verification all session) is lenient about this and never surfaced it, which is why
+`py_compile`-only verification missed it -- this endpoint was never actually executed against a real Oracle
+instance until now.
+
+**Fix (`routers/defects.py::defect_dashboard`):** build the coalesce expression once
+(`assignee_label = func.coalesce(models.User.full_name, "Unassigned")`) and pass that same object to both
+`.with_entities(assignee_label, ...)` and `.group_by(assignee_label)`, so SQLAlchemy compiles one shared bind
+parameter instead of two. No behavior change -- same grouping, same "Unassigned" fallback -- purely a
+same-object-reuse fix so Oracle's GROUP BY validation matches it to the SELECT list.
+
+**Verified:** `python3 -m py_compile app/routers/defects.py` clean; no live Oracle available in this environment
+to re-run the query directly, so this was verified by code inspection against the documented SQLAlchemy/Oracle
+behavior (reusing one `ColumnElement` instance across `with_entities`/`group_by` is the standard fix for this
+exact class of ORA-00979). Recommend the person exercising this against their live Oracle instance confirm
+`GET /api/defects/dashboard` now returns 200.
+
+## 47. Fix DetachedInstanceError on `actor.roles_csv` in the audit background task
+
+**Reported directly** (live traceback): every request was crashing its post-response audit-write background
+task with `sqlalchemy.orm.exc.DetachedInstanceError: Parent instance <User ...> is not bound to a Session; lazy
+load operation of attribute 'role_assignments' cannot proceed`, raised from `models.py::User.roles` (via
+`roles_csv`) inside `audit_service.write_audit`, called from `main.py::_write_request_audit`.
+
+**Root cause:** AUD-008 (section 70, an earlier session) stashes the `User` object `get_current_user` (deps.py)
+already loaded onto `request.state.current_user`, so `_write_request_audit` -- which runs as a `BackgroundTask`
+after the response has been sent, using its own fresh `SessionLocal()` -- can reuse it instead of decoding the
+JWT and querying `User` a second time. That's fine for plain columns (`username`, `id`, `full_name`, ...), which
+SQLAlchemy already loaded into the object's `__dict__` as part of the original `SELECT`. It is not fine for the
+`role_assignments` relationship: that's lazy-loaded, so it's only populated if something during the original
+request happened to touch `current_user.roles`/`.has_role(...)`. Whenever a request's own handler never touched
+roles (many read-only endpoints don't need a role check beyond the auth dependency itself), `role_assignments`
+was still unloaded by the time the background task ran -- and by then the *original* request-scoped `db` session
+(from `Depends(get_db)`) was already closed, so the lazy load had no session to use and raised
+`DetachedInstanceError`. This wasn't introduced by the pagination/dashboard work in sections 40-46; it's a
+latent gap in AUD-008 that this traceback surfaced.
+
+**Fix (`deps.py::get_current_user`):** eagerly load `role_assignments` via
+`.options(selectinload(models.User.role_assignments))` on the same query that already fetches the user, so the
+relationship is always materialized in memory before the object is stashed on `request.state` -- regardless of
+whether anything in the actual request handler happens to touch `.roles`/`.has_role()`. `selectinload` (a second
+targeted `SELECT ... WHERE user_id IN (...)`, not a join) was chosen over `joinedload` to avoid fanning out the
+main `User` row across however many roles a user holds.
+
+**Defense in depth (`audit_service.py::write_audit`):** the function's own docstring says "Best-effort append...
+must never break the action," but the existing `try/except` only wrapped `db.add()`/`db.commit()` -- the
+`actor.roles_csv`/`.full_name`/`.id`/`.username` reads used to build the `AuditLog(...)` row happened *before*
+that `try`, so any exception reading them (this one, or a future one) escaped uncaught, contradicting the
+function's own contract. Widened the `try` to cover the whole row construction, not just the DB write, so a
+failure to log an audit entry can never again surface as an unhandled exception in the request/background-task
+path.
+
+**Verified:** `python3 -m py_compile app/deps.py app/audit_service.py` (and the full `app/*.py app/routers/*.py`
+sweep) clean. No live server in this sandbox to reproduce the original traceback directly; the fix was verified
+by tracing the exact attribute-access chain in the reported stack trace (`write_audit` → `actor.roles_csv` →
+`User.roles` → `self.role_assignments`) against the eager-load change. Documents and outputs copies re-synced
+and confirmed identical via `diff -rq`.
+
+## 48. Fix silent request undercount on Dashboard's "My Requests" tab
+
+**Context:** raised directly after a walkthrough of every `page_size=100` "fetch effectively all of it" compromise
+introduced across the pagination rollout (sections 40-46), to separate genuine live risk from accepted
+picker-convenience trade-offs.
+
+**Root cause:** `Dashboard.tsx`'s `MyRequestsTab` took `requests`/`functionalRequests`/`sastRequests`/
+`dastRequests`/`performanceRequests` as props -- a single Dashboard-level fetch of each request type's
+department-scoped page 1 (`?page_size=100`, `sort_order` defaulting to `desc`), originally hoisted up from both
+`CommandCentre` and `MyRequestsTab` to avoid double-fetching. It then filtered that shared list client-side to
+`requester_id === user.id` ("My Requests") or `department === user.department` ("My Department"). Because the
+fetch itself was already capped at the 100 *most recent* requests of each type across the user's whole
+department, a user's own older request would silently vanish from their own "My Requests" tab -- with no error,
+no indication -- as soon as their department raised more than 100 requests of that one type after it was
+submitted. For an unrestricted-scope role (QA Lead, QA Engineer, Security Analyst, the three Executive-COE
+roles, Scale 6+ -- see `dashboard_department_scope`), the underlying fetch wasn't even department-scoped, so
+"My Department" could undercount as soon as the *organization* crossed 100 requests of one type, not just the
+user's own department. DSH-001..004 (section 45) already removed `CommandCentre`'s need for this fetch entirely
+(it now uses `/api/dashboard/summary`), but explicitly left `MyRequestsTab`'s row-browsing fetch untouched as
+out of scope -- the truncation risk itself was never addressed until now.
+
+**Backend (`qa_requests.py`, `functional.py`, `sast_dast.py` ×2, `performance.py`):** added an optional
+`requester_id: Optional[int] = None` query param to each of the 5 list endpoints (`list_requests`,
+`list_functional`, `list_sast`, `list_dast`, `list_performance`), filtering `Model.requester_id == requester_id`
+when present. Applied after the existing status/search/department filters and the unconditional
+`dashboard_department_scope` authorization filter, so it's a pure additional narrowing, not a bypass of either.
+All 5 response schemas (`QARequestListOut`/`FunctionalListOut`/`SASTListOut`/`DASTListOut`/`PerformanceListOut`)
+already carried `requester_id`; the column already existed on every one of the 5 tables (a real column on
+Functional/SAST/DAST/Performance, not a delegated property) -- this was purely a missing query parameter, not a
+schema or model change. The existing `department=` param (already wired via `pagination.apply_department_filter`
+on all 5) needed no backend change -- it was already correct, just unused by this particular screen.
+
+**Frontend (`Dashboard.tsx`):** `MyRequestsTab` no longer takes the 5 request-list props at all. It now owns two
+independent fetches on mount: `requester_id=<user.id>&page_size=100` per type for "My Requests", and (when the
+user has a department) `department=<user.department>&page_size=100` per type for "My Department" -- both still
+capped at 100 rows per type, but now that cap means "one person's, or one department's, total lifetime volume of
+a single request type," the same class of accepted "practical ceiling" already used elsewhere in this rollout
+(`MyExecutions.tsx`'s `assignment=mine`, Pending Approvals' bounded personal queue), not an arbitrary,
+wrongly-scoped page 1. The Dashboard-level `requests`/`functionalRequests`/`sastRequests`/`dastRequests`/
+`performanceRequests`/`requestsLoaded`/`requestsError` state and its shared `useEffect` were removed entirely --
+nothing else in the file used them once `MyRequestsTab` became self-contained (matching how every other Dashboard
+tab -- `SecurityTab`, `SuppressionTab`, `ThreeWTab`, `TesterOverviewTab` -- already owns its own fetch,
+re-running each time the tab is mounted). This also means these 10 API calls (5 types × 2 scopes) now only fire
+when a visitor actually opens the "Requests" tab, instead of unconditionally on every Dashboard page load.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean. Documents
+and outputs copies re-synced and confirmed identical via `diff -rq`.
+
+## 49. Section 47's fix was incomplete -- actual fix: snapshot, don't reuse the ORM object
+
+**Reported directly** (a second live traceback, same background task, after section 47 shipped):
+
+```
+File "main.py", line 248, in _write_request_audit
+    actor_username = actor.username if actor else None
+sqlalchemy.orm.exc.DetachedInstanceError: Instance <User at 0x10d7959d0> is not bound to a Session;
+attribute refresh operation cannot proceed
+```
+
+**Why section 47 didn't fully fix it:** that fix eager-loaded `role_assignments` so `actor.roles_csv` would never
+need to lazy-load a relationship off a detached object. It correctly fixed *that* failure mode. This second
+traceback is a different one, on a plainer attribute: `actor.username` -- a scalar column that was already
+loaded (part of the original `SELECT`), not lazy at all. The actual mechanism: SQLAlchemy's `Session` defaults to
+`expire_on_commit=True`, which marks *every* attribute on *every* object touched by that session as expired the
+moment `db.commit()` runs anywhere in the request -- e.g. any of the many mutating (`POST`/`PUT`/`PATCH`/
+`DELETE`) endpoint handlers that write and commit. An expired attribute silently re-fetches from the database on
+next access, using its own session -- fine while the request is still in flight, but by the time
+`_write_request_audit` runs as a `BackgroundTask`, that original session (from `Depends(get_db)`) is already
+closed, so the re-fetch has nowhere to go and raises `DetachedInstanceError`. Eager-loading a relationship only
+ever prevents *that one relationship's* lazy-load; it does nothing about a wholesale post-commit expiry of
+everything else on the object. There is no set of "preload enough columns" that reliably survives this -- the
+object is fundamentally unsafe to read outside the session that (re)loaded it, full stop.
+
+**Actual fix -- stop reusing the ORM object across the session boundary entirely:**
+
+- **`deps.py::get_current_user`:** immediately after loading `user` (still inside its own valid, unexpired `db`
+  session), captures a plain `dict` snapshot -- `{"id", "username", "full_name", "roles_csv"}` -- onto
+  `request.state.current_user_snapshot`. `request.state.current_user` (the live ORM object) is still stashed too,
+  since nothing else needed changing there, but the snapshot is what's meant to survive to the background task.
+- **`main.py::_write_request_audit`:** now reads `request.state.current_user_snapshot` instead of
+  `request.state.current_user`. Every value it needs (`actor_username`/`actor_id`/`actor_name`/`actor_roles`)
+  comes straight out of that plain dict -- no ORM attribute access on a possibly-detached object anywhere in this
+  function any more. The pre-existing fallback path (JWT decode + fresh `db.query(...)` when no snapshot exists,
+  e.g. login/public routes) is untouched and was always safe, since that query uses this function's own,
+  currently-open `db` session.
+- **`audit_service.py::write_audit`:** gained three new optional keyword params -- `actor_id`, `actor_name`,
+  `actor_roles` -- alongside the pre-existing `actor_username`. Every other caller of `write_audit` in the
+  codebase (all in `routers/auth.py`, login/logout/user-management flows) passes a live, *same-session* `actor=`
+  object and is completely unaffected; `actor=`, when given, still wins over the plain-value params. Only
+  `_write_request_audit`'s snapshot path now uses the new params instead of `actor=`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. No live server in this sandbox to
+reproduce the original traceback directly; verified by re-tracing the exact same attribute-access chain from
+both reported tracebacks (`_write_request_audit` → `actor.username` / `actor.roles_csv`) and confirming neither
+code path touches the detached object any more. Documents and outputs copies re-synced and confirmed identical
+via `diff -rq`.

@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
-import { AuditLogOut, AuditLogPage } from '../../types'
+import { AuditLogOut, AuditSummary } from '../../types'
 import { Card, ErrorText, Modal, PageHeader, Table } from '../../components/Common'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 const EVENT_TYPES = ['', 'AUTHENTICATION', 'ACCESS_MANAGEMENT', 'DATA_CHANGE', 'ACCESS']
 
@@ -16,55 +17,60 @@ function prettyDetails(raw?: string | null): string {
 }
 
 export default function AuditLog() {
-  const [data, setData] = useState<AuditLogPage>({
-    rows: [], total: 0, page: 1, page_size: 5,
-    summary: { total: 0, failed: 0, authentication: 0, access_management: 0 },
-  })
   const [eventType, setEventType] = useState('')
   const [outcome, setOutcome] = useState('')
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
-  const [page, setPage] = useState(1)
   const [selected, setSelected] = useState<AuditLogOut | null>(null)
+  const [summary, setSummary] = useState<AuditSummary>({ total: 0, failed: 0, authentication: 0, access_management: 0 })
   const [error, setError] = useState<unknown>(null)
 
-  const query = useMemo(() => {
-    const p = new URLSearchParams({ page: String(page), page_size: '5' })
+  // SRS 7.2 pagination rollout -- migrated off this page's own hand-rolled
+  // page/page_size/Previous-Next pager onto the same usePaginatedList +
+  // <Table server={{...}}> pattern every other paginated screen in the app
+  // uses (see routers/audit.py::list_audit_logs' own docstring for why --
+  // this endpoint already did real server-side OFFSET/LIMIT pagination
+  // before this change, just with a bespoke contract).
+  const filterExtra = useMemo(() => ({
+    event_type: eventType || undefined,
+    outcome: outcome || undefined,
+    date_from: dateFrom ? `${dateFrom}T00:00:00` : undefined,
+    date_to: dateTo ? `${dateTo}T23:59:59` : undefined,
+  }), [eventType, outcome, dateFrom, dateTo])
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize,
+  } = usePaginatedList<AuditLogOut>('/api/audit', { search, extra: filterExtra })
+
+  const exportQuery = useMemo(() => {
+    const p = new URLSearchParams()
     if (eventType) p.set('event_type', eventType)
     if (outcome) p.set('outcome', outcome)
     if (search.trim()) p.set('search', search.trim())
     if (dateFrom) p.set('date_from', `${dateFrom}T00:00:00`)
     if (dateTo) p.set('date_to', `${dateTo}T23:59:59`)
     return p.toString()
-  }, [eventType, outcome, search, dateFrom, dateTo, page])
+  }, [eventType, outcome, search, dateFrom, dateTo])
 
-  const load = useCallback(async () => {
-    try {
-      setError(null)
-      setData(await api.get<AuditLogPage>(`/api/audit?${query}`))
-    } catch (err) { setError(err) }
-  }, [query])
-
-  useEffect(() => { load() }, [load])
-  useEffect(() => { setPage(1) }, [eventType, outcome, search, dateFrom, dateTo])
-
-  const totalPages = Math.max(1, Math.ceil(data.total / data.page_size))
+  useEffect(() => {
+    api.get<AuditSummary>(`/api/audit/summary?${exportQuery}`).then(setSummary).catch(setError)
+  }, [exportQuery])
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="Audit Log" count={data.total}
+        title="Audit Log" count={total}
         subtitle="Immutable record of sign-ins, failed access, API activity, data changes, and user/role administration. Passwords, tokens, and request bodies are never captured."
-        actions={<button className="btn btn-primary" onClick={() => api.downloadFile(`/api/audit/export?${query}`, 'qualityhub-audit-log.csv')}>Export CSV</button>}
+        actions={<button className="btn btn-primary" onClick={() => api.downloadFile(`/api/audit/export?${exportQuery}`, 'qualityhub-audit-log.csv')}>Export CSV</button>}
       />
 
       <div className="audit-summary-grid">
-        <div className="audit-summary"><span>Total events</span><strong>{data.summary.total}</strong></div>
-        <div className="audit-summary"><span>Authentication</span><strong>{data.summary.authentication}</strong></div>
-        <div className="audit-summary"><span>Access changes</span><strong>{data.summary.access_management}</strong></div>
-        <div className="audit-summary audit-summary-danger"><span>Failed events</span><strong>{data.summary.failed}</strong></div>
+        <div className="audit-summary"><span>Total events</span><strong>{summary.total}</strong></div>
+        <div className="audit-summary"><span>Authentication</span><strong>{summary.authentication}</strong></div>
+        <div className="audit-summary"><span>Access changes</span><strong>{summary.access_management}</strong></div>
+        <div className="audit-summary audit-summary-danger"><span>Failed events</span><strong>{summary.failed}</strong></div>
       </div>
 
       <div className="toolbar audit-toolbar">
@@ -81,7 +87,10 @@ export default function AuditLog() {
       </div>
 
       <Card subtitle="Select any row to see the complete event context and before/after access changes.">
-        <Table<AuditLogOut> rowKey="id" pageSize={5} onRowClick={setSelected} columns={[
+        <Table<AuditLogOut>
+          rowKey="id" onRowClick={setSelected}
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
+          columns={[
           { key: 'created_at', header: 'When', render: (r) => new Date(r.created_at).toLocaleString() },
           { key: 'actor_name', header: 'Who', render: (r) => <div><div>{r.actor_name || r.actor_username || 'Unauthenticated'}</div><div className="muted small">{r.actor_username || '—'}</div></div>, filterValue: (r) => `${r.actor_name || ''} ${r.actor_username || ''}` },
           { key: 'event_type', header: 'Event', render: (r) => label(r.event_type) },
@@ -89,11 +98,7 @@ export default function AuditLog() {
           { key: 'outcome', header: 'Outcome', render: (r) => <span className={`badge ${r.outcome === 'FAILED' ? 'badge-red' : 'badge-green'}`}>{r.outcome}</span> },
           { key: 'path', header: 'Access / Target', render: (r) => <div><div>{[r.method, r.path].filter(Boolean).join(' ') || '—'}</div>{(r.target_name || r.target_id) && <div className="muted small">{r.target_type}: {r.target_name || r.target_id}</div>}</div>, filterValue: (r) => `${r.method || ''} ${r.path || ''} ${r.target_name || ''} ${r.target_id || ''}` },
           { key: 'ip_address', header: 'Source IP', render: (r) => r.ip_address || '—' },
-        ]} rows={data.rows} />
-        <div className="audit-pagination">
-          <span>Page {page} of {totalPages} · {data.total} matching events</span>
-          <div><button className="btn btn-sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Previous</button><button className="btn btn-sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</button></div>
-        </div>
+        ]} rows={rows} />
       </Card>
 
       {selected && (

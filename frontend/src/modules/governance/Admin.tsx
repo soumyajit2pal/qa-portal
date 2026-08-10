@@ -1,11 +1,12 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
 import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch, IconFolder } from '../../components/Icons'
 import SearchableSelect from '../../components/SearchableSelect'
-import { UserOut, DepartmentOut, ApplicationSeedResult, StorageSettingsOut, ApprovalNotificationSettingsOut } from '../../types'
+import { UserOut, UserSummaryOut, DepartmentOut, ApplicationSeedResult, StorageSettingsOut, ApprovalNotificationSettingsOut } from '../../types'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -476,8 +477,8 @@ function ApplicationSeedCard() {
 
 export default function Admin() {
   const { user } = useAuth()
-  const [users, setUsers] = useState<UserOut[]>([])
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
+  const [summary, setSummary] = useState<UserSummaryOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [resetTarget, setResetTarget] = useState<UserOut | null>(null)
@@ -487,15 +488,27 @@ export default function Admin() {
   const [loginFilter, setLoginFilter] = useState<'ALL' | 'STANDARD' | 'LDAP'>('ALL')
   const [section, setSection] = useState<'users' | 'departments' | 'storage' | 'applications' | 'approval-notifications'>('users')
 
-  const load = useCallback(async () => {
-    try {
-      const rows = await api.get<UserOut[]>('/api/auth/users/all')
-      // Surface accounts awaiting review first -- these are typically brand-new
-      // LDAP logins that were auto-provisioned with the default low-privilege role.
-      rows.sort((a, b) => Number(b.needs_role_review === true) - Number(a.needs_role_review === true))
-      setUsers(rows)
-    } catch (err) { setError(err) }
+  // SRS 7.2 pagination rollout -- the user directory is now server-paginated
+  // and server-filtered (search/account status/login type all become query
+  // params instead of an in-browser .filter() over the whole directory).
+  // "Surface accounts awaiting review first" is now the backend's own
+  // default sort (needs_role_review desc, then name) rather than a
+  // client-side .sort() after fetching everything.
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading: usersLoading, setPage, setPageSize, reload: reloadUsers,
+  } = usePaginatedList<UserOut>('/api/auth/users/all', {
+    search: userSearch,
+    extra: {
+      account_filter: accountFilter === 'ALL' ? undefined : accountFilter.toLowerCase(),
+      login_type: loginFilter === 'ALL' ? undefined : loginFilter,
+    },
+  })
+  const loadSummary = useCallback(() => {
+    api.get<UserSummaryOut>('/api/auth/users/summary').then(setSummary).catch(setError)
   }, [])
+  const refreshUsers = useCallback(() => { reloadUsers(); loadSummary() }, [reloadUsers, loadSummary])
+  useEffect(() => { loadSummary() }, [loadSummary])
 
   const loadDepartments = useCallback(async () => {
     try {
@@ -506,31 +519,13 @@ export default function Admin() {
     } catch (err) { setError(err) }
   }, [])
 
-  const reviewCount = users.filter((u) => u.needs_role_review).length
-  const activeCount = users.filter((u) => u.is_active).length
-  const ldapCount = users.filter((u) => u.login_type === 'LDAP').length
+  const reviewCount = summary?.review_count || 0
+  const activeCount = summary?.active_count || 0
+  const ldapCount = summary?.ldap_count || 0
   const departmentOptions = departments.filter((d) => d.is_active).map((d) => d.name)
-  const filteredUsers = useMemo(() => {
-    const query = userSearch.trim().toLowerCase()
-    return users.filter((account) => {
-      const matchesQuery = !query || [
-        account.full_name,
-        account.username,
-        account.email,
-        account.department,
-        ...(account.roles || []).map((role) => ROLE_LABELS[role] || role),
-      ].some((value) => String(value || '').toLowerCase().includes(query))
-      const matchesAccount = accountFilter === 'ALL'
-        || (accountFilter === 'ACTIVE' && account.is_active)
-        || (accountFilter === 'DISABLED' && !account.is_active)
-        || (accountFilter === 'REVIEW' && account.needs_role_review)
-      const matchesLogin = loginFilter === 'ALL' || account.login_type === loginFilter
-      return matchesQuery && matchesAccount && matchesLogin
-    })
-  }, [users, userSearch, accountFilter, loginFilter])
   const hasUserFilters = !!userSearch.trim() || accountFilter !== 'ALL' || loginFilter !== 'ALL'
 
-  useEffect(() => { load(); loadDepartments() }, [load, loadDepartments])
+  useEffect(() => { loadDepartments() }, [loadDepartments])
 
   if (!hasRole(user, 'ADMIN')) {
     return (
@@ -544,8 +539,12 @@ export default function Admin() {
     setError(null)
     setSavingId(id)
     try {
-      const updated = await api.patch<UserOut>(`/api/auth/users/${id}`, changes)
-      setUsers((rows) => rows.map((r) => (r.id === id ? updated : r)))
+      // SRS 7.2 pagination rollout -- `rows` only ever holds the current
+      // page, so a mutation reloads it (+ the summary strip) instead of
+      // patching a locally-held full array, matching every other mutation
+      // handler in this rollout.
+      await api.patch<UserOut>(`/api/auth/users/${id}`, changes)
+      refreshUsers()
     } catch (err) {
       setError(err)
     } finally {
@@ -569,7 +568,7 @@ export default function Admin() {
         </div>
       )}
       <PageHeader
-        title="Users & Access" count={users.length}
+        title="Users & Access" count={summary?.total || 0}
         subtitle="Create accounts, control role and department access, and manage Standard or LDAP authentication from one workspace."
         actions={section === 'users' ? (
           <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
@@ -579,7 +578,7 @@ export default function Admin() {
       />
 
       <nav className="access-workspace-nav" aria-label="Administration sections">
-        <button type="button" className={section === 'users' ? 'active' : ''} onClick={() => setSection('users')}><IconLock /><span><strong>User Directory</strong><small>Accounts, roles and access</small></span><em>{users.length}</em></button>
+        <button type="button" className={section === 'users' ? 'active' : ''} onClick={() => setSection('users')}><IconLock /><span><strong>User Directory</strong><small>Accounts, roles and access</small></span><em>{summary?.total || 0}</em></button>
         <button type="button" className={section === 'departments' ? 'active' : ''} onClick={() => setSection('departments')}><IconPlus /><span><strong>Departments</strong><small>Organisation structure</small></span><em>{departments.length}</em></button>
         <button type="button" className={section === 'storage' ? 'active' : ''} onClick={() => setSection('storage')}><IconFolder /><span><strong>Storage</strong><small>Document upload location</small></span></button>
         <button type="button" className={section === 'applications' ? 'active' : ''} onClick={() => setSection('applications')}><IconCheckCircle /><span><strong>Application Data</strong><small>Approved-name bulk setup</small></span></button>
@@ -588,7 +587,7 @@ export default function Admin() {
 
       {section === 'users' && <div className="access-workspace-panel">
       <div className="access-summary" aria-label="User account summary">
-        <div><small>Total accounts</small><strong>{users.length}</strong><span>All provisioned users</span></div>
+        <div><small>Total accounts</small><strong>{summary?.total || 0}</strong><span>All provisioned users</span></div>
         <div><small>Active accounts</small><strong>{activeCount}</strong><span>Can access the portal</span></div>
         <div><small>LDAP accounts</small><strong>{ldapCount}</strong><span>Directory authenticated</span></div>
         <div className={reviewCount ? 'needs-attention' : ''}><small>Needs review</small><strong>{reviewCount}</strong><span>Role assignment required</span></div>
@@ -597,7 +596,7 @@ export default function Admin() {
       <div className="card access-users-card">
         <div className="access-card-heading">
           <div><span>Access directory</span><h3>User accounts</h3><p>Search a user, then update their department, roles, access ownership, or account status directly.</p></div>
-          <strong>{filteredUsers.length} shown</strong>
+          <strong>{total} shown</strong>
         </div>
         <div className="access-user-toolbar">
           <label className="access-user-search">
@@ -606,7 +605,7 @@ export default function Admin() {
               aria-label="Search users by name, username, or email"
               value={userSearch}
               onChange={(event) => setUserSearch(event.target.value)}
-              placeholder="Search by user name, username, email, department, or role…"
+              placeholder="Search by user name, username, email, or department…"
             />
             {userSearch && <button type="button" aria-label="Clear user search" onClick={() => setUserSearch('')}>×</button>}
           </label>
@@ -625,6 +624,7 @@ export default function Admin() {
         </div>
         <Table
           rowKey="id"
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading: usersLoading }}
           columns={[
             { key: 'full_name', header: 'Name', render: (u) => (
               <div className="access-user-identity">
@@ -692,9 +692,9 @@ export default function Admin() {
               ) : <span className="muted small">Managed via LDAP</span>
             ) },
           ]}
-          rows={filteredUsers}
+          rows={rows}
         />
-        {filteredUsers.length === 0 && (
+        {rows.length === 0 && (
           <div className="access-empty-search">
             <strong>No users match these filters</strong>
             <span>Try another name, username, email, department, role, or account status.</span>
@@ -723,7 +723,7 @@ export default function Admin() {
       {showCreate && (
         <CreateUserModal
           onClose={() => setShowCreate(false)}
-          onCreated={() => { setShowCreate(false); load() }}
+          onCreated={() => { setShowCreate(false); refreshUsers() }}
           departmentOptions={departmentOptions}
         />
       )}
@@ -731,7 +731,7 @@ export default function Admin() {
         <ResetPasswordModal
           userRow={resetTarget}
           onClose={() => setResetTarget(null)}
-          onDone={() => { setResetTarget(null); load() }}
+          onDone={() => { setResetTarget(null); refreshUsers() }}
         />
       )}
     </div>
