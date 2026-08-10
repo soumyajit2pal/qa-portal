@@ -11,6 +11,7 @@ from ..deps import get_current_user, dashboard_department_scope
 from ..constants import (
     Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
     QA_DEPARTMENT, QA_REQUEST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
+    SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
@@ -623,6 +624,36 @@ STAGE_TEAM = {
     QAStatus.REQUESTER_VERIFICATION: "Requester",
 }
 
+# "Pending At" is the readable current workflow stage; "Pending With" is
+# the role that must perform the next action. These are deliberately separate
+# from responsible_team, which is the owning business department in 3W.
+SAST_DAST_PENDING_WITH = {
+    "DRAFT": "Requester", "SUBMITTED": "SM", "SM_APPROVAL_PENDING": "SM",
+    "RETURNED_BY_SM": "Requester", "SM_REJECTED": "Requester",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
+    "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
+    "SECURITY_LEAD_ASSIGNED": "QA Lead", "SECURITY_READINESS": "QA Lead",
+    "RETURNED_BY_SECURITY_LEAD": "Requester", "PLANNING": "QA Lead",
+    "CONFIGURATION": "Security Analyst", "SCANNING": "Security Analyst",
+    "FINDING_VALIDATION": "Security Analyst", "REMEDIATION": "Security Analyst",
+    "ASSIGNED_TO_REQUESTER": "Requester", "WAITING_FOR_FIX": "Requester",
+    "ASSIGNED_TO_LEAD": "Security Analyst", "RESCAN": "Security Analyst",
+    "SECURITY_COMPLETE": "Security Analyst", "REPORT_READY": "Security Analyst",
+}
+PERFORMANCE_PENDING_WITH = {
+    "DRAFT": "Requester", "SUBMITTED": "SM", "SM_APPROVAL_PENDING": "SM",
+    "RETURNED_BY_SM": "Requester", "SM_REJECTED": "Requester",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
+    "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
+    "ENGINEER_ASSIGNED": "QA Lead", "RETURNED_BY_ENGINEER": "Requester",
+    "READINESS": "QA Lead", "FEASIBILITY": "QA Lead", "PLANNING": "QA Lead",
+    "ENVIRONMENT_SETUP": "QA", "SCRIPT_DEVELOPMENT": "QA", "BASELINE": "QA",
+    "LOAD_TEST_EXECUTION": "QA", "RESULT_ANALYSIS": "QA Lead",
+    "DEFECT_FIX_RETEST": "Requester", "REPORT": "QA Lead",
+    "SIGNOFF_PENDING": "QA Lead", "SIGNED_OFF": "Requester",
+    "REQUESTER_VERIFICATION": "Requester",
+}
+
 
 @router.get("/3w")
 def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -642,7 +673,8 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         items.append({
             "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
             "application_name": r.application_name, "pending_stage": STAGE_LABELS.get(r.status, r.status),
-            "responsible_team": STAGE_TEAM.get(r.status, "QA"), "owner": r.application_owner,
+            "responsible_team": r.department or "Unassigned Department",
+            "pending_with": STAGE_TEAM.get(r.status, "QA"), "owner": r.application_owner,
             "department": r.department,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": r.priority, "status": r.status, "source": "Functional Testing Request",
@@ -655,8 +687,10 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
-            "application_name": r.application_name, "pending_stage": f"SAST - {r.status}",
-            "responsible_team": "Security", "owner": None,
+            "application_name": r.application_name,
+            "pending_stage": f"SAST - {SAST_DAST_STATUS_LABELS.get(r.status, r.status)}",
+            "responsible_team": r.department or "Unassigned Department",
+            "pending_with": SAST_DAST_PENDING_WITH.get(r.status, "Security Analyst"), "owner": None,
             "department": r.department,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": r.risk_category, "status": r.status, "source": "SAST Request",
@@ -668,12 +702,32 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             models.DASTRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
-            "project_id": r.request_id, "epic_number": r.application_url,
-            "application_name": r.application_url, "pending_stage": f"DAST - {r.status}",
-            "responsible_team": "Security", "owner": None,
+            "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
+            "application_name": r.application_name or r.application_url,
+            "pending_stage": f"DAST - {SAST_DAST_STATUS_LABELS.get(r.status, r.status)}",
+            "responsible_team": r.department or "Unassigned Department",
+            "pending_with": SAST_DAST_PENDING_WITH.get(r.status, "Security Analyst"), "owner": None,
             "department": r.department,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": r.risk_category, "status": r.status, "source": "DAST Request",
+        })
+
+    for r in _join_qa_department(
+            _in_period(db.query(models.PerformanceRequest), models.PerformanceRequest.updated_at, date_from, date_to)
+            .filter(models.PerformanceRequest.status.notin_(PERFORMANCE_TERMINAL_STATUSES)),
+            models.PerformanceRequest, scope).all():
+        age = _age_days(r.updated_at)
+        items.append({
+            "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
+            "application_name": r.application_name,
+            "pending_stage": f"Performance - {PERFORMANCE_STATUS_LABELS.get(r.status, r.status)}",
+            "responsible_team": r.department or "Unassigned Department",
+            "pending_with": PERFORMANCE_PENDING_WITH.get(r.status, "QA Lead"),
+            "owner": r.application_owner, "department": r.department,
+            "pending_since": r.updated_at, "ageing_days": age,
+            "ageing_bucket": _ageing_bucket(age),
+            "priority": r.priority or r.risk_category, "status": r.status,
+            "source": "Performance Request",
         })
 
     _SUPPRESSION_STAGE_TEAM = {
@@ -693,7 +747,8 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         items.append({
             "project_id": s.suppression_id, "epic_number": s.application_name,
             "application_name": s.application_name, "pending_stage": s.status,
-            "responsible_team": team, "owner": None,
+            "responsible_team": s.department or "Unassigned Department",
+            "pending_with": team, "owner": None,
             "department": s.department,
             "pending_since": s.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": _worst_severity(s.items), "status": s.status, "source": "Suppression Request",

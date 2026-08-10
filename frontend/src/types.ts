@@ -750,6 +750,7 @@ export interface ThreeWItem {
   project_id: string
   application_name?: string
   pending_stage: string
+  pending_with: string
   responsible_team: string
   owner?: string | null
   department?: string | null

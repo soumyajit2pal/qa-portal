@@ -451,7 +451,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
       (!teamFilter || i.responsible_team === teamFilter)
       && (!priorityFilter || i.priority === priorityFilter)
       && (!ageingFilter || i.ageing_bucket === ageingFilter)
-      && (!query || [i.project_id, i.application_name, i.department, i.pending_stage, i.owner, i.source]
+      && (!query || [i.project_id, i.application_name, i.department, i.pending_stage, i.pending_with, i.owner, i.source]
         .some((value) => String(value || '').toLowerCase().includes(query)))
     ))
   }, [threeW, teamFilter, priorityFilter, ageingFilter, governanceSearch])
@@ -484,7 +484,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
     { key: 'project_id', header: 'Project' },
     { key: 'department', header: 'Department', render: (r) => r.department || '—' },
     { key: 'pending_stage', header: 'Pending At' },
-    { key: 'responsible_team', header: 'Pending With' },
+    { key: 'pending_with', header: 'Pending With' },
     { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
     { key: 'ageing_days', header: 'Since', render: (r) => <span className={`ageing-pill ${r.ageing_days > 15 ? 'breached' : r.ageing_days > 7 ? 'near' : 'within'}`}>{r.ageing_days}d</span> },
     { key: 'ageing_bucket', header: 'Ageing bucket' },
@@ -591,7 +591,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
                 <button className="btn btn-sm" onClick={() => downloadCsv('projects_requiring_attention.csv', visibleItems, [
                   { key: 'project_id', header: 'Project' }, { key: 'department', header: 'Department' },
                   { key: 'pending_stage', header: 'Pending At' },
-                  { key: 'responsible_team', header: 'Pending With' },
+                  { key: 'pending_with', header: 'Pending With' },
                   { key: 'owner', header: 'Owner' }, { key: 'ageing_days', header: 'Ageing (days)' }, { key: 'priority', header: 'Priority' },
                 ])}>Export CSV</button>
               </div>
@@ -622,7 +622,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
               { key: 'application_name', header: 'Application' },
               { key: 'department', header: 'Department', render: (r) => r.department || '—' },
               { key: 'pending_stage', header: 'Pending At' },
-              { key: 'responsible_team', header: 'Team' },
+              { key: 'responsible_team', header: 'Team', render: (r) => r.responsible_team || r.department || '—' },
               { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
               { key: 'ageing_days', header: 'Ageing', render: (r) => <span className={`ageing-pill ${r.ageing_days > 15 ? 'breached' : r.ageing_days > 7 ? 'near' : 'within'}`}>{r.ageing_days}d</span> },
               { key: 'priority', header: 'Priority', render: (r) => r.priority ? <Badge status={r.priority} /> : '—' },
@@ -633,7 +633,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         {govExpanded && govTab === 'Ageing' && (
           <div className="subpanel" style={{ marginTop: 12 }}>
             <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>
-              All {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} (QA, SAST, DAST & Suppression,
+              All {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} (Functional, SAST, DAST, Performance & Suppression,
               excluding Drafts and Closed/Cancelled), grouped by days since last update.
             </p>
             <Donut data={threeW.ageing_bucket_distribution} size={160} />
