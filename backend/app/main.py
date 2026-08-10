@@ -82,8 +82,8 @@ with SessionLocal() as migration_db:
         logger.info("Skipping legacy-layout migration/overdue sweeps -- another worker already holds the startup lock.")
 
 app = FastAPI(
-    title="Centralized QA Portal API",
-    description="Backend for the Bank of Maharashtra Centralized QA Portal "
+    title="QualityShield API",
+    description="Backend for the Bank of Maharashtra QualityShield platform "
                  "(Change Request: Centralized QA Portal Creation, FY 2026-27).",
     version="1.0.0",
 )

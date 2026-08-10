@@ -1704,7 +1704,7 @@ export default function Functional() {
                    raised via a QA Request (include any of these in its request types), then tracked here
                    through Department Head approval, readiness verification, execution and sign-off."
       />
-      <div className="toolbar">
+      {/* <div className="toolbar">
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
@@ -1716,7 +1716,7 @@ export default function Functional() {
             </option>
           ))}
         </select>
-      </div>
+      </div> */}
 
       <Card>
         <Table

@@ -16,9 +16,29 @@ from ..deps import get_current_user, require_roles
 from ..constants import (
     Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES, DEFAULT_LDAP_PROVISION_ROLE,
     DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES, CONFIDENTIAL_ROLES,
+    QA_DEPARTMENT,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+def _ldap_default_role_for_department(department: str | None) -> str:
+    """Role applied after a JIT LDAP user's one-time department selection.
+
+    The picker normally returns the canonical QA_DEPARTMENT value. The
+    normalized aliases make the rule robust to an older department master
+    containing "Quality Assurance" or "COE Quality Assurance" without
+    broadening it to unrelated departments that merely contain "QA".
+    """
+    normalized = " ".join(
+        "".join(ch if ch.isalnum() else " " for ch in (department or "").casefold()).split()
+    )
+    qa_names = {
+        " ".join("".join(ch if ch.isalnum() else " " for ch in QA_DEPARTMENT.casefold()).split()),
+        "quality assurance",
+        "coe quality assurance",
+    }
+    return Role.QA_ENGINEER if normalized in qa_names else Role.REQUESTER
 
 
 def _redact_confidential_roles(user: "models.User", viewer: "models.User") -> "schemas.UserOut":
@@ -156,8 +176,27 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
         raise HTTPException(status_code=400, detail="Department is required")
     _validate_department(db, payload.department)
     before = user_snapshot(current_user)
+    is_first_ldap_department_selection = (
+        current_user.login_type == LoginType.LDAP
+        and current_user.needs_department_selection
+    )
     current_user.department = payload.department
     current_user.needs_department_selection = False
+
+    # A brand-new LDAP user is provisioned as Requester only until they pick
+    # a canonical department. On that one-time confirmation, QA department
+    # users receive the QA Engineer default; every other department retains
+    # Requester. Do not overwrite roles if an administrator already reviewed
+    # or modified the account before the user completed this prompt.
+    current_roles = set(current_user.roles)
+    if (
+        is_first_ldap_department_selection
+        and current_user.needs_role_review
+        and current_roles == {DEFAULT_LDAP_PROVISION_ROLE}
+    ):
+        default_role = _ldap_default_role_for_department(payload.department)
+        if default_role != DEFAULT_LDAP_PROVISION_ROLE:
+            current_user.role_assignments = [models.UserRole(role=default_role)]
     db.commit()
     db.refresh(current_user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="SELF_PROFILE_UPDATED",

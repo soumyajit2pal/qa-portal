@@ -269,10 +269,10 @@ export default function Layout({ children }: { children?: ReactNode }) {
       <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">
-          <span className="brand-emblem"><span className="bank-logo" role="img" aria-label="Bank of Maharashtra logo" /></span>
+          <span className="qualitysphere-mark" aria-hidden="true"><b>Q</b><i>S</i></span>
           <div className="brand-copy">
-            <h1>QualityHub</h1>
-            <p>Bank of Maharashtra · QA Portal</p>
+            <h1>Quality<span>Shield</span></h1>
+            <img className="bank-wordmark sidebar-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
           <button className="sidebar-collapse-control" onClick={toggleSidebarSize} aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'} title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>
             {sidebarCollapsed ? '›' : '‹'}
@@ -332,7 +332,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
         <div className="topbar">
           <button className="mobile-nav-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><span /><span /><span /></button>
           <div className="topbar-context">
-            <span><b>QualityHub</b><i>/</i>{activeGroup?.label || 'Workspace'}</span>
+            <span><b>QualityShield</b><i>/</i>{activeGroup?.label || 'Workspace'}</span>
             <strong>{activeItem?.label || 'Dashboard'}</strong>
           </div>
           <form className="search-box" onSubmit={submitSearch}>

@@ -301,8 +301,10 @@ create an LDAP user up front. The first time someone logs in with a username the
 recognize, it attempts an LDAP bind with the credentials they supplied; if that succeeds, a
 local `User` row is created automatically (`login_type=LDAP`, profile fields best-effort filled
 from the directory's `displayName`/`mail`/`department` attributes) and the person is logged in
-immediately with the default, lowest-privilege role (`DEFAULT_LDAP_PROVISION_ROLE` in
-`app/constants.py`, currently Requester). That new account is flagged `needs_role_review=True`
+initially with the temporary default role (`DEFAULT_LDAP_PROVISION_ROLE` in
+`app/constants.py`, currently Requester). At the mandatory first-login department confirmation,
+users selecting **COE - Quality Assurance** receive **QA Engineer** as their default role;
+users selecting any other department remain **Requester**. That new account is still flagged `needs_role_review=True`
 so it shows up at the top of the Admin section's user table with a "Needs Review" badge — an
 admin then assigns the role the person actually needs, which clears the flag. If the
 credentials don't authenticate against LDAP, the login simply fails with the same

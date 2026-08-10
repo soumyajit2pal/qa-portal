@@ -187,7 +187,7 @@ export default function Help() {
       <div className="help-hero">
         <div className="help-hero-icon"><IconHelp /></div>
         <div className="help-hero-copy">
-          <span>Centralized QA Portal · Operating Guide</span>
+          <span>QualityShield · Operating Guide</span>
           <h1>What do you need help with?</h1>
           <p>Search by task, role, workflow, error code, or module name. This guide follows the portal’s current access controls and approval stages.</p>
           <label className="help-search">

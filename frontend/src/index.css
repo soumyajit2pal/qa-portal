@@ -2110,6 +2110,85 @@ body, .redesigned-shell { background: var(--bg); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(13, 102, 120, .42); background-clip: padding-box; }
 
 /* Shell and logo */
+.qualitysphere-mark {
+  position: relative; display: inline-grid; place-items: center; width: 44px; height: 44px;
+  flex: 0 0 44px; overflow: hidden; border: 1px solid rgba(242,199,53,.72);
+  border-radius: 14px; color: #fff; background:
+    radial-gradient(circle at 68% 25%, rgba(250,220,104,.95) 0 4%, transparent 5%),
+    linear-gradient(145deg, #0f7d8d 0%, #075363 58%, #043a47 100%);
+  box-shadow: 0 8px 22px rgba(2,40,49,.28), inset 0 0 0 1px rgba(255,255,255,.07);
+  isolation: isolate;
+}
+.qualitysphere-mark::before {
+  content: ''; position: absolute; width: 30px; height: 30px; border: 1.5px solid rgba(246,210,73,.9);
+  border-left-color: transparent; border-radius: 50%; transform: rotate(-24deg);
+  animation: qualitysphere-orbit 9s linear infinite;
+}
+.qualitysphere-mark::after {
+  content: ''; position: absolute; width: 34px; height: 13px; border-top: 1px solid rgba(255,255,255,.5);
+  border-radius: 50%; transform: rotate(18deg);
+  animation: qualitysphere-orbit-reverse 12s linear infinite;
+}
+.qualitysphere-mark b, .qualitysphere-mark i { position: relative; z-index: 1; font-style: normal; line-height: 1; }
+.qualitysphere-mark b { margin-left: -5px; font-size: 20px; font-weight: 780; letter-spacing: -.09em; }
+.qualitysphere-mark i { position: absolute; right: 7px; bottom: 8px; color: #f6d649; font-size: 10px; font-weight: 850; }
+.qualitysphere-mark-lg { width: 58px; height: 58px; flex-basis: 58px; border-radius: 17px; }
+.qualitysphere-mark-lg::before { width: 40px; height: 40px; }
+.qualitysphere-mark-lg::after { width: 45px; height: 17px; }
+.qualitysphere-mark-lg b { font-size: 27px; }
+.qualitysphere-mark-lg i { right: 9px; bottom: 10px; font-size: 12px; }
+.qualitysphere-mark { transition: transform .28s ease, box-shadow .28s ease, border-color .28s ease; }
+.brand:hover .qualitysphere-mark,
+.qualitysphere-identity:hover .qualitysphere-mark,
+.public-help-brand:hover .qualitysphere-mark {
+  transform: translateY(-1px) scale(1.035); border-color: rgba(250,220,104,.95);
+  box-shadow: 0 12px 28px rgba(2,40,49,.34), 0 0 0 4px rgba(242,199,53,.08);
+}
+.bank-wordmark { display: block; max-width: 100%; object-fit: contain; border-radius: 3px; }
+.sidebar-bank-wordmark { width: 142px; height: 19px; margin-top: 4px; object-position: left center; }
+.navigation-v4 .brand-copy h1 span,
+.brand-name strong em,
+.login-mobile-brand strong em,
+.public-help-brand strong em { color: #f3ca3d; font-style: normal; background-image: linear-gradient(100deg, #eabf31 20%, #fff0a3 48%, #eabf31 76%); background-size: 220% 100%; background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: qualitysphere-gold-sheen 7s ease-in-out infinite; }
+.qualitysphere-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.login-brand-top { justify-content: space-between; }
+.login-brand-top .brand-name strong { font-size: 20px; letter-spacing: -.025em; }
+.login-brand-top .brand-name small { margin-top: 3px; color: #b4d5da; font-size: 9px; font-weight: 650; text-transform: uppercase; letter-spacing: .1em; }
+.login-bank-wordmark { width: clamp(210px, 20vw, 290px); height: auto; box-shadow: 0 5px 18px rgba(2,42,51,.18); }
+.mobile-bank-wordmark { width: 150px; height: 20px; margin-top: 3px; object-position: left center; }
+.public-bank-wordmark { width: 145px; height: 19px; margin-top: 3px; object-position: left center; }
+
+@keyframes qualitysphere-orbit {
+  from { transform: rotate(-24deg); }
+  to { transform: rotate(336deg); }
+}
+@keyframes qualitysphere-orbit-reverse {
+  from { transform: rotate(18deg); }
+  to { transform: rotate(-342deg); }
+}
+@keyframes qualitysphere-gold-sheen {
+  0%, 62%, 100% { background-position: 100% 50%; }
+  78% { background-position: 0% 50%; }
+}
+@keyframes qualitysphere-brand-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.login-brand-top { animation: qualitysphere-brand-enter .55s cubic-bezier(.2,.7,.2,1) both; }
+.login-brand-copy { animation: qualitysphere-brand-enter .62s .08s cubic-bezier(.2,.7,.2,1) both; }
+.login-brand-foot { animation: qualitysphere-brand-enter .62s .16s cubic-bezier(.2,.7,.2,1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .qualitysphere-mark::before,
+  .qualitysphere-mark::after,
+  .brand-name strong em,
+  .login-mobile-brand strong em,
+  .public-help-brand strong em,
+  .login-brand-top,
+  .login-brand-copy,
+  .login-brand-foot { animation: none !important; }
+  .qualitysphere-mark { transition: none; }
+}
 .bank-logo {
   display: block; flex-shrink: 0; background-color: #17697b;
   background-image: url('/bank-of-maharashtra-logo.png'); background-repeat: no-repeat;
@@ -2922,7 +3001,7 @@ td { padding: 12px; }
 .navigation-v4 .sidebar .brand { min-height: 78px; padding: 13px 14px 13px 16px; gap: 11px; border-bottom: 1px solid rgba(255,255,255,.1); background: #043944; }
 .navigation-v4 .brand-emblem { width: 44px; height: 44px; flex-basis: 44px; border: 1px solid rgba(231,189,46,.55); border-radius: 9px; background: #fff; box-shadow: none; }
 .navigation-v4 .sidebar .brand .bank-logo { width: 38px; height: 38px; border-radius: 7px; }
-.navigation-v4 .brand-copy h1 { color: #fff; font-size: 15px; font-weight: 720; letter-spacing: -.01em; }
+.navigation-v4 .brand-copy h1 { color: #fff; font-size: 16px; font-weight: 760; letter-spacing: -.025em; }
 .navigation-v4 .brand-copy p { margin-top: 3px; color: #9fc7cd; font-size: 8px; font-weight: 650; letter-spacing: .055em; }
 .navigation-v4 .sidebar-collapse-control { width: 25px; height: 25px; border-color: rgba(255,255,255,.13); color: #b4d0d4; background: transparent; }
 .navigation-v4 .sidebar nav { padding: 12px 9px 18px; border: 0; box-shadow: none; scrollbar-width: thin; scrollbar-color: rgba(231,189,46,.55) transparent; }

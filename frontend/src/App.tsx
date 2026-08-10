@@ -137,10 +137,10 @@ function PublicHelp() {
     <div className="public-help-shell">
       <div className="public-help-topbar">
         <Link to="/help" className="public-help-brand">
-          <span className="bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
+          <span className="qualitysphere-mark" aria-hidden="true"><b>Q</b><i>S</i></span>
           <div>
-            <strong>QualityHub</strong>
-            <span>Bank of Maharashtra</span>
+            <strong>Quality<em>Shield</em></strong>
+            <img className="bank-wordmark public-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
         </Link>
         <Link to="/login" className="public-help-back">← Back to sign in</Link>

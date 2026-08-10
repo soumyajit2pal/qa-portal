@@ -45,14 +45,17 @@ export default function Login() {
       <div className="login-ambient login-ambient-one" />
       <div className="login-ambient login-ambient-two" />
 
-      <section className="login-shell" aria-label="QualityHub sign in">
+      <section className="login-shell" aria-label="QualityShield sign in">
         <aside className="login-brand">
           <div className="login-brand-top">
-            <span className="bank-logo login-bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
-            <div className="brand-name">
-              <strong>Bank of Maharashtra</strong>
-              <span>QualityHub · Enterprise QA Portal</span>
+            <div className="qualitysphere-identity">
+              <span className="qualitysphere-mark qualitysphere-mark-lg" aria-hidden="true"><b>Q</b><i>S</i></span>
+              <div className="brand-name">
+                <strong>Quality<em>Shield</em></strong>
+                <small>Enterprise quality assurance</small>
+              </div>
             </div>
+            <img className="bank-wordmark login-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
 
           <div className="login-brand-copy">
@@ -75,8 +78,8 @@ export default function Login() {
 
         <div className="login-card">
           <div className="login-mobile-brand">
-            <span className="bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
-            <div><strong>QualityHub</strong><small>Bank of Maharashtra</small></div>
+            <span className="qualitysphere-mark" aria-hidden="true"><b>Q</b><i>S</i></span>
+            <div><strong>Quality<em>Shield</em></strong><img className="bank-wordmark mobile-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" /></div>
           </div>
 
           <div className="login-card-head">
@@ -113,7 +116,7 @@ export default function Login() {
             />
 
             <button className="login-submit" type="submit" disabled={busy}>
-              <span>{busy ? 'Signing you in…' : 'Sign in to QualityHub'}</span>
+              <span>{busy ? 'Signing you in…' : 'Sign in to QualityShield'}</span>
               {!busy && <span aria-hidden="true">→</span>}
             </button>
           </form>
@@ -127,7 +130,7 @@ export default function Login() {
             </select>
           </div>
 
-          <p className="login-help">Need access? Contact your QualityHub administrator.</p>
+          <p className="login-help">Need access? Contact your QualityShield administrator.</p>
           {/* Reported directly: "Help & user Manual should come on login page
               as well, without login atleast user can read" -- links to the
               same /help route signed-in users use, which now also works
