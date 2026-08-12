@@ -11,7 +11,7 @@ import {
   PageOut, QARequestListOut, RequestDocumentOut, UserOut, TestProjectMyAccessOut,
 } from '../../types'
 import { useAuth } from '../../context/AuthContext'
-import { ENVIRONMENTS, DEFECT_MANAGEMENT_ROLES, DEFECT_REASSIGNABLE_STATUSES, hasRole, canReassign } from '../../constants'
+import { ENVIRONMENTS, DEFECT_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canReassign } from '../../constants'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 const STATUSES = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Closed']
@@ -300,7 +300,7 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
   // around, so this is only ever the users actually mapped to whichever
   // department is currently selected (empty until a department is picked).
   const departmentUsers = values.assigned_team
-    ? users.filter((user) => user.is_active && user.department === values.assigned_team)
+    ? users.filter((user) => user.is_active && hasDepartment(user, values.assigned_team))
     : []
 
   // JiraRichTextField's contentEditable div has no native "required"
@@ -382,7 +382,7 @@ function ReassignDefectModal({ defect, users, departments, onClose, onChanged }:
   const [reason, setReason] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const departmentUsers = assignedTeam ? users.filter((u) => u.is_active && u.department === assignedTeam) : []
+  const departmentUsers = assignedTeam ? users.filter((u) => u.is_active && hasDepartment(u, assignedTeam)) : []
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -568,7 +568,8 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const currentAssigneeUser = users.find((u) => u.id === defect.assignee_id)
   const canReassignDefect = !!defect.assignee_id
     && DEFECT_REASSIGNABLE_STATUSES.includes(defect.status)
-    && canReassign(user, defect.assignee_id, currentAssigneeUser?.department)
+    && canReassign(user, defect.assignee_id, currentAssigneeUser?.departments && currentAssigneeUser.departments.length
+      ? currentAssigneeUser.departments : currentAssigneeUser?.department)
   const allowedTransitions = (TRANSITIONS[defect.status] || []).filter((target) => {
     if (target === 'Assigned') return canAssign
     if (['Rejected', 'Duplicate'].includes(target)) return manager
@@ -684,16 +685,6 @@ export default function Defects() {
   }, [])
 
   const load = useCallback(async () => {
-    // 2026-08 -- reported directly, then corrected same day to also cover
-    // whoever may raise a defect (see DEFECT_MANAGEMENT_ROLES' own comment
-    // in constants.ts), now enforced by the page-level Access Restricted
-    // gate below (and backend-side by list_defects/defect_dashboard/
-    // export_defects/the batch executions endpoint all requiring
-    // DEFECT_MANAGEMENT_ROLES). Guarding here too means an unauthorized
-    // user's page load doesn't even fire this burst of fetches in the first
-    // place -- they'll never reach a state where the page renders the
-    // register anyway, so there's nothing for load() to do.
-    if (!hasRole(user, ...DEFECT_MANAGEMENT_ROLES)) return
     try {
       // Fetches the full active-user directory (every department), not the
       // Test Management IT-QA-only eligible-users list -- a defect can be
@@ -778,21 +769,15 @@ export default function Defects() {
   // should not be any option to open any defects" -- then corrected the
   // same day: "defect can be raised by requster, business analyst
   // application owner too so defect management tool should be available
-  // for them as well" (see DEFECT_MANAGEMENT_ROLES' own comment in
-  // constants.ts for the final role set). Placed after every hook above
-  // (Admin.tsx's own established pattern for this kind of page-level gate)
-  // so the Rules of Hooks aren't violated by an earlier conditional return.
-  // The backend independently enforces the same restriction on the
-  // register/dashboard/export/batch-executions endpoints this page calls,
-  // so a direct API call bypasses nothing even if this render check were
-  // somehow skipped.
-  if (!hasRole(user, ...DEFECT_MANAGEMENT_ROLES)) {
-    return (
-      <Card title="Access Restricted">
-        <p className="muted">Defect Management is only available to QA team accounts and to Requester, Business Analyst, and Application Owner accounts (who may report defects).</p>
-      </Card>
-    )
-  }
+  // for them as well" -- then, further reported directly: "currently
+  // Defect management is not available to everyone. make this visible to
+  // everyone based on department filter." The role-based page gate that
+  // used to live here is retired -- Defect Management is now open to any
+  // authenticated user, scoped purely by department (same as every other
+  // module's register), matching the backend's own retired
+  // DEFECT_MANAGEMENT_ROLES gate on list_defects/defect_dashboard/
+  // export_defects/the batch executions endpoint (routers/defects.py,
+  // routers/test_execution.py).
 
   return <div className="tm-page defect-page">
     <header className="defect-command-header">

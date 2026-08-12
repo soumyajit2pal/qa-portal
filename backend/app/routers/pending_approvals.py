@@ -140,7 +140,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     if user.has_role(Role.APPLICATION_OWNER):
         q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
         if not is_admin:
-            q = q.filter(models.ApplicationMaster.department == user.department)
+            q = q.filter(models.ApplicationMaster.department.in_(user.departments))
         for obj in q.order_by(models.ApplicationMaster.created_at).all():
             gw = _active_gateway(obj.id)
             if not gw:
@@ -156,7 +156,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     if user.has_role(Role.SM):
         q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_SM")
         if not is_admin:
-            q = q.filter(models.ApplicationMaster.department == user.department)
+            q = q.filter(models.ApplicationMaster.department.in_(user.departments))
         for obj in q.order_by(models.ApplicationMaster.created_at).all():
             gw = _active_gateway(obj.id)
             if not gw:
@@ -230,7 +230,7 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
             )
             if not is_admin:
                 q = q.filter(
-                    or_(models.QARequest.department == user.department, models.QARequest.department.is_(None)),
+                    or_(models.QARequest.department.in_(user.departments), models.QARequest.department.is_(None)),
                     model.requester_id != user.id,
                 )
             for obj in q.order_by(model.created_at).all():
@@ -249,7 +249,7 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
             )
             if not is_admin:
                 q = q.filter(
-                    or_(models.QARequest.department == user.department, models.QARequest.department.is_(None)),
+                    or_(models.QARequest.department.in_(user.departments), models.QARequest.department.is_(None)),
                     model.requester_id != user.id,
                 )
             for obj in q.order_by(model.created_at).all():
@@ -305,7 +305,7 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
     if user.has_role(Role.SM):
         q = _query("SM_APPROVAL_PENDING")
         if not is_admin:
-            q = q.filter(models.SuppressionRequest.department == user.department,
+            q = q.filter(models.SuppressionRequest.department.in_(user.departments),
                          models.SuppressionRequest.created_by_id != user.id)
         for obj in q.order_by(models.SuppressionRequest.created_at).all():
             results.append(_item(
@@ -318,7 +318,7 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
     if user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
         q = _query("DEPARTMENT_HEAD_APPROVAL_PENDING")
         if not is_admin:
-            q = q.filter(models.SuppressionRequest.department == user.department,
+            q = q.filter(models.SuppressionRequest.department.in_(user.departments),
                          models.SuppressionRequest.created_by_id != user.id)
         for obj in q.order_by(models.SuppressionRequest.created_at).all():
             results.append(_item(
@@ -347,7 +347,7 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
     (requesting) department -- unlike every SM/Department Head checkpoint
     above."""
     is_admin = user.has_role(Role.ADMIN)
-    if user.department != QA_DEPARTMENT and not is_admin:
+    if not user.has_department(QA_DEPARTMENT) and not is_admin:
         return []
     results: List[dict] = []
 

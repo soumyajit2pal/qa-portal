@@ -32,7 +32,15 @@ class UserOut(ORMModel):
     username: str
     full_name: str
     email: Optional[str] = None
+    # 2026-08 "one user can be on multiple departments" CR -- `department`
+    # (singular) is kept for every existing consumer that only expects one
+    # value. It's the raw legacy column, but every write path now keeps it
+    # in sync with models.User.primary_department (the FIRST department
+    # assigned -- see routers/auth.py::_sync_primary_department), so it
+    # never goes stale. `departments` (plural) is the real, complete list --
+    # new code should read that instead.
     department: Optional[str] = None
+    departments: List[str] = []
     roles: List[str]
     login_type: str
     is_active: bool
@@ -62,7 +70,13 @@ class UserCreate(BaseModel):
     username: str
     full_name: str
     email: Optional[str] = None
+    # 2026-08 "one user can be on multiple departments" CR -- `departments`
+    # (plural) is the new field Admin.tsx now sends; `department` (singular)
+    # is kept accepted for backward compatibility (e.g. any older client/
+    # script), and is treated as a single-item department list if
+    # `departments` itself isn't provided. See routers/auth.py::create_user.
     department: Optional[str] = None
+    departments: Optional[List[str]] = None
     roles: List[str]                    # a user must be assigned at least one role
     login_type: str = "STANDARD"       # STANDARD / LDAP
     password: Optional[str] = None      # required when login_type == STANDARD; ignored for LDAP
@@ -70,10 +84,15 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     """Admin-only partial update -- role reassignment, activation, login-type change, etc.
-    `roles`, if provided, REPLACES the user's full set of assigned roles."""
+    `roles`, if provided, REPLACES the user's full set of assigned roles.
+    `departments`, if provided, REPLACES the user's full set of assigned
+    departments (2026-08 CR) -- `department` (singular) is kept accepted for
+    backward compatibility and is treated the same as a one-item
+    `departments` list when `departments` itself isn't provided."""
     full_name: Optional[str] = None
     email: Optional[str] = None
     department: Optional[str] = None
+    departments: Optional[List[str]] = None
     roles: Optional[List[str]] = None
     login_type: Optional[str] = None
     is_active: Optional[bool] = None
@@ -103,10 +122,9 @@ class LocalAdminUserUpdate(BaseModel):
 
 
 class DepartmentSelection(BaseModel):
-    """Body for PATCH /api/auth/me -- the one thing a logged-in user (not
-    just an Admin) can set on their own profile, used by the first-LDAP-login
-    department-selection popup."""
-    department: str
+    """Ordered department selection from first-time LDAP onboarding."""
+    departments: List[str]
+    primary_department: str
 
 
 class AuditLogOut(ORMModel):
@@ -1598,6 +1616,10 @@ class ApplicationMasterDecision(BaseModel):
     comments: Optional[str] = None
 
 
+class ApplicationMasterDepartmentUpdate(BaseModel):
+    department: str
+
+
 class ApplicationSeedResult(ORMModel):
     """Result of an Admin bulk-seeding an xlsx of known-good Application
     Names into ApplicationMaster (see routers/applications.py::
@@ -1666,6 +1688,38 @@ class TestProjectOut(ORMModel):
     default_reviewer_name: Optional[str] = None
     default_qa_lead_id: Optional[int] = None
     default_qa_lead_name: Optional[str] = None
+    # 2026-08 "view-only access to department/user" CR -- True when the
+    # CURRENT viewer can only see this project via a TestProjectViewGrant
+    # (not their own department membership, and not an unrestricted QA/Admin
+    # role). Computed per-request by the router (routers/test_projects.py),
+    # not a column on TestProject itself -- see that model's own docstring.
+    # Defaults False so any response NOT explicitly stamped (e.g. a
+    # not-yet-updated caller) reads as "full access", the safe default for
+    # something that isn't itself a permission enforcement -- the frontend
+    # uses this purely to badge/disable UI; every real mutation stays
+    # enforced server-side by its own existing role/ownership checks
+    # regardless of what this flag says.
+    view_only: bool = False
+
+
+class TestProjectViewGrantOut(ORMModel):
+    id: int
+    project_id: int
+    department: Optional[str] = None
+    user_id: Optional[int] = None
+    user_name: Optional[str] = None
+    granted_by_id: Optional[int] = None
+    granted_by_name: Optional[str] = None
+    created_at: datetime.datetime
+
+
+class TestProjectViewGrantCreate(BaseModel):
+    """Exactly one of `department`/`user_id` must be set -- validated in
+    routers/test_projects.py::create_project_view_grant, not here (mirrors
+    this app's other "exactly one of" payload rules, e.g.
+    auth.py's department/departments resolution)."""
+    department: Optional[str] = None
+    user_id: Optional[int] = None
 
 
 class TestProjectMyAccessOut(BaseModel):

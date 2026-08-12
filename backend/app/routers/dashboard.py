@@ -37,8 +37,11 @@ def _join_qa_department(query, model, scope):
     everywhere else in the app."""
     if not scope:
         return query
+    # 2026-08 "one user can be on multiple departments" CR -- scope is now a
+    # list of departments (dashboard_department_scope's own docstring), so
+    # this is an `.in_()` membership filter, not `==`.
     return query.join(models.QARequest, model.qa_request_id == models.QARequest.id) \
-                .filter(models.QARequest.department == scope)
+                .filter(models.QARequest.department.in_(scope))
 
 
 def _date_bounds(date_from: str | None, date_to: str | None):
@@ -103,13 +106,13 @@ TESTER_WORKLOAD_STATUSES = [
 # 100% occupied. Lighter lifecycle stages consume a fraction of a slot. This
 # makes the dashboard an explainable capacity aid for QA Leads instead of a
 # relative "busiest person = 100%" chart whose meaning changes every day.
-TESTER_CAPACITY_POINTS = 3.0
+TESTER_CAPACITY_POINTS = 8.0
 FUNCTIONAL_TESTER_LOAD = {
     QAStatus.TESTER_ASSIGNED: 0.50,
     QAStatus.TEST_DESIGN: 1.00,
     QAStatus.EXECUTION_IN_PROGRESS: 1.00,
     QAStatus.DEFECT_RAISED: 0.50,
-    QAStatus.WAITING_FOR_FIX: 0.25,
+    QAStatus.WAITING_FOR_FIX: 0.00,
     QAStatus.RETESTING: 0.75,
     QAStatus.QA_COMPLETED: 0.15,
     QAStatus.QA_SIGNOFF_PENDING: 0.10,
@@ -132,9 +135,9 @@ SECURITY_ANALYST_LOAD = {
     "SCANNING": 1.00,
     "FINDING_VALIDATION": 0.75,
     "REMEDIATION": 0.50,
-    "ASSIGNED_TO_REQUESTER": 0.25,
-    "WAITING_FOR_FIX": 0.25,
-    "ASSIGNED_TO_LEAD": 0.50,
+    "ASSIGNED_TO_REQUESTER": 0.10,
+    "WAITING_FOR_FIX": 0.00,
+    "ASSIGNED_TO_LEAD": 0.10,
     "RESCAN": 0.75,
     "SECURITY_COMPLETE": 0.15,
     "REPORT_READY": 0.10,
@@ -192,7 +195,9 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
                   .join(models.UserRole, models.UserRole.user_id == models.User.id)
                   .filter(models.User.is_active == True,  # noqa: E712
                           models.UserRole.role.in_([Role.QA_ENGINEER, Role.SECURITY_ANALYST]),
-                          models.User.department == QA_DEPARTMENT)
+                          models.User.department_assignments.any(
+                              models.UserDepartment.department == QA_DEPARTMENT
+                          ))
                   .distinct().order_by(models.User.full_name).all())
     functional_requests = (_in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at,
                                       date_from, date_to)
@@ -217,7 +222,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
         return {
             "tester_id": user_id,
             "tester_name": user.full_name if user else f"User #{user_id}",
-            "department": (user.department if user else None) or "—",
+            "department": (", ".join(user.departments) if user and user.departments else None) or "—",
             "role_label": role_label(user),
             "status_counts": {status: 0 for status in TESTER_WORKLOAD_STATUSES},
             "source_counts": {"Functional": 0, "Performance": 0, "SAST": 0, "DAST": 0},
@@ -369,7 +374,7 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
         db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to
     ).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
     if scope:
-        _pending_suppressions_q = _pending_suppressions_q.filter(models.SuppressionRequest.department == scope)
+        _pending_suppressions_q = _pending_suppressions_q.filter(models.SuppressionRequest.department.in_(scope))
     pending_approvals = (
         len([r for r in requests if r.status in PENDING_APPROVAL_STATUSES])
         + _join_qa_department(_in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).filter(
@@ -440,7 +445,9 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     compute it every time" rather than erroring when Redis isn't
     configured/reachable -- `cache.get_json`/`set_json` never raise."""
     scope = dashboard_department_scope(current_user)
-    cache_key = f"dashboard:summary:v1:{scope or 'all'}:{date_from or ''}:{date_to or ''}"
+    # 2026-08 CR -- scope is now a list; join it into a stable, readable cache
+    # key segment (sorted so department order never produces a cache miss).
+    cache_key = f"dashboard:summary:v1:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
     cached = cache.get_json(cache_key)
     if cached is not None:
         return cached
@@ -463,7 +470,7 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
         models.QARequest.target_release_date <= today + datetime.timedelta(days=14),
     )
     if scope:
-        nearing_release_q = nearing_release_q.filter(models.QARequest.department == scope)
+        nearing_release_q = nearing_release_q.filter(models.QARequest.department.in_(scope))
     nearing_release_count = nearing_release_q.count()
 
     critical_pending_q = db.query(models.FunctionalRequest).filter(
@@ -556,7 +563,7 @@ def suppression_dashboard(date_from: str | None = Query(None), date_to: str | No
     # creation time, see its own column comment in models.py) -- unlike
     # Functional/SAST/DAST/Performance, no join needed here.
     if scope:
-        q = q.filter(models.SuppressionRequest.department == scope)
+        q = q.filter(models.SuppressionRequest.department.in_(scope))
     sups = q.all()
     open_sups = [s for s in sups if s.status not in SUPPRESSION_TERMINAL_STATUSES]
     # A suppression request can cover several findings (models.SuppressionItem)
@@ -740,7 +747,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     _suppression_q = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to).filter(
         models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
     if scope:
-        _suppression_q = _suppression_q.filter(models.SuppressionRequest.department == scope)
+        _suppression_q = _suppression_q.filter(models.SuppressionRequest.department.in_(scope))
     for s in _suppression_q.all():
         age = _age_days(s.updated_at)
         team = _SUPPRESSION_STAGE_TEAM.get(s.status, "Requester")
@@ -777,7 +784,7 @@ def three_w_project_detail(project_id: str, db: Session = Depends(get_db),
     if not req:
         return {"detail": "Project not found"}
     scope = dashboard_department_scope(current_user)
-    if scope and req.department != scope:
+    if scope and req.department not in scope:
         # Same department scoping as the 3W list above (see
         # dashboard_department_scope) -- without this, a scoped user could
         # still drill into an out-of-department project's own lifecycle/audit

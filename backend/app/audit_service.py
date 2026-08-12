@@ -73,6 +73,11 @@ def user_snapshot(user: models.User) -> dict:
         "full_name": user.full_name,
         "email": user.email,
         "department": user.department,
+        # 2026-08 "one user can be on multiple departments" CR: capture the
+        # full multi-department set too, alongside the legacy single
+        # `department` (kept above, still synced to the primary/first-
+        # assigned department) so existing audit diffs/readers don't break.
+        "departments": sorted(user.departments),
         "roles": sorted(user.roles),
         "login_type": user.login_type,
         "is_active": bool(user.is_active),

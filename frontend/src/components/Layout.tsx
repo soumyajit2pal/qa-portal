@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS, hasRole, DEFECT_MANAGEMENT_ROLES } from '../constants'
+import { ROLE_LABELS, hasRole } from '../constants'
 import { UserOut } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
@@ -67,15 +67,15 @@ function navGroups(user: UserOut | null): NavGroup[] {
         { to: '/test-projects', label: 'Projects', icon: IconApps },
         { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
         { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
-        // 2026-08 -- reported directly (see DEFECT_MANAGEMENT_ROLES' own
-        // comment in constants.ts): "other than QA team, for others there
-        // should not be any option to open any defects," then corrected the
-        // same day to also include everyone who can raise a defect
-        // (Requester/Business Analyst/Application Owner). Nav item hidden
-        // for anyone outside that combined set, same way Audit Log is below.
-        ...(hasRole(user, ...DEFECT_MANAGEMENT_ROLES)
-          ? [{ to: '/defects', label: 'Defect Management', icon: IconTarget }]
-          : []),
+        // 2026-08 -- was role-gated for a while (QA team plus whoever could
+        // raise a defect), then reported directly: "currently Defect
+        // management is not available to everyone. make this visible to
+        // everyone based on department filter." Nav item now shown
+        // unconditionally, same as every other Test Management item above --
+        // the backend's own department scoping (routers/defects.py's
+        // _scoped_defects) is what actually restricts what a scoped user
+        // sees once there, not this nav check.
+        { to: '/defects', label: 'Defect Management', icon: IconTarget },
         // SRS EXE-002 "My Executions" -- the signed-in user's own actionable
         // items across every authorized project, one cross-project view
         // instead of hunting through each project's own Test Execution page.
@@ -165,7 +165,14 @@ export default function Layout({ children }: { children?: ReactNode }) {
   // auto-opens whichever group contains the current route, so the active
   // section is never hidden on load; only the OTHER groups start collapsed
   // instead of every group being expanded up front.
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set())
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('qa_nav_expanded_groups') || '[]')
+      return new Set(Array.isArray(saved) ? saved : [])
+    } catch {
+      return new Set()
+    }
+  })
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Topbar user menu -- clicking the signed-in name reveals Department +
   // Role(s) (mirrors the sidebar's own user-chip, but reachable from the
@@ -200,14 +207,8 @@ export default function Layout({ children }: { children?: ReactNode }) {
     }
   }, [userMenuOpen])
   useEffect(() => {
-    if (!activeGroup) return
-    setExpandedGroups((previous) => {
-      if (previous.has(activeGroup.label)) return previous
-      const next = new Set(previous)
-      next.add(activeGroup.label)
-      return next
-    })
-  }, [activeGroup?.label])
+    localStorage.setItem('qa_nav_expanded_groups', JSON.stringify(Array.from(expandedGroups)))
+  }, [expandedGroups])
 
   useEffect(() => {
     function focusGlobalSearch(event: KeyboardEvent) {
@@ -273,7 +274,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
   }
 
   return (
-    <div className="app-shell redesigned-shell navigation-v2 navigation-v3 navigation-v4 navigation-v5 navigation-v6">
+    <div className="app-shell redesigned-shell navigation-v2 navigation-v8">
       <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">
@@ -290,14 +291,13 @@ export default function Layout({ children }: { children?: ReactNode }) {
 
         <nav aria-label="Application modules">
           <div className="nav-workspace-label"><span>Quality operations</span><i /></div>
-          {groups.map((group, groupIndex) => (
+          {groups.map((group) => (
             <div className={`nav-group ${sidebarCollapsed || expandedGroups.has(group.label) ? 'group-open' : ''}`} key={group.label}>
               <button className="nav-group-toggle" onClick={() => toggleGroup(group.label)} aria-expanded={sidebarCollapsed || expandedGroups.has(group.label)}>
-                <b className="nav-group-code">{String(groupIndex + 1).padStart(2, '0')}</b>
                 <span>{group.label}</span><i>⌄</i>
               </button>
               <div className="nav-group-items">
-                {group.items.map((item, itemIndex) => {
+                {group.items.map((item) => {
                   const Icon = item.icon
                   return (
                     <NavLink key={item.to} to={item.to} end={item.to === '/'} onClick={() => setSidebarOpen(false)}
@@ -305,7 +305,6 @@ export default function Layout({ children }: { children?: ReactNode }) {
                              className={({ isActive }) => (isActive ? 'active' : '')}>
                       <span className="nav-icon"><Icon /></span>
                       <span className="nav-label">{item.label}</span>
-                      <span className="nav-sequence">{String(groupIndex + 1).padStart(2, '0')}.{String(itemIndex + 1).padStart(2, '0')}</span>
                     </NavLink>
                   )
                 })}
@@ -330,7 +329,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
                 <div className="role">
                   {(user.roles || []).map((r) => ROLE_LABELS[r] || r).join(' · ') || 'No role assigned'}
                 </div>
-                <div className="dept">{user.department || 'No department set'}</div>
+                <div className="dept">{(user.departments && user.departments.length ? user.departments.join(', ') : user.department) || 'No department set'}</div>
               </div>
               <button onClick={handleLogout} title="Log out"><IconLogout width={16} height={16} /></button>
             </div>
@@ -370,12 +369,16 @@ export default function Layout({ children }: { children?: ReactNode }) {
                     <div className="topbar-user-popover-email">{user.username}</div>
                     <div className="topbar-user-popover-row">
                       <span className="label">Department</span>
-                      <span>{user.department || 'No department set'}</span>
+                      <span>{(user.departments && user.departments.length ? user.departments.join(', ') : user.department) || 'No department set'}</span>
                     </div>
                     <div className="topbar-user-popover-row">
                       <span className="label">Role(s)</span>
                       <span>{(user.roles || []).map((r) => ROLE_LABELS[r] || r).join(', ') || 'No role assigned'}</span>
                     </div>
+                    <button type="button" className="topbar-logout" onClick={handleLogout}>
+                      <IconLogout width={15} height={15} />
+                      <span>Log out</span>
+                    </button>
                   </div>
                 )}
               </div>

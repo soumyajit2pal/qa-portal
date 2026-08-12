@@ -3,6 +3,7 @@ import { IconSearch } from './Icons'
 import { UserOut } from '../types'
 import { computePanelPos, PanelPos } from './panelPosition'
 import ClearableSearchInput from './ClearableSearchInput'
+import { userDepartments } from '../constants'
 
 interface MultiUserAssignSelectProps {
   value: string[]
@@ -69,7 +70,8 @@ export default function MultiUserAssignSelect({ value, onChange, users, placehol
   const selected = users.filter((u) => value.includes(String(u.id)))
   const q = query.trim().toLowerCase()
   const filtered = q
-    ? users.filter((u) => u.full_name.toLowerCase().includes(q) || (u.department || '').toLowerCase().includes(q))
+    ? users.filter((u) => u.full_name.toLowerCase().includes(q)
+      || userDepartments(u).some((d) => d.toLowerCase().includes(q)))
     : users
 
   function toggle(u: UserOut) {
@@ -143,7 +145,7 @@ export default function MultiUserAssignSelect({ value, onChange, users, placehol
                 >
                   <span className={`multi-user-checkbox ${checked ? 'checked' : ''}`}>{checked && '✓'}</span>
                   {u.full_name}
-                  {u.department && <span className="muted small" style={{ marginLeft: 6 }}>({u.department})</span>}
+                  {userDepartments(u).length > 0 && <span className="muted small" style={{ marginLeft: 6 }}>({userDepartments(u).join(', ')})</span>}
                 </div>
               )
             })}

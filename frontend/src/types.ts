@@ -25,6 +25,11 @@ export interface UserOut {
   full_name: string
   email?: string | null
   department?: string | null
+  // 2026-08 "one user can be on multiple departments" CR -- the full set a
+  // System Admin has granted this user (mirrors backend schemas.UserOut);
+  // `department` (singular) is kept for compat, synced to the primary
+  // (first-assigned) department.
+  departments: string[]
   roles: string[]
   login_type: string
   is_active: boolean
@@ -852,6 +857,25 @@ export interface TestProjectOut {
   default_reviewer_name?: string | null
   default_qa_lead_id?: number | null
   default_qa_lead_name?: string | null
+  // 2026-08 "view-only access to department/user" CR -- True when the
+  // CURRENT viewer can only see this project via a TestProjectViewGrant,
+  // not their own department or an unrestricted QA/Admin role. Computed
+  // per-request server-side (routers/test_projects.py); defaults false.
+  view_only?: boolean
+}
+
+// 2026-08 "view-only access to department/user" CR -- mirrors backend
+// schemas.TestProjectViewGrantOut. Exactly one of department/user_id is set
+// per row.
+export interface TestProjectViewGrantOut {
+  id: number
+  project_id: number
+  department?: string | null
+  user_id?: number | null
+  user_name?: string | null
+  granted_by_id?: number | null
+  granted_by_name?: string | null
+  created_at: string
 }
 
 // Request body for POST /api/test-projects -- mirrors backend TestProjectCreate.

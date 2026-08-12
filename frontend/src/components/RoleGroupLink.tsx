@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { Modal } from './Common'
+import { hasDepartment, userDepartments } from '../constants'
 import type { UserOut } from '../types'
 
 export default function RoleGroupLink({ users, role, label, department, renderTrigger }: {
@@ -35,7 +36,7 @@ export default function RoleGroupLink({ users, role, label, department, renderTr
     () => users
       .filter((user) => user.is_active
         && (user.roles || []).some((r) => roles.includes(r))
-        && (!department || user.department === department))
+        && (!department || hasDepartment(user, department)))
       .sort((a, b) => a.full_name.localeCompare(b.full_name)),
     [users, roles, department],
   )
@@ -55,7 +56,7 @@ export default function RoleGroupLink({ users, role, label, department, renderTr
         {members.map((member) => <div className="role-group-member" key={member.id}>
           <span className="role-group-avatar">{member.full_name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()}</span>
           <span><strong>{member.full_name}</strong><small>{member.email || member.username}</small></span>
-          <em>{member.department || 'Department not set'}</em>
+          <em>{userDepartments(member).length ? userDepartments(member).join(', ') : 'Department not set'}</em>
         </div>)}
       </div> : <div className="role-group-empty">
         <strong>No active members</strong>

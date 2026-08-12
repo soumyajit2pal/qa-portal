@@ -307,7 +307,7 @@ function Donut({ data, size = 128 }: { data?: Record<string, number> | null; siz
 // funnel; that distinction keeps the numbers consistent with the widget's
 // "current workflow stage" description.
 const LIFECYCLE_STAGES = [
-  { key: 'request', label: 'Draft / Requester' },
+  { key: 'request', label: 'Requester' },
   { key: 'sm-approval', label: 'SM Approval' },
   { key: 'department-head-approval', label: 'Department Head Approval' },
   { key: 'qa-activity', label: 'QA Activity' },
@@ -832,6 +832,11 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
   const [departmentRequests, setDepartmentRequests] = useState<UnifiedRequestRow[]>([])
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<unknown>(null)
+  // 2026-08 "one user can be on multiple departments" CR -- "My department"
+  // now means the UNION across every department this user belongs to, not
+  // just their primary one.
+  const myDepartments = user?.departments && user.departments.length
+    ? user.departments : (user?.department ? [user.department] : [])
 
   useEffect(() => {
     if (!user?.id) return
@@ -854,17 +859,36 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
         return all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       })
     }
+    // `apply_department_filter` is still a single-value equality filter on
+    // the backend, a deliberate per-request search/narrow control -- see its
+    // own list_requests docstring -- so this fetches once per department and
+    // merges/dedupes client-side rather than widening that filter's own
+    // semantics.
     Promise.all([
       fetchUnified(`requester_id=${user.id}`),
       // A user with no department mapped (rare -- e.g. some executive
       // accounts) has no meaningful "my department" set; skip the fetch
       // rather than asking the backend for department="" (which would 400/
       // filter to nothing useful, not "no department").
-      user.department ? fetchUnified(`department=${encodeURIComponent(user.department)}`) : Promise.resolve([]),
+      myDepartments.length
+        ? Promise.all(myDepartments.map((dept) => fetchUnified(`department=${encodeURIComponent(dept)}`)))
+          .then((batches) => {
+            const seen = new Set<string>()
+            const merged: UnifiedRequestRow[] = []
+            for (const batch of batches) {
+              for (const row of batch) {
+                if (seen.has(row.uid)) continue
+                seen.add(row.uid)
+                merged.push(row)
+              }
+            }
+            return merged.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          })
+        : Promise.resolve([]),
     ]).then(([mine, department]) => {
       setMyRequests(mine); setDepartmentRequests(department); setLoaded(true)
     }).catch(setError)
-  }, [user?.id, user?.department])
+  }, [user?.id, user?.department, user?.departments])
 
   const filteredMyRequests = myRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
   const filteredDepartmentRequests = departmentRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
@@ -883,7 +907,7 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
   return (
     <div>
       <p className="muted small">
-        Everything raised by you, or by {user?.department || 'your department'}, across every request type — QA
+        Everything raised by you, or by {myDepartments.length ? myDepartments.join(', ') : 'your department'}, across every request type — QA
         Request, Functional QA, SAST, DAST and Performance.
       </p>
       <Card
@@ -893,7 +917,7 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
               My Requests ({filteredMyRequests.length})
             </button>
             <button className={reqScope === 'department' ? 'active' : ''} onClick={() => setReqScope('department')}>
-              {user?.department || 'My Department'} ({filteredDepartmentRequests.length})
+              {myDepartments.length ? myDepartments.join(', ') : 'My Department'} ({filteredDepartmentRequests.length})
             </button>
           </div>
         )}

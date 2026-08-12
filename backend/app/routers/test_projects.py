@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
-    get_current_user, require_roles, dashboard_department_scope, get_project_member_role,
+    get_current_user, require_roles, dashboard_department_scope, viewable_project_ids, get_project_member_role,
     can_author_repository, can_review_repository, can_execute_project, can_manage_execution_governance,
     can_give_final_approval, require_can_manage_project, get_or_404, get_project_or_404,
 )
@@ -123,7 +123,12 @@ def list_eligible_test_management_users(db: Session = Depends(get_db),
     """
     return (
         db.query(models.User)
-        .filter(models.User.is_active == True, models.User.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS))  # noqa: E712
+        .filter(
+            models.User.is_active == True,  # noqa: E712
+            models.User.department_assignments.any(
+                models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
+            ),
+        )
         .order_by(models.User.full_name)
         .all()
     )
@@ -160,12 +165,26 @@ def list_test_projects(include_inactive: bool = Query(False), params: pagination
     query = db.query(models.TestProject)
     if not include_inactive:
         query = query.filter(models.TestProject.is_active == True)  # noqa: E712
-    scope = dashboard_department_scope(current_user)
-    if scope:
-        query = query.filter(models.TestProject.department == scope)
+    # 2026-08 "view-only access to department/user" CR -- widened from a
+    # plain department filter to viewable_project_ids, which also folds in
+    # any TestProjectViewGrant naming this user or one of their departments.
+    # See that function's own docstring in deps.py.
+    project_ids = viewable_project_ids(db, current_user)
+    if project_ids is not None:
+        query = query.filter(models.TestProject.id.in_(project_ids))
     query = pagination.apply_search(query, params, models.TestProject.name, models.TestProject.project_key)
     query = query.order_by(models.TestProject.is_active.desc(), models.TestProject.name)
     result = pagination.paginate(query, params)
+    # PRJ view-access CR: stamp each returned row with whether the CURRENT
+    # user only sees it via a grant (own department -> full access, same as
+    # before this feature existed) vs their real department membership --
+    # the frontend uses this to badge the card "View only" and disable
+    # mutating controls, without duplicating the department/grant logic
+    # client-side. Computed here rather than as a TestProject @property
+    # since it's inherently per-viewer, not a fact about the project itself.
+    own_scope = dashboard_department_scope(current_user)
+    for row in result.items:
+        row.view_only = bool(own_scope is not None and not current_user.has_department(row.department))
     return pagination.to_page_response(result, params)
 
 
@@ -256,6 +275,8 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
 @router.get("/{project_id}", response_model=schemas.TestProjectOut)
 def get_test_project(project_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = get_project_or_404(db, project_id)
+    own_scope = dashboard_department_scope(current_user)
+    obj.view_only = bool(own_scope is not None and not current_user.has_department(obj.department))
     return obj
 
 
@@ -412,6 +433,78 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
     db.commit()
     db.refresh(obj)
     return obj
+
+
+@router.get("/{project_id}/view-access", response_model=List[schemas.TestProjectViewGrantOut])
+def list_project_view_access(project_id: int, db: Session = Depends(get_db),
+                              current_user: models.User = Depends(get_current_user)):
+    """2026-08 "view-only access to department/user" CR. Visible to anyone
+    who can already see the project at all (same as get_test_project) --
+    only ADDING/REMOVING a grant is Owner/QA-Lead-Group/Admin gated below,
+    same as this project's other detail-management fields."""
+    obj = get_project_or_404(db, project_id)
+    return (
+        db.query(models.TestProjectViewGrant)
+        .filter(models.TestProjectViewGrant.project_id == obj.id)
+        .order_by(models.TestProjectViewGrant.created_at)
+        .all()
+    )
+
+
+@router.post("/{project_id}/view-access", response_model=schemas.TestProjectViewGrantOut)
+def create_project_view_grant(project_id: int, payload: schemas.TestProjectViewGrantCreate,
+                               db: Session = Depends(get_db),
+                               current_user: models.User = Depends(get_current_user)):
+    """Grants read-only visibility into this ONE project (its Test
+    Execution/Repository/Reports, plus its linked Defects) to a department
+    or a specific user who isn't otherwise in scope for it -- see
+    models.TestProjectViewGrant's own docstring for the full reasoning.
+    Gated exactly like editing the project's other detail fields
+    (require_can_manage_project -- Owner, QA Lead Group, or Admin)."""
+    obj = get_project_or_404(db, project_id)
+    require_can_manage_project(obj, current_user)
+    department = (payload.department or "").strip() or None
+    user_id = payload.user_id
+    if bool(department) == bool(user_id):
+        raise HTTPException(400, "Grant exactly one of a department or a user, not both and not neither.")
+    if department:
+        department_row = db.query(models.Department).filter(
+            models.Department.name == department,
+            models.Department.is_active == True,  # noqa: E712 - Oracle boolean column
+        ).first()
+        if not department_row:
+            raise HTTPException(400, "Select an active department from the system department list")
+        if department == obj.department:
+            raise HTTPException(400, "This project's own department already has full access -- no grant needed")
+        existing = db.query(models.TestProjectViewGrant).filter_by(project_id=obj.id, department=department).first()
+        if existing:
+            raise HTTPException(409, f"{department} already has view access to this project")
+    else:
+        target_user = get_or_404(db, models.User, user_id, "User")
+        if target_user.has_department(obj.department):
+            raise HTTPException(400, "This user is already in the project's own department -- no grant needed")
+        existing = db.query(models.TestProjectViewGrant).filter_by(project_id=obj.id, user_id=user_id).first()
+        if existing:
+            raise HTTPException(409, f"{target_user.full_name} already has view access to this project")
+    grant = models.TestProjectViewGrant(
+        project_id=obj.id, department=department, user_id=user_id, granted_by_id=current_user.id,
+    )
+    db.add(grant)
+    db.commit()
+    db.refresh(grant)
+    return grant
+
+
+@router.delete("/{project_id}/view-access/{grant_id}", status_code=204)
+def delete_project_view_grant(project_id: int, grant_id: int, db: Session = Depends(get_db),
+                               current_user: models.User = Depends(get_current_user)):
+    obj = get_project_or_404(db, project_id)
+    require_can_manage_project(obj, current_user)
+    grant = db.query(models.TestProjectViewGrant).filter_by(id=grant_id, project_id=obj.id).first()
+    if not grant:
+        raise HTTPException(404, "View-access grant not found")
+    db.delete(grant)
+    db.commit()
 
 
 @router.post("/{project_id}/activation-review", response_model=schemas.TestProjectOut)

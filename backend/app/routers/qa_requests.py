@@ -345,7 +345,7 @@ def list_requests(params: pagination.PageParams = Depends(),
     # include only records the current user is authorized to access" holds.
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.QARequest.department == scope)
+        q = q.filter(models.QARequest.department.in_(scope))
     # Broad "requests or IDs" search (topbar search box and the QA Requests
     # list's own search field) -- matches Request ID, Application Name, or
     # Epic Number, not just application name.
@@ -619,6 +619,28 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         _raise_child_to_sm(db, performance, "PERFORMANCE", qa_request, current_user)
 
 
+def _resolve_requester_department(current_user: models.User, requested: Optional[str]) -> Optional[str]:
+    """2026-08 "one user can be on multiple departments" CR, follow-up:
+    department was previously locked server-side to the requester's own
+    profile department, full stop -- now that a requester may have more than
+    one, the frontend dropdown lets them pick which of THEIR OWN departments
+    a request belongs to, defaulting to their primary (first-assigned) one.
+    Still never trusts the client blindly: `requested` (if sent at all) must
+    be one of `current_user.departments`, or this raises -- picking an
+    arbitrary department outside the requester's own set stays impossible,
+    exactly as before this change, just widened from "must equal the one
+    department on file" to "must be one of the several on file."""
+    if requested is None:
+        return current_user.primary_department
+    if not current_user.has_department(requested):
+        raise HTTPException(
+            400,
+            f"'{requested}' is not one of your assigned departments "
+            f"({', '.join(current_user.departments) or 'none'}).",
+        )
+    return requested
+
+
 @router.post("", response_model=schemas.QARequestOut)
 def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
@@ -629,9 +651,10 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     ID-bearing child requests once POST /{id}/submit actually raises this
     gateway record -- see _sync_linked_child_requests / submit_request."""
     data = payload.model_dump()
-    # Department is always sourced from the requester's own user profile, not
-    # from client input -- ignore whatever the payload sent.
-    data["department"] = current_user.department
+    # Department is restricted to the requester's OWN department(s) -- see
+    # _resolve_requester_department's own docstring; defaults to their
+    # primary (first-assigned) one when the client doesn't send a choice.
+    data["department"] = _resolve_requester_department(current_user, payload.department)
     request_types = data.pop("request_types", [])
     checked_items = set(data.pop("checked_items", []) or [])
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself
@@ -721,8 +744,13 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     # means updating the still-Draft gateway fields and its stashed
     # draft_child_details, never touching/creating any child request.
     data = payload.model_dump(exclude_unset=True)
-    # Department tracks the requester's own profile, not something edited per-request.
-    data.pop("department", None)
+    # Department is restricted to the requester's OWN department(s) -- same
+    # rule and helper as create_request; only actually re-validated/written
+    # when the client sent a department at all (exclude_unset=True means a
+    # plain re-save of an unrelated field leaves it untouched, same pattern
+    # as application_name_in below).
+    if "department" in data:
+        data["department"] = _resolve_requester_department(current_user, data["department"])
     request_types = data.pop("request_types", None)
     checked_items = data.pop("checked_items", None)
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself

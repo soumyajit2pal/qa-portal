@@ -59,6 +59,33 @@ def create_department(payload: schemas.DepartmentCreate, db: Session = Depends(g
     return obj
 
 
+def backfill_user_department_assignments(db: Session) -> int:
+    """2026-08 "one user can be on multiple departments" CR -- one-time
+    startup backfill (see main.py's startup-migrations block, same
+    try_acquire_lock pattern as migrate_legacy_document_layout) so every
+    pre-existing account gets a real UserDepartment row instead of relying
+    forever on User.departments' own legacy-column fallback. Purely a
+    convenience/consistency pass -- reads already work correctly without
+    this (the fallback exists precisely so nothing breaks in the meantime)
+    -- but Admin.tsx's new multi-select picker, and any future direct query
+    against qap_user_departments, should see a real row for every account
+    that has ever had a department, not just ones created/edited after this
+    CR shipped."""
+    candidates = (
+        db.query(models.User)
+        .filter(models.User.department.isnot(None), models.User.department != "")
+        .filter(~models.User.department_assignments.any())
+        .all()
+    )
+    count = 0
+    for user in candidates:
+        db.add(models.UserDepartment(user_id=user.id, department=user.department))
+        count += 1
+    if count:
+        db.commit()
+    return count
+
+
 @router.patch("/{dept_id}", response_model=schemas.DepartmentOut)
 def update_department(dept_id: int, payload: schemas.DepartmentUpdate, db: Session = Depends(get_db),
                        current_user: models.User = Depends(require_roles(Role.ADMIN))):

@@ -4421,3 +4421,238 @@ but never shown anywhere in the UI). New `.tm-reassignment-history` CSS, styled 
 
 **Verified:** `npx tsc --noEmit -p .` clean; `python3 -m py_compile app/*.py app/routers/*.py` clean (unchanged,
 included for completeness since no backend file was touched in this section).
+
+## 95. A user can now belong to multiple departments
+
+**Reported:** "one user can be on multiple department. so where selecting dropdown for department to assign
+role. update system based on this" -- followed by three scoping decisions once asked: (1) full systemic
+update, not just the Admin dropdown/storage -- every department check across the app becomes "any of the
+user's departments," not a single equality check; (2) self-service department selection (first-LDAP-login
+popup, `PATCH /api/auth/me`) stays single-pick -- only a System Admin can grant a user more than one
+department, via Admin.tsx; (3) wherever exactly one department is still needed (e.g. a brand-new QA
+Request's own `department` field), the user's PRIMARY department -- the first one ever assigned -- is used
+as the default.
+
+**Data model (`backend/app/models.py`):** mirrors the existing `role_assignments`/`UserRole` many-to-many
+pattern used for roles. New `UserDepartment` join table (`qap_user_departments`, unique on
+`(user_id, department)`, ordered by `id` so insertion order == assignment order), a new
+`User.department_assignments` relationship, and three computed helpers: `User.departments` (the full list,
+falling back to the legacy single `department` column when no rows exist yet -- covers pre-migration data
+with no backfill required for correctness), `User.primary_department` (`departments[0]`, i.e. first-assigned),
+and `User.has_department(*departments)` (any-of-overlap membership test). The legacy `User.department` column
+itself is KEPT, not dropped -- every write path now keeps it synced to the primary department, so any call
+site this rollout missed degrades gracefully to correct-for-primary-department behaviour instead of an
+`AttributeError` or a silent `None`/`False`. A one-time startup backfill
+(`departments.backfill_user_department_assignments`, wired into `main.py`'s existing startup-migrations lock
+block) populates `UserDepartment` rows for every pre-existing user from their legacy `department` value.
+
+**Schemas/API (`schemas.py`, `routers/auth.py`):** `UserOut` gained `departments: List[str]` (kept `department`
+for compat); `UserCreate`/`UserUpdate` gained `departments: Optional[List[str]] = None`, which wins over the
+legacy singular `department` if provided (even as `[]`, meaning "clear all"). `POST /api/auth/users` and
+`PATCH /api/auth/users/{id}` write through a shared `_set_user_departments` helper (delete-then-insert,
+re-syncs the legacy column). `PATCH /api/auth/me` (self-service) deliberately still does a full single-value
+replace per decision (2) above. `list_local_admin_users` (DepartmentAdmin.tsx's roster) now matches on ANY
+overlap with the local admin's own department set, not just one.
+
+**Scoping (`deps.py`, `reassignment.py`, and ~15 routers):** `dashboard_department_scope` now returns
+`Optional[list]` (the union of every department the user belongs to) instead of `Optional[str]` -- every
+caller's `.filter(Model.department == scope)` became `.filter(Model.department.in_(scope))`, including the
+less-obvious Python-level (non-SQL) comparisons in `reports.py`, `approvals.py`, `dashboard.py`, and
+`defects.py`. `dashboard.py`'s own `_join_qa_department` helper, which ~15 of that file's own call sites
+already funnel through, needed only one fix to cover the majority of that file. `require_same_department` and
+every `_can_sm_decide`/`_can_dept_head_decide`/`_require_qa_department`-style gate across
+`functional.py`/`performance.py`/`sast_dast.py`/`signoff.py`/`suppression.py`/`test_repository.py`/
+`test_projects.py`/`notifications.py`/`applications.py`/`pending_approvals.py` switched from `user.department
+== X` to `user.has_department(X)` (or the query-level `models.User.department_assignments.any(...)`
+equivalent). `reassignment.require_can_reassign`'s `department` argument now accepts either a single string
+(back-compat) or a list -- when reassigning a Defect or a Test Cycle owner, the previous assignee's FULL
+department set is now checked, looping for any department where the current user is both a member and holds
+that department's Department Head role, rather than picking one department arbitrarily.
+
+**Frontend (`constants.ts` and every module that read `user.department`):** new `userDepartments()` and
+`hasDepartment()` helpers mirror the backend's `User.departments`/`has_department` exactly (any-of overlap,
+falls back to the legacy singular field). `RoleBearer` gained `departments?: string[] | null`.
+`canSeeQaDepartmentOnlyData` and `canReassign` (the latter's `currentAssigneeDepartment` param now also
+accepts a list, mirroring the backend) were rewritten around these helpers. Every `sameDept`/
+`isQADepartmentHead`/`u.department === X`-style check in `Functional.tsx`, `Performance.tsx`, `SAST.tsx`,
+`DAST.tsx`, `SignOff.tsx`, `Suppression.tsx`, `TestExecution.tsx`, `Defects.tsx`, `RoleGroupLink.tsx`,
+`RequestDetail.tsx`, and `DepartmentAdmin.tsx` was converted the same way. `UserAssignSelect.tsx`/
+`MultiUserAssignSelect.tsx`'s search-by-department and department-badge display now consider every department
+a candidate belongs to, not just their primary. `Dashboard.tsx`'s "My Department" requests tab now fetches
+and merges/dedupes across every department the user belongs to (the underlying `apply_department_filter`
+list-endpoint param is still deliberately single-value per request -- a per-request search/narrow control, not
+scoping logic -- so this fans out one fetch per department client-side rather than widening that filter's own
+semantics). `NewRequestModal.tsx` now explicitly sources a new QA Request's department from the requester's
+PRIMARY department (`user.departments[0]`, falling back to the legacy field), matching decision (3) above and
+`routers/qa_requests.py::create_request`'s equivalent `current_user.primary_department` (changed from
+`current_user.department` for the same explicitness, functionally identical since the legacy column stays
+synced to primary).
+
+**Admin UI (`Admin.tsx`):** the department picker (`CreateUserModal` and the users-table inline edit) changed
+from a single `SearchableSelect` to a new `DepartmentChipSelect` -- a checkbox-chip multi-select mirroring the
+existing `RoleChipSelect` pattern used for roles, with the first-picked chip labelled "(primary)" so an Admin
+can see and control which department becomes that user's default. Wired to `PATCH /api/auth/users/{id}` /
+`POST /api/auth/users` with `{ departments: [...] }`.
+
+**`audit_service.py`:** `user_snapshot()` gained a `departments` (full list) field alongside the existing
+`department` (legacy/primary), so access-management audit diffs capture the complete set going forward.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean across
+every file touched; `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/` (only
+`__pycache__`/`uploads` artifacts differed, both expected and excluded from the real sync).
+
+## 96. QA Request creation -- Department is now a dropdown restricted to the requester's own departments
+
+**Reported:** directly after section 95 shipped -- "currently department is freezed in every where, like
+while creating request, department dropdown is blocked. so instead of this enable the dropdown and by
+default selection will be primary department, and then other assigned department only." Section 95 itself
+had left the New QA Request wizard's Department field as a disabled input pre-filled from the requester's
+primary department (matching the pre-multi-department behaviour of "your department is fixed, full stop") --
+now that a requester can genuinely have more than one, that field needed to become a real choice among
+their own set, not stay locked to just the first one.
+
+**Backend (`routers/qa_requests.py`):** new shared `_resolve_requester_department(current_user, requested)`
+helper -- `requested=None` still defaults to `current_user.primary_department` exactly as before; a
+non-`None` value is only accepted if `current_user.has_department(requested)`, otherwise this raises `400`
+("... is not one of your assigned departments ..."). This still never trusts the client to supply an
+arbitrary department (that protection is unchanged), it's just widened from "must equal the one department
+on file" to "must be one of the several on file." `create_request` now calls this with `payload.department`
+instead of unconditionally overwriting with `current_user.primary_department`. `edit_request` (`PUT
+/{req_id}`, editing a still-Draft request) previously popped `department` off every incoming payload
+unconditionally ("Department tracks the requester's own profile, not something edited per-request") -- now
+only re-validates/re-writes it when the client actually sent one (`exclude_unset=True`-aware, same pattern
+already used for `application_name`), so a plain re-save of an unrelated field doesn't silently reset it.
+
+**Frontend (`QARequests/NewRequestModal.tsx`, `QARequests/steps/DetailsStep.tsx`):** `NewRequestModal.tsx`
+now computes `departmentOptions` (via `userDepartments(user)`) and passes it down to `DetailsStep`, which
+gained a `departmentOptions: string[]` prop. The Department field there changed from a disabled `<input>`
+to an editable `SearchableSelect` restricted to those options, still pre-filled with the requester's primary
+department by default (`departmentOptions[0]`) exactly as reported. If an already-Draft request's saved
+department somehow isn't in the requester's current department list any more (e.g. an Admin later removed
+it from their profile), it's still kept as a selectable option rather than silently dropping the saved value.
+`Suppression.tsx`'s own disabled department field was deliberately left untouched -- unlike this one, its
+value isn't sourced from the requester's own profile at all; it's copied from whichever linked SAST/DAST
+finding the requester selects (alongside Application Name/Owner, auto-filled the same way), so unlocking it
+independently would let it drift out of sync with the finding it's actually filed against. Worth a follow-up
+if that field also needs to change.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+
+## 97. QA Sign-off certificate's Environment Tested / Target Promotion Environment now linked, same as the QA Request form
+
+**Reported:** "Under New QA Signoff certificate, Environment Tested * and Target Promotion Environment *
+should be linked like qa request form have. use the same method instead of creating duplicate method." Both
+fields (New QA Sign-off Certificate creation, and its Edit Details modal) were two fully independent
+dropdowns -- Target Promotion Environment even offered every `ENVIRONMENTS` value including "Dev", and
+picking an earlier Target than the already-picked Environment Tested (e.g. Environment Tested=UAT, Target=
+SIT) was silently allowed, unlike the QA Request wizard (`DetailsStep.tsx`) and Functional's Edit Details
+modal, which have enforced strictly-forward pipeline ordering since earlier fixes in this log.
+
+**Fix -- reused the existing shared helpers rather than writing SignOff-specific ones:**
+
+- **Frontend (`modules/governance/SignOff.tsx`, both `NewSignOffModal` and `EditSignOffModal`):** imported
+  `validTargetPromotionOptions`/`validEnvironmentPromotion` from `constants.ts` (the same functions
+  `QARequests/steps/DetailsStep.tsx` and `Functional.tsx`'s Edit Details modal already use) instead of the
+  plain `ENVIRONMENTS` list. Environment Tested's `onChange` now snaps Target Promotion Environment forward
+  to the nearest valid stage if the newly-picked Environment Tested makes the already-picked Target invalid
+  -- identical logic to the other two forms. Target Promotion Environment's own options are now
+  `validTargetPromotionOptions(environment_tested)` instead of the full environment list, so an invalid
+  combination can no longer even be selected. Both modals' `submit()` also gained the same
+  `validEnvironmentPromotion(...)` defense-in-depth check used by the other two forms, as a last line of
+  defense before the request goes out. `ENVIRONMENTS` import dropped from this file entirely -- no longer
+  used anywhere in it.
+- **Backend (`routers/signoff.py`, `create_signoff`/`update_signoff`):** both previously never validated
+  this pair at all. Now call the same `constants.validate_environment_promotion` helper `qa_requests.py` and
+  `functional.py` already use (imported alongside the existing `QA_DEPARTMENT` import, not reimplemented) --
+  `create_signoff` validates unconditionally, `update_signoff` only re-validates when the client actually
+  sent one of the two fields (`exclude_unset=True`-aware, falling back to the certificate's own current
+  value for whichever field wasn't sent -- same pattern as `qa_requests.py::edit_request`). That helper's own
+  docstring updated to list `signoff.py` as a fourth/fifth write path alongside the three it already named.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+
+## 98. Defect Management opened to everyone (department-filtered); Test Project view-only access grants
+
+**Reported:** "currently Defect management is not available to everyone. make this visible to everyone based
+on department filter." Immediately followed by a second, related requirement: "currently one logged in user
+can show projects which are under that user department only. now add one functionality to add view only
+access to department as well as Particular user ... it will help if any project cross departmental, then if
+i add another department as view only access then they atleast know the status. basically they can see the
+test execution, test repository... in summary access to test management details of that department." Three
+design decisions were confirmed directly before building this: (1) who may grant/revoke view access on a
+project -- Owner + QA Lead Group + Admin, the same set that can already edit a project's other detail
+fields; (2) whether a view-access grant should also cover that project's linked Defects, now that Defect
+Management is visible-to-everyone-by-department -- yes, full parity; (3) how a project shared this way shows
+up in the recipient's own project list -- same list, tagged "View only", not a separate section.
+
+**Part 1 -- Defect Management's role gate retired.** `DEFECT_MANAGEMENT_ROLES` (a role allow-list layered on
+top of the existing department scoping) previously gated `list_defects`/`defect_dashboard`/`export_defects`
+(`routers/defects.py`) and the batch Fail/Blocked-executions picker (`routers/test_execution.py::
+list_blocked_failed_executions`), plus the frontend nav item and a page-level "Access Restricted" block
+(`Layout.tsx`, `Defects.tsx`). All of that is removed -- these endpoints now take only `get_current_user`,
+matching the "everyone, scoped by department" pattern every other module's own list endpoint (QA Requests,
+Functional, etc.) already used. The actual restriction was always `_scoped_defects`'s
+`dashboard_department_scope` join (via `Defect.qa_request_id -> QARequest.department`, since `Defect` has no
+department column of its own) -- that's unchanged and is now the ONLY gate. Who may CREATE/link a defect
+(`CREATE_ROLES`) is unaffected. `DEFECT_MANAGEMENT_ROLES` itself is left defined (both backend
+`constants.py` and frontend `constants.ts`) but unreferenced, purely as a record of what that combination
+briefly meant.
+
+**Part 2 -- new `TestProjectViewGrant` model (`models.py`).** A new table, `qap_test_project_view_grants`:
+`project_id`, `department` (nullable), `user_id` (nullable, FK User) -- exactly one of `department`/`user_id`
+set per row (application-layer enforced, same convention as this app's other "exactly one of" rules), plus
+`granted_by_id`/`created_at`. Deliberately per-project, not a blanket department-to-department grant --
+matches "if ANY PROJECT is cross departmental" from the report. No backfill needed (brand-new, empty table;
+`Base.metadata.create_all()` creates it automatically on next backend startup, no manual DB step required).
+
+**Part 2 -- new shared visibility helper (`deps.py::viewable_project_ids`).** Returns `None` for unrestricted
+roles (same convention as `dashboard_department_scope`), otherwise the UNION of a user's own
+department-scoped `TestProject` ids and any project a `TestProjectViewGrant` names them or one of their
+departments on (checked live against `current_user.departments`, not a snapshot taken when the grant was
+created). This single helper replaced three independent, previously-duplicated `TestProject.department.in_
+(scope)` filters: `routers/test_projects.py::list_test_projects`, `routers/test_reports.py::
+_scoped_project_ids`, and `routers/test_execution.py::list_blocked_failed_executions`. `routers/defects.py::
+_scoped_defects` also calls it directly, OR'd alongside its existing `QARequest.department` check (via an
+outer join on `Defect.cycle_id -> TestCycle.project_id`, since not every defect has a cycle_id) -- this is
+the "grant recipients also see the project's Defects" parity decision. Every OTHER Test Management endpoint
+(folders, test cases, cycles, executions, 4 of 5 reports, get-project-by-id) needed ZERO changes: this app's
+existing, deliberate convention is that individual get-by-id endpoints are unscoped by design (a scoped
+user simply never receives an out-of-scope id to navigate to from the list) -- so widening the LIST is
+sufficient to widen everything reachable from it, without touching each sub-resource individually.
+
+**Part 2 -- grant management (`routers/test_projects.py`).** New `GET/POST/DELETE
+/api/test-projects/{id}/view-access`. Listing is open to anyone who can already see the project; granting/
+revoking is gated by the existing `require_can_manage_project` (Owner, QA Lead Group, or Admin -- decision
+(1) above, verbatim, no new permission tier). Validates exactly one of department/user_id is set, that a
+department grant targets an active system department that isn't already the project's own, and that a user
+grant targets someone not already in the project's own department -- both cases would otherwise be a
+redundant no-op grant. `schemas.TestProjectOut` gained a `view_only: bool` field, computed per-request (not
+a stored column -- it's inherently about the CURRENT viewer, not a fact about the project) by
+`list_test_projects`/`get_test_project`: true when the viewer sees this project only via a grant, not their
+own department or an unrestricted role.
+
+**Part 2 -- frontend (`TestProjects.tsx`).** New `ManageViewAccessModal` (a "View access…" button in each
+project card's "More" menu, gated identically to the existing "Edit project" button) lists current grants
+as department/user chips with Remove buttons, and a form to add a new one (department picker sourced from
+`/api/departments`; user picker sourced from the FULL active user directory via `/api/auth/users`,
+deliberately not this page's existing QA-only `eligible-users` list, since the whole point is reaching
+someone outside the project's own department). A project visible only via a grant shows a "View only" badge
+on its card (decision (3) above -- same list, not a separate section) and has its mutating actions (Edit
+project, View access management itself, Activate/Deactivate/request, Archive/Unarchive) hidden -- "Open
+repository"/"View execution"/"Activity" stay fully available, since that's the actual point of the grant.
+`types.ts` gained `TestProjectOut.view_only` and a new `TestProjectViewGrantOut` interface mirroring the
+backend schema.
+
+**Scope note, stated plainly:** this feature only widens what a scoped user's LIST/aggregate queries
+include (read access). It does not add any new write-prevention machinery to Test Management's mutate
+endpoints (create/edit a cycle, assign a runner, edit a test case, etc.) -- those already, and still, rely
+entirely on this app's existing role checks (QA_ENGINEER/QA_LEAD/etc.), which a business-role grant
+recipient (Requester/Business Analyst/etc.) never holds regardless of any grant. A hybrid case -- e.g. a
+QA_ENGINEER from Department A granted view access into a Department B project -- was already able to reach
+mutate endpoints for ANY project whose id they knew, grant or not, since this app's sub-resource write
+endpoints were never department-scoped by id in the first place (only list-endpoint discoverability was);
+that's a pre-existing characteristic of the app's permission model, not something this feature changes or
+was asked to fix, so it's flagged here rather than silently expanded in scope.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean;
+`rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/`.

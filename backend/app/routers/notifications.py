@@ -142,7 +142,9 @@ def sweep_overdue_approvals(db: Session) -> int:
         candidates = db.query(models.User).filter(
             # Oracle Boolean columns are NUMBER(1); use `= 1`, not `IS 1`.
             models.User.is_active == 1,
-            models.User.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS),
+            models.User.department_assignments.any(
+                models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
+            ),
         ).all()
         if draft.status == "In Review":
             recipient_ids = [u.id for u in candidates if u.id != draft.author_id

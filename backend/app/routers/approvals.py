@@ -118,7 +118,7 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
                 rows = [r for r in rows if not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
     scope = dashboard_department_scope(current_user)
     if scope:
-        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) == scope]
+        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]
     return rows[:500]
 
 

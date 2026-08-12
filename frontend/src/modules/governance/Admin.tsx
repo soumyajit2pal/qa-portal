@@ -4,8 +4,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
 import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch, IconFolder } from '../../components/Icons'
-import SearchableSelect from '../../components/SearchableSelect'
-import { UserOut, UserSummaryOut, DepartmentOut, ApplicationSeedResult, StorageSettingsOut, ApprovalNotificationSettingsOut } from '../../types'
+import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult, StorageSettingsOut, ApprovalNotificationSettingsOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 // Shared by every page that needs a department picker -- departments are
@@ -17,8 +16,13 @@ export async function loadActiveDepartments(): Promise<DepartmentOut[]> {
   return api.get<DepartmentOut[]>('/api/departments')
 }
 
+// `department` (singular) intentionally dropped from this form's own state
+// -- 2026-08 "one user can be on multiple departments" CR moved department
+// selection to its own `departments: string[]` state in CreateUserModal
+// (DepartmentChipSelect), sent alongside this form's payload rather than
+// living inside it.
 const EMPTY_FORM = {
-  username: '', full_name: '', email: '', department: '',
+  username: '', full_name: '', email: '',
   roles: ['REQUESTER'] as string[], login_type: 'STANDARD', password: '',
 }
 type CreateUserForm = typeof EMPTY_FORM
@@ -52,10 +56,43 @@ export function RoleChipSelect({ value, onChange, disabled, roles = ALL_ROLES }:
   )
 }
 
+// 2026-08 "one user can be on multiple departments" CR -- mirrors
+// RoleChipSelect's own checkbox-chip pattern above, just for a plain string
+// list instead of a role-code-to-label lookup. The FIRST department a user
+// is assigned acts as their "primary"/default wherever exactly one
+// department is needed (e.g. a new QA Request) -- see backend
+// models.User.primary_department -- so ordering here (the order chips were
+// clicked in) matters; toggling one back off and on moves it to the end.
+export function DepartmentChipSelect({ value, onChange, disabled, options }: {
+  value: string[]; onChange: (departments: string[]) => void; disabled?: boolean; options: string[]
+}) {
+  function toggle(dept: string) {
+    if (disabled) return
+    const has = value.includes(dept)
+    onChange(has ? value.filter((d) => d !== dept) : [...value, dept])
+  }
+  return (
+    <div className="chip-select">
+      {options.map((d) => {
+        const active = value.includes(d)
+        const primary = active && value[0] === d
+        return (
+          <label key={d} className={`chip-toggle ${active ? 'active' : ''} ${disabled ? 'disabled' : ''}`}>
+            <input type="checkbox" checked={active} disabled={disabled} onChange={() => toggle(d)} />
+            <span className="chip-dot">{active && <IconCheckCircle width={9} height={9} strokeWidth={3} />}</span>
+            {d}{primary && <small style={{ marginLeft: 4, opacity: 0.7 }}>(primary)</small>}
+          </label>
+        )
+      })}
+    </div>
+  )
+}
+
 function CreateUserModal({ onClose, onCreated, departmentOptions }: {
   onClose: () => void; onCreated: (u: UserOut) => void; departmentOptions: string[]
 }) {
   const [form, setForm] = useState<CreateUserForm>(EMPTY_FORM)
+  const [departments, setDepartments] = useState<string[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
@@ -70,7 +107,7 @@ function CreateUserModal({ onClose, onCreated, departmentOptions }: {
     setBusy(true)
     setError(null)
     try {
-      const payload: Partial<CreateUserForm> = { ...form }
+      const payload: Partial<CreateUserForm> & { departments?: string[] } = { ...form, departments }
       if (payload.login_type === 'LDAP') delete payload.password
       const created = await api.post<UserOut>('/api/auth/users', payload)
       onCreated(created)
@@ -88,15 +125,10 @@ function CreateUserModal({ onClose, onCreated, departmentOptions }: {
           <Field label="Username *"><input required value={form.username} onChange={(e) => set('username', e.target.value)} /></Field>
           <Field label="Full Name *"><input required value={form.full_name} onChange={(e) => set('full_name', e.target.value)} /></Field>
           <Field label="Email"><input type="email" value={form.email} onChange={(e) => set('email', e.target.value)} /></Field>
-          <Field label="Department (searchable)">
-            <SearchableSelect
-              value={form.department}
-              onChange={(v) => set('department', v)}
-              options={departmentOptions}
-              placeholder="Select department..."
-            />
-          </Field>
         </div>
+        <Field label="Department(s) — a user may belong to more than one; the first one picked is their primary">
+          <DepartmentChipSelect value={departments} onChange={setDepartments} options={departmentOptions} />
+        </Field>
         <Field label="Role(s) * — a user may hold more than one">
           <RoleChipSelect value={form.roles} onChange={(v) => set('roles', v)} />
         </Field>
@@ -160,6 +192,72 @@ function ResetPasswordModal({ userRow, onClose, onDone }: { userRow: UserOut; on
       </form>
     </Modal>
   )
+}
+
+function ManageUserAccessModal({ userRow, departmentOptions, onClose, onDone }: {
+  userRow: UserOut; departmentOptions: string[]; onClose: () => void; onDone: () => void
+}) {
+  const [departments, setDepartments] = useState<string[]>(userRow.departments?.length ? userRow.departments : (userRow.department ? [userRow.department] : []))
+  const [roles, setRoles] = useState<string[]>(userRow.roles || [])
+  const [adminManagedOnly, setAdminManagedOnly] = useState(!!userRow.admin_managed_only)
+  const [active, setActive] = useState(userRow.is_active)
+  const [departmentSearch, setDepartmentSearch] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault()
+    if (!roles.length) { setError(new Error('Select at least one role')); return }
+    setBusy(true); setError(null)
+    try {
+      await api.patch(`/api/auth/users/${userRow.id}`, { departments, roles, admin_managed_only: adminManagedOnly, is_active: active })
+      onDone()
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  function toggleDepartment(department: string) {
+    setDepartments((values) => values.includes(department) ? values.filter((value) => value !== department) : [...values, department])
+  }
+
+  function makePrimary(department: string) {
+    setDepartments((values) => [department, ...values.filter((value) => value !== department)])
+  }
+
+  function toggleRole(role: string) {
+    setRoles((values) => values.includes(role) ? values.filter((value) => value !== role) : [...values, role])
+  }
+
+  const visibleDepartments = departmentOptions.filter((department) => department.toLowerCase().includes(departmentSearch.trim().toLowerCase()))
+
+  return <Modal title={`Manage access — ${userRow.full_name}`} onClose={onClose}>
+    <form onSubmit={save} className="access-manage-form">
+      <div className="access-manage-identity"><span className="access-user-avatar">{userRow.full_name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase()}</span><div><strong>{userRow.full_name}</strong><span>@{userRow.username}</span><small>{userRow.email || 'No email address'}</small></div></div>
+      <section className="access-picker-panel">
+        <header><div><small>01 · Organisational scope</small><h3>Department access</h3><p>Select one or more departments. Set one selected department as primary.</p></div><strong>{departments.length} selected</strong></header>
+        <label className="access-picker-search"><IconSearch width={14} height={14} /><input value={departmentSearch} onChange={(event) => setDepartmentSearch(event.target.value)} placeholder="Find a department…" /></label>
+        <div className="access-department-options">
+          {visibleDepartments.map((department) => {
+            const selected = departments.includes(department)
+            const primary = departments[0] === department
+            return <div className={`access-option-row ${selected ? 'selected' : ''}`} key={department}>
+              <label><input type="checkbox" checked={selected} disabled={busy} onChange={() => toggleDepartment(department)} /><span>{department}</span></label>
+              {primary ? <strong>Primary</strong> : selected ? <button type="button" onClick={() => makePrimary(department)}>Make primary</button> : null}
+            </div>
+          })}
+        </div>
+      </section>
+      <section className="access-picker-panel">
+        <header><div><small>02 · Permission profile</small><h3>Roles</h3><p>Assign the responsibilities this user can perform.</p></div><strong>{roles.length} selected</strong></header>
+        <div className="access-role-options">{ALL_ROLES.map((role) => <label className={roles.includes(role) ? 'selected' : ''} key={role}><input type="checkbox" checked={roles.includes(role)} disabled={busy} onChange={() => toggleRole(role)} /><span>{ROLE_LABELS[role] || role}</span></label>)}</div>
+      </section>
+      <div className="access-manage-controls">
+        <label><input type="checkbox" checked={adminManagedOnly} onChange={(event) => setAdminManagedOnly(event.target.checked)} disabled={busy} /><span><strong>Admin-managed account</strong><small>Hide from local department coordinator rosters.</small></span></label>
+        <label><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} disabled={busy} /><span><strong>Active account</strong><small>User can sign in and access permitted modules.</small></span></label>
+      </div>
+      <ErrorText error={error} />
+      <div className="modal-actions access-manage-actions"><span>Changes apply after saving.</span><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save access'}</button></div>
+    </form>
+  </Modal>
 }
 
 // Admin section: "provision to add department" -- lists every department
@@ -390,12 +488,42 @@ function ApprovalNotificationSettingsCard() {
 // rejected rows are each handled), instead of every name only ever entering
 // the master list one at a time via a requester typing "Other" on the QA
 // Request wizard and waiting on Application Owner review.
-function ApplicationSeedCard() {
+function ApplicationSeedCard({ departmentOptions }: { departmentOptions: string[] }) {
   const [file, setFile] = useState<File | null>(null)
   const [downloadingTemplate, setDownloadingTemplate] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [result, setResult] = useState<ApplicationSeedResult | null>(null)
+  const [applications, setApplications] = useState<ApplicationMasterOut[]>([])
+  const [applicationSearch, setApplicationSearch] = useState('')
+  const [draftDepartments, setDraftDepartments] = useState<Record<number, string>>({})
+  const [savingApplicationId, setSavingApplicationId] = useState<number | null>(null)
+  const [savedApplicationId, setSavedApplicationId] = useState<number | null>(null)
+
+  const loadApplications = useCallback(async () => {
+    try {
+      const rows = await api.get<ApplicationMasterOut[]>('/api/application-names')
+      setApplications(rows)
+      setDraftDepartments(Object.fromEntries(rows.map((row) => [row.id, row.department || ''])))
+    } catch (err) { setError(err) }
+  }, [])
+
+  useEffect(() => { loadApplications() }, [loadApplications])
+
+  async function updateDepartment(application: ApplicationMasterOut) {
+    const department = draftDepartments[application.id] || ''
+    if (!department) { setError(new Error('Select a department')); return }
+    setSavingApplicationId(application.id); setSavedApplicationId(null); setError(null)
+    try {
+      const updated = await api.patch<ApplicationMasterOut>(`/api/application-names/${application.id}/department`, { department })
+      setApplications((rows) => rows.map((row) => row.id === updated.id ? updated : row))
+      setSavedApplicationId(application.id)
+    } catch (err) { setError(err) } finally { setSavingApplicationId(null) }
+  }
+
+  const visibleApplications = applications.filter((application) => (
+    `${application.name} ${application.department || ''}`.toLowerCase().includes(applicationSearch.trim().toLowerCase())
+  ))
 
   async function downloadTemplate() {
     setDownloadingTemplate(true)
@@ -471,6 +599,34 @@ function ApplicationSeedCard() {
           <ul>{result.errors.map((message, idx) => <li key={idx}>{message}</li>)}</ul>
         </div>
       )}
+      <div className="application-department-manager">
+        <div className="application-department-head">
+          <div><small>Existing application master</small><h3>Application departments</h3><p>Assign or correct the owning department for an application already available in the system.</p></div>
+          <strong>{applications.length} applications</strong>
+        </div>
+        <label className="application-department-search">
+          <IconSearch width={15} height={15} />
+          <input value={applicationSearch} onChange={(event) => setApplicationSearch(event.target.value)} placeholder="Search application or department…" />
+        </label>
+        <div className="application-department-list">
+          {visibleApplications.map((application) => {
+            const selected = draftDepartments[application.id] || ''
+            const unchanged = selected === (application.department || '')
+            return <div className="application-department-row" key={application.id}>
+              <div><strong>{application.name}</strong><small>{application.department || 'Department not assigned'}</small></div>
+              <select value={selected} onChange={(event) => { setDraftDepartments((values) => ({ ...values, [application.id]: event.target.value })); setSavedApplicationId(null) }}>
+                <option value="">Select department</option>
+                {departmentOptions.map((department) => <option key={department} value={department}>{department}</option>)}
+              </select>
+              <button type="button" className="btn btn-sm btn-primary" disabled={!selected || unchanged || savingApplicationId === application.id} onClick={() => updateDepartment(application)}>
+                {savingApplicationId === application.id ? 'Updating…' : 'Update'}
+              </button>
+              {savedApplicationId === application.id && <span className="application-department-saved">✓ Updated</span>}
+            </div>
+          })}
+          {!visibleApplications.length && <div className="empty-state compact"><strong>No applications found</strong><span>Try another application name or department.</span></div>}
+        </div>
+      </div>
     </Card>
   )
 }
@@ -482,6 +638,7 @@ export default function Admin() {
   const [error, setError] = useState<unknown>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [resetTarget, setResetTarget] = useState<UserOut | null>(null)
+  const [accessTarget, setAccessTarget] = useState<UserOut | null>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
   const [userSearch, setUserSearch] = useState('')
   const [accountFilter, setAccountFilter] = useState<'ALL' | 'ACTIVE' | 'DISABLED' | 'REVIEW'>('ALL')
@@ -639,58 +796,22 @@ export default function Admin() {
                 </div>
               </div>
             ), filterValue: (u) => `${u.full_name} ${u.username} ${u.email || ''}` },
-            { key: 'department', header: 'Department', render: (u) => (
-              <div style={{ minWidth: 220 }}>
-                <SearchableSelect
-                  value={u.department || ''}
-                  disabled={savingId === u.id}
-                  onChange={(v) => patchUser(u.id, { department: v })}
-                  options={departmentOptions}
-                  placeholder="Not set"
-                />
-              </div>
-            ) },
-            { key: 'roles', header: 'Role(s)', render: (u) => (
-              <div style={{ minWidth: 260 }}>
-                <RoleChipSelect
-                  value={u.roles || []}
-                  disabled={savingId === u.id}
-                  onChange={(v) => patchUser(u.id, { roles: v })}
-                />
-              </div>
+            { key: 'department', header: 'Access scope', render: (u) => {
+              const values = u.departments?.length ? u.departments : (u.department ? [u.department] : [])
+              return <div className="access-scope-summary"><strong>{values[0] || 'No department'}</strong>{values.length > 1 && <span>+{values.length - 1} additional</span>}<small>Primary department</small></div>
+            }, filterValue: (u) => (u.departments && u.departments.length ? u.departments : (u.department ? [u.department] : [])).join(' ') },
+            { key: 'roles', header: 'Roles', render: (u) => (
+              <div className="access-role-summary">{(u.roles || []).slice(0, 2).map((role) => <span key={role}>{ROLE_LABELS[role] || role}</span>)}{(u.roles || []).length > 2 && <small>+{(u.roles || []).length - 2} more</small>}</div>
             ), filterValue: (u) => (u.roles || []).join(' ') },
             { key: 'login_type', header: 'Login Type', render: (u) => (
               <span className={`badge ${u.login_type === 'LDAP' ? 'badge-blue' : 'badge-gray'}`}>
                 {u.login_type === 'LDAP' ? 'LDAP' : 'Standard'}
               </span>
             ) },
-            { key: 'admin_managed_only', header: 'Managed by Admin Only', render: (u) => (
-              <button
-                className={`btn btn-sm ${u.admin_managed_only ? 'btn-primary' : ''}`}
-                disabled={savingId === u.id}
-                title="When set to Yes, this user is hidden from Department Coordinator / Executive COE rosters -- only a System Admin can assign their role(s) or change their status."
-                onClick={() => patchUser(u.id, { admin_managed_only: !u.admin_managed_only })}
-              >
-                {u.admin_managed_only ? 'Yes' : 'No'}
-              </button>
-            ), filterValue: (u) => u.admin_managed_only ? 'Yes' : 'No' },
             { key: 'is_active', header: 'Status', render: (u) => (
-              <button
-                className={`btn btn-sm ${u.is_active ? '' : 'btn-danger'}`}
-                disabled={savingId === u.id || u.id === user?.id}
-                title={u.id === user?.id ? "You can't deactivate your own account" : ''}
-                onClick={() => patchUser(u.id, { is_active: !u.is_active })}
-              >
-                {u.is_active ? 'Active' : 'Disabled'}
-              </button>
+              <div className="access-status-summary"><span className={`badge ${u.is_active ? 'badge-green' : 'badge-red'}`}>{u.is_active ? 'Active' : 'Disabled'}</span>{u.admin_managed_only && <small>Admin managed</small>}</div>
             ), filterValue: (u) => u.is_active ? 'Active' : 'Disabled' },
-            { key: 'actions', header: '', filterable: false, render: (u) => (
-              u.login_type === 'STANDARD' ? (
-                <button className="btn btn-sm" onClick={() => setResetTarget(u)}>
-                  <IconLock width={13} height={13} /> Reset Password
-                </button>
-              ) : <span className="muted small">Managed via LDAP</span>
-            ) },
+            { key: 'actions', header: 'Actions', filterable: false, render: (u) => <div className="access-row-actions"><button className="btn btn-sm btn-primary" onClick={() => setAccessTarget(u)}>Manage access</button>{u.login_type === 'STANDARD' && <button className="btn btn-sm" onClick={() => setResetTarget(u)}><IconLock width={13} height={13} /> Reset password</button>}</div> },
           ]}
           rows={rows}
         />
@@ -709,7 +830,7 @@ export default function Admin() {
       </div>}
 
       {section === 'applications' && <div className="access-workspace-panel access-departments-section">
-        <ApplicationSeedCard />
+        <ApplicationSeedCard departmentOptions={departmentOptions} />
       </div>}
 
       {section === 'storage' && <div className="access-workspace-panel access-departments-section">
@@ -727,6 +848,7 @@ export default function Admin() {
           departmentOptions={departmentOptions}
         />
       )}
+      {accessTarget && <ManageUserAccessModal userRow={accessTarget} departmentOptions={departmentOptions} onClose={() => setAccessTarget(null)} onDone={() => { setAccessTarget(null); refreshUsers() }} />}
       {resetTarget && (
         <ResetPasswordModal
           userRow={resetTarget}

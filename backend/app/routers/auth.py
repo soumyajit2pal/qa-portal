@@ -171,16 +171,26 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
     department-selection popup, but written generically (validates against
     the same active-department list as the Admin-only PATCH /users/{id}
     below) rather than as a one-shot "first login only" endpoint, so it also
-    works if someone's department simply needs correcting later."""
-    if not payload.department or not payload.department.strip():
-        raise HTTPException(status_code=400, detail="Department is required")
-    _validate_department(db, payload.department)
+    works if someone's department simply needs correcting later.
+
+    The ordered selection supports multiple departments; primary_department
+    is stored first so User.primary_department and all existing consumers
+    continue to resolve the correct default scope."""
+    selected_departments = list(dict.fromkeys(department.strip() for department in payload.departments if department.strip()))
+    primary_department = payload.primary_department.strip()
+    if not selected_departments:
+        raise HTTPException(status_code=400, detail="Select at least one department")
+    if not primary_department or primary_department not in selected_departments:
+        raise HTTPException(status_code=400, detail="Primary department must be one of the selected departments")
+    for department in selected_departments:
+        _validate_department(db, department)
+    ordered_departments = [primary_department, *[department for department in selected_departments if department != primary_department]]
     before = user_snapshot(current_user)
     is_first_ldap_department_selection = (
         current_user.login_type == LoginType.LDAP
         and current_user.needs_department_selection
     )
-    current_user.department = payload.department
+    _set_user_departments(db, current_user, ordered_departments)
     current_user.needs_department_selection = False
 
     # A brand-new LDAP user is provisioned as Requester only until they pick
@@ -194,7 +204,7 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
         and current_user.needs_role_review
         and current_roles == {DEFAULT_LDAP_PROVISION_ROLE}
     ):
-        default_role = _ldap_default_role_for_department(payload.department)
+        default_role = _ldap_default_role_for_department(primary_department)
         if default_role != DEFAULT_LDAP_PROVISION_ROLE:
             current_user.role_assignments = [models.UserRole(role=default_role)]
     db.commit()
@@ -259,7 +269,11 @@ def list_all_users(
     # Search deliberately doesn't cover role labels (unlike Admin.tsx's old
     # client-side search) -- `roles` is a many-to-many join, not a plain
     # column, and role-name search is a small enough slice of this box's
-    # real usage not to justify a join here.
+    # real usage not to justify a join here. Same reasoning now applies to
+    # `department` post-2026-08 CR: this still matches only the legacy
+    # column (kept in sync with each user's PRIMARY department), not every
+    # secondary department -- a minor, deliberate gap, not a join over
+    # department_assignments, for the same low-value-vs-complexity reason.
     q = pagination.apply_search(q, params, models.User.full_name, models.User.username, models.User.email, models.User.department)
     # Reported directly: "Surface accounts awaiting review first" -- a
     # two-column order (needs_role_review desc, then name) that doesn't map
@@ -308,18 +322,59 @@ def _validate_department(db: Session, department):
         raise HTTPException(status_code=400, detail=f"Invalid department '{department}'")
 
 
+# 2026-08 "one user can be on multiple departments" CR -- helpers shared by
+# create_user/update_user/update_me below.
+_UNSET = object()
+
+
+def _validate_departments(db: Session, departments: list) -> list:
+    """Validates every entry against active Department rows (same rule as
+    _validate_department, applied per-item), de-duplicating while preserving
+    order and dropping any blank entries."""
+    cleaned = list(dict.fromkeys(d for d in (departments or []) if d and d.strip()))
+    for d in cleaned:
+        _validate_department(db, d)
+    return cleaned
+
+
+def _resolve_departments_payload(department, departments) -> list:
+    """A create/update payload may arrive as the new plural `departments`
+    list (Admin.tsx's multi-select), or -- backward compatibility -- the
+    legacy singular `department` string. `departments`, if present, always
+    wins outright (even an empty list, meaning "clear all departments")."""
+    if departments is not None:
+        return list(departments)
+    return [department] if department else []
+
+
+def _set_user_departments(db: Session, user: models.User, departments: list) -> None:
+    """Replaces user.department_assignments wholesale (not a merge) -- same
+    delete-then-flush-then-insert pattern update_user already uses for roles
+    below, so an unchanged department in the new list doesn't trip
+    uq_qap_user_departments by trying to INSERT before the old row's DELETE
+    is flushed. Also keeps the legacy `department` column in sync with the
+    new primary (first) entry, for every consumer that still reads that
+    column directly instead of `.departments`/`.has_department(...)`."""
+    for da in list(user.department_assignments):
+        db.delete(da)
+    db.flush()
+    for d in departments:
+        db.add(models.UserDepartment(user_id=user.id, department=d))
+    user.department = departments[0] if departments else None
+
+
 @router.post("/users", response_model=schemas.UserOut)
 def create_user(payload: schemas.UserCreate, request: Request, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.ADMIN))):
-    """Admin section (Module 9): user mapping = department + one or more roles
-    (access types). A user can hold several roles at once (e.g. QA Lead +
-    Security Analyst) -- all are active simultaneously."""
+    """Admin section (Module 9): user mapping = department(s) + one or more
+    roles (access types). A user can hold several roles, and (2026-08 CR)
+    several departments, at once -- all are active simultaneously."""
     from ..auth import hash_password
     if db.query(models.User).filter(models.User.username == payload.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
     _validate_roles(payload.roles)
     roles = _dedupe_roles(payload.roles)
-    _validate_department(db, payload.department)
+    departments = _validate_departments(db, _resolve_departments_payload(payload.department, payload.departments))
     login_type = payload.login_type or LoginType.STANDARD
     if login_type not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{login_type}'")
@@ -328,8 +383,9 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
 
     user = models.User(
         username=payload.username, full_name=payload.full_name, email=payload.email,
-        department=payload.department, login_type=login_type,
+        department=departments[0] if departments else None, login_type=login_type,
         role_assignments=[models.UserRole(role=r) for r in roles],
+        department_assignments=[models.UserDepartment(department=d) for d in departments],
         hashed_password=hash_password(payload.password) if login_type == LoginType.STANDARD else None,
     )
     db.add(user)
@@ -344,7 +400,7 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
 @router.patch("/users/{user_id}", response_model=schemas.UserOut)
 def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.ADMIN))):
-    """Admin section (Module 9): reassign role(s), change login type, activate/deactivate, edit profile fields."""
+    """Admin section (Module 9): reassign role(s)/department(s), change login type, activate/deactivate, edit profile fields."""
     user = db.query(models.User).get(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -355,8 +411,19 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
     if new_roles is not None:
         _validate_roles(new_roles)
         new_roles = _dedupe_roles(new_roles)
-    if "department" in data:
-        _validate_department(db, data["department"])
+    # 2026-08 CR -- `departments` (plural), if the caller sent it at all
+    # (even as an empty list), takes priority over the legacy singular
+    # `department`. Popped out of `data` so the generic setattr loop below
+    # never writes the legacy column directly -- _set_user_departments is
+    # the only thing that's allowed to touch it now, so it stays in sync
+    # with department_assignments.
+    raw_department = data.pop("department", _UNSET)
+    raw_departments = data.pop("departments", _UNSET)
+    new_departments = None
+    if raw_departments is not _UNSET:
+        new_departments = _validate_departments(db, raw_departments)
+    elif raw_department is not _UNSET:
+        new_departments = _validate_departments(db, [raw_department] if raw_department else [])
     if "login_type" in data and data["login_type"] not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{data['login_type']}'")
     # Note: switching an LDAP account to Standard leaves it with no usable
@@ -364,6 +431,8 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
 
     for k, v in data.items():
         setattr(user, k, v)
+    if new_departments is not None:
+        _set_user_departments(db, user, new_departments)
     if new_roles is not None:
         # Replace the full set of role assignments (not a merge/append).
         # Delete the old rows and flush *before* adding the new ones -- if we
@@ -446,13 +515,18 @@ def _require_own_department_target(current_user: models.User, target: models.Use
     if target.admin_managed_only:
         raise HTTPException(status_code=403,
                              detail="This account is managed by a System Admin only")
-    if not current_user.department:
+    if not current_user.departments:
         raise HTTPException(status_code=403, detail="Your own profile has no department set")
-    if target.department != current_user.department:
+    # 2026-08 "one user can be on multiple departments" CR -- a local admin
+    # who now belongs to several departments may manage a target user mapped
+    # to ANY of them (not just their first/primary one), and the target
+    # itself may also belong to several departments -- any overlap is
+    # sufficient, same rule as reassignment.py's Department Head check.
+    if not target.has_department(*current_user.departments):
         raise HTTPException(
             status_code=403,
-            detail=f"You can only manage users mapped to your own department "
-                   f"('{current_user.department}').",
+            detail=f"You can only manage users mapped to one of your own departments "
+                   f"({', '.join(current_user.departments)}).",
         )
 
 
@@ -491,11 +565,18 @@ def list_local_admin_users(db: Session = Depends(get_db),
     an org-wide directory -- naturally bounded the same way Test Cycles/
     Test Projects and Pending Approvals were left alone elsewhere in this
     rollout, rather than the unbounded-growth case pagination exists for."""
-    if not current_user.department:
+    if not current_user.departments:
         raise HTTPException(status_code=400, detail="Your own profile has no department set")
+    # 2026-08 CR -- union of every department this local admin belongs to,
+    # not just their primary one (mirrors _require_own_department_target).
     rows = (
         db.query(models.User)
-        .filter(models.User.department == current_user.department, models.User.id != current_user.id)
+        .filter(
+            models.User.department_assignments.any(
+                models.UserDepartment.department.in_(current_user.departments)
+            ),
+            models.User.id != current_user.id,
+        )
         .order_by(models.User.full_name)
         .all()
     )
@@ -552,5 +633,5 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
                 actor=current_user, request=request, status_code=200, target_type="USER",
                 target_id=user.id, target_name=user.full_name,
                 details={"changes": snapshot_changes(before, user_snapshot(user)),
-                         "scope": current_user.department})
+                         "scope": ", ".join(current_user.departments)})
     return user

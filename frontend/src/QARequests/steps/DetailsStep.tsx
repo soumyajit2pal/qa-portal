@@ -15,11 +15,23 @@ const OTHER = "__OTHER__";
 interface Props {
   form: QARequestForm;
   set: SetField;
+  // 2026-08 "one user can be on multiple departments" CR, follow-up: the
+  // requester's own department(s) only -- never the full org-wide list (that
+  // stays enforced server-side too, see routers/qa_requests.py::
+  // _resolve_requester_department).
+  departmentOptions: string[];
 }
 
 // First wizard step -- the core "Application & Change Details" and
 // "Release & Environment" fields, shared by every request type.
-export function DetailsStep({ form, set }: Props) {
+export function DetailsStep({ form, set, departmentOptions }: Props) {
+  // An already-Draft request's saved department might not be in the
+  // requester's CURRENT department list any more (e.g. an Admin later
+  // removed that department from their profile) -- keep it selectable
+  // rather than silently dropping/blanking an already-valid saved value.
+  const departmentSelectOptions = form.department && !departmentOptions.includes(form.department)
+    ? [form.department, ...departmentOptions]
+    : departmentOptions;
   const [crError, setCrError] = useState("");
   const [epicError, setEpicError] = useState("");
   // Approved names only -- a brand-new name typed via "Other" doesn't show up
@@ -112,14 +124,17 @@ export function DetailsStep({ form, set }: Props) {
               }
             />
           </Field>
-          <Field label="Department">
-            <input
-              value={form.department || "Not set on your profile"}
-              disabled
+          <Field label="Department *">
+            <SearchableSelect
+              value={form.department || ""}
+              onChange={(v) => set("department", v)}
+              options={departmentSelectOptions}
+              placeholder="Select department..."
             />
             <p className="muted small" style={{ margin: "4px 0 0" }}>
-              Fixed to your registered department. Contact an Administrator to
-              change it.
+              {departmentSelectOptions.length > 1
+                ? "Defaults to your primary department -- pick any department you're assigned to."
+                : "Fixed to your registered department. Contact an Administrator to add more."}
             </p>
           </Field>
           <Field label="Change Request ID(s) *">

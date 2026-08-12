@@ -19,6 +19,7 @@ import {
   GATEWAY_EDITABLE_STATUSES,
   GATEWAY_STATUS_LABELS,
   hasRole,
+  hasDepartment,
 } from "../constants";
 import { useChecklistTemplate } from "./steps/useChecklistTemplate";
 import {
@@ -194,7 +195,7 @@ export function RequestDetail({
   // ApplicationMaster row directly, not off any specific child request --
   // nothing backend-side needed to change. Same same-department gate every
   // other approval checkpoint in the app uses.
-  const sameDept = !!user?.department && user.department === req.department;
+  const sameDept = hasDepartment(user, req.department);
 
   // After an Application Owner/SM approves or rejects this request's
   // Application Name (see ApplicationNameBanner below), refetch this

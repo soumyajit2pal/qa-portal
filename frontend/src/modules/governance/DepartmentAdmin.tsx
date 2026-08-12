@@ -74,7 +74,7 @@ export default function DepartmentAdmin() {
         title="Department Coordinator" count={users.length}
         subtitle={
           `Assign ${isQAAdmin ? 'QA team' : 'working-level'} roles and activate/deactivate accounts mapped to ` +
-          `${user?.department || 'your department'} -- Administrator, Department Head, and Executive COE access ` +
+          `${(user?.departments && user.departments.length ? user.departments.join(', ') : user?.department) || 'your department'} -- Administrator, Department Head, and Executive COE access ` +
           'still require a System Admin, as does any account marked "Managed by Admin Only" (won\'t appear below).'
         }
       />

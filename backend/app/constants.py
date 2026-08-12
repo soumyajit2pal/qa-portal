@@ -53,16 +53,19 @@ QA_ADMIN_ASSIGNABLE_ROLES = [
 # defect (REQUESTER, BUSINESS_ANALYST, APPLICATION_OWNER -- CREATE_ROLES
 # itself doesn't separately list AGM_QA, but it's added here for the same
 # Executive-bypass reason CHIEF_MANAGER_QA is). Excludes only roles with no
-# stake in defects at all: SM, Department Head (CM/AGM), SCALE_6_PLUS. Keep
-# in sync with defects.py's CREATE_ROLES if that one changes. Used to gate
-# the Defect Management *register* (list/dashboard/export in
-# routers/defects.py), the batch Fail/Blocked-executions picker used to
-# create/link a defect (routers/test_execution.py), and the frontend
-# nav/page (constants.ts's own mirror, DEFECT_MANAGEMENT_ROLES). Admin
-# always passes via has_role()'s own bypass. Does NOT affect who may open a
-# single already-known defect by id/key (defects.py's get_defect/
-# get_defect_by_key stay unrestricted) -- only browsing/batch-picking is
-# restricted.
+# stake in defects at all: SM, Department Head (CM/AGM), SCALE_6_PLUS. This
+# briefly gated the Defect Management *register* (list/dashboard/export in
+# routers/defects.py), the batch Fail/Blocked-executions picker
+# (routers/test_execution.py), and the frontend nav/page (constants.ts's own
+# mirror) -- then, further reported directly: "currently Defect management
+# is not available to everyone. make this visible to everyone based on
+# department filter." That role gate is now retired everywhere it applied;
+# browsing the register is open to any authenticated user, scoped purely by
+# department (defects.py's own _scoped_defects), same as every other
+# module's list endpoint. Kept defined (unreferenced) purely as a record of
+# the role set that combination briefly meant, not for any active check --
+# CREATE_ROLES (who may actually report/link a defect) is unaffected by any
+# of this and still enforced separately.
 DEFECT_MANAGEMENT_ROLES = [
     Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
     Role.SECURITY_ANALYST, Role.REQUESTER, Role.BUSINESS_ANALYST,
@@ -408,9 +411,12 @@ POST_SIT_ENVIRONMENTS = ["UAT", "Pre-Production"]
 def validate_environment_promotion(environment: str, target_promotion_environment: str) -> None:
     """Raises ValueError if `target_promotion_environment` is not strictly
     later than `environment` in ENVIRONMENT_PIPELINE_ORDER. Callers (see
-    routers/qa_requests.py::create_request/edit_request and
-    routers/functional.py::update_functional -- the only 3 write paths for
-    these two fields) are expected to catch ValueError and re-raise as a 400
+    routers/qa_requests.py::create_request/edit_request,
+    routers/functional.py::update_functional, and -- 2026-08, reported
+    directly ("Environment Tested / Target Promotion Environment should be
+    linked like qa request form have") -- routers/signoff.py::
+    create_signoff/update_signoff, reusing this same helper rather than a
+    duplicate one) are expected to catch ValueError and re-raise as a 400
     HTTPException; kept framework-agnostic here so it isn't tied to FastAPI.
     Silently passes if either value isn't a recognised pipeline stage (e.g.
     blank/None on a still-in-progress Draft) -- this is a business-rule

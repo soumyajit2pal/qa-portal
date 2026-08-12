@@ -3,6 +3,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
 from .database import get_db
@@ -35,7 +36,7 @@ def get_current_user(
     # this same request.
     user = (
         db.query(models.User)
-        .options(selectinload(models.User.role_assignments))
+        .options(selectinload(models.User.role_assignments), selectinload(models.User.department_assignments))
         .filter(models.User.username == username)
         .first()
     )
@@ -107,12 +108,16 @@ def require_same_department(current_user: models.User, entity_department) -> Non
         return
     if not entity_department:
         return
-    if (current_user.department or None) != entity_department:
+    # 2026-08 "one user can be on multiple departments" CR -- any overlap
+    # between the request's department and ANY of the approver's own
+    # departments is sufficient, not just their primary one.
+    if not current_user.has_department(entity_department):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
                 f"You can only act on requests from your own department. This request belongs to "
-                f"'{entity_department}', but your profile is mapped to '{current_user.department or 'no department'}'."
+                f"'{entity_department}', but your profile is mapped to "
+                f"'{', '.join(current_user.departments) or 'no department'}'."
             ),
         )
 
@@ -143,9 +148,16 @@ DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES = {
 }
 
 
-def dashboard_department_scope(current_user: models.User) -> Optional[str]:
-    """Returns the single department a Dashboard query should be confined to,
-    or None for "no restriction, show every department."
+def dashboard_department_scope(current_user: models.User) -> Optional[list]:
+    """Returns the list of departments a Dashboard query should be confined
+    to (callers should filter with `.in_(scope)`, not `== scope`), or None
+    for "no restriction, show every department."
+
+    2026-08 "one user can be on multiple departments" CR -- was a single
+    department string; a user belonging to several departments now sees the
+    UNION of all of them here, not just their primary one. Every caller of
+    this function was updated from `.filter(Model.department == scope)` to
+    `.filter(Model.department.in_(scope))` accordingly.
 
     2026-08 "Admin and Scale 6+ Access-Control Requirement" -- reported
     directly, as a formal spec, that this was a "critical role-mapping and
@@ -171,7 +183,44 @@ def dashboard_department_scope(current_user: models.User) -> Optional[str]:
         return None
     if set(current_user.roles) & DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES:
         return None
-    return current_user.department or None
+    return current_user.departments or None
+
+
+def viewable_project_ids(db: Session, current_user: models.User) -> Optional[list]:
+    """2026-08 -- reported directly: "one logged in user can [only] show
+    projects which are under that user department only. now add ... view
+    only access to department as well as particular user ... if any project
+    cross departmental." Same `None` == unrestricted convention as
+    dashboard_department_scope (Admin/QA-tier roles see every project
+    regardless, so callers should skip filtering entirely rather than
+    resolving a concrete id list for them). For everyone else: their own
+    department-scoped TestProject ids, UNION any project a
+    TestProjectViewGrant (see that model's own docstring) explicitly grants
+    them read-only visibility into -- either granted straight to their
+    account, or to any department they currently belong to (checked live
+    against current_user.departments, same as every other department-scoped
+    check in this app, not a snapshot taken when the grant was created).
+
+    This only ever WIDENS which projects a scoped user's list/aggregate
+    queries include -- it has no bearing on create/edit/execute permissions,
+    which stay gated by this app's existing role checks exactly as before a
+    grant existed. See routers/test_projects.py::list_test_projects,
+    test_reports.py::_scoped_project_ids, and
+    test_execution.py::list_blocked_failed_executions for the three call
+    sites this widens; routers/defects.py::_scoped_defects also calls this
+    directly for the "grant recipients also see the project's Defects"
+    parity decision."""
+    scope = dashboard_department_scope(current_user)
+    if scope is None:
+        return None
+    own_ids = [row[0] for row in db.query(models.TestProject.id).filter(models.TestProject.department.in_(scope)).all()]
+    granted_ids = [row[0] for row in db.query(models.TestProjectViewGrant.project_id).filter(
+        or_(
+            models.TestProjectViewGrant.user_id == current_user.id,
+            models.TestProjectViewGrant.department.in_(current_user.departments),
+        )
+    ).all()]
+    return list(dict.fromkeys(own_ids + granted_ids))
 
 
 def resolve_entity_department(db: Session, entity_type: str, entity_id: int) -> Optional[str]:

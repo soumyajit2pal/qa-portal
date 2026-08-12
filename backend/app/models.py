@@ -156,6 +156,16 @@ class User(Base):
     username = Column(String(64), unique=True, nullable=False)
     full_name = Column(String(150), nullable=False)
     email = Column(String(150))
+    # 2026-08 "one user can be on multiple departments" CR -- a user's real
+    # department membership now lives in department_assignments (many-to-many
+    # via UserDepartment, same pattern as role_assignments/UserRole below).
+    # This column is kept, but is no longer the source of truth: every write
+    # path now also keeps it in sync with the FIRST-assigned department (see
+    # `departments`/`primary_department` below, and _sync_primary_department
+    # in routers/auth.py) purely so any legacy code/report that still queries
+    # this raw column directly keeps working with a sane "primary department"
+    # value instead of silently going stale or NULL. New code should use
+    # `.departments` (the full list) or `.has_department(...)` instead.
     department = Column(String(150))
     login_type = Column(String(16), nullable=False, default=LoginType.STANDARD)
     # Nullable because LDAP-type accounts authenticate against the directory
@@ -197,6 +207,17 @@ class User(Base):
     # permission checks treat a user's assigned roles as active at once (no
     # role-switcher): see has_role() below and deps.py::require_roles.
     role_assignments = relationship("UserRole", back_populates="user", cascade="all,delete-orphan")
+    # 2026-08 "one user can be on multiple departments" CR, reported
+    # directly. A user can now belong to more than one department at once
+    # (e.g. a shared/cross-functional QA + Security Analyst account) --
+    # mirrors role_assignments/UserRole above exactly, same join-table
+    # pattern. `order_by` keeps `.departments`/`primary_department` stable
+    # and predictable (insertion order = the order departments were
+    # assigned), which matters for `primary_department` below.
+    department_assignments = relationship(
+        "UserDepartment", back_populates="user", cascade="all,delete-orphan",
+        order_by="UserDepartment.id",
+    )
 
     @property
     def roles(self) -> List[str]:
@@ -215,6 +236,37 @@ class User(Base):
         codes = set(self.roles)
         return "ADMIN" in codes or bool(codes & set(roles))
 
+    @property
+    def departments(self) -> List[str]:
+        """Every department this user currently belongs to. Falls back to the
+        legacy `department` column for any account that predates the
+        department_assignments rollout and hasn't been touched since (e.g. a
+        row seeded before this migration ran) -- keeps has_department() and
+        every caller of `.departments` working immediately, with no separate
+        backfill step required."""
+        assigned = [da.department for da in self.department_assignments]
+        if assigned:
+            return assigned
+        return [self.department] if self.department else []
+
+    @property
+    def primary_department(self) -> "str | None":
+        """The FIRST department this user was ever assigned -- used only as a
+        default/prefill for the handful of places that need exactly one
+        department (e.g. a new QA Request's own department field). Never
+        used for eligibility/access checks -- those should always check
+        against the full `.departments` list via has_department()."""
+        departments = self.departments
+        return departments[0] if departments else None
+
+    def has_department(self, *departments: str) -> bool:
+        """True if this user belongs to at least one of the given
+        departments. The multi-department equivalent of the old
+        `user.department == X` / `user.department in (...)` checks scattered
+        across the app -- every one of those was rewritten to call this
+        instead of comparing the single legacy column directly."""
+        return bool(set(self.departments) & set(d for d in departments if d))
+
 
 class UserRole(Base):
     """Join table backing User.roles -- one row per (user, role) pair."""
@@ -225,6 +277,24 @@ class UserRole(Base):
     role = Column(String(32), nullable=False)
 
     user = relationship("User", back_populates="role_assignments")
+
+
+class UserDepartment(Base):
+    """Join table backing User.departments -- one row per (user, department)
+    pair, exact mirror of UserRole above. `department` is a free-text string
+    (not a FK to qap_departments.id) for the same reason the legacy
+    User.department column was: it's validated against active Department
+    rows at write time (routers/auth.py::_validate_department) rather than
+    DB-enforced, matching how every other "department" field in this app
+    (QARequest.department, TestProject.department, etc.) already works."""
+    __tablename__ = "qap_user_departments"
+    __table_args__ = (UniqueConstraint("user_id", "department", name="uq_qap_user_departments"),)
+    id = pk_column()
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False)
+    department = Column(String(150), nullable=False)
+    created_at = Column(DateTime, default=now)
+
+    user = relationship("User", back_populates="department_assignments")
 
 
 class Department(Base):
@@ -1742,6 +1812,7 @@ class TestProject(Base):
     test_cases = relationship("TestCase", back_populates="project", cascade="all,delete-orphan")
     cycles = relationship("TestCycle", back_populates="project", cascade="all,delete-orphan")
     members = relationship("TestProjectMember", back_populates="project", cascade="all,delete-orphan")
+    view_grants = relationship("TestProjectViewGrant", back_populates="project", cascade="all,delete-orphan")
 
     @property
     def owner_name(self):
@@ -1797,6 +1868,62 @@ class TestProjectMember(Base):
     @property
     def added_by_name(self):
         return self.added_by.full_name if self.added_by else None
+
+
+class TestProjectViewGrant(Base):
+    """2026-08 -- reported directly: "one logged in user can [only] show
+    projects which are under that user department only. now add one
+    functionality to add view only access to department as well as
+    particular user ... it will help if any project cross departmental."
+    Grants read-only visibility into ONE specific Test Project (its Test
+    Execution/Repository/Reports, plus -- per the same requirement's
+    follow-up decision -- its linked Defects) to a department or user who
+    isn't otherwise in scope for it via TestProject.department. Deliberately
+    per-project, not a blanket department-to-department grant, matching "if
+    ANY PROJECT is cross departmental" -- most projects never need this;
+    it's an exception for the specific ones that do.
+
+    Exactly one of `department`/`user_id` is set per row (enforced in
+    routers/test_projects.py, not at the DB level -- same
+    application-layer-only convention as this app's other "must be exactly
+    one of" rules, e.g. auth.py's department/departments payload
+    resolution). A department grant covers every current AND future member
+    of that department (checked live against User.departments at read time,
+    same as every other department-scoped check in this app); a user grant
+    covers that one account regardless of their own department(s).
+
+    This is READ-ONLY by design -- it only ever widens which projects a
+    scoped user's LIST/aggregate queries include (see
+    deps.py::viewable_project_ids), never any create/edit/execute
+    permission, all of which stay gated by this app's existing role-based
+    checks (QA_ENGINEER/QA_LEAD/etc.) exactly as before. A grant recipient
+    who happens to also hold one of those roles is not, by virtue of this
+    grant alone, able to mutate the granted project -- same as how holding
+    those roles alone was never sufficient without also being in-department
+    prior to this feature."""
+    __tablename__ = "qap_test_project_view_grants"
+    __table_args__ = (
+        UniqueConstraint("project_id", "department", name="uq_qap_tpvg_project_department"),
+        UniqueConstraint("project_id", "user_id", name="uq_qap_tpvg_project_user"),
+    )
+    id = pk_column()
+    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
+    department = Column(String(150), nullable=True)
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    granted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    project = relationship("TestProject", foreign_keys=[project_id])
+    user = relationship("User", foreign_keys=[user_id])
+    granted_by = relationship("User", foreign_keys=[granted_by_id])
+
+    @property
+    def user_name(self):
+        return self.user.full_name if self.user else None
+
+    @property
+    def granted_by_name(self):
+        return self.granted_by.full_name if self.granted_by else None
 
 
 class TestFolder(Base):

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_not_requester, dashboard_department_scope
-from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, QA_DEPARTMENT
+from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, QA_DEPARTMENT, validate_environment_promotion
 from ..pdf_export import RichTextValue, build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -47,7 +47,7 @@ def _get_visible_or_404(db: Session, signoff_id: int, user: models.User) -> "mod
     """Resolve a certificate while enforcing request-department privacy."""
     obj = _get_or_404(db, signoff_id)
     scope = dashboard_department_scope(user)
-    if scope and obj.request_department != scope:
+    if scope and obj.request_department not in scope:
         # Deliberately 404 instead of 403 so another department cannot use
         # sequential IDs to discover whether a private certificate exists.
         raise HTTPException(404, "Sign-off certificate not found")
@@ -89,11 +89,11 @@ def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", curren
 def _require_qa_department(user: models.User) -> None:
     if user.has_role(Role.ADMIN):
         return
-    if user.department != QA_DEPARTMENT:
+    if not user.has_department(QA_DEPARTMENT):
         raise HTTPException(
             403,
             f"QA Sign-off is restricted to the '{QA_DEPARTMENT}' department. "
-            f"Your profile is mapped to '{user.department or 'no department'}'.",
+            f"Your profile is mapped to '{', '.join(user.departments) or 'no department'}'.",
         )
 
 
@@ -114,7 +114,7 @@ def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Dep
                 models.FunctionalRequest.request_id == models.QASignOff.testing_request_id,
             )
             .join(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id)
-            .filter(models.QARequest.department == scope))
+            .filter(models.QARequest.department.in_(scope)))
     return q.order_by(models.QASignOff.created_at.desc()).all()
 
 
@@ -137,6 +137,16 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     # Never trust the linked business request's department for approval
     # routing: the sign-off certificate is a COE - Quality Assurance-owned record.
     data["department"] = QA_DEPARTMENT
+    # Same Environment Tested/Target Promotion Environment ordering rule as
+    # routers/qa_requests.py::create_request/edit_request and
+    # routers/functional.py::update_functional -- reuses the same shared
+    # validate_environment_promotion helper rather than a duplicate check.
+    # The frontend's own two selects already only offer valid combinations,
+    # this is the defense-in-depth backstop before a direct API call.
+    try:
+        validate_environment_promotion(data.get("environment_tested"), data.get("target_promotion_environment"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     obj = models.QASignOff(**data, status="DRAFT", requester_id=current_user.id)
     db.add(obj)
     db.commit()
@@ -179,6 +189,17 @@ def update_signoff(signoff_id: int, payload: schemas.SignOffUpdate, db: Session 
         raise HTTPException(403, "Only the requester, a QA Lead during approval, or an admin can edit this certificate")
 
     data = payload.model_dump(exclude_unset=True)
+    # Same shared-method ordering check as create_signoff -- only actually
+    # re-validated when the client sent at least one of the two fields
+    # (exclude_unset=True-aware, same pattern as qa_requests.py::edit_request),
+    # falling back to obj's own current value for whichever field wasn't sent.
+    if "environment_tested" in data or "target_promotion_environment" in data:
+        final_environment_tested = data.get("environment_tested", obj.environment_tested)
+        final_target = data.get("target_promotion_environment", obj.target_promotion_environment)
+        try:
+            validate_environment_promotion(final_environment_tested, final_target)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
     for k, v in data.items():
         setattr(obj, k, v)
     db.commit()
@@ -392,11 +413,11 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
     if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA) and user.department == QA_DEPARTMENT
+        return user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA) and user.has_department(QA_DEPARTMENT)
     if status == "DEPT_HEAD_QA_APPROVAL_PENDING":
         return user.has_role(
             Role.CHIEF_MANAGER_QA, Role.AGM_QA,
-        ) and user.department == QA_DEPARTMENT
+        ) and user.has_department(QA_DEPARTMENT)
     return False
 
 

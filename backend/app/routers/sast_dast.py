@@ -161,7 +161,7 @@ def _get_or_404(db: Session, model_cls, req_id: int, label: str):
 
 def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> models.User:
     user = db.query(models.User).get(user_id) if user_id else None
-    if not user or not user.is_active or not user.has_role(role) or user.department != QA_DEPARTMENT:
+    if not user or not user.is_active or not user.has_role(role) or not user.has_department(QA_DEPARTMENT):
         raise HTTPException(400, f"{label} must be an active {role.replace('_', ' ').title()} from {QA_DEPARTMENT}")
     return user
 
@@ -192,7 +192,7 @@ def _require_can_reassign_security_analyst(obj, user: models.User) -> None:
         return
     if obj.security_analyst_id and obj.security_analyst_id == user.id:
         return
-    if user.department == QA_DEPARTMENT and user.has_role(*reassignment.department_head_roles(QA_DEPARTMENT)):
+    if user.has_department(QA_DEPARTMENT) and user.has_role(*reassignment.department_head_roles(QA_DEPARTMENT)):
         return
     # 2026-08 -- reported directly: QA_LEAD is required to keep reassignment
     # rights here too, mirroring functional.py/performance.py's identical
@@ -233,9 +233,9 @@ def _can_upload_documents(obj, user: models.User) -> bool:
                   "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     # Every post-readiness/terminal status -- locked for everyone but Admin
     # until the request is returned to the requester above.
     return False
@@ -268,9 +268,9 @@ def _can_edit_details(obj, user: models.User) -> bool:
     if status in ("DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     return False
 
 
@@ -727,7 +727,7 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
     )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.QARequest.department == scope)
+        q = q.filter(models.QARequest.department.in_(scope))
     q = pagination.apply_search(q, params, models.SASTRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.SASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
@@ -1244,7 +1244,7 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
     )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.QARequest.department == scope)
+        q = q.filter(models.QARequest.department.in_(scope))
     q = pagination.apply_search(q, params, models.DASTRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.DASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)

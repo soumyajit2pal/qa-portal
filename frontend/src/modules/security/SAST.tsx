@@ -7,7 +7,7 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
-import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
+import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
 import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 
@@ -65,7 +65,7 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   // canDeptHeadDecide -- this modal only opens via that same gate, but the
   // checklist evidence controls inside it need their own explicit check.
   const isRequesterModal = editing.requester_id === user?.id || isAdmin
-  const sameDeptModal = !!user?.department && user.department === editing.department
+  const sameDeptModal = hasDepartment(user, editing.department)
   const canSMDecideModal = hasRole(user, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
   const canDeptHeadDecideModal = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
   const canManageEvidenceModal = isAdmin || (
@@ -392,15 +392,15 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const isAdmin = hasRole(user, 'ADMIN')
   const isRequester = req.requester_id === user?.id || isAdmin
   const status = req.status
-  const sameDept = !!user?.department && user.department === req.department
+  const sameDept = hasDepartment(user, req.department)
   // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
   // gated action, same as Admin, without being listed as "QA Lead group"
   // members (display-only concern, see assignedGroupFor above). See
   // ORACLE_MIGRATION_2026-07.md section 59.
   const isAssignedQALead = isAdmin || hasRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   const isAssignedAnalyst = isAdmin || (hasRole(user, 'SECURITY_ANALYST') && req.security_analyst_id === user?.id)
-  const qaLeads = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('QA_LEAD'))
-  const securityAnalysts = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('SECURITY_ANALYST'))
+  const qaLeads = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_LEAD'))
+  const securityAnalysts = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('SECURITY_ANALYST'))
 
   // Edit access mirrors the backend's own _can_edit_details exactly (see
   // update_sast): the requester (or admin) may edit while it's Draft or
@@ -493,7 +493,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // QA_LEAD is required to keep reassignment rights too, restoring parity
   // with isAssignedQALead (which already gates the first assignment).
   // Mirrors sast_dast.py's _require_can_reassign_security_analyst exactly.
-  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && user?.department === QA_DEPARTMENT)
+  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
   const canReassignSecurityAnalyst = isAssignedAnalyst || isQADepartmentHead || hasRole(user, 'QA_LEAD')
   const canAssignSecurityAnalyst =
     (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&

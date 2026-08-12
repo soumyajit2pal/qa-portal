@@ -5,7 +5,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
+import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole, hasDepartment } from '../../constants'
 import { SASTListOut, DASTListOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
@@ -136,7 +136,7 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
   // same as their override elsewhere.
   function inScope(r: SASTListOut | DASTListOut): boolean {
     if (hasRole(user, 'ADMIN')) return true
-    return r.requester_id === user?.id || (!!user?.department && r.department === user.department)
+    return r.requester_id === user?.id || hasDepartment(user, r.department)
   }
 
   // A suppression is a decision about a *finding* -- there's nothing to
@@ -324,7 +324,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
   // SM/Department Head approvals are department-scoped -- see the comment in
   // QARequests.tsx. Security Team verification is NOT department-scoped
   // (it's the QA/security side receiving the request).
-  const sameDept = !!user?.department && user.department === sup.department
+  const sameDept = hasDepartment(user, sup.department)
 
   const canSubmit = isRequester && status === 'Draft'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status)

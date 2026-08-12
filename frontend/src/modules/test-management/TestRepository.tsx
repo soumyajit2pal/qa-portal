@@ -2436,9 +2436,10 @@ function RecycleBinPanel({
           {
             key: 'actions', header: 'Actions', filterable: false,
             render: (c) => (
-              <span className="tm-bulk-summary" style={{ display: 'flex', gap: 8 }}>
+              <span className="tm-recycle-actions">
                 {canRestore && <button className="btn btn-sm btn-primary" disabled={busyId === c.id} onClick={() => restoreOne(c.id)}>Restore</button>}
                 {canPurge && <button className="btn btn-sm btn-danger" disabled={busyId === c.id} onClick={() => setConfirmSingle({ id: c.id, key: c.test_case_key })}>Clear permanently</button>}
+                {!canRestore && !canPurge && <small>No permitted actions</small>}
               </span>
             ),
           },

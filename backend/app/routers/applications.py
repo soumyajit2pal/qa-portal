@@ -159,6 +159,40 @@ def list_application_names(db: Session = Depends(get_db), current_user: models.U
     return result
 
 
+@router.patch("/{app_id}/department", response_model=schemas.ApplicationMasterOut)
+def update_application_department(
+    app_id: int,
+    payload: schemas.ApplicationMasterDepartmentUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    """Assign an existing application master to an active system department.
+
+    Linked Test Projects carry a denormalised department value for filtering,
+    so keep those rows synchronized with the application master update.
+    """
+    obj = db.query(models.ApplicationMaster).get(app_id)
+    if not obj:
+        raise HTTPException(404, "Application not found")
+    department = payload.department.strip()
+    if not department:
+        raise HTTPException(400, "Department is required")
+    active_department = (db.query(models.Department)
+                         .filter(models.Department.name == department,
+                                 models.Department.is_active == True)  # noqa: E712 - Oracle boolean column
+                         .first())
+    if not active_department:
+        raise HTTPException(400, "Select an active department from the system department list")
+    obj.department = active_department.name
+    (db.query(models.TestProject)
+       .filter(models.TestProject.application_master_id == obj.id)
+       .update({models.TestProject.department: active_department.name}, synchronize_session=False))
+    db.commit()
+    db.refresh(obj)
+    _invalidate_approved_names_cache()
+    return obj
+
+
 @router.get("/pending-app-owner", response_model=List[schemas.ApplicationMasterOut])
 def list_pending_app_owner_names(db: Session = Depends(get_db),
                                   current_user: models.User = Depends(require_roles(Role.APPLICATION_OWNER, Role.ADMIN))):
@@ -173,7 +207,7 @@ def list_pending_app_owner_names(db: Session = Depends(get_db),
     department's."""
     q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
     if not current_user.has_role(Role.ADMIN):
-        q = q.filter(models.ApplicationMaster.department == current_user.department)
+        q = q.filter(models.ApplicationMaster.department.in_(current_user.departments))
     return q.order_by(models.ApplicationMaster.created_at).all()
 
 
@@ -191,7 +225,7 @@ def list_pending_application_names(db: Session = Depends(get_db),
     applied here as a filter instead of a hard error)."""
     q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_SM")
     if not current_user.has_role(Role.ADMIN):
-        q = q.filter(models.ApplicationMaster.department == current_user.department)
+        q = q.filter(models.ApplicationMaster.department.in_(current_user.departments))
     return q.order_by(models.ApplicationMaster.created_at).all()
 
 

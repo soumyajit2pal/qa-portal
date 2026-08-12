@@ -35,6 +35,7 @@ import {
   DEPLOYMENT_ENVIRONMENTS,
   CHANGE_TYPES,
   hasRole,
+  hasDepartment,
   validTargetPromotionOptions,
   validEnvironmentPromotion,
   canManageReadinessEvidence,
@@ -120,7 +121,7 @@ function FunctionalFormModal({
   // canManageReadinessEvidence's isOwner param) rather than assuming the
   // status alone means this particular viewer may attach/remove evidence.
   const isRequesterModal = editing.requester_id === user?.id || isAdmin;
-  const sameDeptModal = !!user?.department && user.department === editing.department;
+  const sameDeptModal = hasDepartment(user, editing.department);
   const canSMDecideModal = hasRole(user, "SM") && editing.status === "SM_APPROVAL_PENDING" && sameDeptModal;
   const canDeptHeadDecideModal =
     hasRole(user, "DEPARTMENT_HEAD_CM", "DEPARTMENT_HEAD_AGM") &&
@@ -844,10 +845,10 @@ function FunctionalDetail({
   }
 
   const qaLeads = users.filter((u) =>
-    u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes("QA_LEAD")
+    u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes("QA_LEAD")
   );
   const testers = users.filter((u) =>
-    u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes("QA_ENGINEER")
+    u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes("QA_ENGINEER")
   );
 
   const isAdmin = hasRole(user, "ADMIN");
@@ -855,7 +856,7 @@ function FunctionalDetail({
   const isRequesterVerifier = isRequester || hasRole(user, "APPLICATION_OWNER");
 
   const status = req.status;
-  const sameDept = !!user?.department && user.department === req.department;
+  const sameDept = hasDepartment(user, req.department);
   // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
   // gated action, same as Admin, without being listed as "QA Lead group"
   // members anywhere (display-only concern, kept to literal QA_LEAD --
@@ -990,7 +991,7 @@ function FunctionalDetail({
   // the first assignment). Mirrors functional.py's
   // _require_can_reassign_tester exactly.
   const isQADepartmentHead =
-    isAdmin || (hasRole(user, "CHIEF_MANAGER_QA", "AGM_QA") && user?.department === QA_DEPARTMENT);
+    isAdmin || (hasRole(user, "CHIEF_MANAGER_QA", "AGM_QA") && hasDepartment(user, QA_DEPARTMENT));
   const canReassignTester = isAssignedTester || isQADepartmentHead || hasRole(user, "QA_LEAD");
   const canAssignTester =
     (isInitialTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignTester) &&
@@ -1062,7 +1063,7 @@ function FunctionalDetail({
   // isn't available to.
   const canRequestSignoff =
     (isAssignedTester || isAssignedQALead) &&
-    (hasRole(user, "ADMIN") || user?.department === QA_DEPARTMENT) &&
+    (hasRole(user, "ADMIN") || hasDepartment(user, QA_DEPARTMENT)) &&
     status === "QA_COMPLETED";
   // "Confirm Sign-off" (a manual QA Lead click) removed -- the linked
   // certificate reaching ISSUED now auto-advances this request straight to

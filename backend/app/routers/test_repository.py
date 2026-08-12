@@ -68,7 +68,11 @@ def _stage1_reviewer_ids(db: Session, project_id: int, author_id: Optional[int] 
         # Oracle stores SQLAlchemy Boolean as NUMBER(1); `.is_(True)` emits
         # `IS 1`, which Oracle rejects with ORA-00908. Equality emits `= 1`.
         models.User.is_active == 1,
-        models.User.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS),
+        # 2026-08 "one user can be on multiple departments" CR -- membership
+        # via the department_assignments join table, not the legacy column.
+        models.User.department_assignments.any(
+            models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
+        ),
     ).all()
     return [
         user.id for user in users
@@ -82,7 +86,11 @@ def _stage2_approver_ids(db: Session, author_id: Optional[int] = None) -> List[i
     "Review Completed" -- see _stage1_reviewer_ids' own comment."""
     users = db.query(models.User).filter(
         models.User.is_active == 1,
-        models.User.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS),
+        # 2026-08 "one user can be on multiple departments" CR -- membership
+        # via the department_assignments join table, not the legacy column.
+        models.User.department_assignments.any(
+            models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
+        ),
     ).all()
     return [
         user.id for user in users
@@ -97,7 +105,11 @@ def _qa_group_ids(db: Session, author_id: Optional[int] = None) -> List[int]:
     AskUserQuestion), excluding the author (GOV-002 maker-checker)."""
     users = db.query(models.User).filter(
         models.User.is_active == 1,
-        models.User.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS),
+        # 2026-08 "one user can be on multiple departments" CR -- membership
+        # via the department_assignments join table, not the legacy column.
+        models.User.department_assignments.any(
+            models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
+        ),
     ).all()
     return [
         user.id for user in users
@@ -114,7 +126,11 @@ def _qa_lead_group_ids(db: Session, author_id: Optional[int] = None) -> List[int
     excluding the author."""
     users = db.query(models.User).filter(
         models.User.is_active == 1,
-        models.User.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS),
+        # 2026-08 "one user can be on multiple departments" CR -- membership
+        # via the department_assignments join table, not the legacy column.
+        models.User.department_assignments.any(
+            models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
+        ),
     ).all()
     return [
         user.id for user in users
@@ -1126,7 +1142,7 @@ def _validate_stage2_assignee(db: Session, drafts: List[models.TestCaseVersion],
     qa_lead = db.query(models.User).get(qa_lead_id)
     if not qa_lead or not qa_lead.is_active:
         raise HTTPException(400, "Select an active QA Lead (Stage 2)")
-    if qa_lead.department not in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS:
+    if not qa_lead.has_department(*TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
         raise HTTPException(
             400,
             f"Selected approvers must be mapped to one of: {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)}",
@@ -1151,7 +1167,7 @@ def _validate_submission_assignees(db: Session, drafts: List[models.TestCaseVers
     reviewer = db.query(models.User).get(reviewer_id)
     if not reviewer or not reviewer.is_active:
         raise HTTPException(400, "Select an active Reviewer (Stage 1)")
-    if reviewer.department not in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS:
+    if not reviewer.has_department(*TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
         raise HTTPException(
             400,
             f"Selected approvers must be mapped to one of: {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)}",

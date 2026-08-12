@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, dashboard_department_scope, get_project_or_404 as _get_project_or_404
+from ..deps import get_current_user, viewable_project_ids, get_project_or_404 as _get_project_or_404
 from ..constants import TEST_CYCLE_LOCKED_STATUSES
 
 router = APIRouter(prefix="/api/test-reports", tags=["test-management"])
@@ -55,13 +55,11 @@ _MAX_PAGE_SIZE = 500
 
 def _scoped_project_ids(db: Session, current_user: models.User) -> Optional[list]:
     """None means unrestricted (Admin/QA Lead-tier roles); otherwise the
-    list of TestProject ids the caller's own department scope allows, same
-    department-scoping convention as every other report/dashboard in this
-    app (deps.dashboard_department_scope)."""
-    scope = dashboard_department_scope(current_user)
-    if not scope:
-        return None
-    return [row[0] for row in db.query(models.TestProject.id).filter(models.TestProject.department == scope).all()]
+    list of TestProject ids the caller may see -- their own department
+    scope, widened by deps.viewable_project_ids to also include any
+    2026-08 "view-only access to department/user" CR grant (see that
+    function's own docstring in deps.py)."""
+    return viewable_project_ids(db, current_user)
 
 
 @router.get("/projects/{project_id}/repository-health", response_model=schemas.RepositoryHealthOut)

@@ -84,6 +84,14 @@ def run():
             db.add(models.User(
                 username=username, full_name=full_name, department=dept,
                 role_assignments=[models.UserRole(role=role)],
+                # 2026-08 "one user can be on multiple departments" CR --
+                # every demo user still gets exactly one department, seeded
+                # through the new department_assignments relationship (not
+                # just the legacy `department` column above) so seeded
+                # accounts behave identically to ones created through
+                # Admin.tsx post-migration, rather than relying on the
+                # User.departments property's own legacy-column fallback.
+                department_assignments=[models.UserDepartment(department=dept)] if dept else [],
                 email=f"{username}@bankofmaharashtra.bank.in",
                 login_type=LoginType.STANDARD,
                 hashed_password=hash_password(DEMO_PASSWORD),

@@ -40,7 +40,7 @@ def _visible_qa_requests(db: Session, current_user: models.User):
         ))
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.QARequest.department == scope)
+        q = q.filter(models.QARequest.department.in_(scope))
     return q
 
 
@@ -92,7 +92,7 @@ def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
+             .filter(models.QARequest.department.in_(scope))
     rows = q.all()
     return [{
         "Request ID": r.request_id, "Application": r.application_name, "Build": r.build_number,
@@ -107,7 +107,7 @@ def dast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
+             .filter(models.QARequest.department.in_(scope))
     rows = q.all()
     return [{
         "Request ID": r.request_id, "Application URL": r.application_url, "Environment": r.environment,
@@ -126,10 +126,10 @@ def vulnerability_trend(db: Session = Depends(get_db), current_user: models.User
     if scope:
         sast_q = sast_q.join(models.SASTRequest, models.SASTFinding.sast_request_id == models.SASTRequest.id) \
                         .join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
-                        .filter(models.QARequest.department == scope)
+                        .filter(models.QARequest.department.in_(scope))
         dast_q = dast_q.join(models.DASTRequest, models.DASTFinding.dast_request_id == models.DASTRequest.id) \
                         .join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
-                        .filter(models.QARequest.department == scope)
+                        .filter(models.QARequest.department.in_(scope))
     findings = sast_q.all() + dast_q.all()
     from collections import Counter
     return dict(Counter(f.severity for f in findings))
@@ -150,7 +150,7 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
     q = db.query(models.SuppressionRequest)
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.SuppressionRequest.department == scope)
+        q = q.filter(models.SuppressionRequest.department.in_(scope))
     rows = q.all()
     out = []
     for s in rows:
@@ -181,12 +181,12 @@ def monthly_kpi(db: Session = Depends(get_db), current_user: models.User = Depen
     if scope:
         completed_q = completed_q.join(
             models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id
-        ).filter(models.QARequest.department == scope)
+        ).filter(models.QARequest.department.in_(scope))
     open_suppressions_q = db.query(models.SuppressionRequest).filter(
         models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
     if scope:
         # SuppressionRequest.department is a real column -- direct filter.
-        open_suppressions_q = open_suppressions_q.filter(models.SuppressionRequest.department == scope)
+        open_suppressions_q = open_suppressions_q.filter(models.SuppressionRequest.department.in_(scope))
     return [{
         "Total QA Requests": total_requests, "Completed Requests": completed_q.count(),
         "Open Suppressions": open_suppressions_q.count(),
@@ -216,7 +216,7 @@ def quality_scorecard(db: Session = Depends(get_db), current_user: models.User =
         if scope:
             sast_q = sast_q.join(
                 models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id
-            ).filter(models.QARequest.department == scope)
+            ).filter(models.QARequest.department.in_(scope))
         out.append({
             "Application": app, "QA Requests": len(reqs),
             "Completed": completed,
@@ -235,7 +235,7 @@ def audit_evidence(db: Session = Depends(get_db), current_user: models.User = De
     rows = db.query(models.ApprovalAction).order_by(models.ApprovalAction.created_at.desc()).limit(1000).all()
     scope = dashboard_department_scope(current_user)
     if scope:
-        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) == scope]
+        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]
     out = []
     for a in rows:
         u = db.query(models.User).get(a.actor_id) if a.actor_id else None

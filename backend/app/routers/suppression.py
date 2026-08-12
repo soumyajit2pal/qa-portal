@@ -98,7 +98,7 @@ def list_suppressions(db: Session = Depends(get_db), current_user: models.User =
     q = db.query(models.SuppressionRequest)
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.SuppressionRequest.department == scope)
+        q = q.filter(models.SuppressionRequest.department.in_(scope))
     return q.order_by(models.SuppressionRequest.created_at.desc()).all()
 
 
@@ -380,9 +380,9 @@ def _can_upload_documents(obj: "models.SuppressionRequest", user: models.User) -
     if status in ("Draft", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_TEAM"):
         return obj.created_by_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     # SECURITY_TEAM_VERIFICATION/Done/Rejected -- locked for everyone but
     # Admin until the request is returned to the requester above.
     return False

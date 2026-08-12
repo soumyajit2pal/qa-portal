@@ -9,11 +9,11 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
-    get_current_user, require_roles, dashboard_department_scope,
+    get_current_user, require_roles, viewable_project_ids,
     require_can_execute_project, require_can_manage_execution_governance,
     get_project_or_404 as _get_project_or_404,
 )
-from ..constants import Role, QAStatus, DEFECT_MANAGEMENT_ROLES, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
+from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
 from .. import documents as doc_store
 from .. import reassignment
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
@@ -306,7 +306,7 @@ def _runner_or_404(db: Session, user_id: int) -> models.User:
         raise HTTPException(404, "Selected runner was not found or is inactive")
     if not (set(target.roles) & {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA}):
         raise HTTPException(400, "Runner must have the QA Engineer, QA Lead, or CM-QA role")
-    if target.department not in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS:
+    if not target.has_department(*TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
         raise HTTPException(400, f"Runner must be mapped to one of: {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)}")
     return target
 
@@ -321,7 +321,7 @@ def _require_qa_assignment_manager(current_user: models.User) -> None:
     """
     if current_user.has_role(Role.ADMIN):
         return
-    if current_user.department not in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS:
+    if not current_user.has_department(*TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
         raise HTTPException(403, f"Only members of {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)} can assign testcase runners")
 
 
@@ -783,7 +783,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     owner_reason = None
     if is_owner_reassignment:
         previous_owner = db.query(models.User).get(previous_owner_id)
-        reassignment.require_can_reassign(current_user, previous_owner_id, previous_owner.department if previous_owner else None)
+        reassignment.require_can_reassign(current_user, previous_owner_id, previous_owner.departments if previous_owner else None)
         owner_reason = reassignment.require_reason(payload.reason)
     start_date = data.get("start_date", obj.start_date)
     end_date = data.get("end_date", obj.end_date)
@@ -1050,7 +1050,7 @@ def get_execution_summary(cycle_id: int, db: Session = Depends(get_db),
 
 @router.get("/executions/blocked-or-failed", response_model=List[schemas.DefectLinkableExecutionOut])
 def list_blocked_failed_executions(db: Session = Depends(get_db),
-                                    current_user: models.User = Depends(require_roles(*DEFECT_MANAGEMENT_ROLES))):
+                                    current_user: models.User = Depends(get_current_user)):
     """2026-08 -- reported directly: on Defect Management's page load, "if
     there are 30 project[s] then 30 api call[s] ... same for cycles,
     executions." Defects.tsx used to build its "pick a Failed/Blocked Test
@@ -1060,23 +1060,21 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
     one execution-list call per cycle, scaling worse than linearly as the
     number of in-progress cycles grows. This single batch query replaces all
     of that: one SQL join across TestProject -> TestCycle -> TestExecution,
-    filtered to active projects and Fail/Blocked status, department-scoped
-    the same way every other cross-project list in this app is. This
-    actually matters now: DEFECT_MANAGEMENT_ROLES includes REQUESTER/
-    BUSINESS_ANALYST/APPLICATION_OWNER (2026-08, reported directly -- see
-    that constant's own comment in constants.py), none of which are in
-    dashboard_department_scope's unrestricted set, so their own picker is
-    correctly narrowed to their own department's projects, same as their
-    view of the defect register itself (defects.py's _scoped_defects). QA
-    team roles remain department-unrestricted as usual.
+    filtered to active projects and Fail/Blocked status, scoped the same way
+    every other cross-project list in this app is (deps.viewable_project_ids
+    -- own department scope, widened by any 2026-08 "view-only access to
+    department/user" CR grant).
 
-    Only ever called by Defects.tsx, which is itself now
-    DEFECT_MANAGEMENT_ROLES-gated (see defects.py's own list_defects/
-    defect_dashboard/export_defects) -- gated here too rather than relying
-    solely on the frontend hiding the page. Returns one flattened row per
-    execution, each carrying its own project/cycle alongside it, mirroring
-    the frontend's pre-existing `ExecutionContext` shape exactly so no
-    consumer-side logic needs to change, only where the data comes from."""
+    2026-08, further widened: Defect Management itself is no longer role-
+    gated (see defects.py's own list_defects/defect_dashboard/export_defects
+    and this router's own docstring update) -- open to any authenticated
+    user, scoped by department exactly like every other module's register,
+    so this picker only takes `get_current_user` too now rather than the
+    retired DEFECT_MANAGEMENT_ROLES allow-list. Returns one flattened row
+    per execution, each carrying its own project/cycle alongside it,
+    mirroring the frontend's pre-existing `ExecutionContext` shape exactly
+    so no consumer-side logic needs to change, only where the data comes
+    from."""
     q = (
         db.query(models.TestExecution)
         .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
@@ -1088,9 +1086,9 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
             *_LIST_EXECUTION_EAGER_LOADS,
         )
     )
-    scope = dashboard_department_scope(current_user)
-    if scope:
-        q = q.filter(models.TestProject.department == scope)
+    project_ids = viewable_project_ids(db, current_user)
+    if project_ids is not None:
+        q = q.filter(models.TestProject.id.in_(project_ids))
     executions = q.order_by(models.TestProject.id, models.TestCycle.id, models.TestExecution.id).all()
     return [
         {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution}

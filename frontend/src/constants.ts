@@ -82,15 +82,34 @@ export const DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES: string[] = [
   'SCALE_6_PLUS',
 ]
 
+// 2026-08 "one user can be on multiple departments" CR -- mirrors backend
+// models.py's User.departments/has_department: a user's full department set
+// (falls back to the single legacy `department` field for any caller that
+// hasn't been updated to send `departments` yet), and an any-of-overlap
+// membership check.
+export function userDepartments(user?: { departments?: string[] | null; department?: string | null } | null): string[] {
+  if (!user) return []
+  if (user.departments && user.departments.length) return user.departments
+  return user.department ? [user.department] : []
+}
+
+export function hasDepartment(user: { departments?: string[] | null; department?: string | null } | null | undefined,
+  ...departments: (string | null | undefined)[]): boolean {
+  const mine = new Set(userDepartments(user))
+  return departments.some((d) => d && mine.has(d))
+}
+
 // Whether `user` would see any data on a page scoped the same way as QA
 // Sign-off (see dashboard_department_scope in deps.py): unrestricted by
-// role, has no department set at all (nothing meaningful to scope by, same
-// fallback the backend uses), or is actually mapped to QA_DEPARTMENT.
-export function canSeeQaDepartmentOnlyData(user?: { roles?: string[]; department?: string | null } | null): boolean {
+// role, has no department at all (nothing meaningful to scope by, same
+// fallback the backend uses), or holds QA_DEPARTMENT among their (possibly
+// several) departments.
+export function canSeeQaDepartmentOnlyData(user?: { roles?: string[]; departments?: string[] | null; department?: string | null } | null): boolean {
   if (!user) return false
   if ((user.roles || []).some((r) => DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES.includes(r))) return true
-  if (!user.department) return true
-  return user.department === QA_DEPARTMENT
+  const departments = userDepartments(user)
+  if (!departments.length) return true
+  return hasDepartment(user, QA_DEPARTMENT)
 }
 
 // 2026-08 Reassignment Requirement -- mirrors backend/app/reassignment.py's
@@ -111,13 +130,20 @@ export function departmentHeadRoles(department?: string | null): string[] {
 // department, or an Admin. Takes the assignee's department directly rather
 // than looking it up, since callers generally already have that user's
 // record on hand (e.g. from a users list already loaded for a picker).
-export function canReassign(user: RoleBearer | null | undefined, currentAssigneeId?: number | null, currentAssigneeDepartment?: string | null): boolean {
+// `currentAssigneeDepartment` may also be an array (the previous assignee's
+// full multi-department set) -- 2026-08 "one user can be on multiple
+// departments" CR -- any department where `user` is BOTH a member AND holds
+// that department's Department Head role qualifies, same any-of logic as
+// the backend's now list-accepting `department` param.
+export function canReassign(user: RoleBearer | null | undefined, currentAssigneeId?: number | null, currentAssigneeDepartment?: string | string[] | null): boolean {
   if (!user) return false
   if ((user.roles || []).includes('ADMIN')) return true
   if (currentAssigneeId != null && user.id === currentAssigneeId) return true
-  if (currentAssigneeDepartment && user.department === currentAssigneeDepartment
-    && hasRole(user, ...departmentHeadRoles(currentAssigneeDepartment))) return true
-  return false
+  const candidateDepartments = Array.isArray(currentAssigneeDepartment)
+    ? currentAssigneeDepartment
+    : (currentAssigneeDepartment ? [currentAssigneeDepartment] : [])
+  return candidateDepartments.some((dept) => dept && hasDepartment(user, dept)
+    && hasRole(user, ...departmentHeadRoles(dept)))
 }
 
 // Mirrors backend/app/constants.py's APPLICATION_MASTER_STATUS_LABELS
@@ -139,6 +165,10 @@ export interface RoleBearer {
   roles?: string[] | null
   id?: number
   department?: string | null
+  // 2026-08 "one user can be on multiple departments" CR -- the full set;
+  // `department` (singular) is kept for compat and mirrors the backend's
+  // synced-but-not-source-of-truth legacy column (primary/first-assigned).
+  departments?: string[] | null
 }
 
 // A user may hold several roles at once (all active simultaneously) -- this
@@ -297,20 +327,19 @@ export const QA_LEAD_GROUP_ROLES: string[] = ['QA_LEAD', 'CHIEF_MANAGER_QA', 'AG
 // The "QA" execution-stage tile's sole qualifying role (see comment above).
 export const QA_EXECUTION_GROUP_ROLE = 'QA_ENGINEER'
 
-/// 2026-08 -- reported directly: "other than QA team, for others there
+// 2026-08 -- reported directly: "other than QA team, for others there
 // should not be any option to open any defects," then corrected same day:
 // "defect can be raised by requster, business analyst application owner
 // too so defect management tool should be available for them as well."
-// Mirrors backend constants.py's DEFECT_MANAGEMENT_ROLES exactly -- QA team
-// (QA_ENGINEER/QA_LEAD/CHIEF_MANAGER_QA/AGM_QA/SECURITY_ANALYST) plus every
-// role that can report/link a defect (REQUESTER/BUSINESS_ANALYST/
-// APPLICATION_OWNER, matching backend defects.py's CREATE_ROLES). Gates the
-// Defect Management nav item (Layout.tsx) and the page itself (Defects.tsx).
-// Excludes only roles with no stake in defects at all: SM, Department Head
-// (CM/AGM), SCALE_6_PLUS. A single defect via a direct deep link (GET
-// /{id}/by-key) stays open to any authenticated user regardless -- only
-// browsing the register itself is restricted. hasRole()'s own ADMIN bypass
-// applies as usual.
+// This role allow-list gated the Defect Management nav item (Layout.tsx)
+// and the page itself (Defects.tsx) for a while -- then, further reported
+// directly: "currently Defect management is not available to everyone.
+// make this visible to everyone based on department filter." That role
+// gate is retired app-wide (both here and on the mirrored backend
+// constants.py constant/routers/defects.py) -- browsing the register is
+// now open to any authenticated user, scoped purely by department, same as
+// every other module. Kept defined (unreferenced) purely as a record of the
+// role set that combination briefly meant, not for any active check.
 export const DEFECT_MANAGEMENT_ROLES: string[] = [
   'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA', 'SECURITY_ANALYST',
   'REQUESTER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER',

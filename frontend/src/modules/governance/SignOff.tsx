@@ -4,9 +4,9 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
 import {
-  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, DEPLOYMENT_ENVIRONMENTS, hasRole,
+  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, DEPLOYMENT_ENVIRONMENTS, hasRole, hasDepartment,
   SIGNOFF_EDITABLE_STATUSES, QA_DEPARTMENT, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
-  QA_LEAD_GROUP_ROLES,
+  QA_LEAD_GROUP_ROLES, validTargetPromotionOptions, validEnvironmentPromotion,
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, FunctionalListOut, PageOut, ApprovalActionOut } from '../../types'
 import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
@@ -241,7 +241,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // Request ID(s) fields need this explicit check instead -- they're only
     // ever filled in via picking a Testing Request above.
     if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and Change Request ID(s) are derived from it.'); return }
-    if (!hasRole(user, 'ADMIN') && user?.department !== QA_DEPARTMENT) {
+    if (!hasRole(user, 'ADMIN') && !hasDepartment(user, QA_DEPARTMENT)) {
       setError(`QA Sign-off is restricted to the ${QA_DEPARTMENT} department.`)
       return
     }
@@ -249,6 +249,16 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     if (validityErr) { setError(validityErr); return }
     const richTextErr = richTextRequiredError(form)
     if (richTextErr) { setError(richTextErr); return }
+    // Same Environment Tested/Target Promotion Environment ordering rule as
+    // the QA Request wizard's DetailsStep.tsx -- reuses the same shared
+    // validEnvironmentPromotion helper rather than a duplicate check. The
+    // two selects below already only offer valid Target options and
+    // auto-correct on Environment Tested change, so this should never
+    // actually trip, but it's the last line of defense before the POST.
+    if (!validEnvironmentPromotion(form.environment_tested, form.target_promotion_environment)) {
+      setError(`Target Promotion Environment ('${form.target_promotion_environment}') must be later than Environment Tested ('${form.environment_tested}') in the pipeline SIT -> UAT -> Pre-Production -> Production.`)
+      return
+    }
     setBusy(true)
     try {
       const created = await api.post<SignOffOut>('/api/signoffs', {
@@ -317,15 +327,27 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
               the environment being tested/deployed FROM -- it's the
               pipeline's final destination, only ever valid as a Target
               Promotion Environment. See constants.ts's
-              DEPLOYMENT_ENVIRONMENTS for the shared list. */}
+              DEPLOYMENT_ENVIRONMENTS for the shared list. Target Promotion
+              Environment is further restricted (and Environment Tested's own
+              onChange snaps it forward) via the same shared
+              validTargetPromotionOptions/validEnvironmentPromotion helpers
+              the QA Request wizard's DetailsStep.tsx and Functional.tsx's
+              Edit Details modal already use -- reused here, not duplicated. */}
           <Field label="Environment Tested *">
-            <select required value={form.environment_tested} onChange={(e) => set('environment_tested', e.target.value)}>
+            <select required value={form.environment_tested} onChange={(e) => {
+              const nextEnv = e.target.value
+              set('environment_tested', nextEnv)
+              const validTargets = validTargetPromotionOptions(nextEnv)
+              if (!validTargets.includes(form.target_promotion_environment)) {
+                set('target_promotion_environment', validTargets[0] || '')
+              }
+            }}>
               {DEPLOYMENT_ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Target Promotion Environment *">
             <select required value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
-              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+              {validTargetPromotionOptions(form.environment_tested).map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Validity From">
@@ -388,6 +410,11 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
     if (validityErr) { setError(validityErr); return }
     const richTextErr = richTextRequiredError(form)
     if (richTextErr) { setError(richTextErr); return }
+    // Same shared-method ordering check as NewSignOffModal above.
+    if (!validEnvironmentPromotion(form.environment_tested, form.target_promotion_environment)) {
+      setError(`Target Promotion Environment ('${form.target_promotion_environment}') must be later than Environment Tested ('${form.environment_tested}') in the pipeline SIT -> UAT -> Pre-Production -> Production.`)
+      return
+    }
     setBusy(true)
     setError(null)
     try {
@@ -437,16 +464,24 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
               {RISK_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
-          {/* Same DEPLOYMENT_ENVIRONMENTS reasoning as the standalone
-              Create Certificate form above -- see that field's own comment. */}
+          {/* Same DEPLOYMENT_ENVIRONMENTS/validTargetPromotionOptions/
+              validEnvironmentPromotion reasoning as the standalone Create
+              Certificate form above -- see that field's own comment. */}
           <Field label="Environment Tested *">
-            <select required value={form.environment_tested} onChange={(e) => set('environment_tested', e.target.value)}>
+            <select required value={form.environment_tested} onChange={(e) => {
+              const nextEnv = e.target.value
+              set('environment_tested', nextEnv)
+              const validTargets = validTargetPromotionOptions(nextEnv)
+              if (!validTargets.includes(form.target_promotion_environment)) {
+                set('target_promotion_environment', validTargets[0] || '')
+              }
+            }}>
               {DEPLOYMENT_ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Target Promotion Environment *">
             <select required value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
-              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+              {validTargetPromotionOptions(form.environment_tested).map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Validity From">
@@ -497,7 +532,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   const isRequester = item.requester_id === user?.id || hasRole(user, 'ADMIN')
   const status = item.status
   const isAdmin = hasRole(user, 'ADMIN')
-  const isQADepartment = user?.department === QA_DEPARTMENT || isAdmin
+  const isQADepartment = hasDepartment(user, QA_DEPARTMENT) || isAdmin
 
   const canSubmit = isRequester && status === 'DRAFT'
   // SM_REJECTED ("Rejected by QA Lead" here) included alongside RETURNED_BY_*
@@ -660,7 +695,7 @@ export default function SignOff() {
   // create_signoff), so a QA Lead can raise a certificate themselves (e.g.
   // on behalf of a request whose assigned tester isn't available).
   const canCreate = hasRole(user, 'ADMIN')
-    || (hasRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA') && user?.department === QA_DEPARTMENT)
+    || (hasRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
 
   return (
     <div>

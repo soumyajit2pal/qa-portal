@@ -78,6 +78,9 @@ with SessionLocal() as migration_db:
         overdue_defects = notifications.sweep_overdue_defects(migration_db)
         if overdue_defects:
             logger.info("Defect overdue sweep: %d notification(s) created", overdue_defects)
+        backfilled_departments = departments.backfill_user_department_assignments(migration_db)
+        if backfilled_departments:
+            logger.info("Backfilled department_assignments for %d existing user(s)", backfilled_departments)
     else:
         logger.info("Skipping legacy-layout migration/overdue sweeps -- another worker already holds the startup lock.")
 

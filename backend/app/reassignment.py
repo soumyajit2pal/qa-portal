@@ -59,32 +59,47 @@ def department_head_roles(department: Optional[str]) -> tuple:
 
 def department_head_user_ids(db: Session, department: Optional[str]) -> List[int]:
     """Every active user who is a Department Head of `department` -- role
-    AND department both matching (see module docstring)."""
+    AND department both matching (see module docstring).
+
+    2026-08 "one user can be on multiple departments" CR -- a Department
+    Head who now belongs to several departments still qualifies here as long
+    as `department` is ONE of theirs, not necessarily their primary one --
+    uses the department_assignments join table via has_department(), same as
+    every other membership check in this module."""
     if not department:
         return []
     roles = set(department_head_roles(department))
     candidates = db.query(models.User).filter(
-        models.User.department == department,
+        models.User.department_assignments.any(models.UserDepartment.department == department),
         models.User.is_active == True,  # noqa: E712
     ).all()
     return [u.id for u in candidates if set(u.roles) & roles]
 
 
 def require_can_reassign(current_user: models.User, current_assignee_id: Optional[int],
-                          department: Optional[str]) -> None:
+                          department) -> None:
     """403s unless `current_user` is the current assignee, a Department Head
     of `department`, or an Administrator (has_role's own Admin bypass covers
     the last one). `department` is the CURRENT ASSIGNEE's department -- the
     person being reassigned FROM, not the department the record itself
     lives in, per "the Department Head of the department to which the
-    current assignee belongs.\""""
+    current assignee belongs."
+
+    2026-08 "one user can be on multiple departments" CR -- `department` may
+    now be a single string (legacy callers) OR a list (a previous
+    assignee's full `.departments`, the normal case now). `current_user`
+    qualifies as Department Head if they belong to (has_department) AND
+    hold the Department Head role for ANY ONE of the given departments --
+    not necessarily the previous assignee's primary one."""
     if current_user.has_role(Role.ADMIN):
         return
     if current_assignee_id and current_user.id == current_assignee_id:
         return
-    if department and current_user.department == department \
-            and set(current_user.roles) & set(department_head_roles(department)):
-        return
+    departments = [department] if isinstance(department, str) else list(department or [])
+    for dept in departments:
+        if dept and current_user.has_department(dept) \
+                and set(current_user.roles) & set(department_head_roles(dept)):
+            return
     raise HTTPException(
         403,
         "Only the current assignee, the Department Head of their department, "

@@ -11,7 +11,7 @@ import { IconCheckCircle } from '../../components/Icons'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import {
   PRIORITIES, RISK_RATINGS, ENVIRONMENTS, DEPLOYMENT_ENVIRONMENTS,
-  PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, canManageReadinessEvidence,
+  PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, hasDepartment, canManageReadinessEvidence,
   QA_DEPARTMENT, PERFORMANCE_PENDING_WITH, QA_EXECUTION_GROUP_ROLE,
   PERFORMANCE_TESTER_REASSIGNABLE_STATUSES,
 } from '../../constants'
@@ -56,7 +56,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
   // canDeptHeadDecide -- this modal only opens via canEditDetails, but the
   // checklist evidence controls inside it need their own explicit check.
   const isRequesterModal = editing.requester_id === user?.id || isAdmin
-  const sameDeptModal = !!user?.department && user.department === editing.department
+  const sameDeptModal = hasDepartment(user, editing.department)
   const canSMDecideModal = hasRole(user, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
   const canDeptHeadDecideModal = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
   const canManageEvidenceModal = isAdmin || (
@@ -334,7 +334,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 
   const isRequester = req.requester_id === user?.id || hasRole(user, 'ADMIN')
   const status = req.status
-  const sameDept = !!user?.department && user.department === req.department
+  const sameDept = hasDepartment(user, req.department)
   const isAdmin = hasRole(user, 'ADMIN')
   // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
   // gated action, same as Admin, without being listed as "QA Lead group"
@@ -344,8 +344,8 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const assignedTesterIds = new Set((req.assigned_tester_ids || '').split(',').filter(Boolean).map(Number))
   const isAssignedTester = isAdmin || (hasRole(user, 'QA_ENGINEER') && !!user?.id && assignedTesterIds.has(user.id))
   const isExecutionOwner = isAssignedQALead || isAssignedTester
-  const qaLeads = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('QA_LEAD'))
-  const testers = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('QA_ENGINEER'))
+  const qaLeads = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_LEAD'))
+  const testers = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_ENGINEER'))
 
   // Edit access -- see the matching (and more detailed) comment in
   // SAST.tsx's canEditDetails for the full reasoning; same rule here.
@@ -439,7 +439,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   // rights too, restoring parity with isAssignedQALead (which already gates
   // the first assignment). Mirrors performance.py's
   // _require_can_reassign_performance_tester exactly.
-  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && user?.department === QA_DEPARTMENT)
+  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
   const canReassignPerformanceTester = isAssignedTester || isQADepartmentHead || hasRole(user, 'QA_LEAD')
   const canCompletePlanning =
     (isInitialPerformanceTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignPerformanceTester) &&

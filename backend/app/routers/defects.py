@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session, joinedload
 
 from .. import documents as doc_store
 from .. import models, schemas, pagination
-from ..constants import ENVIRONMENTS, Role, DEFECT_MANAGEMENT_ROLES, DEFECT_REASSIGNABLE_STATUSES
+from ..constants import ENVIRONMENTS, Role, DEFECT_REASSIGNABLE_STATUSES
 from ..database import get_db
-from ..deps import get_current_user, require_roles, dashboard_department_scope
+from ..deps import get_current_user, dashboard_department_scope, viewable_project_ids
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from . import notifications
 from .. import reassignment
@@ -42,18 +42,22 @@ CREATE_ROLES = (
     Role.SECURITY_ANALYST, Role.REQUESTER, Role.BUSINESS_ANALYST,
     Role.APPLICATION_OWNER,
 )
-# 2026-08 -- reported directly, then corrected same day (see
-# DEFECT_MANAGEMENT_ROLES' own comment in constants.py): "other than QA
-# team, for others there should not be any option to open any defects,"
-# then "defect can be raised by requster, business analyst application
-# owner too so defect management tool should be available for them as
-# well." DEFECT_MANAGEMENT_ROLES (imported above, shared with
-# routers/test_execution.py's batch picker) gates
-# list_defects/defect_dashboard/export_defects below -- effectively
-# "whoever CREATE_ROLES already lets report/link a defect, plus AGM_QA" --
-# scoped narrowly to the *register* (browsing defects at all); a
-# single-defect deep link (GET /{id}, GET /by-key/{key} -- e.g. from a
-# notification) stays open to any authenticated user regardless.
+# 2026-08 -- reported directly, then corrected same day: "other than QA
+# team, for others there should not be any option to open any defects," then
+# "defect can be raised by requster, business analyst application owner too
+# so defect management tool should be available for them as well." A role
+# allow-list (DEFECT_MANAGEMENT_ROLES) gated list_defects/defect_dashboard/
+# export_defects (plus test_execution.py's batch picker) for a while as a
+# result -- but then, further reported directly: "currently Defect
+# management is not available to everyone. make this visible to everyone
+# based on department filter." The role gate is retired -- browsing the
+# register is now open to any authenticated user, scoped purely by
+# department (_scoped_defects below), exactly like every other module's own
+# list endpoint (QA Requests, Functional, etc.) has always worked. Who may
+# CREATE/link a defect is unaffected by this -- that's still CREATE_ROLES,
+# checked separately by _require_create_role. A single-defect deep link
+# (GET /{id}, GET /by-key/{key} -- e.g. from a notification) was already
+# open to any authenticated user regardless, unchanged here.
 _DOC_MODULE = "DEFECT"
 
 
@@ -76,12 +80,29 @@ def _scoped_defects(db: Session, current_user: models.User):
     them. Defect has no department column of its own (unlike QARequest/
     TestProject/etc.), so this joins through its always-present
     qa_request_id to get one, mirroring how approvals.py/reports.py already
-    do the same join-based scoping for cross-entity feeds."""
+    do the same join-based scoping for cross-entity feeds.
+
+    2026-08 "view-only access to department/user" CR, parity decision
+    (reported directly: a project view-access grant recipient should also
+    see that project's Defects, "the complete picture of that project's
+    status," not just its Test Execution/Repository/Reports) -- widened to
+    an OR: a defect is also in scope if it's linked (via cycle_id -- not
+    every defect has one; opened first, then attached to a Failed/Blocked
+    execution later, see models.Defect's own column comment) to a Test
+    Cycle whose Project is one of viewable_project_ids' grant-widened set.
+    A defect with no cycle_id simply can't match this second branch and
+    falls back to the QARequest.department check alone, same as before this
+    CR existed."""
     q = db.query(models.Defect)
     scope = dashboard_department_scope(current_user)
     if scope:
+        project_ids = viewable_project_ids(db, current_user)
         q = q.join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
+             .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id) \
+             .filter(or_(
+                 models.QARequest.department.in_(scope),
+                 models.TestCycle.project_id.in_(project_ids or []),
+             ))
     return q
 
 
@@ -158,7 +179,7 @@ def _require_execution_link_access(db: Session, cycle: models.TestCycle, current
         raise HTTPException(403, "You are not authorized to link defects in this Test Cycle")
     scope = dashboard_department_scope(current_user)
     project_department = cycle.project.department if cycle.project else None
-    if scope and project_department and project_department != scope:
+    if scope and project_department and project_department not in scope:
         raise HTTPException(403, "You can only link defects to Test Cycles in your own department.")
 
 
@@ -289,7 +310,7 @@ def list_defects(status: Optional[str] = None, severity: Optional[str] = None,
                  ),
                  params: pagination.PageParams = Depends(),
                  db: Session = Depends(get_db),
-                 current_user: models.User = Depends(require_roles(*DEFECT_MANAGEMENT_ROLES))):
+                 current_user: models.User = Depends(get_current_user)):
     # Kept as plain query params (not folded into PageParams.status) since
     # they're single-value exact filters used by other modules' own narrow
     # pickers (e.g. TestExecution.tsx's `?cycle_id=`), same convention as
@@ -334,7 +355,7 @@ def list_defects(status: Optional[str] = None, severity: Optional[str] = None,
 
 
 @router.get("/dashboard", response_model=schemas.DefectDashboardOut)
-def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(*DEFECT_MANAGEMENT_ROLES))):
+def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # SRS 7.2 pagination rollout -- previously fetched every scoped defect's
     # full ORM row into Python just to run Counter() over it, an unbounded
     # fetch that grew with the register regardless of how many rows anyone
@@ -410,7 +431,7 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
 
 
 @router.get("/export-xlsx")
-def export_defects(db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(*DEFECT_MANAGEMENT_ROLES))):
+def export_defects(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Export the governed defect register with workflow and traceability fields."""
     defects = _scoped_defects(db, current_user).order_by(models.Defect.created_at.desc()).all()
     status_counts = Counter(item.status for item in defects)
@@ -492,7 +513,7 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
     # every department's requests; a department-scoped role may only
     # report defects against its own department's requests.
     scope = dashboard_department_scope(current_user)
-    if scope and request.department and request.department != scope:
+    if scope and request.department and request.department not in scope:
         raise HTTPException(403, "You can only report defects against QA Requests from your own department.")
     link_values = (payload.execution_id, payload.cycle_id, payload.test_case_id)
     if any(value is not None for value in link_values) and not all(value is not None for value in link_values):
@@ -730,7 +751,7 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
     if not obj.assignee_id or obj.status not in DEFECT_REASSIGNABLE_STATUSES:
         raise HTTPException(400, f"{obj.defect_key} does not currently have an assignee that can be reassigned.")
     previous_assignee = db.query(models.User).get(obj.assignee_id)
-    reassignment.require_can_reassign(current_user, obj.assignee_id, previous_assignee.department if previous_assignee else None)
+    reassignment.require_can_reassign(current_user, obj.assignee_id, previous_assignee.departments if previous_assignee else None)
     reason = reassignment.require_reason(payload.reason)
     new_assignee = db.query(models.User).get(payload.assignee_id)
     if not new_assignee or not new_assignee.is_active:

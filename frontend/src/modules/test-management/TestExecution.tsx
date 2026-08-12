@@ -5,7 +5,7 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { hasRole, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate } from '../../constants'
+import { hasRole, hasDepartment, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCaseListOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import InfoModal from '../../components/InfoModal'
@@ -56,7 +56,7 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
   // that never had an owner) stays open to anyone who can edit the cycle at
   // all -- same broad gate this whole modal already runs under.
   const isAdmin = Boolean(user?.roles.includes('ADMIN'))
-  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && user?.department === QA_DEPARTMENT)
+  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
   const hasExistingOwner = !!editing?.owner_id
   const isCurrentOwner = !!editing && editing.owner_id === user?.id
   const canChangeOwner = !hasExistingOwner || isAdmin || isCurrentOwner || isQADepartmentHead
@@ -1380,7 +1380,7 @@ export default function TestExecution() {
   const canManageExecutionGovernance = hasRole(user, ...QA_LEAD_GROUP_ROLES) && (myAccess?.can_manage_execution_governance ?? false)
   const canDeleteCycle = canManageExecutionGovernance
   const canManageRunners = hasRole(user, ...CAN_EXEC_ROLES)
-    && (user?.roles.includes('ADMIN') || user?.department === QA_DEPARTMENT)
+    && (user?.roles.includes('ADMIN') || hasDepartment(user, QA_DEPARTMENT))
   // 2026-08 Reassignment Requirement -- initially narrowed reassigning an
   // already-assigned runner to the current runner / QA Department Head /
   // Admin, same as every other reassignment flow. Reported directly again:
@@ -1601,7 +1601,7 @@ export default function TestExecution() {
   const selectedProject = projects.find((project) => project.id === projectId)
   const projectIsActive = !!selectedProject?.is_active
   const runnerCandidates = useMemo(() => users.filter((candidate) => (
-    candidate.department === QA_DEPARTMENT
+    hasDepartment(candidate, QA_DEPARTMENT)
     && candidate.is_active
     && candidate.roles.some((role) => ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA'].includes(role))
   )), [users])
