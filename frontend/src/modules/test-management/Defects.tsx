@@ -1,18 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
-import { Badge, ErrorText, Field, Modal, Table } from '../../components/Common'
+import { Badge, Card, ErrorText, Field, Modal, Table } from '../../components/Common'
 import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import {
-  ApprovalActionOut, DefectDashboardOut, DefectListOut, DefectOut, DepartmentOut, PageOut, QARequestListOut,
-  RequestDocumentOut, TestCycleOut, TestExecutionOut, TestProjectOut, UserOut,
-  TestProjectMyAccessOut,
+  ApprovalActionOut, DefectDashboardOut, DefectLinkableExecutionOut, DefectListOut, DefectOut, DepartmentOut,
+  PageOut, QARequestListOut, RequestDocumentOut, UserOut, TestProjectMyAccessOut,
 } from '../../types'
 import { useAuth } from '../../context/AuthContext'
-import { ENVIRONMENTS } from '../../constants'
+import { ENVIRONMENTS, DEFECT_MANAGEMENT_ROLES, DEFECT_REASSIGNABLE_STATUSES, hasRole, canReassign } from '../../constants'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 const STATUSES = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Closed']
@@ -27,11 +26,11 @@ const TRANSITIONS: Record<string, string[]> = {
   Deferred: ['Assigned'], Closed: ['Reopened'], Rejected: [], Duplicate: [],
 }
 
-interface ExecutionContext {
-  project: TestProjectOut
-  cycle: TestCycleOut
-  execution: TestExecutionOut
-}
+// 2026-08 -- was a locally-defined interface; now just an alias for the
+// batch endpoint's own response shape (types.ts's DefectLinkableExecutionOut,
+// mirroring backend schemas.py) so every existing `ExecutionContext` usage
+// below needs no further changes.
+type ExecutionContext = DefectLinkableExecutionOut
 
 // CreateDefectModal and EditDefectModal both stage an explicit "+ Add
 // evidence" file picker alongside whichever screenshots were pasted into
@@ -87,17 +86,30 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
   const initial = standalone ? undefined : (contexts.find((row) => row.execution.id === initialExecutionId) || contexts[0])
   const [executionId, setExecutionId] = useState(initial ? String(initial.execution.id) : '')
   const selected = contexts.find((row) => String(row.execution.id) === executionId)
-  const linkedRequest = selected?.cycle.linked_request_type && selected.cycle.linked_request_id
-    ? requests.find((request) => {
-        const groups = [
-          ...request.linked_functional_requests.map((child) => ['Functional', child.id] as const),
-          ...request.linked_sast_requests.map((child) => ['SAST', child.id] as const),
-          ...request.linked_dast_requests.map((child) => ['DAST', child.id] as const),
-          ...request.linked_performance_requests.map((child) => ['Performance', child.id] as const),
-        ]
-        return groups.some(([type, id]) => type === selected.cycle.linked_request_type && id === selected.cycle.linked_request_id)
-      })
-    : undefined
+  // 2026-08 -- reported directly: "if defect open from 'report defect from
+  // execution', currently showing all request id, ... it should be filter
+  // based on request linked with that test cycle." Find the QA Request whose
+  // own linked_functional_requests/linked_sast_requests/linked_dast_requests/
+  // linked_performance_requests actually contains the child request the
+  // selected execution's Test Cycle is linked to (TestCycle.linked_request_
+  // type/linked_request_id). Simplified per follow-up feedback ("no need of
+  // textbox, just auto populate the linked request id, nothing others") --
+  // when found, it's auto-populated as a locked, read-only value (same
+  // pattern as the read-only Application field beside it) instead of being
+  // offered as a pre-selected but still-editable dropdown option.
+  function findLinkedRequest(row: ExecutionContext | undefined): QARequestListOut | undefined {
+    if (!row?.cycle.linked_request_type || !row.cycle.linked_request_id) return undefined
+    return requests.find((request) => {
+      const groups = [
+        ...request.linked_functional_requests.map((child) => ['Functional', child.id] as const),
+        ...request.linked_sast_requests.map((child) => ['SAST', child.id] as const),
+        ...request.linked_dast_requests.map((child) => ['DAST', child.id] as const),
+        ...request.linked_performance_requests.map((child) => ['Performance', child.id] as const),
+      ]
+      return groups.some(([type, id]) => type === row.cycle.linked_request_type && id === row.cycle.linked_request_id)
+    })
+  }
+  const linkedRequest = findLinkedRequest(selected)
   const [requestId, setRequestId] = useState(linkedRequest ? String(linkedRequest.id) : '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -145,7 +157,12 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
     setExpected(selected.execution.test_case?.description || '')
     setActual(selected.execution.actual_result || '')
     setBuild(selected.cycle.build || '')
-    if (linkedRequest) setRequestId(String(linkedRequest.id))
+    // Re-derive against the NEWLY selected execution's own Test Cycle --
+    // previously this only ever updated requestId when a linked request was
+    // found, leaving a stale selection from the prior execution in place
+    // when the new one had no traceable link at all.
+    const nextLinked = findLinkedRequest(selected)
+    setRequestId(nextLinked ? String(nextLinked.id) : '')
   }, [executionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // The defect record itself already exists by the time this can fail --
@@ -180,12 +197,20 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
     } catch (err) { setError(err); setBusy(false) }
   }
 
+  const requestOptions = requests
+    .filter((request) => request.request_id)
+    .map((request) => ({ value: String(request.id), label: `${request.request_id} · ${request.application_name}` }))
+
   return <Modal title={standalone ? 'Open Defect' : 'Report Defect from Execution'} onClose={onClose} wide>
     <form onSubmit={submit} className="defect-form">
       <div className="defect-trace-banner"><strong>{standalone ? 'Open now, link later' : 'Execution traceability'}</strong><span>{standalone ? 'The defect will be created against the QA Request and can later be linked to a Failed/Blocked execution from the defect or Test Cycle.' : 'Only Failed or Blocked executions are available. Request, cycle, testcase, application, reporter, and date are recorded automatically.'}</span></div>
       {!standalone && <Field label="Failed / Blocked Test Execution *"><SearchableSelect value={executionId} onChange={setExecutionId} placeholder="Select execution…" options={contexts.map((row) => ({ value: String(row.execution.id), label: `${row.cycle.cycle_key} · ${row.execution.test_case?.test_case_key || row.execution.test_case_id} · ${row.execution.status}` }))} /></Field>}
       <div className="grid grid-2">
-        <Field label="QA Request ID *"><SearchableSelect value={requestId} onChange={setRequestId} placeholder="Select QA Request…" options={requests.filter((request) => request.request_id).map((request) => ({ value: String(request.id), label: `${request.request_id} · ${request.application_name}` }))} /></Field>
+        <Field label="QA Request ID *">
+          {!standalone && linkedRequest
+            ? <input readOnly value={`${linkedRequest.request_id} · ${linkedRequest.application_name}`} />
+            : <SearchableSelect value={requestId} onChange={setRequestId} placeholder="Select QA Request…" options={requestOptions} />}
+        </Field>
         <Field label="Application"><input readOnly value={requests.find((request) => String(request.id) === requestId)?.application_name || ''} /></Field>
       </div>
       <Field label="Defect Title *"><input required disabled={!!createdDefect} value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
@@ -234,8 +259,21 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
   defect: DefectOut; target: string; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]
   onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
+  // 2026-08 -- reported directly: "During assigning defect, department
+  // should be auto populated based on linked request or Failed / Blocked
+  // Test Execution." defect.project_department (the linked Test Cycle's own
+  // Project.department -- only set once this defect is linked to an
+  // execution) takes priority over requestDepartment (the linked QA
+  // Request's own department, previously the only source) as the more
+  // specific "which team actually owns the failing area" signal; falls back
+  // to requestDepartment when no execution is linked (e.g. a defect opened
+  // standalone), then the defect's own already-recorded assigned_team when
+  // re-assigning. Still just a prefill -- the Department field stays a
+  // normal editable SearchableSelect below, this only decides its starting
+  // value.
+  const autoDepartment = defect.project_department || requestDepartment || ''
   const [values, setValues] = useState<Record<string, any>>(
-    target === 'Assigned' ? { assigned_team: requestDepartment || defect.assigned_team || '' } : {},
+    target === 'Assigned' ? { assigned_team: autoDepartment || defect.assigned_team || '' } : {},
   )
   // Every free-text field below (Resolution Summary, Root Cause, Fix
   // Details, Retest Actual Result, Retest Remarks, Closure Remarks,
@@ -310,20 +348,64 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
     <form onSubmit={submit}>
       <div className="defect-transition-summary"><Badge status={defect.status} /><span>→</span><Badge status={target} /></div>
       <fieldset disabled={!!savedDefect} className="defect-transition-fieldset">
-      {target === 'Assigned' && <><Field label="Department *"><SearchableSelect value={values.assigned_team || ''} onChange={(value) => { set('assigned_team', value); set('assignee_id', null) }} placeholder="Select department…" options={departments.map((department) => ({ value: department.name, label: department.name }))} /></Field><Field label="Assignee *"><UserAssignSelect value={values.assignee_id ? String(values.assignee_id) : ''} onChange={(value) => set('assignee_id', value ? Number(value) : null)} users={departmentUsers} placeholder={values.assigned_team ? 'Select responsible user…' : 'Select a department first…'} disabled={!values.assigned_team} /></Field>{requestDepartment && <p className="defect-assignment-default">Defaulted from QA Request: <strong>{requestDepartment}</strong></p>}</>}
+      {target === 'Assigned' && <>{defect.assignee_name && <p className="defect-assignment-current">Currently assigned to <strong>{defect.assignee_name}</strong>{defect.assigned_team ? ` (${defect.assigned_team})` : ''}.</p>}<Field label="Department *"><SearchableSelect value={values.assigned_team || ''} onChange={(value) => { set('assigned_team', value); set('assignee_id', null) }} placeholder="Select department…" options={departments.map((department) => ({ value: department.name, label: department.name }))} /></Field><Field label="Assignee *"><UserAssignSelect value={values.assignee_id ? String(values.assignee_id) : ''} onChange={(value) => set('assignee_id', value ? Number(value) : null)} users={departmentUsers} placeholder={values.assigned_team ? 'Select responsible user…' : 'Select a department first…'} disabled={!values.assigned_team} /></Field>{autoDepartment && <p className="defect-assignment-default">Defaulted from {defect.project_department ? 'the linked Failed / Blocked Test Execution\'s project' : 'the linked QA Request'}: <strong>{autoDepartment}</strong></p>}<Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" placeholder="Optional note for the assignee…" /></Field></>}
       {target === 'Resolved' && <><Field label="Resolution Type *"><select required value={values.resolution_type || ''} onChange={(e) => set('resolution_type', e.target.value)}><option value="">Select…</option>{RESOLUTION_TYPES.map((value) => <option key={value}>{value}</option>)}</select></Field><Field label="Resolution Summary *"><JiraRichTextField value={values.resolution_summary || ''} onChange={(v) => set('resolution_summary', v)} onImagesChange={setImages('resolution_summary')} disabled={!!savedDefect} ariaLabel="Resolution Summary" placeholder="Summarize the fix…" /></Field><Field label="Root Cause *"><JiraRichTextField value={values.root_cause || ''} onChange={(v) => set('root_cause', v)} onImagesChange={setImages('root_cause')} disabled={!!savedDefect} ariaLabel="Root Cause" placeholder="Describe the root cause…" /></Field><Field label="Fix Details *"><JiraRichTextField value={values.fix_details || ''} onChange={(v) => set('fix_details', v)} onImagesChange={setImages('fix_details')} disabled={!!savedDefect} ariaLabel="Fix Details" placeholder="Describe the fix that was applied…" /></Field><Field label="Fixed Build / Release *"><input required value={values.fixed_build_version || ''} onChange={(e) => set('fixed_build_version', e.target.value)} /></Field></>}
       {target === 'Closed' && <><Field label="Tested Build Version *"><input required value={values.tested_build_version || ''} onChange={(e) => set('tested_build_version', e.target.value)} /></Field><Field label="Retest Actual Result *"><JiraRichTextField value={values.actual_result || ''} onChange={(v) => set('actual_result', v)} onImagesChange={setImages('actual_result')} disabled={!!savedDefect} ariaLabel="Retest Actual Result" placeholder="Describe the retest outcome…" /></Field><Field label="Retest Remarks *"><JiraRichTextField value={values.retest_remarks || ''} onChange={(v) => set('retest_remarks', v)} onImagesChange={setImages('retest_remarks')} disabled={!!savedDefect} ariaLabel="Retest Remarks" /></Field><Field label="Closure Remarks *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="Closure Remarks" /></Field></>}
       {target === 'Reopened' && <Field label="Reopening Reason *"><JiraRichTextField value={values.reopen_reason || ''} onChange={(v) => set('reopen_reason', v)} onImagesChange={setImages('reopen_reason')} disabled={!!savedDefect} ariaLabel="Reopening Reason" placeholder="Attach supporting evidence in the defect before reopening." /></Field>}
       {target === 'Deferred' && <><Field label="Deferral Reason *"><JiraRichTextField value={values.deferral_reason || ''} onChange={(v) => set('deferral_reason', v)} onImagesChange={setImages('deferral_reason')} disabled={!!savedDefect} ariaLabel="Deferral Reason" /></Field><div className="grid grid-2"><Field label="Approved By *"><input required value={values.deferral_approved_by || ''} onChange={(e) => set('deferral_approved_by', e.target.value)} /></Field><Field label="Target Release *"><input required value={values.target_release || ''} onChange={(e) => set('target_release', e.target.value)} /></Field></div><Field label="Expected Resolution Date *"><input required type="date" value={values.expected_resolution_date || ''} onChange={(e) => set('expected_resolution_date', e.target.value)} /></Field></>}
       {target === 'Rejected' && <Field label="Rejection Reason *"><JiraRichTextField value={values.rejection_reason || ''} onChange={(v) => set('rejection_reason', v)} onImagesChange={setImages('rejection_reason')} disabled={!!savedDefect} ariaLabel="Rejection Reason" /></Field>}
       {target === 'Duplicate' && <Field label="Original Defect ID *"><SearchableSelect value={values.duplicate_defect_id ? String(values.duplicate_defect_id) : ''} onChange={(value) => set('duplicate_defect_id', value ? Number(value) : null)} placeholder="Select original defect…" options={defects.filter((item) => item.id !== defect.id).map((item) => ({ value: String(item.id), label: `${item.defect_key} · ${item.title}` }))} /></Field>}
-      {!['Resolved', 'Closed', 'Reopened', 'Deferred', 'Rejected', 'Duplicate'].includes(target) && <Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" /></Field>}
+      {!['Assigned', 'Resolved', 'Closed', 'Reopened', 'Deferred', 'Rejected', 'Duplicate'].includes(target) && <Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" /></Field>}
       </fieldset>
       <ErrorText error={error} title={savedDefect ? `${savedDefect.defect_key} was updated` : 'Defect workflow action failed'} />
       <div className="modal-actions">
         {savedDefect
           ? <><button className="btn btn-primary" disabled={busy}>{busy ? 'Attaching…' : 'Retry attaching evidence'}</button><button type="button" className="btn" disabled={busy} onClick={() => onChanged(savedDefect)}>Continue without evidence</button></>
           : <><button className={`btn ${['Rejected', 'Duplicate'].includes(target) ? 'btn-danger' : 'btn-primary'}`} disabled={busy || (target === 'Assigned' && (!values.assignee_id || !values.assigned_team))}>{busy ? 'Updating…' : target}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></>}
+      </div>
+    </form>
+  </Modal>
+}
+
+// 2026-08 Reassignment Requirement -- transition_defect's "Assigned" step
+// (see TransitionModal above) is only reachable from New/Reopened/Deferred,
+// so once a defect is In Progress/Resolved/Retest/Reopened/Deferred there
+// was previously no way to change who it's assigned to at all. This hits
+// the dedicated POST /{id}/reassign endpoint instead -- it changes only the
+// assignee, leaving status/history untouched, and requires a reason.
+function ReassignDefectModal({ defect, users, departments, onClose, onChanged }: {
+  defect: DefectOut; users: UserOut[]; departments: DepartmentOut[]
+  onClose: () => void; onChanged: (defect: DefectOut) => void
+}) {
+  const [assignedTeam, setAssignedTeam] = useState(defect.assigned_team || '')
+  const [assigneeId, setAssigneeId] = useState<number | ''>('')
+  const [reason, setReason] = useState('')
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+  const departmentUsers = assignedTeam ? users.filter((u) => u.is_active && u.department === assignedTeam) : []
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault()
+    if (!assigneeId || !reason.trim()) return
+    setBusy(true); setError(null)
+    try {
+      const saved = await api.post<DefectOut>(`/api/defects/${defect.id}/reassign`, {
+        assignee_id: assigneeId, assigned_team: assignedTeam || null, reason: reason.trim(),
+      })
+      onChanged(saved)
+    } catch (err) { setError(err); setBusy(false) }
+  }
+
+  return <Modal title={`Reassign ${defect.defect_key}`} onClose={onClose} variant="dialog" preventBackdropClose>
+    <form onSubmit={submit}>
+      <p className="defect-assignment-current">Currently assigned to <strong>{defect.assignee_name || 'Unassigned'}</strong>{defect.assigned_team ? ` (${defect.assigned_team})` : ''}.</p>
+      <Field label="Department"><SearchableSelect value={assignedTeam} onChange={(value) => { setAssignedTeam(value); setAssigneeId('') }} placeholder="Select department…" options={departments.map((department) => ({ value: department.name, label: department.name }))} /></Field>
+      <Field label="New Assignee *"><UserAssignSelect value={assigneeId ? String(assigneeId) : ''} onChange={(value) => setAssigneeId(value ? Number(value) : '')} users={departmentUsers} placeholder={assignedTeam ? 'Select responsible user…' : 'Select a department first…'} disabled={!assignedTeam} /></Field>
+      <Field label="Reassignment reason *"><textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Required -- why is this defect being reassigned?" /></Field>
+      <ErrorText error={error} title="Defect could not be reassigned" />
+      <div className="modal-actions">
+        <button className="btn btn-primary" disabled={busy || !assigneeId || !reason.trim()}>{busy ? 'Reassigning…' : 'Reassign'}</button>
+        <button type="button" className="btn" onClick={onClose}>Cancel</button>
       </div>
     </form>
   </Modal>
@@ -446,6 +528,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const navigate = useNavigate()
   const { user } = useAuth()
   const [transition, setTransition] = useState('')
+  const [showReassign, setShowReassign] = useState(false)
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
   const [documents, setDocuments] = useState<RequestDocumentOut[]>([])
   const [uploading, setUploading] = useState(false)
@@ -471,11 +554,21 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     anchor.href = url; anchor.download = document.file_name; anchor.click(); URL.revokeObjectURL(url)
   }
   const roles = user?.roles || []
-  const manager = roles.some((role) => ['ADMIN', 'QA_LEAD', 'CHEIF_MANAGER_QA'].includes(role)) || !!access?.can_give_final_approval
+  const manager = roles.some((role) => ['ADMIN', 'QA_LEAD', 'CHIEF_MANAGER_QA'].includes(role)) || !!access?.can_give_final_approval
   const canAssign = manager || roles.includes('QA_ENGINEER')
   const applicationOwner = roles.includes('APPLICATION_OWNER')
   const assignee = defect.assignee_id === user?.id
   const tester = defect.retest_tester_id === user?.id || defect.reporter_id === user?.id
+  // 2026-08 Reassignment Requirement -- "Assigned" (above) is only reachable
+  // from New/Reopened/Deferred, so this is the only way to change the
+  // assignee once work is already under way. Eligible to the current
+  // assignee, the Department Head of the CURRENT ASSIGNEE's own department
+  // (looked up from `users`, since a defect's assigned_team can be routed to
+  // any active department, not just QA), or Admin.
+  const currentAssigneeUser = users.find((u) => u.id === defect.assignee_id)
+  const canReassignDefect = !!defect.assignee_id
+    && DEFECT_REASSIGNABLE_STATUSES.includes(defect.status)
+    && canReassign(user, defect.assignee_id, currentAssigneeUser?.department)
   const allowedTransitions = (TRANSITIONS[defect.status] || []).filter((target) => {
     if (target === 'Assigned') return canAssign
     if (['Rejected', 'Duplicate'].includes(target)) return manager
@@ -488,7 +581,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     // "tester" set (retest_tester/assigned runner), same reasoning as the
     // backend's own comment on this.
     if (target === 'Reopened') return defect.status === 'Closed'
-      ? roles.some((role) => ['ADMIN', 'QA_LEAD', 'CHEIF_MANAGER_QA'].includes(role)) || defect.reporter_id === user?.id
+      ? roles.some((role) => ['ADMIN', 'QA_LEAD', 'CHIEF_MANAGER_QA'].includes(role)) || defect.reporter_id === user?.id
       : manager || tester
     return false
   })
@@ -498,7 +591,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} wide>
       <div className="defect-detail-hero">
         <div className="defect-detail-summary"><span className="defect-detail-kicker">{defect.application_name} · {defect.module_feature}</span><div><Badge status={defect.status} /><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><span className="defect-priority-pill">{defect.priority}</span>{!defect.execution_id && <span className="badge badge-yellow">Traceability incomplete</span>}</div></div>
-        <div className="defect-actions">{defect.status === 'New' && (manager || defect.reporter_id === user?.id) && <button className="btn btn-sm" onClick={() => setEditMode(true)}>Edit</button>}{!defect.execution_id && <button className="btn btn-sm btn-primary" disabled={!contexts.length} onClick={() => setShowLinkExecution(true)}>Link to execution</button>}{allowedTransitions.map((status) => <button key={status} className={`btn btn-sm ${status === 'Rejected' ? 'btn-danger' : status === 'Closed' ? 'btn-primary' : ''}`} onClick={() => setTransition(status)}>{status}</button>)}</div>
+        <div className="defect-actions">{defect.status === 'New' && (manager || defect.reporter_id === user?.id) && <button className="btn btn-sm" onClick={() => setEditMode(true)}>Edit</button>}{!defect.execution_id && <button className="btn btn-sm btn-primary" disabled={!contexts.length} onClick={() => setShowLinkExecution(true)}>Link to execution</button>}{canReassignDefect && <button className="btn btn-sm" onClick={() => setShowReassign(true)}>Reassign</button>}{allowedTransitions.map((status) => <button key={status} className={`btn btn-sm ${status === 'Rejected' ? 'btn-danger' : status === 'Closed' ? 'btn-primary' : ''}`} onClick={() => setTransition(status)}>{status}</button>)}</div>
       </div>
       <div className={`defect-lifecycle ${lifecycleIndex < 0 ? 'has-exception' : ''}`}>
         {lifecycle.map((stage, index) => <div key={stage} className={`${index === lifecycleIndex ? 'current' : ''} ${lifecycleIndex >= 0 && index < lifecycleIndex ? 'complete' : ''}`}><i>{index < lifecycleIndex ? '✓' : index + 1}</i><span>{stage}</span></div>)}
@@ -518,7 +611,8 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
         </div>
         <aside className="defect-detail-aside"><section><span className="defect-section-label">Operating context</span><h4>Defect properties</h4><dl><dt>Application</dt><dd>{defect.application_name}</dd><dt>Module / Feature</dt><dd>{defect.module_feature}</dd><dt>Environment</dt><dd>{defect.environment}</dd><dt>Build</dt><dd>{defect.build_version || '—'}</dd><dt>Reporter</dt><dd>{defect.reporter_name}</dd><dt>Assignee</dt><dd>{defect.assignee_name || 'Unassigned'}</dd></dl></section></aside>
       </div>
-      {(defect.resolution_summary || defect.retest_remarks || defect.reopen_reason || defect.deferral_reason || defect.rejection_reason) && <section className="defect-workflow-details"><h4>Workflow Details</h4>
+      {(defect.assignment_remarks || defect.resolution_summary || defect.retest_remarks || defect.reopen_reason || defect.deferral_reason || defect.rejection_reason) && <section className="defect-workflow-details"><h4>Workflow Details</h4>
+        {defect.assignment_remarks && <div className="defect-workflow-item"><strong>Assignment{defect.assigned_by_name ? ` · ${defect.assigned_by_name}` : ''}</strong><MarkdownComment value={defect.assignment_remarks} /></div>}
         {defect.resolution_summary && <div className="defect-workflow-item"><strong>Resolution</strong><MarkdownComment value={defect.resolution_summary} /></div>}
         {defect.root_cause && <div className="defect-workflow-item"><strong>Root cause</strong><MarkdownComment value={defect.root_cause} /></div>}
         {defect.retest_remarks && <div className="defect-workflow-item"><strong>Retest</strong><MarkdownComment value={defect.retest_remarks} /></div>}
@@ -530,6 +624,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
       <JiraActivity entityType="DEFECT" entityId={defect.id} items={activity} onPosted={(item) => setActivity((current) => [...current, item])} />
     </Modal>
     {transition && <TransitionModal defect={defect} target={transition} users={users} departments={departments} requestDepartment={requestDepartment} defects={defects} onClose={() => setTransition('')} onChanged={(saved) => { setTransition(''); onChanged(saved) }} />}
+    {showReassign && <ReassignDefectModal defect={defect} users={users} departments={departments} onClose={() => setShowReassign(false)} onChanged={(saved) => { setShowReassign(false); onChanged(saved) }} />}
     {showLinkExecution && <LinkExecutionModal defect={defect} contexts={contexts} onClose={() => setShowLinkExecution(false)} onChanged={(saved) => { setShowLinkExecution(false); onChanged(saved) }} />}
     {editMode && <EditDefectModal defect={defect} manager={manager} onClose={() => setEditMode(false)} onChanged={(saved) => { setEditMode(false); onChanged(saved) }} />}
   </>
@@ -537,13 +632,13 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
 
 export default function Defects() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [dashboard, setDashboard] = useState<DefectDashboardOut | null>(null)
   const [requests, setRequests] = useState<QARequestListOut[]>([])
   const [contexts, setContexts] = useState<ExecutionContext[]>([])
   const [users, setUsers] = useState<UserOut[]>([])
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
-  const [accessByProject, setAccessByProject] = useState<Record<number, TestProjectMyAccessOut>>({})
   const [duplicateCandidates, setDuplicateCandidates] = useState<DefectListOut[]>([])
   const [selected, setSelected] = useState<DefectOut | null>(null)
   const [openingDefectId, setOpeningDefectId] = useState<number | null>(null)
@@ -589,6 +684,16 @@ export default function Defects() {
   }, [])
 
   const load = useCallback(async () => {
+    // 2026-08 -- reported directly, then corrected same day to also cover
+    // whoever may raise a defect (see DEFECT_MANAGEMENT_ROLES' own comment
+    // in constants.ts), now enforced by the page-level Access Restricted
+    // gate below (and backend-side by list_defects/defect_dashboard/
+    // export_defects/the batch executions endpoint all requiring
+    // DEFECT_MANAGEMENT_ROLES). Guarding here too means an unauthorized
+    // user's page load doesn't even fire this burst of fetches in the first
+    // place -- they'll never reach a state where the page renders the
+    // register anyway, so there's nothing for load() to do.
+    if (!hasRole(user, ...DEFECT_MANAGEMENT_ROLES)) return
     try {
       // Fetches the full active-user directory (every department), not the
       // Test Management IT-QA-only eligible-users list -- a defect can be
@@ -597,7 +702,7 @@ export default function Defects() {
       // candidates from whichever department is actually selected, not just
       // QA. See TransitionModal's departmentUsers filter, which narrows this
       // full list down to the selected assigned_team at assignment time.
-      const [qaRequests, allUsers, projects, activeDepartments, duplicates] = await Promise.all([
+      const [qaRequests, allUsers, activeDepartments, duplicates, executionContexts] = await Promise.all([
         // SRS PAG-002 -- /api/qa-requests is now paginated (max page_size
         // 100); this picker (linking a new defect to its QA Request, and
         // reading the responsible department off one) wants "effectively
@@ -605,11 +710,6 @@ export default function Defects() {
         // directly instead of going through hooks/usePaginatedList.
         api.get<PageOut<QARequestListOut>>('/api/qa-requests?page_size=100').then((p) => p.items),
         api.get<UserOut[]>('/api/auth/users'),
-        // SRS 7.2 pagination rollout -- Test Projects/Cycles are now
-        // wrapped in Page[T] for API-contract consistency (task #82);
-        // page_size=100 + .items since this picker still wants the
-        // complete list, not a real pager UI.
-        api.get<PageOut<TestProjectOut>>('/api/test-projects?page_size=100').then((p) => p.items),
         api.get<DepartmentOut[]>('/api/departments'),
         // Candidate pool for TransitionModal's "Original Defect ID" picker
         // (marking a defect Duplicate) -- SearchableSelect has no async/
@@ -619,34 +719,43 @@ export default function Defects() {
         // defect register has real unbounded growth, unlike Test Cases'
         // folder tree).
         api.get<PageOut<DefectListOut>>('/api/defects?page_size=100').then((p) => p.items),
+        // 2026-08 -- reported directly: "if there are 30 project[s] then 30
+        // api call[s] ... same for cycles, executions." This single batch
+        // call (routers/test_execution.py::list_blocked_failed_executions)
+        // replaces what used to be a per-project /my-access + /cycles fan-out
+        // followed by a per-cycle /executions fan-out -- see
+        // DefectLinkableExecutionOut's own docstring in schemas.py. No
+        // /api/test-projects fetch is needed here any more either -- it was
+        // only ever used to drive that fan-out.
+        api.get<DefectLinkableExecutionOut[]>('/api/test-execution/executions/blocked-or-failed'),
       ])
       setRequests(qaRequests); setUsers(allUsers); setDepartments(activeDepartments); setDuplicateCandidates(duplicates)
+      setContexts(executionContexts)
       loadDashboard()
-      const accessRows = await Promise.all(projects.map((project) => api.get<TestProjectMyAccessOut>(`/api/test-projects/${project.id}/my-access`)))
-      setAccessByProject(Object.fromEntries(accessRows.map((access) => [access.project_id, access])))
-      const contextGroups = await Promise.all(projects.filter((project) => project.is_active).map(async (project) => {
-        const cycles = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${project.id}/cycles?page_size=100`).then((p) => p.items)
-        const rows = await Promise.all(cycles.map(async (cycle) => {
-          // SRS 7.2 pagination rollout -- the underlying endpoint is now
-          // paginated; the Fail/Blocked filter is now a server-side
-          // `status` query param instead of fetching every execution in
-          // the cycle just to filter it away in the browser. page_size=100
-          // is a practical ceiling for "failing testcases in one cycle to
-          // pick from when linking a new defect."
-          const executions = await api.get<PageOut<TestExecutionOut>>(
-            `/api/test-execution/cycles/${cycle.id}/executions?status=Fail&status=Blocked&page_size=100`,
-          )
-          return executions.items.map((execution) => ({ project, cycle, execution }))
-        }))
-        return rows.flat()
-      }))
-      setContexts(contextGroups.flat())
       const openKey = searchParams.get('open')
       if (openKey) openDefect(openKey)
       if (initialExecutionId) setCreateMode('execution')
     } catch (err) { setError(err) }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load() }, [load])
+
+  // 2026-08 -- was an eager Record<projectId, TestProjectMyAccessOut> fetched
+  // for EVERY project up front (part of the same N+1 burst above), even
+  // though it's only ever consulted for whichever ONE defect is currently
+  // open (`access={...}` below). GET /api/test-projects/{id}/my-access's own
+  // docstring says it's meant to be called "once per project selection" --
+  // TestExecution.tsx/TestRepository.tsx already do exactly that; this now
+  // matches them, fetching on demand only when a defect with a project_id is
+  // opened, instead of once per project at page load.
+  const [selectedAccess, setSelectedAccess] = useState<TestProjectMyAccessOut | undefined>(undefined)
+  useEffect(() => {
+    if (!selected?.project_id) { setSelectedAccess(undefined); return }
+    let cancelled = false
+    api.get<TestProjectMyAccessOut>(`/api/test-projects/${selected.project_id}/my-access`)
+      .then((access) => { if (!cancelled) setSelectedAccess(access) })
+      .catch(() => { if (!cancelled) setSelectedAccess(undefined) })
+    return () => { cancelled = true }
+  }, [selected?.project_id])
 
   // Queue-tab/health-strip counts now come straight off the SQL-aggregated
   // DefectDashboardOut (loaded independently of the current queue/search/
@@ -664,10 +773,31 @@ export default function Defects() {
   const clearFilters = () => { setSearch(''); setStatus(''); setSeverity(''); setPriority('') }
   const ageInDays = (reportedAt: string) => Math.max(0, Math.floor((Date.now() - new Date(reportedAt).getTime()) / 86400000))
   function update(saved: DefectOut) { refreshDefects(); setSelected(saved) }
+
+  // 2026-08 -- reported directly: "other than QA team, for others there
+  // should not be any option to open any defects" -- then corrected the
+  // same day: "defect can be raised by requster, business analyst
+  // application owner too so defect management tool should be available
+  // for them as well" (see DEFECT_MANAGEMENT_ROLES' own comment in
+  // constants.ts for the final role set). Placed after every hook above
+  // (Admin.tsx's own established pattern for this kind of page-level gate)
+  // so the Rules of Hooks aren't violated by an earlier conditional return.
+  // The backend independently enforces the same restriction on the
+  // register/dashboard/export/batch-executions endpoints this page calls,
+  // so a direct API call bypasses nothing even if this render check were
+  // somehow skipped.
+  if (!hasRole(user, ...DEFECT_MANAGEMENT_ROLES)) {
+    return (
+      <Card title="Access Restricted">
+        <p className="muted">Defect Management is only available to QA team accounts and to Requester, Business Analyst, and Application Owner accounts (who may report defects).</p>
+      </Card>
+    )
+  }
+
   return <div className="tm-page defect-page">
     <header className="defect-command-header">
       <div className="defect-command-copy"><span>QUALITY CONTROL · DEFECT OPERATIONS</span><div><h2>Defect Management</h2><b>{dashboard?.total || 0}</b></div><p>Prioritize risk, maintain execution traceability, and move every defect through a governed resolution workflow.</p></div>
-      <div className="defect-command-actions"><button className="btn" onClick={() => api.downloadFile('/api/defects/export-xlsx', 'defect-management-register.xlsx')}>Export register</button><button className="btn" onClick={() => setCreateMode('standalone')}>+ Open defect</button><button className="btn btn-primary" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ From Failed / Blocked</button></div>
+      <div className="defect-command-actions"><button className="btn btn-sm" onClick={() => api.downloadFile('/api/defects/export-xlsx', 'defect-management-register.xlsx')}>Export</button><button className="btn btn-sm" disabled={!contexts.length} onClick={() => setCreateMode('standalone')}>+ New defect</button><button className="btn btn-primary btn-sm" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ Report from execution</button></div>
     </header>
     <ErrorText error={error} title="Defect Management could not be loaded" />
     <section className="defect-health-strip">
@@ -677,7 +807,6 @@ export default function Defects() {
       <div className="success"><span>Resolved / Retest</span><strong>{queueCounts.retest}</strong><small>waiting for validation</small></div>
       <div className="neutral"><span>Closed</span><strong>{dashboard?.closed || 0}</strong><small>{dashboard?.reopened || 0} reopened · {dashboard?.deferred || 0} deferred</small></div>
     </section>
-    <section className="defect-stage-strip"><div className="defect-stage-heading"><span>Lifecycle distribution</span><small>Select a stage to filter the register</small></div><div>{STATUSES.slice(0, 6).map((stage) => <button key={stage} className={status === stage ? 'active' : ''} onClick={() => setStatus(status === stage ? '' : stage)}><span>{stage}</span><strong>{dashboard?.by_status?.[stage] || 0}</strong></button>)}</div></section>
     <section className="defect-workspace-card">
       <nav className="defect-queue-tabs" aria-label="Defect queues">{([['all', 'All defects'], ['attention', 'Needs attention'], ['mine', 'My work'], ['unlinked', 'Unlinked'], ['retest', 'Ready for retest'], ['closed', 'Closed']] as const).map(([key, label]) => <button key={key} className={queue === key ? 'active' : ''} onClick={() => setQueue(key)}><span>{label}</span><b>{queueCounts[key]}</b></button>)}</nav>
       <div className="defect-register-head"><div><span>DEFECT REGISTER</span><h3>{total} {total === 1 ? 'record' : 'records'} in this view</h3></div>{dashboard && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
@@ -696,6 +825,15 @@ export default function Defects() {
       {!defects.length && <div className="tm-empty"><strong>{dashboard?.total ? 'No defects match this view' : 'No governed defects yet'}</strong><span>{dashboard?.total ? 'Change the queue or clear filters to see more records.' : 'Open a defect now, or report one directly from a Failed/Blocked execution.'}</span></div>}
     </section>
     {createMode && <CreateDefectModal standalone={createMode === 'standalone'} contexts={contexts} requests={requests} initialExecutionId={initialExecutionId} onClose={() => { setCreateMode(''); setSearchParams({}) }} onCreated={(created) => { refreshDefects(); setCreateMode(''); setSelected(created); setSearchParams({ open: created.defect_key }) }} />}
-    {selected && <DefectDetail defect={selected} users={users} departments={departments} requestDepartment={requests.find((request) => request.id === selected.qa_request_id)?.department} defects={duplicateCandidates} contexts={contexts} access={selected.project_id ? accessByProject[selected.project_id] : undefined} onClose={() => { setSelected(null); setSearchParams({}) }} onChanged={update} />}
+    {selected && <DefectDetail defect={selected} users={users} departments={departments} requestDepartment={requests.find((request) => request.id === selected.qa_request_id)?.department} defects={duplicateCandidates} contexts={contexts} access={selectedAccess} onClose={() => {
+      // 2026-08 -- reported directly: closing a defect opened via a
+      // cross-module deep link (e.g. Test Execution's "Cycle Defects"
+      // panel, see LinkedDefects.tsx's `returnTo`) used to just clear the
+      // `open` param and leave the user sitting on the Defects register,
+      // instead of going back to the page they actually came from.
+      const returnTo = searchParams.get('return')
+      if (returnTo) { navigate(returnTo); return }
+      setSelected(null); setSearchParams({})
+    }} onChanged={update} />}
   </div>
 }

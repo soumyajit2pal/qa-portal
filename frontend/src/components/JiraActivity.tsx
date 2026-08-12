@@ -14,6 +14,7 @@ import {
   RichTextImageInput,
   RichTextLinkEditor,
   RichTextPastedImages,
+  normalizeStoredRichText,
 } from './RichTextEditor'
 
 type ActivityFilter = 'all' | 'comments' | 'history'
@@ -72,7 +73,11 @@ function inlineMarkdown(value: string, keyPrefix: string): React.ReactNode[] {
 }
 
 export function MarkdownComment({ value }: { value: string }) {
-  const lines = value.replace(/\r/g, '').split('\n')
+  const lines = normalizeStoredRichText(value).split('\n')
+  const isTableStart = (lineIndex: number) =>
+    lineIndex + 1 < lines.length &&
+    lines[lineIndex].includes('|') &&
+    /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[lineIndex + 1])
   const blocks: React.ReactNode[] = []
   let index = 0
   while (index < lines.length) {
@@ -85,7 +90,7 @@ export function MarkdownComment({ value }: { value: string }) {
       index += 1
       continue
     }
-    if (line.includes('|') && index + 1 < lines.length && /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[index + 1])) {
+    if (isTableStart(index)) {
       const cells = (entry: string) => entry.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, '|'))
       const header = cells(line)
       index += 2
@@ -114,7 +119,7 @@ export function MarkdownComment({ value }: { value: string }) {
     }
     const paragraph: string[] = [line]
     index += 1
-    while (index < lines.length && lines[index].trim() && !/^\s*(?:#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s?)/.test(lines[index])) paragraph.push(lines[index++])
+    while (index < lines.length && lines[index].trim() && !isTableStart(index) && !/^\s*(?:#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s?)/.test(lines[index])) paragraph.push(lines[index++])
     blocks.push(<p key={`p-${index}`}>{paragraph.map((entry, paragraphIndex) => <React.Fragment key={paragraphIndex}>{inlineMarkdown(entry, `p-${index}-${paragraphIndex}`)}{paragraphIndex < paragraph.length - 1 && <br />}</React.Fragment>)}</p>)
   }
   return <div className="jira-markdown">{blocks}</div>

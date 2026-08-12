@@ -3,15 +3,17 @@ export const ROLE_LABELS: Record<string, string> = {
   BUSINESS_ANALYST: 'Business Analyst',
   QA_ENGINEER: 'QA Engineer (QA)',
   QA_LEAD: 'QA Lead',
-  CHEIF_MANAGER_QA: 'Cheif Manager - QA',
-  // Split from a single DEPARTMENT_HEAD_COE role (2026-08) into two roles
-  // with IDENTICAL authority -- CHEIF_MANAGER_QA is an additional peer of
-  // CHEIF_MANAGER_COE with the same authority; same rationale as the DEPARTMENT_HEAD_CM/
-  // DEPARTMENT_HEAD_AGM split below: every hasRole(user, 'DEPARTMENT_HEAD_COE')
-  // check now checks both, so either can approve the Executive COE / QA
-  // Sign-off checkpoint. Purely so approval logs show the exact position.
-  CHEIF_MANAGER_COE: 'Chief Manager - COE',
-  AGM_COE: 'Assistant General Manager - COE',
+  // 2026-08: CHIEF_MANAGER_QA/AGM_QA are now the sole "QA Executive Group" --
+  // any active holder of either role has identical authority at the
+  // Executive COE / QA Sign-off checkpoint (reported directly -- "no ther
+  // pair is required, creating lots of confusion"). Previously split into a
+  // second pair, CHEIF_MANAGER_COE/AGM_COE, with identical authority but a
+  // separate label; those two roles are retired -- existing accounts were
+  // migrated onto CHIEF_MANAGER_QA/AGM_QA by the one-time role-consolidation
+  // data-fix script. Also corrects the "Cheif" -> "Chief" spelling, which
+  // was baked into the role constant itself, not just this label.
+  CHIEF_MANAGER_QA: 'Chief Manager - QA',
+  AGM_QA: 'Assistant General Manager - QA',
   SECURITY_ANALYST: 'Security Analyst (QA)',
   APPLICATION_OWNER: 'Application Owner',
   // Split from a single DEPARTMENT_HEAD role (2026-08) into two roles with
@@ -44,14 +46,13 @@ export const ALL_ROLES = Object.keys(ROLE_LABELS)
 // QA_ADMIN_ASSIGNABLE_ROLES exactly -- the working-level roles a local admin
 // may assign to users in their own department via DepartmentAdmin.tsx,
 // without needing a System Admin. Split in two (2026-08, per request) since
-// a business Department Head and the QA department's own Executive COE
+// a business Department Head and the QA department's own QA Executive
 // oversee different teams: DEPARTMENT_ADMIN_ASSIGNABLE_ROLES for the former,
 // QA_ADMIN_ASSIGNABLE_ROLES for the latter (which DepartmentAdmin.tsx picks
 // between based on which kind of local admin is logged in). Both exclude
-// ADMIN and DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHEIF_MANAGER_COE/
-// CHEIF_MANAGER_QA/AGM_COE -- neither kind of local admin may mint peer
-// department heads, Executive COE approvers, or other System Admins
-// themselves.
+// ADMIN and DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHIEF_MANAGER_QA/AGM_QA --
+// neither kind of local admin may mint peer department heads, QA Executive
+// approvers, or other System Admins themselves.
 export const DEPARTMENT_ADMIN_ASSIGNABLE_ROLES: string[] = [
   'REQUESTER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER', 'SM',
 ]
@@ -66,7 +67,7 @@ export const QA_DEPARTMENT = 'COE - Quality Assurance'
 // Mirrors backend/app/deps.py's DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES
 // exactly -- roles whose own department mapping is ignored for department-
 // scoped data (see that file's own docstring for the full reasoning: the
-// QA/Security/Executive-COE roles review every business department's
+// QA/Security/Executive roles review every business department's
 // requests as their actual job, and Role.SCALE_6_PLUS is a confidential,
 // System-Admin-only role granted the same org-wide view on request). Used
 // here purely for frontend nav/page-gating decisions (e.g. hiding QA
@@ -77,7 +78,7 @@ export const QA_DEPARTMENT = 'COE - Quality Assurance'
 // role check -- Admin is deliberately NOT in this set, same as the backend).
 export const DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES: string[] = [
   'QA_LEAD', 'QA_ENGINEER', 'SECURITY_ANALYST',
-  'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE',
+  'CHIEF_MANAGER_QA', 'AGM_QA',
   'SCALE_6_PLUS',
 ]
 
@@ -90,6 +91,33 @@ export function canSeeQaDepartmentOnlyData(user?: { roles?: string[]; department
   if ((user.roles || []).some((r) => DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES.includes(r))) return true
   if (!user.department) return true
   return user.department === QA_DEPARTMENT
+}
+
+// 2026-08 Reassignment Requirement -- mirrors backend/app/reassignment.py's
+// department_head_roles exactly: COE - Quality Assurance's own "Department
+// Head" checkpoint is CHIEF_MANAGER_QA/AGM_QA; every other department uses
+// the generic DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM pair. Needed wherever a
+// Reassign action's eligibility depends on the CURRENT ASSIGNEE's own
+// department rather than always being QA (e.g. defects, which can be routed
+// to any active department -- unlike tester/analyst/runner reassignment,
+// which are always within COE - Quality Assurance and so hardcode
+// CHIEF_MANAGER_QA/AGM_QA directly).
+export function departmentHeadRoles(department?: string | null): string[] {
+  return department === QA_DEPARTMENT ? ['CHIEF_MANAGER_QA', 'AGM_QA'] : ['DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM']
+}
+
+// Mirrors backend/app/reassignment.py's require_can_reassign exactly: the
+// current assignee, the Department Head of the current assignee's OWN
+// department, or an Admin. Takes the assignee's department directly rather
+// than looking it up, since callers generally already have that user's
+// record on hand (e.g. from a users list already loaded for a picker).
+export function canReassign(user: RoleBearer | null | undefined, currentAssigneeId?: number | null, currentAssigneeDepartment?: string | null): boolean {
+  if (!user) return false
+  if ((user.roles || []).includes('ADMIN')) return true
+  if (currentAssigneeId != null && user.id === currentAssigneeId) return true
+  if (currentAssigneeDepartment && user.department === currentAssigneeDepartment
+    && hasRole(user, ...departmentHeadRoles(currentAssigneeDepartment))) return true
+  return false
 }
 
 // Mirrors backend/app/constants.py's APPLICATION_MASTER_STATUS_LABELS
@@ -109,6 +137,8 @@ export const APPLICATION_MASTER_STATUS_LABELS: Record<string, string> = {
 // UserOut so it works for both the logged-in user and any user row.
 export interface RoleBearer {
   roles?: string[] | null
+  id?: number
+  department?: string | null
 }
 
 // A user may hold several roles at once (all active simultaneously) -- this
@@ -189,6 +219,21 @@ export const QA_STATUSES: string[] = [
   'QA_SIGNED_OFF', 'REQUESTER_VERIFICATION', 'CLOSED', 'CANCELLED',
 ]
 
+// 2026-08 -- reported directly: "once assigned there are no other option to
+// reassign the tester or modify the tester. give qa lead to reassign as well
+// as the current assign people can reasign to another qa member." Mirrors
+// backend app/constants.py's TESTER_REASSIGNABLE_STATUSES exactly -- the
+// full active-testing window (Planning through Retesting) during which
+// assign-tester may be called again, by either the QA Lead group or whoever
+// is currently assigned. Calling it while status is still exactly PLANNING
+// is the original "initial assignment" path (advances to TESTER_ASSIGNED);
+// calling it at any later status in this list is a pure reassignment and
+// leaves status untouched. See Functional.tsx's canAssignTester.
+export const TESTER_REASSIGNABLE_STATUSES: string[] = [
+  'PLANNING', 'TESTER_ASSIGNED', 'TEST_DESIGN', 'EXECUTION_IN_PROGRESS',
+  'DEFECT_RAISED', 'WAITING_FOR_FIX', 'RETESTING',
+]
+
 export const QA_STATUS_LABELS: Record<string, string> = {
   DRAFT: 'Draft', SUBMITTED: 'Submitted',
   SM_APPROVAL_PENDING: 'SM Approval Pending',
@@ -232,6 +277,44 @@ export const QA_PENDING_WITH: Record<string, string> = {
   QA_SIGNED_OFF: 'Requester', REQUESTER_VERIFICATION: 'Requester',
   CLOSED: '—', CANCELLED: '—',
 }
+
+// Reported directly: "AGM QA / Chief Manager QA does not need to assign QA
+// lead separately as they [a]re the executive[s], ... they have super
+// power" -- CHIEF_MANAGER_QA/AGM_QA get a blanket Executive bypass on every
+// QA-Lead-gated ACTION (readiness verification, planning, sign-off, test
+// project activation approval, etc.), same as Administrator, WITHOUT being
+// listed as "QA Lead group" members anywhere in the UI. This constant is
+// therefore only for ACTION authorization (e.g. SignOff.tsx's
+// canQALeadDecide, TestProjects.tsx's canReview/canEditProjectDetails) --
+// every DISPLAY use (RoleGroupLink "QA Lead group members" modal,
+// assignedGroupFor's "QA Lead" tile across Functional/SAST/DAST/Performance,
+// the Department-Head-decision preview) was reverted back to literal
+// 'QA_LEAD' only, so the roster only ever lists people whose actual role is
+// QA Lead (see ORACLE_MIGRATION_2026-07.md section 59). The separate "QA"
+// execution-stage tile (TESTER_ASSIGNED/TEST_DESIGN/EXECUTION_IN_PROGRESS/
+// RETESTING) stays QA_ENGINEER only (see QA_EXECUTION_GROUP_ROLE below).
+export const QA_LEAD_GROUP_ROLES: string[] = ['QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
+// The "QA" execution-stage tile's sole qualifying role (see comment above).
+export const QA_EXECUTION_GROUP_ROLE = 'QA_ENGINEER'
+
+/// 2026-08 -- reported directly: "other than QA team, for others there
+// should not be any option to open any defects," then corrected same day:
+// "defect can be raised by requster, business analyst application owner
+// too so defect management tool should be available for them as well."
+// Mirrors backend constants.py's DEFECT_MANAGEMENT_ROLES exactly -- QA team
+// (QA_ENGINEER/QA_LEAD/CHIEF_MANAGER_QA/AGM_QA/SECURITY_ANALYST) plus every
+// role that can report/link a defect (REQUESTER/BUSINESS_ANALYST/
+// APPLICATION_OWNER, matching backend defects.py's CREATE_ROLES). Gates the
+// Defect Management nav item (Layout.tsx) and the page itself (Defects.tsx).
+// Excludes only roles with no stake in defects at all: SM, Department Head
+// (CM/AGM), SCALE_6_PLUS. A single defect via a direct deep link (GET
+// /{id}/by-key) stays open to any authenticated user regardless -- only
+// browsing the register itself is restricted. hasRole()'s own ADMIN bypass
+// applies as usual.
+export const DEFECT_MANAGEMENT_ROLES: string[] = [
+  'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA', 'SECURITY_ANALYST',
+  'REQUESTER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER',
+]
 
 // Statuses from which the Functional Testing Request's own descriptive
 // fields (currently just Priority/Risk Rating -- see PUT
@@ -398,6 +481,20 @@ export const SAST_DAST_EDITABLE_STATUSES: string[] = [
 // dead end (mirrors backend constants.SAST_DAST_TERMINAL_STATUSES).
 export const SAST_DAST_TERMINAL_STATUSES: string[] = ['REPORT_READY', 'CLOSED', 'DEPARTMENT_HEAD_REJECTED']
 
+// 2026-08 Reassignment CR -- mirrors backend app/constants.py's
+// SAST_DAST_ANALYST_REASSIGNABLE_STATUSES exactly. See SAST.tsx/DAST.tsx's
+// canAssignSecurityAnalyst.
+export const SAST_DAST_ANALYST_REASSIGNABLE_STATUSES: string[] = [
+  'PLANNING', 'CONFIGURATION', 'SCANNING', 'FINDING_VALIDATION', 'REMEDIATION',
+  'ASSIGNED_TO_REQUESTER', 'WAITING_FOR_FIX', 'ASSIGNED_TO_LEAD', 'RESCAN',
+  'SECURITY_COMPLETE',
+]
+
+// Mirrors backend/app/constants.py's DEFECT_REASSIGNABLE_STATUSES exactly --
+// every status where a defect actually has an assignee and is still active.
+// See Defects.tsx's DefectDetail (Reassign action) and ReassignDefectModal.
+export const DEFECT_REASSIGNABLE_STATUSES: string[] = ['Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+
 // SAST/DAST's own "Security Readiness" pre-scan checklists used to be
 // hardcoded here (DEFAULT_SAST_CHECKLIST_ITEMS/DEFAULT_DAST_CHECKLIST_ITEMS)
 // -- both are Admin-configurable now (Admin > Readiness Checklist
@@ -417,6 +514,24 @@ export const PERFORMANCE_STATUSES: string[] = [
   'BASELINE', 'LOAD_TEST_EXECUTION', 'RESULT_ANALYSIS', 'DEFECT_FIX_RETEST', 'REPORT',
   'SIGNOFF_PENDING', 'SIGNED_OFF', 'REQUESTER_VERIFICATION', 'CLOSED', 'CANCELLED',
 ]
+// Performance's own equivalent of TESTER_REASSIGNABLE_STATUSES above --
+// mirrors backend app/constants.py's PERFORMANCE_TESTER_REASSIGNABLE_STATUSES
+// exactly (every stage from Planning onward, since Performance's
+// complete-planning action fuses "assign tester" with "advance to
+// Environment Setup" into a single call -- there's no separate "tester
+// assigned" status here the way Functional has TESTER_ASSIGNED). Calling
+// complete-planning while status is still exactly PLANNING is the initial
+// assignment (advances to ENVIRONMENT_SETUP); any later status in this list
+// is a pure reassignment and leaves status untouched. See Performance.tsx's
+// canCompletePlanning.
+const PERFORMANCE_STAGE_ORDER: string[] = [
+  'ENGINEER_ASSIGNED', 'READINESS', 'FEASIBILITY', 'PLANNING', 'ENVIRONMENT_SETUP',
+  'SCRIPT_DEVELOPMENT', 'BASELINE', 'LOAD_TEST_EXECUTION', 'RESULT_ANALYSIS',
+  'DEFECT_FIX_RETEST', 'REPORT',
+]
+export const PERFORMANCE_TESTER_REASSIGNABLE_STATUSES: string[] =
+  PERFORMANCE_STAGE_ORDER.slice(PERFORMANCE_STAGE_ORDER.indexOf('PLANNING'))
+
 export const PERFORMANCE_STATUS_LABELS: Record<string, string> = {
   DRAFT: 'Draft', SUBMITTED: 'Submitted',
   SM_APPROVAL_PENDING: 'SM Approval Pending', RETURNED_BY_SM: 'Returned by SM', SM_REJECTED: 'Rejected by SM',
@@ -520,7 +635,7 @@ export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
   SM_APPROVAL_PENDING: 'QA Lead Approval Pending',
   RETURNED_BY_SM: 'Returned by QA Lead',
   SM_REJECTED: 'Rejected by QA Lead',
-  DEPT_HEAD_COE_APPROVAL_PENDING: 'Executive COE Approval Pending',
+  DEPT_HEAD_QA_APPROVAL_PENDING: 'Executive COE Approval Pending',
   RETURNED_BY_DEPT_HEAD_COE: 'Returned by Executive COE',
   DEPT_HEAD_COE_REJECTED: 'Rejected by Executive COE',
   ISSUED: 'Issued',
@@ -543,7 +658,7 @@ export const SIGNOFF_TERMINAL_STATUSES: string[] = ['ISSUED', 'DEPT_HEAD_COE_REJ
 export const SIGNOFF_PENDING_WITH: Record<string, string> = {
   DRAFT: 'Tester', SUBMITTED: 'QA Lead',
   SM_APPROVAL_PENDING: 'QA Lead', RETURNED_BY_SM: 'Tester', SM_REJECTED: '—',
-  DEPT_HEAD_COE_APPROVAL_PENDING: 'Executive COE', RETURNED_BY_DEPT_HEAD_COE: 'Tester', DEPT_HEAD_COE_REJECTED: '—',
+  DEPT_HEAD_QA_APPROVAL_PENDING: 'Executive COE', RETURNED_BY_DEPT_HEAD_COE: 'Tester', DEPT_HEAD_COE_REJECTED: '—',
   ISSUED: '—',
 }
 
@@ -571,6 +686,26 @@ export const ENVIRONMENTS: string[] = ['Dev', 'SIT', 'UAT', 'Pre-Production', 'P
 // Functional.tsx's Edit Details modal), so it's not part of this ordering.
 // Mirrors backend/app/constants.py's ENVIRONMENT_PIPELINE_ORDER exactly.
 export const ENVIRONMENT_PIPELINE_ORDER: string[] = ['SIT', 'UAT', 'Pre-Production', 'Production']
+
+// Reported directly: "There Should not be any option Production in
+// deployment Environment... this replicate everywhere where the target
+// promotion and deployment environment scnarios present." A QA Request is
+// raised to plan testing on the way TO Production, not deployed straight to
+// it -- Production only ever makes sense as a Target Promotion Environment
+// (the pipeline's final destination), never as the Deployment Environment
+// you're starting a request from. Every "Deployment Environment" dropdown
+// (DetailsStep.tsx's New Request wizard, Functional.tsx's Edit Details
+// modal) uses this single shared list instead of each hand-filtering
+// ENVIRONMENTS locally, so this exclusion can't drift out of sync between
+// them -- same reasoning as ENVIRONMENT_PIPELINE_ORDER itself being one
+// shared source of truth rather than repeated inline arrays. Also incidentally
+// closes the "Target Promotion Environment has zero valid options" edge case
+// from the previous fix (validTargetPromotionOptions('Production') === [])
+// for every FRESH selection -- that dead-end can no longer be reached via
+// either dropdown; the disabled-field fallback in DetailsStep.tsx stays in
+// place only as a safety net for any pre-existing Draft saved with
+// environment='Production' before this change.
+export const DEPLOYMENT_ENVIRONMENTS: string[] = ENVIRONMENT_PIPELINE_ORDER.slice(0, -1)
 
 // Every Target Promotion Environment option that is strictly later than the
 // given Deployment Environment in the pipeline above -- used to populate the
@@ -647,11 +782,30 @@ export const TEST_CASE_TYPES: string[] = [
 // in-progress draft, if any, else its approved baseline) -- see backend
 // models.py's own "Module 10" header comment.
 export const TEST_CASE_STATUSES: string[] = ['Draft', 'In Review', 'Review Completed', 'Returned', 'Approved', 'Rejected', 'Archived']
+// 2026-08 "Simplified Test Management Review and Approval" requirement --
+// OLD-path drafts already sitting at "In Review"/"Review Completed"/
+// "Returned" when this shipped keep running the pre-existing "Test Approval
+// Workflow" logic above, completely unchanged (Reviewer-tier system QA_LEAD
+// role does Stage 1, CM QA/AGM QA-only does Stage 2). Any fresh Draft
+// submission (or a NEW-vocabulary Returned status resubmitting) instead
+// routes to the QA Group (QA_ENGINEER) for Stage 1 and the QA Lead Group
+// (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA) for Stage 2 -- no individual reviewer/
+// QA-Lead assignment either way. Mirrors backend
+// constants.TEST_CASE_NEW_STATUSES exactly; see ORACLE_MIGRATION_2026-07.md
+// for the full writeup and the "new cases only" migration decision.
+export const TEST_CASE_NEW_STATUSES: string[] = [
+  'Recommendation Pending', 'QA Lead Approval Pending', 'Returned by QA', 'Returned by QA Lead',
+]
+TEST_CASE_STATUSES.push(...TEST_CASE_NEW_STATUSES)
 export const TEST_CASE_STATUS_LABELS: Record<string, string> = {
   Draft: 'Draft',
   'In Review': 'Pending Reviewer Recommendation',
   'Review Completed': 'Pending QA Lead Approval',
   Returned: 'Returned for Correction',
+  'Recommendation Pending': 'Pending QA Recommendation',
+  'QA Lead Approval Pending': 'Pending QA Lead Approval',
+  'Returned by QA': 'Returned for Correction (by QA)',
+  'Returned by QA Lead': 'Returned for Correction (by QA Lead)',
   Approved: 'Approved',
   Rejected: 'Rejected',
   Archived: 'Archived',
@@ -662,12 +816,16 @@ export const TEST_CASE_STATUS_LABELS: Record<string, string> = {
 // the fallback label when no assignment exists yet.
 export const TEST_CASE_PENDING_WITH: Record<string, string> = {
   Draft: 'Author', 'In Review': 'Reviewer', 'Review Completed': 'QA Lead', Returned: 'Author',
+  'Recommendation Pending': 'QA Group', 'QA Lead Approval Pending': 'QA Lead Group',
+  'Returned by QA': 'Author', 'Returned by QA Lead': 'Author',
   Approved: '—', Rejected: '—', Archived: '—',
 }
 // Statuses where a decision (Reviewer recommend/return, or QA Lead
 // approve/return/reject) is currently awaited -- mirrors backend
 // constants.TEST_CASE_PENDING_DECISION_STATUSES.
-export const TEST_CASE_PENDING_DECISION_STATUSES: string[] = ['In Review', 'Review Completed']
+export const TEST_CASE_PENDING_DECISION_STATUSES: string[] = [
+  'In Review', 'Review Completed', 'Recommendation Pending', 'QA Lead Approval Pending',
+]
 // Mirrors backend constants.TEST_CASE_TERMINAL_STATUSES -- Rejected cannot
 // be executed, added to a Ready cycle, or edited in place.
 export const TEST_CASE_TERMINAL_STATUSES: string[] = ['Rejected']

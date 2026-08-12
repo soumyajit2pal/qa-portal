@@ -33,7 +33,8 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, can_review_repository
+from ..constants import Role, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
@@ -106,11 +107,18 @@ def sweep_overdue_approvals(db: Session) -> int:
     """Section 10 "Reminder and escalation intervals... configurable by an
     Administrator. Default: one reminder after two business days and
     escalation after five business days." Walks every TestCaseVersion
-    currently sitting In Review or Review Completed, fires a Reminder or
+    currently sitting at an in-flight review checkpoint -- both the OLD "Test
+    Approval Workflow" (In Review / Review Completed) and the 2026-08
+    "Simplified Test Management" NEW workflow (Recommendation Pending / QA
+    Lead Approval Pending) that superseded it for every fresh submission
+    (see ORACLE_MIGRATION_2026-07.md sections 60-62) -- fires a Reminder or
     Escalation notification to whoever it's currently assigned to once the
     relevant threshold is crossed, and stamps reminder_sent_at/escalated_at
-    so it's never sent twice for the same wait. Returns how many
-    notifications were created (logged by the caller, main.py, same
+    so it's never sent twice for the same wait. The NEW-path pair was missed
+    when section 60 introduced it, which silently stopped reminders/
+    escalations from ever firing for it since virtually all live submissions
+    route to the NEW path now -- added here to close that gap. Returns how
+    many notifications were created (logged by the caller, main.py, same
     convention as every other startup migration step)."""
     reminder_days = _setting_int(db, REMINDER_DAYS_KEY, DEFAULT_REMINDER_DAYS)
     escalation_days = _setting_int(db, ESCALATION_DAYS_KEY, DEFAULT_ESCALATION_DAYS)
@@ -118,33 +126,62 @@ def sweep_overdue_approvals(db: Session) -> int:
     created = 0
     pending = (
         db.query(models.TestCaseVersion)
-        .filter(models.TestCaseVersion.status.in_(("In Review", "Review Completed")))
+        .filter(models.TestCaseVersion.status.in_((
+            "In Review", "Review Completed", "Recommendation Pending", "QA Lead Approval Pending",
+        )))
         .all()
     )
+    stage1_statuses = ("In Review", "Recommendation Pending")
     for draft in pending:
         case = draft.test_case
         if not case:
             continue
-        stage_started = draft.submitted_at if draft.status == "In Review" else draft.reviewed_at
+        stage_started = draft.submitted_at if draft.status in stage1_statuses else draft.reviewed_at
         if not stage_started:
             continue
-        recipient_id = draft.assigned_reviewer_id if draft.status == "In Review" else draft.assigned_qa_lead_id
-        if not recipient_id:
-            continue  # nobody specifically assigned yet -- nothing to remind
+        candidates = db.query(models.User).filter(
+            # Oracle Boolean columns are NUMBER(1); use `= 1`, not `IS 1`.
+            models.User.is_active == 1,
+            models.User.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS),
+        ).all()
+        if draft.status == "In Review":
+            recipient_ids = [u.id for u in candidates if u.id != draft.author_id
+                             and Role.QA_LEAD in set(u.roles)]
+        elif draft.status == "Review Completed":
+            recipient_ids = [u.id for u in candidates if u.id != draft.author_id
+                             and set(u.roles).intersection({Role.CHIEF_MANAGER_QA, Role.AGM_QA})]
+        elif draft.status == "Recommendation Pending":
+            # NEW-path Stage 1 -- QA Group. GOV-002: also excludes whoever
+            # submitted this draft, not just its original author (section 62).
+            recipient_ids = [u.id for u in candidates if u.id != draft.author_id
+                             and u.id != draft.submitted_by_id and Role.QA_ENGINEER in set(u.roles)]
+        else:
+            # NEW-path Stage 2 ("QA Lead Approval Pending") -- QA Lead Group.
+            # GOV-002: also excludes the submitter and the Stage 1 reviewer.
+            recipient_ids = [u.id for u in candidates if u.id != draft.author_id
+                             and u.id not in (draft.submitted_by_id, draft.reviewed_by_id)
+                             and set(u.roles).intersection({Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA})]
+        if not recipient_ids:
+            continue
         elapsed_bd = _business_days_between(stage_started, now)
-        stage_label = "Reviewer recommendation" if draft.status == "In Review" else "QA Lead final approval"
+        stage_label = {
+            "In Review": "Reviewer recommendation",
+            "Review Completed": "QA Lead final approval",
+            "Recommendation Pending": "QA Group recommendation",
+            "QA Lead Approval Pending": "QA Lead Group final approval",
+        }[draft.status]
         if elapsed_bd >= escalation_days and not draft.escalated_at:
-            fire(db, [recipient_id], "Escalated", "TEST_CASE", case.id, case.test_case_key,
+            fire(db, recipient_ids, "Escalated", "TEST_CASE", case.id, case.test_case_key,
                  f"Escalation: {case.test_case_key} has been awaiting {stage_label} for "
                  f"{elapsed_bd} business day(s).")
             draft.escalated_at = now
-            created += 1
+            created += len(recipient_ids)
         elif elapsed_bd >= reminder_days and not draft.reminder_sent_at:
-            fire(db, [recipient_id], "Reminder", "TEST_CASE", case.id, case.test_case_key,
+            fire(db, recipient_ids, "Reminder", "TEST_CASE", case.id, case.test_case_key,
                  f"Reminder: {case.test_case_key} is awaiting {stage_label} "
                  f"({elapsed_bd} business day(s) so far).")
             draft.reminder_sent_at = now
-            created += 1
+            created += len(recipient_ids)
     if created:
         db.commit()
     return created

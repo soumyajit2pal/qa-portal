@@ -184,7 +184,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     or overloaded. Shared requests divide their load across assigned testers."""
     qa_team_roles = {
         Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
-        Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA, Role.AGM_COE,
+        Role.CHIEF_MANAGER_QA, Role.AGM_QA,
     }
     if not qa_team_roles.intersection(current_user.roles):
         raise HTTPException(403, "QA tester workload is restricted to the QA team")

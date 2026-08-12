@@ -654,6 +654,13 @@ class DepartmentHeadDecisionIn(BaseModel):
 
 class AssignTesterIn(BaseModel):
     tester_ids: List[int]
+    # 2026-08 Reassignment CR -- mandatory only when this call is actually a
+    # reassignment (status already past the initial PLANNING assignment);
+    # optional here so the very first assignment (nothing to give a reason
+    # for yet) isn't forced to fill it in. Enforced server-side in
+    # functional.py::assign_tester / performance.py::complete_planning via
+    # reassignment.require_reason.
+    reason: Optional[str] = None
 
 
 class StartFunctionalExecutionIn(BaseModel):
@@ -663,6 +670,12 @@ class StartFunctionalExecutionIn(BaseModel):
 
 class AssignSecurityAnalystIn(BaseModel):
     security_analyst_id: int
+    # 2026-08 Reassignment CR -- mandatory only when this call is actually a
+    # reassignment (status already past the initial PLANNING assignment);
+    # see AssignTesterIn's identical field for the same reasoning. Enforced
+    # server-side in sast_dast.py::_assign_security_analyst via
+    # reassignment.require_reason.
+    reason: Optional[str] = None
 
 
 class SecurityDeptHeadDecisionIn(BaseModel):
@@ -1273,6 +1286,18 @@ class DefectTransition(BaseModel):
     closure_remarks: Optional[str] = None
 
 
+# 2026-08 Reassignment Requirement -- dedicated endpoint/payload for changing
+# an already-assigned defect's assignee without touching status/history.
+# Deliberately separate from DefectTransition: the "Assigned" status is only
+# reachable from New/Reopened/Deferred (see defects.py's TRANSITIONS), so
+# there was previously no way to change the assignee once work was already
+# under way (In Progress/Resolved/Retest/etc).
+class DefectReassign(BaseModel):
+    assignee_id: int
+    assigned_team: Optional[str] = None
+    reason: Optional[str] = None
+
+
 class DefectOut(ORMModel):
     id: int
     defect_key: str
@@ -1284,6 +1309,13 @@ class DefectOut(ORMModel):
     cycle_id: Optional[int] = None
     cycle_key: Optional[str] = None
     project_id: Optional[int] = None
+    # 2026-08 -- reported directly: "During assigning defect, department
+    # should be auto populated based on linked request or Failed / Blocked
+    # Test Execution." See models.Defect.project_department's own docstring
+    # -- the linked Test Cycle's own Project.department, used by
+    # Defects.tsx's TransitionModal to prefill the "Assigned" step's
+    # Department field ahead of the QA Request's own department.
+    project_department: Optional[str] = None
     primary_test_case_id: Optional[int] = None
     test_case_key: Optional[str] = None
     execution_id: Optional[int] = None
@@ -1866,10 +1898,6 @@ class TestCaseBulkUpdate(BaseModel):
     test_type: Optional[str] = None
     module_name: Optional[str] = None
     tags: Optional[List[str]] = None
-    # APR-001 routing assignments. model_fields_set distinguishes unchanged
-    # from explicit null (clear the item override/use the project default).
-    assigned_reviewer_id: Optional[int] = None
-    assigned_qa_lead_id: Optional[int] = None
     status: Optional[str] = None
 
 
@@ -1895,8 +1923,31 @@ class TestCaseBulkRecommend(BaseModel):
     is optional to match the single-case Recommend action (APR-004: return/
     reject require a comment, approval/recommendation don't)."""
     ids: List[int]
-    assigned_qa_lead_id: int
     comments: Optional[str] = None
+
+
+class TestCaseBulkReturn(BaseModel):
+    """2026-08 -- NEW-workflow-only bulk equivalent of review_test_case's
+    single-case RETURN decision, available at either NEW-path checkpoint
+    ("Recommendation Pending" -> "Returned by QA", or "QA Lead Approval
+    Pending" -> "Returned by QA Lead"). comments is mandatory, matching the
+    single-case RETURN's own requirement (a reason is required when
+    returning a test case for changes). OLD-path rows are not supported by
+    this endpoint -- return/reject there remain single-case only via
+    review_test_case, per this migration's established "new cases only"
+    convention."""
+    ids: List[int]
+    comments: str
+
+
+class TestCaseBulkReject(BaseModel):
+    """2026-08 -- NEW-workflow-only bulk equivalent of review_test_case's
+    single-case REJECT decision (terminal), available at either NEW-path
+    checkpoint. comments is mandatory, matching the single-case REJECT's own
+    requirement. OLD-path rows are not supported, same reasoning as
+    TestCaseBulkReturn above."""
+    ids: List[int]
+    comments: str
 
 
 class TestCaseBulkSubmit(BaseModel):
@@ -1905,8 +1956,6 @@ class TestCaseBulkSubmit(BaseModel):
     directly: with a large imported/cloned batch, submitting one testcase
     at a time was impractical."""
     ids: List[int]
-    assigned_reviewer_id: int
-    assigned_qa_lead_id: int
     note: Optional[str] = None
 
 
@@ -1923,9 +1972,6 @@ class TestCaseReview(BaseModel):
         REJECT  -> "Rejected", terminal (comments MANDATORY)
     """
     decision: str
-    # Required by the router when decision == RECOMMEND; ignored for the
-    # Stage 2 decisions and Stage 1 RETURN.
-    assigned_qa_lead_id: Optional[int] = None
     comments: Optional[str] = None
     # SRS VER-004 "Default policy may auto-increment minor and permit QA
     # Lead to select major with justification" -- version_bump is ignored
@@ -1952,8 +1998,6 @@ class TestCaseSubmit(BaseModel):
     """REV-001 -- submitting a Draft version for Reviewer recommendation. note is
     the author's own optional context for the reviewer, stored on
     TestCaseVersion.submit_note."""
-    assigned_reviewer_id: int
-    assigned_qa_lead_id: int
     note: Optional[str] = None
 
 
@@ -1975,9 +2019,49 @@ class TestCaseCloneIn(BaseModel):
 
 class TestCaseArchive(BaseModel):
     """TC-006 -- archiving preserves all versions/cycle membership/
-    execution history while preventing new cycle selection. reason is
-    optional but recorded on the audit trail when given."""
-    reason: Optional[str] = None
+    execution history while preventing new cycle selection. 2026-08 --
+    reason is now mandatory (was optional): "Final-Approved Test Case
+    Deletion and Archive Requirement" -- "The user must provide an archive
+    reason." Recorded verbatim on the audit trail (see archive_test_case)."""
+    reason: str
+
+
+class TestCaseBulkArchive(BaseModel):
+    """2026-08 -- bulk counterpart to TestCaseArchive, for the "Archive
+    Selected" bulk action alongside bulk-delete (see bulk_archive_test_cases
+    in test_repository.py). Acts only on rows with a live Approved baseline
+    -- an already-Archived row in the same selection is silently skipped
+    rather than rejecting the whole batch, since re-archiving an archived
+    row isn't a meaningful conflict the way deleting a governed one is."""
+    ids: List[int]
+    reason: str
+
+
+class TestCaseBulkRestoreFromArchive(BaseModel):
+    """2026-08 -- bulk counterpart to the single-case restore_test_case
+    (Archived -> Approved), alongside TestCaseBulkArchive. No reason field --
+    matches the single-case /restore endpoint, which likewise doesn't
+    require one (only the Archive direction demands a documented reason;
+    reversing it back to Approved isn't a governance decision the way
+    archiving or deleting is)."""
+    ids: List[int]
+
+
+class TestCaseBulkRestoreFromRecycleBin(BaseModel):
+    """2026-08 "Recycle Bin" requirement -- bulk counterpart to
+    restore_test_case_from_recycle_bin. Any Author-tier user may restore
+    (same tier that can delete in the first place) -- restoring an
+    accidental delete isn't a governance decision the way purging
+    permanently is."""
+    ids: List[int]
+
+
+class TestCaseBulkPurge(BaseModel):
+    """2026-08 "Recycle Bin" requirement -- "only QA lead can clear from
+    recycle bin." Bulk counterpart to purge_test_case -- the only remaining
+    code path (besides the single-case one) that issues a real, irreversible
+    `db.delete()`. QA Lead Group only (require_can_manage_repository_governance)."""
+    ids: List[int]
 
 
 class TestCaseOut(ORMModel):
@@ -2004,6 +2088,17 @@ class TestCaseOut(ORMModel):
     current_approved_version_id: Optional[int] = None
     current_draft_version_id: Optional[int] = None
     current_draft_author_id: Optional[int] = None
+    current_draft_author_name: Optional[str] = None
+    # GOV-002 gap fix -- see models.TestCase.current_draft_submitted_by_id/
+    # current_draft_reviewed_by_id's own docstring.
+    current_draft_submitted_by_id: Optional[int] = None
+    current_draft_reviewed_by_id: Optional[int] = None
+    # "show submitted by as well" -- see models.TestCase.
+    # current_draft_submitted_by_name's own docstring.
+    current_draft_submitted_by_name: Optional[str] = None
+    # "Add Recommended By once recommended" -- see models.TestCase.
+    # current_draft_reviewed_by_name's own docstring.
+    current_draft_reviewed_by_name: Optional[str] = None
     created_by_id: Optional[int] = None
     created_by_name: Optional[str] = None
     created_at: datetime.datetime
@@ -2011,6 +2106,11 @@ class TestCaseOut(ORMModel):
     checked_out_by_id: Optional[int] = None
     checked_out_by_name: Optional[str] = None
     checked_out_at: Optional[datetime.datetime] = None
+    # 2026-08 "Recycle Bin" requirement -- see models.TestCase.is_deleted's
+    # own docstring. False/None for every normal (non-recycled) case.
+    is_deleted: bool = False
+    deleted_by_name: Optional[str] = None
+    deleted_at: Optional[datetime.datetime] = None
     # APR-006 "current assignee, pending action, elapsed time" -- bridges
     # through the current draft version, see models.TestCase's own
     # properties. None once nothing is pending (Approved with no draft in
@@ -2051,6 +2151,17 @@ class TestCaseListOut(ORMModel):
     current_approved_version_id: Optional[int] = None
     current_draft_version_id: Optional[int] = None
     current_draft_author_id: Optional[int] = None
+    current_draft_author_name: Optional[str] = None
+    # GOV-002 gap fix -- see models.TestCase.current_draft_submitted_by_id/
+    # current_draft_reviewed_by_id's own docstring.
+    current_draft_submitted_by_id: Optional[int] = None
+    current_draft_reviewed_by_id: Optional[int] = None
+    # "show submitted by as well" -- see models.TestCase.
+    # current_draft_submitted_by_name's own docstring.
+    current_draft_submitted_by_name: Optional[str] = None
+    # "Add Recommended By once recommended" -- see models.TestCase.
+    # current_draft_reviewed_by_name's own docstring.
+    current_draft_reviewed_by_name: Optional[str] = None
     created_by_id: Optional[int] = None
     created_by_name: Optional[str] = None
     created_at: datetime.datetime
@@ -2058,6 +2169,11 @@ class TestCaseListOut(ORMModel):
     checked_out_by_id: Optional[int] = None
     checked_out_by_name: Optional[str] = None
     checked_out_at: Optional[datetime.datetime] = None
+    # 2026-08 "Recycle Bin" requirement -- see models.TestCase.is_deleted's
+    # own docstring. False/None for every normal (non-recycled) case.
+    is_deleted: bool = False
+    deleted_by_name: Optional[str] = None
+    deleted_at: Optional[datetime.datetime] = None
     pending_with_user_id: Optional[int] = None
     pending_with_user_name: Optional[str] = None
     pending_since: Optional[datetime.datetime] = None
@@ -2082,6 +2198,13 @@ class TestCaseSummaryOut(BaseModel):
     review_completed_count: int
     critical_count: int
     tags: List[str]
+    # 2026-08 "Recycle Bin" requirement -- power the sidebar's "Archived"/
+    # "Recycle Bin" shortcut badges the same way unfiled_count already
+    # powers "Unfiled"'s. total/unfiled_count/folder_counts above now
+    # exclude both Archived and soft-deleted (Recycle Bin) cases -- these
+    # two are their dedicated counts.
+    archived_count: int = 0
+    recycle_bin_count: int = 0
 
 
 # Summary shown when importing an xlsx sheet. imported_executions remains in
@@ -2139,6 +2262,7 @@ class TestCycleUpdate(BaseModel):
     owner_id: Optional[int] = None
     blocking_reason: Optional[str] = None
     remarks: Optional[str] = None
+    reason: Optional[str] = None  # 2026-08 Reassignment Requirement -- mandatory only when owner_id changes and a previous owner already existed
 
 
 class TestCycleOut(ORMModel):
@@ -2230,11 +2354,19 @@ class TestExecutionBulkRemoveResult(BaseModel):
 
 class TestExecutionAssign(BaseModel):
     assigned_to_id: Optional[int] = None
+    # 2026-08 Reassignment CR -- mandatory only when this execution already
+    # has a runner (i.e. this call is actually a reassignment/unassignment,
+    # not the first-ever assignment). Enforced server-side in
+    # test_execution.py::assign_execution via reassignment.require_reason.
+    reason: Optional[str] = None
 
 
 class TestExecutionBulkAssign(BaseModel):
     execution_ids: List[int]
     assigned_to_id: int
+    # 2026-08 Reassignment CR -- mandatory only if ANY of the selected
+    # executions already has a runner. See TestExecutionAssign.reason.
+    reason: Optional[str] = None
 
 
 class TestRunDefectCreate(BaseModel):
@@ -2312,6 +2444,10 @@ class TestExecutionOut(ORMModel):
     executed_by_id: Optional[int] = None
     executed_by_name: Optional[str] = None
     executed_at: Optional[datetime.datetime] = None
+    # Scenario 1 self-remove fix -- see models.TestExecution.added_by_id's
+    # own docstring. None for any slot created before this column existed.
+    added_by_id: Optional[int] = None
+    added_by_name: Optional[str] = None
     run_count: int = 0
     run_version: int = 0
     created_at: datetime.datetime
@@ -2336,6 +2472,26 @@ class TestExecutionSummaryOut(BaseModel):
     unassigned_count: int
     mine_count: int
     total_run_count: int
+
+
+class DefectLinkableExecutionOut(ORMModel):
+    """2026-08 -- reported directly: on Defect Management's page load, "if
+    there are 30 project[s] then 30 api call[s] ... same for cycles,
+    executions" -- Defects.tsx used to fan out one /my-access call per
+    project, then one /cycles call per project, then one /executions call
+    per cycle in that project, purely to build the "pick a Failed/Blocked
+    execution" dropdown for creating/linking a defect. This is the single
+    batch replacement: routers/test_execution.py::list_blocked_failed_
+    executions joins TestProject -> TestCycle -> TestExecution server-side
+    in one query (scoped to active projects, status in Fail/Blocked, and the
+    caller's own department scope) and returns one flattened row per
+    execution, each carrying its project/cycle context alongside it --
+    mirrors the frontend's own pre-existing `ExecutionContext` shape
+    (project + cycle + execution) exactly, so Defects.tsx's own dropdown/
+    picker code needs no logic changes, only its data source."""
+    project: TestProjectOut
+    cycle: TestCycleOut
+    execution: TestExecutionOut
 
 
 # ---------------- Test Management Reporting (SRS section 11) ----------------

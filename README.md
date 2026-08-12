@@ -328,8 +328,13 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
 
 ## Production notes
 
-- Replace `Base.metadata.create_all()` (used for convenience here) with **Alembic**
-  migrations before going to production, so Oracle schema changes are versioned.
+- Apply versioned Oracle schema changes with **Alembic** before starting API
+  containers; see `backend/MIGRATIONS.md`.
+- Configure `TRUSTED_PROXY_CIDRS` with only the actual load-balancer, ingress or
+  reverse-proxy networks. Login and action audit records will then store the
+  original client from `X-Forwarded-For` instead of the proxy's address. The
+  supplied nginx configuration already forwards `X-Real-IP` and
+  `X-Forwarded-For`.
 - Add MFA at the identity-provider layer for LDAP/AD-backed logins, per the non-functional
   requirements (5.1) — this app only performs the LDAP bind, not step-up/MFA.
 - Supporting documents are uploaded (multiple files per request, every module) and stored on

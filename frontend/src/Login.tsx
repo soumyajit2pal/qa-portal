@@ -6,7 +6,7 @@ import { ErrorText } from './components/Common'
 
 const DEMO_ACCOUNTS: [string, string][] = [
   ['requester1', 'Requester 1 (Developer) / Others'], ['requester1', 'Requester 2 (Developer) / Others'],['ba1', 'Business Analyst'], ['qa1', 'QA Engineer (QA 1)'],['qa2', 'QA Engineer (QA 2)']
-  ,['qalead1', 'QA Lead'], ['cm1', 'Executive COE (CM-QA)'],['agm1', 'Executive COE (AGM-QA)'], ['security1', 'Security Analyst (QA)'],
+  ,['cheifmanagerqa1', 'Chief Manager - QA'],['agm1', 'Assistant General Manager - QA'],
   ['appowner1', 'Application Owner'], ['depthead1', 'Department Head - CM'],['depthead2', 'Department Head - AGM'],
   ['sm1', 'SM'], ['sm2', 'SM With App Owner'], ['admin', 'Administrator'],
 ]

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
-import { PageHeader, Field, ErrorText, Badge } from '../../components/Common'
+import { PageHeader, Field, ErrorText, Badge, Table } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import {
   TestProjectOut, TestCycleOut, ReportCountRow, ReportStatusCountRow,
@@ -25,6 +25,23 @@ const TABS: { id: ReportTab; label: string; scope: 'project' | 'cycle' | 'none' 
   { id: 'portfolio', label: 'Project Portfolio', scope: 'none' },
 ]
 
+const TAB_DESCRIPTIONS: Record<ReportTab, string> = {
+  health: 'Coverage, ownership, age and execution readiness',
+  'cycle-progress': 'Execution completion and assignment health',
+  defects: 'Linked-defect volume and retest outcomes',
+  'version-impact': 'Stale test-case versions requiring action',
+  portfolio: 'Cross-project delivery and ownership trends',
+}
+
+function barTone(label: string): string {
+  const value = label.toLowerCase()
+  if (/critical|fail|reject|blocked|breach/.test(value)) return 'tone-danger'
+  if (/high|pending|warning|stale|unassigned/.test(value)) return 'tone-warning'
+  if (/pass|approve|complete|active|closed/.test(value)) return 'tone-success'
+  if (/medium|progress|review/.test(value)) return 'tone-info'
+  return 'tone-primary'
+}
+
 // A simple horizontal-bar breakdown -- used for every "counts by X" group
 // across all 5 reports rather than a charting library, matching how
 // Dashboard.tsx's own summary tiles favor plain styled bars/numbers over a
@@ -37,7 +54,7 @@ function CountBars({ rows, total }: { rows: { key: string; count: number }[]; to
       {rows.map((row) => (
         <div className="tm-report-bar-row" key={row.key}>
           <span className="tm-report-bar-label">{row.key}</span>
-          <div className="tm-report-bar-track"><div className="tm-report-bar-fill" style={{ width: `${(row.count / max) * 100}%` }} /></div>
+          <div className="tm-report-bar-track"><div className={`tm-report-bar-fill ${barTone(row.key)}`} style={{ width: `${(row.count / max) * 100}%` }} /></div>
           <span className="tm-report-bar-count">{row.count}{total ? ` (${Math.round((row.count / total) * 100)}%)` : ''}</span>
         </div>
       ))}
@@ -68,7 +85,7 @@ function Pager({ offset, limit, total, onOffset }: { offset: number; limit: numb
   )
 }
 
-const PAGE_SIZE = 25
+const PAGE_SIZE = 5
 
 function RepositoryHealthPanel({ projectId }: { projectId: number }) {
   const [data, setData] = useState<RepositoryHealthOut | null>(null)
@@ -80,7 +97,7 @@ function RepositoryHealthPanel({ projectId }: { projectId: number }) {
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading…</p>
   return (
-    <div>
+    <div className="tm-report-panel">
       <PopulationNote text={data.population_note} />
       <div className="tm-report-stats-row">
         <StatCard label="Total test cases" value={data.total_cases} />
@@ -123,7 +140,7 @@ function CycleProgressPanel({ projectId }: { projectId: number }) {
 
   if (error) return <ErrorText error={error} />
   return (
-    <div>
+    <div className="tm-report-panel">
       <Field label="Cycle">
         <SearchableSelect
           value={cycleId === '' ? '' : String(cycleId)}
@@ -135,7 +152,7 @@ function CycleProgressPanel({ projectId }: { projectId: number }) {
       {!cycleId && <p className="muted">Select a cycle to see its progress.</p>}
       {cycleId && !data && <p className="muted">Loading…</p>}
       {data && (
-        <div>
+        <div className="tm-report-panel-body">
           <PopulationNote text={data.population_note} />
           <div className="tm-report-stats-row">
             <StatCard label="Total items" value={data.total_items} />
@@ -163,7 +180,7 @@ function DefectQualityPanel({ projectId }: { projectId: number }) {
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading…</p>
   return (
-    <div>
+    <div className="tm-report-panel">
       <PopulationNote text={data.population_note} />
       <div className="tm-report-stats-row">
         <StatCard label="Total defect links" value={data.total_defect_links} />
@@ -189,26 +206,23 @@ function VersionImpactPanel({ projectId }: { projectId: number }) {
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading…</p>
   return (
-    <div>
+    <div className="tm-report-panel">
       <PopulationNote text={data.population_note} />
       <div className="tm-report-stats-row">
         <StatCard label="Cycles with stale items" value={data.cycles_with_stale_items} />
       </div>
-      <table className="simple-table">
-        <thead><tr><th>Cycle</th><th>Status</th><th>Stale Items</th><th>Upgradeable</th><th>Permanently Pinned</th></tr></thead>
-        <tbody>
-          {data.items.map((item) => (
-            <tr key={item.cycle_id}>
-              <td>{item.cycle_key}</td>
-              <td><Badge status={item.cycle_status} /></td>
-              <td>{item.stale_item_count}</td>
-              <td>{item.upgradeable_count}</td>
-              <td>{item.permanently_pinned_count}</td>
-            </tr>
-          ))}
-          {data.items.length === 0 && <tr><td colSpan={5} className="muted">No cycles currently carry a stale pinned version.</td></tr>}
-        </tbody>
-      </table>
+      <Table
+        tableId="test-report-version-impact"
+        rowKey="cycle_id"
+        rows={data.items}
+        columns={[
+          { key: 'cycle_key', header: 'Cycle' },
+          { key: 'cycle_status', header: 'Status', render: (item) => <Badge status={item.cycle_status} /> },
+          { key: 'stale_item_count', header: 'Stale Items' },
+          { key: 'upgradeable_count', header: 'Upgradeable' },
+          { key: 'permanently_pinned_count', header: 'Permanently Pinned' },
+        ]}
+      />
       <Pager offset={offset} limit={PAGE_SIZE} total={data.total_items} onOffset={setOffset} />
     </div>
   )
@@ -223,7 +237,7 @@ function ProjectPortfolioPanel() {
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading…</p>
   return (
-    <div>
+    <div className="tm-report-panel">
       <PopulationNote text={data.population_note} />
       <div className="tm-report-stats-row">
         <StatCard label="Active projects" value={data.active_project_count} />
@@ -266,31 +280,52 @@ export default function TestReports() {
       <ErrorText error={error} />
       <PageHeader
         title="Test Reports"
-        subtitle="Repository health, cycle progress, defect quality, version impact, and portfolio -- SRS section 11."
+        subtitle="Operational insight across repository quality, execution, defects, versions and project delivery."
       />
-      <div className="pill-tabs" style={{ marginBottom: 14, flexWrap: 'wrap' }} aria-label="Report views">
-        {TABS.map((t) => (
-          <button key={t.id} className={tab === t.id ? 'active' : ''} onClick={() => setTab(t.id)}>{t.label}</button>
-        ))}
-      </div>
-      {activeTab.scope !== 'none' && (
-        <div style={{ maxWidth: 420, marginBottom: 16 }}>
-          <Field label="Project">
-            <SearchableSelect
-              value={projectId === '' ? '' : String(projectId)}
-              onChange={(v) => setProjectId(v ? Number(v) : '')}
-              placeholder={projects.length ? 'Select a project...' : 'No Test Projects yet'}
-              options={projects.map((p) => ({ value: String(p.id), label: `${p.project_key} · ${p.name}` }))}
-            />
-          </Field>
+      <section className="tm-report-workspace">
+        <aside className="tm-report-navigation" aria-label="Report views">
+          <div className="tm-report-navigation-head">
+            <span>Report catalogue</span>
+            <strong>{TABS.length} views</strong>
+          </div>
+          {TABS.map((t, index) => (
+            <button key={t.id} className={tab === t.id ? 'active' : ''} onClick={() => setTab(t.id)}>
+              <span className="tm-report-nav-index">{String(index + 1).padStart(2, '0')}</span>
+              <span><strong>{t.label}</strong><small>{TAB_DESCRIPTIONS[t.id]}</small></span>
+              <i>›</i>
+            </button>
+          ))}
+        </aside>
+        <div className="tm-report-content">
+          <header className="tm-report-content-head">
+            <div>
+              <span className="tm-report-eyebrow">Current report</span>
+              <h3>{activeTab.label}</h3>
+              <p>{TAB_DESCRIPTIONS[activeTab.id]}</p>
+            </div>
+            {activeTab.scope !== 'none' && (
+              <div className="tm-report-project-control">
+                <Field label="Project scope">
+                  <SearchableSelect
+                    value={projectId === '' ? '' : String(projectId)}
+                    onChange={(v) => setProjectId(v ? Number(v) : '')}
+                    placeholder={projects.length ? 'Select a project...' : 'No Test Projects yet'}
+                    options={projects.map((p) => ({ value: String(p.id), label: `${p.project_key} · ${p.name}` }))}
+                  />
+                </Field>
+              </div>
+            )}
+          </header>
+          <div className="tm-report-content-body">
+            {activeTab.scope !== 'none' && !projectId && <div className="tm-report-empty"><strong>Select a project</strong><span>Choose a project scope to generate this report.</span></div>}
+            {activeTab.scope === 'none' && <ProjectPortfolioPanel />}
+            {projectId && tab === 'health' && <RepositoryHealthPanel projectId={projectId} />}
+            {projectId && tab === 'cycle-progress' && <CycleProgressPanel projectId={projectId} />}
+            {projectId && tab === 'defects' && <DefectQualityPanel projectId={projectId} />}
+            {projectId && tab === 'version-impact' && <VersionImpactPanel projectId={projectId} />}
+          </div>
         </div>
-      )}
-      {activeTab.scope !== 'none' && !projectId && <p className="muted">Select a project to view this report.</p>}
-      {activeTab.scope === 'none' && <ProjectPortfolioPanel />}
-      {projectId && tab === 'health' && <RepositoryHealthPanel projectId={projectId} />}
-      {projectId && tab === 'cycle-progress' && <CycleProgressPanel projectId={projectId} />}
-      {projectId && tab === 'defects' && <DefectQualityPanel projectId={projectId} />}
-      {projectId && tab === 'version-impact' && <VersionImpactPanel projectId={projectId} />}
+      </section>
     </div>
   )
 }

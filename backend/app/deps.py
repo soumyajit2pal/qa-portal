@@ -126,10 +126,9 @@ def require_same_department(current_user: models.User, entity_department) -> Non
 # set, so it's confined to its own department the same as Requester/
 # Business Analyst/SM/Application Owner/Admin.
 #
-# Still unrestricted: the QA/Security/Executive-COE roles that review
+# Still unrestricted: the QA/Security/Executive roles that review
 # requests raised by every business department as their actual job
-# (QA_LEAD, QA_ENGINEER, SECURITY_ANALYST, CHEIF_MANAGER_COE/
-# CHEIF_MANAGER_QA/AGM) --
+# (QA_LEAD, QA_ENGINEER, SECURITY_ANALYST, CHIEF_MANAGER_QA/AGM_QA) --
 # these roles are all mapped to the fixed QA_DEPARTMENT ("COE - Quality Assurance"), never the
 # business department of the request they're reviewing, so scoping them the
 # same way as a Requester/SM would show them nothing rather than something
@@ -139,24 +138,37 @@ def require_same_department(current_user: models.User, entity_department) -> Non
 # someone outside the QA department who still needs the same org-wide view.
 DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES = {
     Role.QA_LEAD, Role.QA_ENGINEER, Role.SECURITY_ANALYST,
-    Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA, Role.AGM_COE,
+    Role.CHIEF_MANAGER_QA, Role.AGM_QA,
     Role.SCALE_6_PLUS,
 }
 
 
 def dashboard_department_scope(current_user: models.User) -> Optional[str]:
     """Returns the single department a Dashboard query should be confined to,
-    or None for "no restriction, show every department." Checked directly
-    against the raw roles list (models.User.roles), NOT has_role() --
-    has_role() treats ADMIN as satisfying any role check, which would
-    incorrectly also exempt an Admin account from this scoping even though
-    Admin is one of the roles that IS meant to be scoped here (confirmed
-    directly).
+    or None for "no restriction, show every department."
+
+    2026-08 "Admin and Scale 6+ Access-Control Requirement" -- reported
+    directly, as a formal spec, that this was a "critical role-mapping and
+    authorization defect": an ADMIN account with no other role was being
+    scoped to its own single department here, same as a plain business
+    user, unless it ALSO held SCALE_6_PLUS (or one of the QA/Security
+    roles) -- i.e. `ADMIN AND SCALE_6_PLUS` in effect, when the required
+    behavior is `ADMIN` alone, independent of department, scale, or any
+    other role. This reverses an EARLIER, explicitly "confirmed directly"
+    decision in this same codebase's history that deliberately checked the
+    raw roles list instead of has_role() specifically so Admin WOULD be
+    scoped here -- that decision has now been explicitly superseded by this
+    later, more detailed requirement, which is unambiguous on this exact
+    point ("The system shall grant administrative access without checking
+    ... Department"). Admin now always bypasses first, same as
+    require_same_department already does and always has.
 
     A user with no department set on their own profile is treated the same
     as require_same_department treats a None entity_department: there's
     nothing meaningful to scope by, so this returns None (unrestricted)
     rather than filtering down to "department IS NULL" rows only."""
+    if current_user.has_role(Role.ADMIN):
+        return None
     if set(current_user.roles) & DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES:
         return None
     return current_user.department or None
@@ -327,10 +339,17 @@ def _project_role_permits(db: Session, project_id: int, current_user: models.Use
         return True
     role = get_project_member_role(db, project_id, current_user.id)
     if role is None:
-        # CM-QA enters Test Management through an explicit project
+        # CM-QA/AGM-QA enter Test Management through an explicit project
         # assignment (normally Stage 2 default -> Project Lead). Do not give
         # that role the legacy non-member access retained for QA staff.
-        if current_user.has_role(Role.CHEIF_MANAGER_QA) and not current_user.has_role(
+        # Bug found via debugging pass: this only named CHIEF_MANAGER_QA --
+        # an AGM_QA-only account (no QA_ENGINEER/QA_LEAD) fell through to
+        # `return True` below and got the same unrestricted "legacy QA
+        # staff" access on every project that this check exists specifically
+        # to deny CM-QA. Both executive roles now get the identical
+        # restriction, matching their identical standing everywhere else
+        # (Author-tier, Stage 2 approval, Executive COE).
+        if current_user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA) and not current_user.has_role(
             Role.QA_ENGINEER, Role.QA_LEAD
         ):
             return False
@@ -338,8 +357,20 @@ def _project_role_permits(db: Session, project_id: int, current_user: models.Use
     return role in allowed
 
 
+# 2026-08 "Simplified Test Management Review and Approval" requirement
+# ("whole module" scope, per ORACLE_MIGRATION_2026-07.md) -- repository
+# authoring is a stateless, current-moment permission (unlike the
+# TestCaseVersion review chain below, which has an old/new-vocabulary
+# status to discriminate an in-flight item's workflow generation), so it
+# moves to the plain system-role model immediately: every router endpoint
+# that calls this already sits behind require_roles(*_AUTHOR_ROLES) in
+# test_repository.py (QA_ENGINEER/QA_LEAD/CHIEF_MANAGER_QA/AGM_QA), so this
+# is now a pass-through -- TestProjectMember's "Author" project role is no
+# longer read here (table/data kept for history only, per the additive-only
+# schema convention; no migration needed since there was never a per-item
+# status tracking who authored under which model).
 def can_author_repository(db: Session, project_id: int, current_user: models.User) -> bool:
-    return _project_role_permits(db, project_id, current_user, _REPOSITORY_AUTHOR_ROLES)
+    return True
 
 
 def can_review_repository(db: Session, project_id: int, current_user: models.User) -> bool:
@@ -386,25 +417,54 @@ _FINAL_APPROVAL_ROLES = {"Project Lead"}
 
 
 def can_give_final_approval(db: Session, project_id: int, current_user: models.User) -> bool:
-    if current_user.has_role(Role.QA_LEAD):  # has_role() already bypasses for ADMIN too
+    # Test-case Stage 2 is the shared QA-management queue. Either CM QA or
+    # AGM QA may complete it; Admin retains oversight access.
+    if current_user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return True
-    role = get_project_member_role(db, project_id, current_user.id)
-    return role in _FINAL_APPROVAL_ROLES
+    return False
 
 
 def require_can_give_final_approval(db: Session, project_id: int, current_user: models.User) -> None:
     if not can_give_final_approval(db, project_id, current_user):
-        raise HTTPException(403, "Final approval needs system QA Lead/Administrator, or project role "
-                                  "Project Lead on this specific Test Project -- Owner and Reviewer roles "
-                                  "cannot give final approval (separation of duties).")
+        raise HTTPException(403, "Final approval is available only to CM QA, AGM QA, or an Administrator.")
 
 
+# 2026-08 "Simplified Test Management Review and Approval" requirement --
+# repository governance actions that are NOT tied to a specific
+# TestCaseVersion's old/new-workflow status (folder deletion, checkout
+# override, archive/restore of an already-Approved baseline) move to the
+# QA Lead Group system-role model, the same set used for Stage 2 final
+# approval under the new workflow (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA --
+# CM-QA/AGM-QA's Executive bypass already covers this, see
+# ORACLE_MIGRATION_2026-07.md section 59). Deliberately NOT touching
+# can_review_repository/require_can_review_repository above -- those stay
+# the OLD-path-only helper for a TestCaseVersion still sitting at legacy
+# "In Review"/"Review Completed" (test_repository.py's
+# bulk_recommend_test_cases is_old_path branch calls it directly),
+# unchanged per the "new cases only" migration decision.
+def can_manage_repository_governance(current_user: models.User) -> bool:
+    return current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
+
+
+def require_can_manage_repository_governance(current_user: models.User) -> None:
+    if not can_manage_repository_governance(current_user):
+        raise HTTPException(403, "This action is available only to the QA Lead Group (QA Lead, CM QA, or AGM QA).")
+
+
+# 2026-08 "Simplified Test Management" whole-module scope: test execution
+# is a stateless, current-moment permission -- no in-flight item status
+# discriminates an "old" execution from a "new" one the way
+# TestCaseVersion.status does for the review chain above, so it moves to
+# the QA Group / QA Lead Group system-role model immediately, no
+# migration/dual-path needed. TestProjectMember's Tester/Project
+# Lead/Owner project roles are no longer read here (table/data kept for
+# history only).
 def can_execute_project(db: Session, project_id: int, current_user: models.User) -> bool:
-    return _project_role_permits(db, project_id, current_user, _EXECUTION_WRITE_ROLES)
+    return current_user.has_role(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
 
 
 def can_manage_execution_governance(db: Session, project_id: int, current_user: models.User) -> bool:
-    return _project_role_permits(db, project_id, current_user, _EXECUTION_GOVERNANCE_ROLES)
+    return current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
 
 
 def require_can_author_repository(db: Session, project_id: int, current_user: models.User) -> None:
@@ -448,7 +508,10 @@ def can_manage_project(project: models.TestProject, current_user: models.User) -
     than through create/update_test_project, which also insert/refresh an
     Owner TestProjectMember row) may not have a matching membership row, so
     relying on membership here could incorrectly lock out a real owner."""
-    if current_user.has_role(Role.QA_LEAD):  # has_role() already bypasses for ADMIN too
+    # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+    # gated action, same as ADMIN -- see ORACLE_MIGRATION_2026-07.md
+    # section 59. has_role() already bypasses for ADMIN too.
+    if current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return True
     return project.owner_id == current_user.id
 

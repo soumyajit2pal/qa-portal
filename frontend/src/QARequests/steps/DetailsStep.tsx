@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api } from "../../api";
 import { Field } from "../../components/Common";
 import SearchableSelect from "../../components/SearchableSelect";
-import { CHANGE_TYPES, ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
+import { CHANGE_TYPES, DEPLOYMENT_ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
 import { ApplicationMasterOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
 import { CR_NUMBER_REGEX, EPIC_NUMBER_REGEX } from "../validation";
@@ -258,28 +258,53 @@ export function DetailsStep({ form, set }: Props) {
                 }
               }}
             >
-              {ENVIRONMENTS.filter((e_) => e_ !== "Dev").map((o) => (
+              {DEPLOYMENT_ENVIRONMENTS.map((o) => (
                 <option key={o} value={o}>
                   {o}
                 </option>
               ))}
             </select>
           </Field>
-          <Field label="Target Promotion Environment *">
-            <select
-              value={form.target_promotion_environment}
-              onChange={(e) =>
-                set("target_promotion_environment", e.target.value)
-              }
-            >
-              <option value="">Select Target Promotion Environment</option>
-              {validTargetPromotionOptions(form.environment).map((o) => (
-                <option key={o} value={o}>
-                  {o}
-                </option>
-              ))}
-            </select>
-          </Field>
+          {/* Reported directly: this dropdown could be left on its blank
+              placeholder and Next/Submit still went through -- fixed in
+              validation.ts's detailsStepError, which now actually blocks
+              that. targetOptions/hasTargetOptions below still guard the
+              "Production has nowhere later to promote to" edge case
+              (validTargetPromotionOptions('Production') === []), even
+              though Deployment Environment's own dropdown above no longer
+              offers "Production" at all (see DEPLOYMENT_ENVIRONMENTS'
+              own comment) -- this stays purely as a safety net for any
+              pre-existing Draft saved with environment='Production' before
+              that change, so reopening one doesn't show a required field
+              with genuinely nothing to select. */}
+          {(() => {
+            const targetOptions = validTargetPromotionOptions(form.environment);
+            const hasTargetOptions = targetOptions.length > 0;
+            return (
+              <Field
+                label={`Target Promotion Environment${hasTargetOptions ? " *" : ""}`}
+              >
+                <select
+                  value={form.target_promotion_environment}
+                  disabled={!hasTargetOptions}
+                  onChange={(e) =>
+                    set("target_promotion_environment", e.target.value)
+                  }
+                >
+                  <option value="">
+                    {hasTargetOptions
+                      ? "Select Target Promotion Environment"
+                      : "Not applicable -- Production is the final stage"}
+                  </option>
+                  {targetOptions.map((o) => (
+                    <option key={o} value={o}>
+                      {o}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            );
+          })()}
           <Field label="Target Release Date">
             <input
               type="date"

@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
@@ -7,6 +8,7 @@ import SearchableSelect from '../../components/SearchableSelect'
 import { hasRole, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCaseListOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
+import InfoModal from '../../components/InfoModal'
 import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import UserAssignSelect from '../../components/UserAssignSelect'
@@ -16,7 +18,15 @@ import { usePaginatedList } from '../../hooks/usePaginatedList'
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
 // added to it. QA Engineer + QA Lead both execute (Admin bypasses).
-const CAN_EXEC_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHEIF_MANAGER_QA']
+const CAN_EXEC_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA']
+// 2026-08 -- reported directly: "'Remove from cycle' should be available
+// only for QA lead ... Same for Test Cycle ... Administration can supersede
+// everything." Matches backend deps.py's can_manage_execution_governance
+// role set exactly (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA) -- deliberately NOT
+// CAN_EXEC_ROLES above, which is missing AGM_QA and includes plain
+// QA_ENGINEER (who may execute but, per this change, may no longer remove
+// a testcase from a cycle or delete a cycle).
+const QA_LEAD_GROUP_ROLES = ['QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
 
 function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
   projectId: number
@@ -38,10 +48,25 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
   const [ownerId, setOwnerId] = useState<number | ''>(editing?.owner_id ?? '')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const { user } = useAuth()
+  // 2026-08 Reassignment Requirement -- changing an already-set cycle owner
+  // is a reassignment: only the current owner, the QA Department Head, or
+  // an Admin may pick a different one, and a reason becomes mandatory.
+  // Setting an owner for the first time (creating a cycle, or editing one
+  // that never had an owner) stays open to anyone who can edit the cycle at
+  // all -- same broad gate this whole modal already runs under.
+  const isAdmin = Boolean(user?.roles.includes('ADMIN'))
+  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && user?.department === QA_DEPARTMENT)
+  const hasExistingOwner = !!editing?.owner_id
+  const isCurrentOwner = !!editing && editing.owner_id === user?.id
+  const canChangeOwner = !hasExistingOwner || isAdmin || isCurrentOwner || isQADepartmentHead
+  const isOwnerReassignment = hasExistingOwner && (ownerId || null) !== editing?.owner_id
+  const [ownerReassignReason, setOwnerReassignReason] = useState('')
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { setError(new Error('Cycle name cannot be blank')); return }
+    if (isOwnerReassignment && !ownerReassignReason.trim()) { setError(new Error('A reassignment reason is required to change the cycle owner')); return }
     setBusy(true); setError(null)
     try {
       const payload = {
@@ -52,6 +77,7 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
         cycle_type: cycleType || null,
         environment: environment || null, build: build || null,
         owner_id: ownerId || null,
+        ...(isOwnerReassignment ? { reason: ownerReassignReason.trim() } : {}),
       }
       const saved = editing
         ? await api.patch<TestCycleOut>(`/api/test-execution/cycles/${editing.id}`, payload)
@@ -80,14 +106,23 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
             <input value={build} onChange={(e) => setBuild(e.target.value)} placeholder="e.g. 2026.08.1" />
           </Field>
           <Field label="Owner">
-            <SearchableSelect
-              value={ownerId === '' ? '' : String(ownerId)}
-              onChange={(v) => setOwnerId(v ? Number(v) : '')}
-              placeholder="-- Unassigned --"
-              options={[{ value: '', label: '-- Unassigned --' }, ...users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))]}
-            />
+            {canChangeOwner ? (
+              <SearchableSelect
+                value={ownerId === '' ? '' : String(ownerId)}
+                onChange={(v) => setOwnerId(v ? Number(v) : '')}
+                placeholder="-- Unassigned --"
+                options={[{ value: '', label: '-- Unassigned --' }, ...users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))]}
+              />
+            ) : (
+              <input value={editing?.owner_name || 'Unassigned'} disabled title="Only the current owner, the QA Department Head, or an Administrator can reassign the cycle owner" />
+            )}
           </Field>
         </div>
+        {isOwnerReassignment && (
+          <Field label="Owner reassignment reason *">
+            <input className="reassign-reason-input" value={ownerReassignReason} onChange={(e) => setOwnerReassignReason(e.target.value)} placeholder="Required when changing an already-assigned owner…" />
+          </Field>
+        )}
         <Field label="Linked Child Request">
           <SearchableSelect value={linkedRequest} onChange={setLinkedRequest} placeholder="Optional — select Functional, SAST, DAST or Performance ID…" options={requests.flatMap((request) => [
             ...request.linked_functional_requests.map((child) => ({ value: `Functional:${child.id}`, label: `${child.request_id} · Functional — ${request.application_name}` })),
@@ -107,7 +142,7 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
         </div>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : editing ? 'Save Changes' : 'Create Cycle'}</button>
+          <button className="btn btn-primary" disabled={busy || (isOwnerReassignment && !ownerReassignReason.trim())}>{busy ? 'Saving…' : editing ? 'Save Changes' : 'Create Cycle'}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -378,6 +413,9 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
   const [linkingDefect, setLinkingDefect] = useState(false)
   const [defectKey, setDefectKey] = useState('')
   const [defectUrl, setDefectUrl] = useState('')
+  const runButtonRef = useRef<HTMLButtonElement>(null)
+  const runPanelRef = useRef<HTMLDivElement>(null)
+  const [runPanelPosition, setRunPanelPosition] = useState<{ top: number; left: number; width: number } | null>(null)
   const latestRun = execution.runs?.[execution.runs.length - 1]
   // Reported directly: "testcase already failed, and defect also linked,
   // then why again allowing to marked failed" -- clarified to mean a second,
@@ -387,6 +425,43 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
   // test_execution.py's _link_defect / defects.py's _link_to_execution) --
   // this just keeps the buttons from being offered once already linked.
   const latestCanLinkDefect = !!latestRun && ['Fail', 'Blocked'].includes(latestRun.status) && !(latestRun.defects?.length)
+
+  function toggleRunPanel() {
+    if (open) { setOpen(false); return }
+    const rect = runButtonRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const gap = 8
+    const viewportGap = 12
+    const width = Math.min(330, window.innerWidth - viewportGap * 2)
+    const estimatedHeight = 265
+    const left = Math.min(Math.max(viewportGap, rect.right - width), window.innerWidth - width - viewportGap)
+    const top = window.innerHeight - rect.bottom >= estimatedHeight + gap
+      ? rect.bottom + gap
+      : Math.max(viewportGap, rect.top - estimatedHeight - gap)
+    setRunPanelPosition({ top, left, width })
+    setLinkingDefect(false)
+    setOpen(true)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    function closeOutside(event: MouseEvent) {
+      const target = event.target as Node
+      if (!runPanelRef.current?.contains(target) && !runButtonRef.current?.contains(target)) setOpen(false)
+    }
+    function closeOnMove() { setOpen(false) }
+    function closeOnEscape(event: KeyboardEvent) { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', closeOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    window.addEventListener('resize', closeOnMove)
+    window.addEventListener('scroll', closeOnMove, true)
+    return () => {
+      document.removeEventListener('mousedown', closeOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+      window.removeEventListener('resize', closeOnMove)
+      window.removeEventListener('scroll', closeOnMove, true)
+    }
+  }, [open])
 
   async function saveResult() {
     if (!result) return
@@ -420,21 +495,22 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
 
   return (
     <div className="tm-inline-run" onClick={(event) => event.stopPropagation()}>
-      <button type="button" className="tm-play-button" disabled={!canExecute || busy} title={canExecute ? 'Record a result without opening the testcase' : 'Only the assigned runner can execute this testcase'} onClick={() => { setOpen((value) => !value); setLinkingDefect(false) }}><span>▶</span> Run</button>
+      <button ref={runButtonRef} type="button" className="tm-play-button" disabled={!canExecute || busy} title={canExecute ? 'Record a result without opening the testcase' : 'Only the assigned runner can execute this testcase'} onClick={toggleRunPanel}><span>▶</span> Run</button>
       {latestCanLinkDefect && canExecute && <button type="button" className="tm-link-last-defect tm-governed-defect" onClick={() => navigate(`/defects?execution=${execution.id}`)}>Raise defect</button>}
       {latestCanLinkDefect && canExecute && <button type="button" className="tm-link-last-defect" onClick={() => onLinkExisting(execution)}>Link existing</button>}
       {latestCanLinkDefect && canExecute && <button type="button" className="tm-link-last-defect" onClick={() => { setLinkingDefect((value) => !value); setOpen(false) }}>Link external</button>}
-      {open && <div className="tm-inline-run-panel">
-        <strong>Record new result</strong><small>Creates Attempt #{(execution.run_count || 0) + 1}</small>
+      {open && runPanelPosition && createPortal(<div ref={runPanelRef} className="tm-inline-run-panel portaled" style={runPanelPosition} onClick={(event) => event.stopPropagation()}>
+        <div className="tm-inline-run-head"><span><small>Quick execution</small><strong>Record result</strong></span><b>Attempt #{(execution.run_count || 0) + 1}</b></div>
         <div className="tm-inline-result-options">{TEST_EXECUTION_STATUSES.filter((status) => status !== 'Not Executed').map((status) => {
           const blocked = executionStatusGate(execution.linked_defects, execution.runs, status)
-          return <button type="button" key={status} className={result === status ? 'selected' : ''} disabled={!!blocked} title={blocked || undefined} onClick={() => setResult(status)}>{status}</button>
+          const tone = status.toLowerCase().replace(/\s+/g, '-')
+          return <button type="button" key={status} className={`${result === status ? 'selected ' : ''}result-${tone}`} disabled={!!blocked} title={blocked || undefined} onClick={() => setResult(status)}><i />{status}</button>
         })}</div>
         {result && executionStatusGate(execution.linked_defects, execution.runs, result) && (
           <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result)}</small>
         )}
-        <div className="tm-inline-run-actions"><button type="button" className="btn btn-sm" onClick={() => setOpen(false)}>Cancel</button><button type="button" className="btn btn-sm btn-primary" disabled={!result || busy} onClick={saveResult}>{busy ? 'Saving…' : 'Save result'}</button></div>
-      </div>}
+        <div className="tm-inline-run-actions"><span>{result ? `${result} selected` : 'Select one result'}</span><button type="button" className="btn btn-sm" onClick={() => { setResult(''); setOpen(false) }}>Cancel</button><button type="button" className="btn btn-sm btn-primary" disabled={!result || busy} onClick={saveResult}>{busy ? 'Saving…' : 'Save attempt'}</button></div>
+      </div>, document.body)}
       {linkingDefect && latestRun && <form className="tm-inline-defect-panel" onSubmit={linkDefect}>
         <strong>Link to latest {latestRun.status.toLowerCase()} run</strong><small>Attempt #{latestRun.attempt_no} only</small>
         <input required value={defectKey} onChange={(event) => setDefectKey(event.target.value)} placeholder="Defect key, e.g. JIRA-142" />
@@ -705,10 +781,13 @@ function VersionUpgradeAction({ execution, onUpgraded }: {
   )
 }
 
-function RecordResultModal({ execution, readOnly, canAssign, runnerCandidates, onAssigned, onClose, onSaved, onRemoved }: {
+function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRemove, removeBlockedReason, runnerCandidates, onAssigned, onClose, onSaved, onRemoved }: {
   execution: TestExecutionOut
   readOnly: boolean
   canAssign: boolean
+  canReassign: boolean
+  canRemove: boolean
+  removeBlockedReason?: string
   runnerCandidates: UserOut[]
   onAssigned: (execution: TestExecutionOut) => void
   onClose: () => void
@@ -729,6 +808,24 @@ function RecordResultModal({ execution, readOnly, canAssign, runnerCandidates, o
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState(false)
+  // 2026-08 Reassignment Requirement -- changing (or clearing) an already-
+  // assigned runner needs a mandatory reason; hold the picked value here
+  // until it's confirmed, same pattern as the cycle-level table control.
+  const [pendingReassign, setPendingReassign] = useState<string | null>(null)
+  const [reassignReason, setReassignReason] = useState('')
+  // Reported directly: reassigning a runner had no visible log anywhere in
+  // Test Execution -- the reason was captured and written to the audit
+  // trail (reassignment.record_reassignment, entity_type="TEST_CASE"), but
+  // that trail was only ever surfaced in Test Repository's own test case
+  // activity tab, never here where the reassignment actually happens. Fetch
+  // and show it directly under the runner panel instead.
+  const [reassignmentHistory, setReassignmentHistory] = useState<ApprovalActionOut[]>([])
+  const loadReassignmentHistory = useCallback(() => {
+    api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CASE&entity_id=${execution.test_case_id}`)
+      .then((items) => setReassignmentHistory(items.filter((item) => item.decision === 'Reassigned')))
+      .catch(() => undefined)
+  }, [execution.test_case_id])
+  useEffect(() => { loadReassignmentHistory() }, [loadReassignmentHistory])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -749,14 +846,27 @@ function RecordResultModal({ execution, readOnly, canAssign, runnerCandidates, o
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
-  async function assign(value: string) {
+  async function assign(value: string, reason?: string) {
     setBusy(true); setError(null)
     try {
       const saved = await api.patch<TestExecutionOut>(`/api/test-execution/executions/${execution.id}/assign`, {
         assigned_to_id: value ? Number(value) : null,
+        ...(reason ? { reason } : {}),
       })
       onAssigned(saved)
+      setPendingReassign(null)
+      setReassignReason('')
+      if (reason) loadReassignmentHistory()
     } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  function handleAssignChange(value: string) {
+    if (execution.assigned_to_id) {
+      setPendingReassign(value)
+      setReassignReason('')
+    } else {
+      assign(value)
+    }
   }
 
   async function remove() {
@@ -833,8 +943,38 @@ function RecordResultModal({ execution, readOnly, canAssign, runnerCandidates, o
       <div className="tm-execution-result-heading"><h4>Execution Result</h4>{readOnly && <span>Read only</span>}</div>
       <div className={`tm-runner-panel ${execution.assigned_to_id ? '' : 'unassigned'}`}>
         <div><small>Assigned runner</small><strong>{execution.assigned_to_name || 'Unassigned'}</strong>{execution.assigned_at && <span>Assigned {new Date(execution.assigned_at).toLocaleString()}{execution.assigned_by_name ? ` by ${execution.assigned_by_name}` : ''}</span>}</div>
-        {canAssign && <div className="tm-runner-control"><UserAssignSelect value={execution.assigned_to_id ? String(execution.assigned_to_id) : ''} onChange={assign} users={runnerCandidates} placeholder="Assign QA runner…" disabled={busy} />{execution.assigned_to_id && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => assign('')}>Unassign</button>}</div>}
+        {(execution.assigned_to_id ? canReassign : canAssign) && <div className="tm-runner-control"><UserAssignSelect value={execution.assigned_to_id ? String(execution.assigned_to_id) : ''} onChange={handleAssignChange} users={runnerCandidates} placeholder="Assign QA runner…" disabled={busy} />{execution.assigned_to_id && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => handleAssignChange('')}>Unassign</button>}</div>}
+        {pendingReassign !== null && (
+          <div className="tm-reassign-confirm">
+            <input
+              type="text"
+              className="reassign-reason-input"
+              placeholder="Reassignment reason (required)…"
+              value={reassignReason}
+              onChange={(e) => setReassignReason(e.target.value)}
+              autoFocus
+            />
+            <button type="button" className="btn btn-sm btn-primary" disabled={busy || !reassignReason.trim()} onClick={() => assign(pendingReassign, reassignReason.trim())}>
+              {busy ? 'Confirming…' : 'Confirm'}
+            </button>
+            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => { setPendingReassign(null); setReassignReason('') }}>Cancel</button>
+          </div>
+        )}
       </div>
+      {reassignmentHistory.length > 0 && (
+        <div className="tm-reassignment-history">
+          <h5>Reassignment history <span className="badge badge-gray">{reassignmentHistory.length}</span></h5>
+          <ul>
+            {reassignmentHistory.map((item) => (
+              <li key={item.id}>
+                <strong>{item.previous_state || 'Unassigned'} → {item.new_state || 'Unassigned'}</strong>
+                <span> · {item.actor_name || 'Unknown'} · {new Date(item.created_at).toLocaleString()}</span>
+                {item.comments && <p>{item.comments}</p>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {!execution.assigned_to_id && <div className="info-banner">A COE - Quality Assurance QA Engineer or QA Lead must assign this testcase before an execution attempt can be recorded.</div>}
       {execution.assigned_to_id && readOnly && <div className="info-banner">Only the assigned runner can record the next attempt. Any COE - Quality Assurance QA Engineer or QA Lead can reassign the testcase when needed.</div>}
       {activeLinkedDefects.length > 0 && (
@@ -895,13 +1035,19 @@ function RecordResultModal({ execution, readOnly, canAssign, runnerCandidates, o
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
             <button className="btn btn-primary" disabled={busy || !status || actualResult.length > 10000}>{busy ? 'Saving...' : 'Save Attempt'}</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
-            <button type="button" className="btn btn-danger" onClick={() => setConfirmRemove(true)} disabled={busy}>Remove from Cycle</button>
+            {canRemove && (
+              <button type="button" className="btn btn-danger" onClick={() => setConfirmRemove(true)} disabled={busy}>Remove from Cycle</button>
+            )}
           </div>
+          {!canRemove && removeBlockedReason && <p className="muted small" style={{ marginTop: 8 }}>{removeBlockedReason}</p>}
         </form>
       )}
       {readOnly && (
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
           <button type="button" className="btn" onClick={onClose}>Close</button>
+          {canRemove && (
+            <button type="button" className="btn btn-danger" onClick={() => setConfirmRemove(true)}>Remove from Cycle</button>
+          )}
         </div>
       )}
       {confirmRemove && (
@@ -1093,10 +1239,11 @@ interface BulkRemoveResult {
   removed_evidence_count: number
 }
 
-function BulkRemoveModal({ cycleId, cycleKey, executions, onClose, onRemoved }: {
+function BulkRemoveModal({ cycleId, cycleKey, executions, eligibility, onClose, onRemoved }: {
   cycleId: number
   cycleKey: string
   executions: TestExecutionOut[]
+  eligibility: (execution: TestExecutionOut) => { eligible: boolean; reason?: string }
   onClose: () => void
   onRemoved: (result: BulkRemoveResult) => void
 }) {
@@ -1107,11 +1254,24 @@ function BulkRemoveModal({ cycleId, cycleKey, executions, onClose, onRemoved }: 
   const [progressMessage, setProgressMessage] = useState('Waiting for confirmation')
   const [error, setError] = useState<unknown>(null)
   const [result, setResult] = useState<BulkRemoveResult | null>(null)
+  // Reported directly (refined by Scenario 1's self-remove carve-out): a
+  // slot is only removable once its full eligibility rule passes -- Admin
+  // always; QA Lead Group any not-yet-executed slot; a plain QA_ENGINEER
+  // only one they personally added, and only before it's been executed;
+  // anything with recorded history, Admin only. See removeFromCycleEligibility
+  // in the parent component for the exact rule. Mirrors TestRepository.tsx's
+  // deletableSelectedIds/governedSelectedIds split -- the request stays
+  // atomic (all removable ids in one call) but silently excludes what the
+  // backend would reject anyway, rather than letting the whole batch fail
+  // on one blocked item.
+  const removableExecutions = selectedExecutions.filter((execution) => eligibility(execution).eligible)
+  const blockedExecutions = selectedExecutions.filter((execution) => !eligibility(execution).eligible)
   const runCount = selectedExecutions.reduce((total, execution) => total + (execution.run_count || execution.runs?.length || 0), 0)
   const defectCount = selectedExecutions.reduce((total, execution) => total + (execution.runs || []).reduce((runTotal, run) => runTotal + (run.defects?.length || 0), 0), 0)
   const preview = selectedExecutions.slice(0, 6).map((execution) => execution.test_case?.test_case_key || `#${execution.test_case_id}`)
 
   async function remove() {
+    if (!removableExecutions.length) return
     setError(null)
     setStage('removing')
     setProgress(8)
@@ -1126,7 +1286,7 @@ function BulkRemoveModal({ cycleId, cycleKey, executions, onClose, onRemoved }: 
     }, 280)
     try {
       const saved = await api.post<BulkRemoveResult>(`/api/test-execution/cycles/${cycleId}/executions/bulk-remove`, {
-        execution_ids: selectedExecutions.map((execution) => execution.id),
+        execution_ids: removableExecutions.map((execution) => execution.id),
       })
       const remainingDisplayTime = Math.max(0, 750 - (Date.now() - startedAt))
       if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))
@@ -1153,15 +1313,23 @@ function BulkRemoveModal({ cycleId, cycleKey, executions, onClose, onRemoved }: 
     <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <div className="tm-bulk-confirm">
-          <div className="tm-bulk-confirm-count"><strong>{selectedExecutions.length}</strong><span>testcase{selectedExecutions.length !== 1 ? 's' : ''} will leave this test cycle</span></div>
+          <div className="tm-bulk-confirm-count"><strong>{removableExecutions.length}</strong><span>testcase{removableExecutions.length !== 1 ? 's' : ''} will leave this test cycle</span></div>
           <p>Selected testcases: {preview.join(', ')}{selectedExecutions.length > preview.length ? ` and ${selectedExecutions.length - preview.length} more` : ''}.</p>
+          {blockedExecutions.length > 0 && (
+            <p className="muted small">
+              {blockedExecutions.length} of the {selectedExecutions.length} selected will be skipped -- you're not
+              eligible to remove {blockedExecutions.length !== 1 ? 'them' : 'it'} right now:{' '}
+              {blockedExecutions.slice(0, 5).map((execution) => execution.test_case?.test_case_key || `#${execution.test_case_id}`).join(', ')}
+              {blockedExecutions.length > 5 ? ` and ${blockedExecutions.length - 5} more` : ''}.
+            </p>
+          )}
           <div className="action-error-dialog" role="alert">
             <div className="action-error-dialog-icon">!</div>
             <div><strong>This permanently removes lifecycle history</strong><span>Removal impact</span><p>{runCount} execution attempt{runCount !== 1 ? 's' : ''}, {defectCount} linked defect{defectCount !== 1 ? 's' : ''}, and all attached execution evidence for these cycle entries will be deleted. Repository testcase definitions are not deleted.</p></div>
           </div>
           <p className="muted small">The database operation is atomic. If validation or saving fails, every selected cycle entry remains unchanged.</p>
           <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
-            <button className="btn btn-danger" onClick={remove}>Remove from cycle</button>
+            <button className="btn btn-danger" onClick={remove} disabled={!removableExecutions.length}>Remove from cycle{removableExecutions.length ? ` (${removableExecutions.length})` : ''}</button>
             <button className="btn" onClick={onClose}>Keep testcases</button>
           </div>
         </div>
@@ -1202,9 +1370,50 @@ export default function TestExecution() {
   // TestRepository.tsx's own `myAccess`. Defaults permissive while loading.
   const [myAccess, setMyAccess] = useState<TestProjectMyAccessOut | null>(null)
   const canExec = hasRole(user, ...CAN_EXEC_ROLES) && (myAccess?.can_execute ?? true)
-  const canDeleteCycle = hasRole(user, ...CAN_EXEC_ROLES) && (myAccess?.can_manage_execution_governance ?? false)
+  const isAdmin = Boolean(user?.roles.includes('ADMIN'))
+  // 2026-08 -- reported directly: role gate shared by Delete Cycle and
+  // Remove-from-cycle (single + bulk) now, both QA Lead Group only. Was
+  // previously `hasRole(user, ...CAN_EXEC_ROLES)` for canDeleteCycle, which
+  // doesn't include AGM_QA even though myAccess.can_manage_execution_
+  // governance already correctly reflects AGM_QA on the backend -- fixed
+  // here since it's the exact permission this change is about.
+  const canManageExecutionGovernance = hasRole(user, ...QA_LEAD_GROUP_ROLES) && (myAccess?.can_manage_execution_governance ?? false)
+  const canDeleteCycle = canManageExecutionGovernance
   const canManageRunners = hasRole(user, ...CAN_EXEC_ROLES)
     && (user?.roles.includes('ADMIN') || user?.department === QA_DEPARTMENT)
+  // 2026-08 Reassignment Requirement -- initially narrowed reassigning an
+  // already-assigned runner to the current runner / QA Department Head /
+  // Admin, same as every other reassignment flow. Reported directly again:
+  // "for test execution reassignment of testcase can be perform by any QA
+  // user, otherwise it will be hectic for qa lead" -- unlike Functional/
+  // Performance tester and SAST/DAST analyst reassignment, runner
+  // reassignment stays on the SAME broad canManageRunners gate as the first
+  // assignment (mirrors backend's assign_execution/bulk_assign_executions,
+  // which now call _require_qa_assignment_manager unconditionally). A
+  // reason is still mandatory once a runner is already assigned -- this
+  // only affects who can see/use the control, not whether a reason is
+  // required. Kept as a function (not a plain boolean) since every call
+  // site already expects one, and other reassignment flows in this same
+  // file use the same shape.
+  const canReassignExecution = useCallback((_execution: TestExecutionOut) => canManageRunners, [canManageRunners])
+  // Reported directly, refined by Scenario 1 ("tester add testcase in
+  // lifecycle, but not executed it, just added ... might be by mistake ...
+  // now system should allow to remove from lifecycle as there are no test
+  // execution history"): whoever ADDED a testcase to the cycle (execution.
+  // added_by_id) may remove their own addition themselves, but only while
+  // it still has zero execution history -- self-correcting a same-person,
+  // zero-consequence mistake without needing a QA Lead. Once a specific
+  // slot has recorded history, even a QA Lead can no longer remove IT
+  // (other still-untouched slots in the same cycle stay removable) -- only
+  // an Administrator may. Mirrors the backend's
+  // _execution_removal_block_reason exactly, in the same priority order.
+  const removeFromCycleEligibility = useCallback((execution: TestExecutionOut): { eligible: boolean; reason?: string } => {
+    if (isAdmin) return { eligible: true }
+    if (execution.run_count) return { eligible: false, reason: 'This testcase already has recorded execution history in this cycle -- only an Administrator can remove it now.' }
+    if (canManageExecutionGovernance) return { eligible: true }
+    if (execution.added_by_id && execution.added_by_id === user?.id) return { eligible: true }
+    return { eligible: false, reason: 'This testcase was not added to this cycle by you -- only the QA Lead Group, an Administrator, or whoever added it can remove it before it has been executed.' }
+  }, [isAdmin, canManageExecutionGovernance, user])
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [projectId, setProjectId] = useState<number | ''>('')
   const [cycles, setCycles] = useState<TestCycleOut[]>([])
@@ -1228,7 +1437,15 @@ export default function TestExecution() {
   const [deletingCycle, setDeletingCycle] = useState(false)
   const [selectedExecutionIds, setSelectedExecutionIds] = useState<Set<number>>(new Set())
   const [bulkAssigneeId, setBulkAssigneeId] = useState('')
+  const [bulkAssignReason, setBulkAssignReason] = useState('')
   const [bulkAssigning, setBulkAssigning] = useState(false)
+  // 2026-08 Reassignment Requirement -- the inline per-row runner picker
+  // used to fire the PATCH immediately on change; reassigning an already-
+  // assigned slot now needs a mandatory reason first, so a change against an
+  // already-assigned row is held here until confirmed instead.
+  const [reassignRunnerDraft, setReassignRunnerDraft] = useState<{ execution: TestExecutionOut; value: string } | null>(null)
+  const [reassignRunnerReason, setReassignRunnerReason] = useState('')
+  const [reassigningRunner, setReassigningRunner] = useState(false)
   const [showBulkExecution, setShowBulkExecution] = useState(false)
   const [bulkRemoveExecutions, setBulkRemoveExecutions] = useState<TestExecutionOut[] | null>(null)
   const [cycleActivity, setCycleActivity] = useState<ApprovalActionOut[]>([])
@@ -1237,6 +1454,8 @@ export default function TestExecution() {
   const [users, setUsers] = useState<UserOut[]>([])
   const [exportingCycle, setExportingCycle] = useState(false)
   const [unlinkingCycleLink, setUnlinkingCycleLink] = useState(false)
+  const [pendingUnlinkCycleRequest, setPendingUnlinkCycleRequest] = useState(false)
+  const [unlinkedCycleRequestNotice, setUnlinkedCycleRequestNotice] = useState<string | null>(null)
   const [qaRequests, setQaRequests] = useState<QARequestListOut[]>([])
   const [linkingExistingExecution, setLinkingExistingExecution] = useState<TestExecutionOut | null>(null)
 
@@ -1384,7 +1603,7 @@ export default function TestExecution() {
   const runnerCandidates = useMemo(() => users.filter((candidate) => (
     candidate.department === QA_DEPARTMENT
     && candidate.is_active
-    && candidate.roles.some((role) => ['QA_ENGINEER', 'QA_LEAD', 'CHEIF_MANAGER_QA'].includes(role))
+    && candidate.roles.some((role) => ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA'].includes(role))
   )), [users])
   const canExecuteRow = useCallback((execution: TestExecutionOut) => (
     canExec && projectIsActive && selectedCycle?.status === 'In Progress'
@@ -1416,16 +1635,39 @@ export default function TestExecution() {
     })
   }
 
-  async function assignRunner(execution: TestExecutionOut, value: string) {
+  async function assignRunner(execution: TestExecutionOut, value: string, reason?: string) {
     setError(null)
     try {
       const saved = await api.patch<TestExecutionOut>(`/api/test-execution/executions/${execution.id}/assign`, {
         assigned_to_id: value ? Number(value) : null,
+        ...(reason ? { reason } : {}),
       })
       refreshExecutions()
       setEditingExecution((current) => current?.id === saved.id ? saved : current)
       if (cycleId) api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
-    } catch (err) { setError(err) }
+      return true
+    } catch (err) { setError(err); return false }
+  }
+
+  // 2026-08 Reassignment Requirement -- first assignment (execution
+  // currently unassigned) still applies immediately, same as before.
+  // Changing (or clearing) an already-assigned runner is a reassignment:
+  // hold the picked value and require a reason before it's sent.
+  function handleRunnerChange(execution: TestExecutionOut, value: string) {
+    if (execution.assigned_to_id) {
+      setReassignRunnerDraft({ execution, value })
+      setReassignRunnerReason('')
+    } else {
+      assignRunner(execution, value)
+    }
+  }
+
+  async function confirmReassignRunner() {
+    if (!reassignRunnerDraft || !reassignRunnerReason.trim()) return
+    setReassigningRunner(true)
+    const ok = await assignRunner(reassignRunnerDraft.execution, reassignRunnerDraft.value, reassignRunnerReason.trim())
+    setReassigningRunner(false)
+    if (ok) { setReassignRunnerDraft(null); setReassignRunnerReason('') }
   }
 
   async function bulkAssignSelected() {
@@ -1435,9 +1677,12 @@ export default function TestExecution() {
       await api.post<TestExecutionOut[]>(`/api/test-execution/cycles/${cycleId}/executions/bulk-assign`, {
         execution_ids: Array.from(selectedExecutionIds),
         assigned_to_id: Number(bulkAssigneeId),
+        ...(bulkAssignReason.trim() ? { reason: bulkAssignReason.trim() } : {}),
       })
       refreshExecutions()
       setSelectedExecutionIds(new Set())
+      setBulkAssigneeId('')
+      setBulkAssignReason('')
       api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => undefined)
     } catch (err) { setError(err) } finally { setBulkAssigning(false) }
   }
@@ -1467,15 +1712,25 @@ export default function TestExecution() {
     } catch (err) { setError(err) } finally { setExportingCycle(false) }
   }
 
+  // 2026-08 -- reported directly: unlinking a cycle's request "sometime not
+  // working, opening as javascript alert window" (the browser's own
+  // window.confirm, which some browsers/policies silently block or dismiss).
+  // Swapped for the same ConfirmModal pop-up used everywhere else in this
+  // page (e.g. cycleToDelete below), plus a follow-up InfoModal acknowledging
+  // success -- previously there was no feedback at all once the link
+  // silently disappeared from the sidebar.
   async function unlinkCycleRequest() {
     if (!selectedCycle?.linked_request_key) return
-    if (!window.confirm(`Unlink ${selectedCycle.linked_request_key} from ${selectedCycle.cycle_key}? Test cases and execution history will remain unchanged.`)) return
+    const requestKey = selectedCycle.linked_request_key
+    const cycleKey = selectedCycle.cycle_key
     setUnlinkingCycleLink(true); setError(null)
     try {
       const saved = await api.del<TestCycleOut>(`/api/test-execution/cycles/${selectedCycle.id}/request-link`)
       setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle))
       api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${selectedCycle.id}`).then(setCycleActivity).catch(() => undefined)
-    } catch (err) { setError(err) } finally { setUnlinkingCycleLink(false) }
+      setPendingUnlinkCycleRequest(false)
+      setUnlinkedCycleRequestNotice(`${requestKey} has been unlinked from ${cycleKey}.`)
+    } catch (err) { setError(err); setPendingUnlinkCycleRequest(false) } finally { setUnlinkingCycleLink(false) }
   }
 
   return (
@@ -1557,7 +1812,7 @@ export default function TestExecution() {
                     {selectedCycle?.build && <span className="badge badge-gray">Build {selectedCycle.build}</span>}
                     {selectedCycle?.owner_name && <span className="badge badge-gray">Owner: {selectedCycle.owner_name}</span>}
                   </div>
-                  {selectedCycle?.linked_request_key && <div className="tm-cycle-request-link"><b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>{canExec && projectIsActive && !cycleIsLocked && <button type="button" disabled={unlinkingCycleLink} onClick={unlinkCycleRequest}>{unlinkingCycleLink ? 'Unlinking…' : 'Unlink'}</button>}</div>}
+                  {selectedCycle?.linked_request_key && <div className="tm-cycle-request-link"><b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>{canExec && projectIsActive && !cycleIsLocked && <button type="button" disabled={unlinkingCycleLink} onClick={() => setPendingUnlinkCycleRequest(true)}>{unlinkingCycleLink ? 'Unlinking…' : 'Unlink'}</button>}</div>}
                   {cycleIsLocked && (
                     <div className="info-banner">
                       {selectedCycle?.status === 'Blocked'
@@ -1595,28 +1850,57 @@ export default function TestExecution() {
                 <button className={!resultFilter ? 'active' : ''} onClick={() => setResultFilter('')}>All <span>{cycleExecutionTotal}</span></button>
                 {TEST_EXECUTION_STATUSES.map((s) => <button key={s} className={resultFilter === s ? 'active' : ''} onClick={() => setResultFilter(s)}>{s} <span>{executionSummary?.status_counts[s] || 0}</span></button>)}
               </div>
-              {selectedCycle && <LinkedDefects query={`cycle_id=${selectedCycle.id}`} title="Cycle Defects" />}
+              {selectedCycle && <LinkedDefects query={`cycle_id=${selectedCycle.id}`} title="Cycle Defects" returnTo={`/test-execution?project=${projectId}&cycle=${selectedCycle.id}`} />}
               {canExec && projectIsActive && !cycleIsLocked && (
                 <div className="tm-bulk-bar" role="region" aria-label="Bulk testcase lifecycle actions">
                   <strong>{selectedExecutionIds.size ? `${selectedExecutionIds.size} testcase${selectedExecutionIds.size !== 1 ? 's' : ''} selected` : 'Select rows to assign, execute, or remove in bulk'}</strong>
                   <button type="button" className="btn btn-sm" disabled={!selectableExecutions.length} onClick={toggleVisibleExecutions}>{allVisibleSelected ? 'Clear visible' : `Select visible (${selectableExecutions.length})`}</button>
                   {selectedExecutionIds.size > 0 && <button type="button" className="btn btn-sm" onClick={() => setSelectedExecutionIds(new Set())}>Clear selection</button>}
-                  {canManageRunners && selectedExecutionIds.size > 0 && (
-                    <div className="tm-bulk-assign-group">
-                      <SearchableSelect
-                        value={bulkAssigneeId}
-                        onChange={setBulkAssigneeId}
-                        placeholder="Assign selected to…"
-                        options={runnerCandidates.map((runner) => ({ value: String(runner.id), label: runner.full_name }))}
-                        style={{ minWidth: 190 }}
-                      />
-                      <button type="button" className="btn btn-sm" disabled={!selectedExecutionIds.size || !bulkAssigneeId || bulkAssigning} onClick={bulkAssignSelected}>
-                        {bulkAssigning ? 'Assigning…' : `Assign (${selectedExecutionIds.size})`}
-                      </button>
-                    </div>
-                  )}
+                  {canManageRunners && selectedExecutionIds.size > 0 && (() => {
+                    // Reassigning a runner is open to any QA Engineer/QA
+                    // Lead/Chief Manager QA/Admin here, same as first
+                    // assignment (reported directly: "for test execution
+                    // reassignment of testcase can be perform by any QA
+                    // user, otherwise it will be hectic for qa lead") --
+                    // only the mandatory reason differs once a row already
+                    // has a runner.
+                    const bulkHasReassignment = selectedExecutions.some((execution) => !!execution.assigned_to_id)
+                    return (
+                      <div className="tm-bulk-assign-group">
+                        <SearchableSelect
+                          value={bulkAssigneeId}
+                          onChange={setBulkAssigneeId}
+                          placeholder="Assign selected to…"
+                          options={runnerCandidates.map((runner) => ({ value: String(runner.id), label: runner.full_name }))}
+                          style={{ minWidth: 190 }}
+                        />
+                        {bulkHasReassignment && (
+                          <input
+                            type="text"
+                            className="reassign-reason-input"
+                            placeholder="Reassignment reason (required)…"
+                            value={bulkAssignReason}
+                            onChange={(e) => setBulkAssignReason(e.target.value)}
+                          />
+                        )}
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          disabled={!selectedExecutionIds.size || !bulkAssigneeId || bulkAssigning || (bulkHasReassignment && !bulkAssignReason.trim())}
+                          onClick={bulkAssignSelected}
+                        >
+                          {bulkAssigning ? 'Assigning…' : bulkHasReassignment ? `Reassign (${selectedExecutionIds.size})` : `Assign (${selectedExecutionIds.size})`}
+                        </button>
+                      </div>
+                    )
+                  })()}
                   <button type="button" className="btn btn-sm btn-primary" disabled={!bulkExecutionEligible} title={selectedExecutionIds.size && !bulkExecutionEligible ? 'Bulk execution requires every selected testcase to be assigned to you' : undefined} onClick={() => setShowBulkExecution(true)}>Bulk execute{selectedExecutionIds.size ? ` (${selectedExecutionIds.size})` : ''}</button>
-                  {canManageRunners && <button type="button" className="btn btn-sm btn-danger" disabled={!selectedExecutionIds.size} onClick={() => setBulkRemoveExecutions(selectedExecutions)}>Remove from cycle{selectedExecutionIds.size ? ` (${selectedExecutionIds.size})` : ''}</button>}
+                  {/* Scenario 1: visible to any exec-capable user now, not just QA Lead
+                      Group -- a plain QA_ENGINEER may still remove testcases THEY added
+                      before execution (removeFromCycleEligibility/BulkRemoveModal do the
+                      actual per-item filtering; this button just needs someone who could
+                      plausibly have something eligible to remove). */}
+                  {(canManageExecutionGovernance || canExec) && <button type="button" className="btn btn-sm btn-danger" disabled={!selectedExecutionIds.size} onClick={() => setBulkRemoveExecutions(selectedExecutions)}>Remove from cycle{selectedExecutionIds.size ? ` (${selectedExecutionIds.size})` : ''}</button>}
                 </div>
               )}
               <Table<TestExecutionOut>
@@ -1627,7 +1911,7 @@ export default function TestExecution() {
                   { key: 'select', header: <input type="checkbox" aria-label="Select all visible testcases" checked={allVisibleSelected} disabled={!selectableExecutions.length} onChange={toggleVisibleExecutions} onClick={(event) => event.stopPropagation()} />, filterable: false, render: (execution) => <input type="checkbox" aria-label={`Select ${execution.test_case?.test_case_key || `testcase ${execution.test_case_id}`}`} checked={selectedExecutionIds.has(execution.id)} disabled={!canSelectRow(execution)} title={canSelectRow(execution) ? 'Select for bulk lifecycle actions' : execution.assigned_to_id ? `Assigned to ${execution.assigned_to_name || 'another runner'}` : 'Assign a runner before execution'} onChange={() => toggleExecutionSelection(execution.id)} onClick={(event) => event.stopPropagation()} /> },
                   { key: 'test_case', header: 'Test Case', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.test_case?.test_case_key || `#${e.test_case_id}`}</strong><small>{[e.test_case?.module_name, `pinned v${e.pinned_version_label || e.test_case?.version || '1.0'}`].filter(Boolean).join(' · ')}{e.is_pinned_stale && <span className="badge badge-yellow" style={{ marginLeft: 6 }} title="A newer Approved version exists">Stale</span>}</small></span>, filterValue: (e) => `${e.test_case?.test_case_key || e.test_case_id} ${e.test_case?.module_name || ''}` },
                   { key: 'scenario', header: 'Scenario', render: (e) => e.test_case?.test_scenario || '—', filterValue: (e) => e.test_case?.test_scenario || '' },
-                  { key: 'assigned_to_name', header: 'Assigned To', render: (e) => canManageRunners && projectIsActive && !cycleIsLocked ? <div className="tm-table-assignee" onClick={(event) => event.stopPropagation()}><UserAssignSelect value={e.assigned_to_id ? String(e.assigned_to_id) : ''} onChange={(value) => assignRunner(e, value)} users={runnerCandidates} placeholder="Assign runner…" />{e.assigned_to_id && <button type="button" title="Unassign" onClick={() => assignRunner(e, '')}>×</button>}</div> : <span className={e.assigned_to_name ? '' : 'muted'}>{e.assigned_to_name || 'Unassigned'}</span>, filterValue: (e) => e.assigned_to_name || 'Unassigned' },
+                  { key: 'assigned_to_name', header: 'Assigned To', render: (e) => (projectIsActive && !cycleIsLocked && (e.assigned_to_id ? canReassignExecution(e) : canManageRunners)) ? <div className="tm-table-assignee" onClick={(event) => event.stopPropagation()}><UserAssignSelect value={e.assigned_to_id ? String(e.assigned_to_id) : ''} onChange={(value) => handleRunnerChange(e, value)} users={runnerCandidates} placeholder="Assign runner…" />{e.assigned_to_id && <button type="button" title="Unassign" onClick={() => handleRunnerChange(e, '')}>×</button>}</div> : <span className={e.assigned_to_name ? '' : 'muted'}>{e.assigned_to_name || 'Unassigned'}</span>, filterValue: (e) => e.assigned_to_name || 'Unassigned' },
                   { key: 'quick_run', header: 'Actions', filterable: false, render: (execution) => <InlineExecutionActions execution={execution} canExecute={canExecuteRow(execution)} onLinkExisting={setLinkingExistingExecution} onError={setError} onChanged={() => refreshExecutions()} /> },
                   { key: 'run_count', header: 'Runs', render: (e) => <span className={`tm-run-count ${e.run_count ? 'has-runs' : ''}`}>{e.run_count || 0}</span> },
                   { key: 'status', header: 'Latest Result', render: (e) => <Badge status={e.status} /> },
@@ -1698,6 +1982,7 @@ export default function TestExecution() {
           cycleId={Number(cycleId)}
           cycleKey={selectedCycle.cycle_key}
           executions={bulkRemoveExecutions}
+          eligibility={removeFromCycleEligibility}
           onClose={() => { setBulkRemoveExecutions(null); setSelectedExecutionIds(new Set()) }}
           onRemoved={() => {
             refreshExecutions()
@@ -1710,6 +1995,9 @@ export default function TestExecution() {
           execution={editingExecution}
           readOnly={!canExec || !projectIsActive || cycleIsLocked || (!user?.roles.includes('ADMIN') && editingExecution.assigned_to_id !== user?.id)}
           canAssign={canManageRunners && projectIsActive && !cycleIsLocked}
+          canReassign={projectIsActive && !cycleIsLocked && canReassignExecution(editingExecution)}
+          canRemove={projectIsActive && !cycleIsLocked && removeFromCycleEligibility(editingExecution).eligible}
+          removeBlockedReason={removeFromCycleEligibility(editingExecution).reason}
           runnerCandidates={runnerCandidates}
           onAssigned={(saved) => {
             refreshExecutions()
@@ -1725,13 +2013,52 @@ export default function TestExecution() {
           onRemoved={() => { refreshExecutions(); setEditingExecution(null) }}
         />
       )}
+      {reassignRunnerDraft && (
+        <Modal title="Reassign Runner" onClose={() => { setReassignRunnerDraft(null); setReassignRunnerReason('') }}>
+          <p>
+            Reassign <strong>{reassignRunnerDraft.execution.test_case?.test_case_key || `Testcase #${reassignRunnerDraft.execution.test_case_id}`}</strong> from{' '}
+            <strong>{reassignRunnerDraft.execution.assigned_to_name || 'Unassigned'}</strong> to{' '}
+            <strong>{reassignRunnerDraft.value ? runnerCandidates.find((r) => String(r.id) === reassignRunnerDraft.value)?.full_name || 'a new runner' : 'Unassigned'}</strong>?
+          </p>
+          <Field label="Reassignment reason (required)">
+            <textarea rows={3} value={reassignRunnerReason} onChange={(e) => setReassignRunnerReason(e.target.value)} autoFocus />
+          </Field>
+          <ErrorText error={error} />
+          <div className="modal-actions">
+            <button type="button" className="btn" disabled={reassigningRunner} onClick={() => { setReassignRunnerDraft(null); setReassignRunnerReason('') }}>Cancel</button>
+            <button type="button" className="btn btn-primary" disabled={reassigningRunner || !reassignRunnerReason.trim()} onClick={confirmReassignRunner}>
+              {reassigningRunner ? 'Reassigning…' : 'Confirm reassignment'}
+            </button>
+          </div>
+        </Modal>
+      )}
       {cycleToDelete && (
         <ConfirmModal
           title="Delete test cycle?"
-          message={<div><p>Delete <strong>{cycleToDelete.name}</strong>?</p><p className="muted small">Only an empty cycle can be deleted. Recorded execution evidence will never be removed automatically.</p></div>}
+          message={<div>
+            <p>Delete <strong>{cycleToDelete.name}</strong>?</p>
+            <p className="muted small">
+              {isAdmin
+                ? 'As an Administrator, this deletes the cycle even if it still contains testcase slots -- their recorded execution history and evidence will be permanently removed with it.'
+                : 'Only an empty cycle can be deleted. Remove every testcase from the cycle first -- recorded execution evidence is never removed automatically. Only an Administrator can delete a cycle that still has execution history.'}
+            </p>
+          </div>}
           confirmLabel="Delete cycle" cancelLabel="Keep cycle" destructive busy={deletingCycle}
           onConfirm={deleteCycle} onCancel={() => setCycleToDelete(null)}
         />
+      )}
+      {pendingUnlinkCycleRequest && selectedCycle?.linked_request_key && (
+        <ConfirmModal
+          title="Unlink QA Request?"
+          message={<p>Unlink <strong>{selectedCycle.linked_request_key}</strong> from <strong>{selectedCycle.cycle_key}</strong>? Test cases and execution history will remain unchanged.</p>}
+          confirmLabel="Unlink" cancelLabel="Cancel" destructive busy={unlinkingCycleLink}
+          onConfirm={unlinkCycleRequest} onCancel={() => setPendingUnlinkCycleRequest(false)}
+        />
+      )}
+      {unlinkedCycleRequestNotice && (
+        <InfoModal title="Request unlinked" onClose={() => setUnlinkedCycleRequestNotice(null)}>
+          <p>{unlinkedCycleRequestNotice}</p>
+        </InfoModal>
       )}
     </div>
   )

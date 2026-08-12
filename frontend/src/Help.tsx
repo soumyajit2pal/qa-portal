@@ -406,7 +406,7 @@ export default function Help() {
                 { title: 'Create or import test cases', text: 'Complete the ID-linked hierarchy and all fields including epic, CR, module, priority, pre-condition, scenario, steps, expected result, and data.' },
                 { title: 'Review import results', text: 'The completion dialog identifies created and skipped rows and gives a reason for each issue. The uploaded xlsx is parsed in memory; the source workbook is not retained in document storage.' },
                 { title: 'Submit for Reviewer recommendation', text: 'A new or materially updated testcase first moves to Pending Reviewer Recommendation and cannot be used in a cycle.' },
-                { title: 'Recommend, then approve', text: 'The Reviewer recommends or returns the testcase at Stage 1. The QA Lead then approves, returns, or rejects it at Stage 2. Approved cases become Active; re-approval increments the version.' },
+                { title: 'Two-stage group approval', text: 'Submission automatically enters the shared Stage 1 queue for every eligible QA reviewer except the author. The first valid action wins. After Stage 1 approval, CM QA and AGM QA receive Stage 2 simultaneously; either may approve, return, or reject. Approved cases become Active.' },
                 { title: 'Use check-out for editing', text: 'Check Out reserves the case so others know it is being edited. Save the work, then Check In to release the editing reservation.' },
                 { title: 'Maintain in bulk', text: 'Use tags to filter matching test cases. Bulk update can change Test Type, Folder, Module Name, and Priority. Confirm the selected count before bulk update or delete.' },
               ]} />

@@ -139,3 +139,48 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# 2026-08 -- dedicated pool for audit writes (see main.py's
+# application_audit_middleware / _write_request_audit). Previously, every
+# single /api request's background audit write pulled a connection from the
+# SAME pool as normal request handling (`engine`/`SessionLocal` above),
+# competing with real user requests for a share of DB_POOL_SIZE +
+# DB_MAX_OVERFLOW under concurrent load -- reported directly as a
+# contributing factor to "API calls too slow" alongside a NameError crash
+# report. Audit writes are small, frequent, single-row inserts that don't
+# need to compete for that same budget, so they get their own separate
+# (deliberately smaller) engine/pool instead -- sized independently via
+# AUDIT_DB_POOL_SIZE/AUDIT_DB_MAX_OVERFLOW so it can be tuned without
+# affecting the main pool. Defaults are intentionally small: an audit write
+# holds its connection only briefly (one INSERT + commit), so a handful of
+# connections comfortably keeps up even under load; if this pool itself
+# starts timing out, that's now a distinct, separately diagnosable signal
+# from the main pool's own timeout errors instead of the two being
+# indistinguishable. Same DATABASE_URL/DB_POOL_TIMEOUT/DB_POOL_RECYCLE as
+# the main engine -- only the pool size/overflow differ.
+AUDIT_POOL_SIZE = _env_int("AUDIT_DB_POOL_SIZE", 3)
+AUDIT_MAX_OVERFLOW = _env_int("AUDIT_DB_MAX_OVERFLOW", 5)
+
+logger.info(
+    "Audit DB pool config: pool_size=%s max_overflow=%s (separate from main pool above)",
+    AUDIT_POOL_SIZE, AUDIT_MAX_OVERFLOW,
+)
+
+audit_engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=POOL_PRE_PING,
+    pool_size=AUDIT_POOL_SIZE,
+    max_overflow=AUDIT_MAX_OVERFLOW,
+    pool_timeout=POOL_TIMEOUT,
+    pool_recycle=POOL_RECYCLE,
+)
+if QUERY_TIMEOUT_MS > 0:
+    @event.listens_for(audit_engine, "connect")
+    def _set_audit_call_timeout(dbapi_connection, connection_record):  # noqa: ARG001
+        try:
+            dbapi_connection.call_timeout = QUERY_TIMEOUT_MS
+        except AttributeError:
+            pass  # already logged once against the main engine above
+
+AuditSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=audit_engine)

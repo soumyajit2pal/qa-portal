@@ -1868,11 +1868,18 @@ class TestCase(Base):
     priority = Column(String(16))
     # Mirror of the current version's own status -- see constants.
     # TEST_CASE_STATUSES (Draft/In Review/Review Completed/Returned/
-    # Approved/Rejected/Archived, 2026-08 "Test Approval Workflow"
-    # refactor). The API, not a client edit form, controls transitions --
-    # see routers/test_repository.py's review workflow. "Review Completed"
-    # is the longest value at 17 chars, still comfortably under String(20).
-    status = Column(String(20), default="Draft")
+    # Approved/Rejected/Archived, 2026-08 "Test Approval Workflow" refactor,
+    # plus TEST_CASE_NEW_STATUSES -- Recommendation Pending/QA Lead Approval
+    # Pending/Returned by QA/Returned by QA Lead -- added by the 2026-08
+    # "Simplified Test Management Review and Approval" requirement). The
+    # API, not a client edit form, controls transitions -- see
+    # routers/test_repository.py's review workflow. "QA Lead Approval
+    # Pending" is the longest value at 24 chars -- ORA-12899 (String(20) was
+    # too narrow for it, hit in production; String(30) leaves headroom for
+    # future values). Widening an EXISTING Oracle column needs a manual
+    # ALTER TABLE -- create_all() never alters existing columns -- see
+    # scripts/2026-08_widen_test_case_status_columns.sql.
+    status = Column(String(30), default="Draft")
     # Mirror of the current version's own version_major/version_minor.
     # Major represents a materially changed intent, minor a compatible
     # refinement (SRS VER-004); both live authoritatively on
@@ -1906,6 +1913,23 @@ class TestCase(Base):
     # deliberately NOT gated by this lock.
     checked_out_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     checked_out_at = Column(DateTime, nullable=True)
+    # 2026-08 "Recycle Bin" requirement -- delete_test_case/
+    # bulk_delete_test_cases (governed cases -- ever Approved/Archived/
+    # Rejected -- were already, and remain, permanently blocked from this
+    # entirely; only a still-pre-approval case can ever reach here) now soft-
+    # delete instead of a real `db.delete()`: this flag set True, the row
+    # otherwise untouched and excluded from every normal list/summary query,
+    # recoverable via restore_test_case_from_recycle_bin until an authorized
+    # QA Lead Group member permanently purges it (purge_test_case/
+    # bulk_purge_test_cases -- the only code path that still issues a real
+    # `db.delete()`). New columns on an EXISTING production table --
+    # `create_all()` never alters existing columns, so this requires the
+    # companion manual `ALTER TABLE`, see
+    # scripts/2026-08_add_test_case_recycle_bin_columns.sql.
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    deleted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_reason = Column(String(1000), nullable=True)
     tag_rows = relationship("TestCaseTag", back_populates="test_case", cascade="all,delete-orphan")
 
     @property
@@ -1928,6 +1952,7 @@ class TestCase(Base):
     folder = relationship("TestFolder")
     created_by = relationship("User", foreign_keys=[created_by_id])
     checked_out_by = relationship("User", foreign_keys=[checked_out_by_id])
+    deleted_by = relationship("User", foreign_keys=[deleted_by_id])
     steps = relationship("TestStep", back_populates="test_case", cascade="all,delete-orphan",
                          order_by="TestStep.step_no")
     executions = relationship("TestExecution", back_populates="test_case", cascade="all,delete-orphan")
@@ -1951,6 +1976,10 @@ class TestCase(Base):
         return self.checked_out_by.full_name if self.checked_out_by else None
 
     @property
+    def deleted_by_name(self):
+        return self.deleted_by.full_name if self.deleted_by else None
+
+    @property
     def current_draft_author_id(self):
         """Author of the version currently moving through review.
 
@@ -1958,6 +1987,60 @@ class TestCase(Base):
         for the author before the backend's GOV-002 check is reached.
         """
         return self.current_draft_version.author_id if self.current_draft_version else None
+
+    # 2026-08 "Simplified Test Management" GOV-002 gap fix -- the author
+    # isn't the only person a NEW-path stage can block from acting again:
+    # whoever SUBMITTED the draft (draft.submitted_by_id, which may be a
+    # different QA_ENGINEER than the content's author -- authoring/checkout
+    # is a broad team-tier permission, not locked to one person) is blocked
+    # from recording that same draft's Stage 1 decision, and whoever
+    # recorded Stage 1 (draft.reviewed_by_id) is blocked from also recording
+    # Stage 2. Exposed here, same reasoning as current_draft_author_id
+    # above, so the UI can suppress the button before the backend's own
+    # (authoritative) check in review_test_case/bulk_recommend_test_cases/
+    # bulk_approve_test_cases is reached.
+    @property
+    def current_draft_submitted_by_id(self):
+        return self.current_draft_version.submitted_by_id if self.current_draft_version else None
+
+    @property
+    def current_draft_reviewed_by_id(self):
+        return self.current_draft_version.reviewed_by_id if self.current_draft_version else None
+
+    # Reported directly: "Pending with author, give details who have
+    # uploaded" -- pending_with_user_name is intentionally None for a
+    # never-submitted Draft (nothing is actually pending review yet, see
+    # that property's own docstring above), so the Workflow column's
+    # fallback previously showed the bare, name-less word "Author" with no
+    # way to tell WHICH author still needs to submit it. Exposed here so the
+    # UI can show the real name in that one fallback case specifically.
+    @property
+    def current_draft_author_name(self):
+        return self.current_draft_version.author_name if self.current_draft_version else None
+
+    # Reported directly, alongside the "Pending with" author-name fix above:
+    # "along with Pending with details, show submitted by as well" -- the
+    # Workflow column previously only ever showed WHO the item is pending
+    # WITH (a group, or an author on Returned), never WHO submitted it into
+    # its current pending state. Exposed here the same way as
+    # current_draft_author_name so the frontend doesn't need a second
+    # round-trip.
+    @property
+    def current_draft_submitted_by_name(self):
+        return self.current_draft_version.submitted_by_name if self.current_draft_version else None
+
+    # Reported directly: "Add Recommended By once recommended" -- once a
+    # NEW-path draft clears Stage 1 (status moves to "QA Lead Approval
+    # Pending"), draft.reviewed_by_id records who made that recommend
+    # decision (see review_test_case/bulk_recommend_test_cases, which both
+    # set it). Exposed the same way as current_draft_submitted_by_name so
+    # the Workflow column can show "Recommended by" alongside "Submitted
+    # by" without a second round-trip. None before Stage 1 has actually
+    # been decided (nothing to attribute yet) -- same "only show once it's
+    # true" shape as submitted_by_name for a never-submitted Draft.
+    @property
+    def current_draft_reviewed_by_name(self):
+        return self.current_draft_version.reviewed_by_name if self.current_draft_version else None
 
     @property
     def version(self):
@@ -2079,7 +2162,10 @@ class TestCaseVersion(Base):
     test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False, index=True)
     version_major = Column(Integer, nullable=False, default=1)
     version_minor = Column(Integer, nullable=False, default=0)
-    status = Column(String(20), nullable=False, default="Draft")
+    # See TestCase.status above for the full status vocabulary and the
+    # ORA-12899/String(30) note -- this is the authoritative copy; TestCase's
+    # own status is just a mirror of whichever version is current.
+    status = Column(String(30), nullable=False, default="Draft")
     # Immutable content snapshot -- see TestCase's own former column
     # docstrings for what each of these means; identical shape, just scoped
     # to one frozen version instead of the mutable identity.
@@ -2174,23 +2260,41 @@ class TestCaseVersion(Base):
     # APR-006 "current assignee" -- whichever role's action is currently
     # pending, per this version's own status. None once terminal
     # (Approved/Rejected/Archived) or while still an unsubmitted Draft.
+    # 2026-08 "Simplified Test Management Review and Approval" requirement --
+    # extended to the 4 NEW-path statuses (constants.TEST_CASE_NEW_STATUSES):
+    # "Recommendation Pending"/"QA Lead Approval Pending" have no individual
+    # assignee (group routing is authoritative), so pending_with_user_id
+    # stays None for those -- the frontend falls back to
+    # constants.ts::TEST_CASE_PENDING_WITH's group label, rendered as a
+    # clickable RoleGroupLink (QA Group/QA Lead Group) rather than a plain
+    # string, same UX as pending_with_user_id being a real person elsewhere.
+    # "Returned by QA"/"Returned by QA Lead" DO have a real pending person
+    # (the author, same as OLD "Returned") -- reported directly: "Pending
+    # with author, give details who have uploaded" was previously blank for
+    # these two NEW-path Returned statuses (only literal OLD "Returned" was
+    # handled), which fell back to the generic unclickable "Author" label
+    # with no actual name.
     @property
     def pending_with_user_id(self):
         if self.status == "In Review":
             return self.assigned_reviewer_id
         if self.status == "Review Completed":
             return self.assigned_qa_lead_id
-        if self.status == "Returned":
+        if self.status in ("Returned", "Returned by QA", "Returned by QA Lead"):
             return self.author_id
         return None
 
     @property
     def pending_with_user_name(self):
         if self.status == "In Review":
-            return self.assigned_reviewer_name
+            return "QA Reviewer Group"
         if self.status == "Review Completed":
-            return self.assigned_qa_lead_name
-        if self.status == "Returned":
+            return "CM QA / AGM QA"
+        if self.status == "Recommendation Pending":
+            return "QA Group"
+        if self.status == "QA Lead Approval Pending":
+            return "QA Lead Group"
+        if self.status in ("Returned", "Returned by QA", "Returned by QA Lead"):
             return self.author_name
         return None
 
@@ -2321,6 +2425,18 @@ class TestExecution(Base):
     executed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=now)
     run_version = Column(Integer, nullable=False, default=0)
+    # 2026-08 "Remove from cycle" permission requirement, Scenario 1:
+    # "tester add testcase in lifecycle, but not executed it, just added ...
+    # system should allow to remove from lifecycle as there are no test
+    # execution history." Resolution (asked directly): whoever added a
+    # testcase to a cycle may remove their OWN addition themselves, but only
+    # while it still has zero execution history -- self-correcting a same-
+    # person, zero-consequence mistake, without needing a QA Lead. Nullable
+    # since it didn't exist before this column was added -- an existing slot
+    # created before this ships simply falls back to "QA Lead Group/Admin
+    # only" (see routers/test_execution.py's _execution_removal_block_reason),
+    # same as if nobody in particular were recorded as the adder.
+    added_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
 
     cycle = relationship("TestCycle", back_populates="executions")
     test_case = relationship("TestCase", back_populates="executions")
@@ -2328,6 +2444,7 @@ class TestExecution(Base):
     assigned_to = relationship("User", foreign_keys=[assigned_to_id])
     assigned_by = relationship("User", foreign_keys=[assigned_by_id])
     executed_by = relationship("User", foreign_keys=[executed_by_id])
+    added_by = relationship("User", foreign_keys=[added_by_id])
     runs = relationship("TestExecutionRun", back_populates="execution",
                          cascade="all,delete-orphan", order_by="TestExecutionRun.attempt_no")
     # Every governed Defect (defects.py) linked to this specific execution
@@ -2353,6 +2470,10 @@ class TestExecution(Base):
     @property
     def executed_by_name(self):
         return self.executed_by.full_name if self.executed_by else None
+
+    @property
+    def added_by_name(self):
+        return self.added_by.full_name if self.added_by else None
 
     @property
     def run_count(self):
@@ -2538,6 +2659,18 @@ class Defect(Base):
     def project_id(self):
         return self.cycle.project_id if self.cycle else None
 
+    # 2026-08 -- reported directly: "During assigning defect, department
+    # should be auto populated based on linked request or Failed / Blocked
+    # Test Execution." The linked Test Cycle's own Project.department is
+    # the "which team actually owns the failing area" signal -- more
+    # specific than the QA Request's own department, which the frontend
+    # already offers as a fallback default (see Defects.tsx's TransitionModal
+    # -- requestDepartment). None whenever no execution/cycle is linked
+    # (e.g. a defect opened standalone, not from a Failed/Blocked execution).
+    @property
+    def project_department(self):
+        return self.cycle.project.department if self.cycle and self.cycle.project else None
+
     @property
     def test_case_key(self):
         return self.primary_test_case.test_case_key if self.primary_test_case else None
@@ -2597,6 +2730,20 @@ Index("ix_qap_dast_status_created", DASTRequest.status, DASTRequest.created_at)
 Index("ix_qap_perf_status_created", PerformanceRequest.status, PerformanceRequest.created_at)
 Index("ix_qap_appract_entity_created", ApprovalAction.entity_type, ApprovalAction.entity_id, ApprovalAction.created_at)
 Index("ix_qap_tc_proj_folder_created", TestCase.project_id, TestCase.folder_id, TestCase.created_at)
+# 2026-08 -- added after the IDX-001..007 pass above, alongside the Recycle
+# Bin feature's is_deleted column (models.py's own comment on that column).
+# Every list/summary query in test_repository.py filters
+# `project_id == X AND is_deleted == True/False` together (list_test_cases,
+# get_test_case_summary x3, list_all_test_cases_for_project,
+# _selected_project_cases, list_recycle_bin) -- is_deleted itself was never
+# indexed at all, so every one of those queries index-range-scans by
+# project_id via ix_qap_tc_proj_folder_created above and then falls back to
+# a table-access-by-rowid to evaluate is_deleted on each candidate row. This
+# composite serves the actual filter pair directly instead. Not a dup of
+# ix_qap_tc_proj_folder_created under IDX-005 -- different second column
+# (is_deleted vs folder_id), so it covers a distinct filter combination
+# rather than a subset of it.
+Index("ix_qap_tc_proj_deleted_created", TestCase.project_id, TestCase.is_deleted, TestCase.created_at)
 Index("ix_qap_cyc_proj_status_created", TestCycle.project_id, TestCycle.status, TestCycle.created_at)
 Index("ix_qap_readiness_func_req", ReadinessChecklistItem.functional_request_id)
 Index("ix_qap_moddocs_req_uploaded", RequestDocument.module, RequestDocument.request_id, RequestDocument.uploaded_at)
@@ -2624,4 +2771,3 @@ Index("ix_qap_defects_assignee_upd", Defect.assignee_id, Defect.status, Defect.u
 #     lives on the row already, but there's no separate "assignment updated"
 #     timestamp distinct from the row's own created_at) to usefully compose
 #     with -- revisit if/when that module gains one.
-

@@ -23,13 +23,16 @@ import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
 import JiraActivity from "../../components/JiraActivity";
 import ClearableSearchInput from "../../components/ClearableSearchInput";
+import RoleGroupLink from "../../components/RoleGroupLink";
 import {
   QA_STATUSES,
   QA_STATUS_LABELS,
   QA_PENDING_WITH,
+  QA_EXECUTION_GROUP_ROLE,
+  TESTER_REASSIGNABLE_STATUSES,
   PRIORITIES,
   RISK_RATINGS,
-  ENVIRONMENTS,
+  DEPLOYMENT_ENVIRONMENTS,
   CHANGE_TYPES,
   hasRole,
   validTargetPromotionOptions,
@@ -278,7 +281,7 @@ function FunctionalFormModal({
                   }
                 }}
               >
-                {ENVIRONMENTS.filter((e_) => e_ !== "Dev").map((o) => (
+                {DEPLOYMENT_ENVIRONMENTS.map((o) => (
                   <option key={o} value={o}>
                     {o}
                   </option>
@@ -409,6 +412,76 @@ const LIFECYCLE_STAGES = [
   "Sign-off",
   "Closed",
 ];
+
+// Reported directly: "sm approval not completed but still QA Lead assigned"
+// -- the "Assigned Group" field/column used to hardcode "QA Lead"
+// unconditionally, regardless of the request's actual current status, so it
+// showed "QA Lead" even while a request was still sitting at
+// SM_APPROVAL_PENDING (or earlier). This maps the real backend status (see
+// routers/functional.py's own status transitions -- SM_APPROVAL_PENDING is
+// gated by Role.SM, DEPARTMENT_HEAD_APPROVAL_PENDING by
+// Role.DEPARTMENT_HEAD_CM/AGM, everything from QA_LEAD_ASSIGNED through
+// QA_COMPLETED by Role.QA_LEAD) to whichever group is genuinely holding the
+// request right now. Returns null for every requester-owned/terminal/
+// Sign-off-phase status (Draft, Submitted, any RETURNED_BY_*/*_REJECTED,
+// QA Sign-off phase, Requester Verification, Closed, Cancelled) -- those
+// aren't sitting with a review group at all, so the field shows "—" instead
+// of a misleading group.
+// Derived from QA_PENDING_WITH (constants.ts) -- the same table that already
+// drives the list's "Pending With" column and is itself kept in exact sync
+// with dashboard.py's STAGE_TEAM/backend require_roles() gates -- rather
+// than re-deriving its own status list, so this can never drift out of sync
+// with "Pending With" or silently miss a status. Only labels that name an
+// actual role-holding group get a RoleGroupLink; "Requester" (an individual,
+// not a group) and "--" (terminal/dead-end) both resolve to null, which
+// callers render as "--".
+function assignedGroupFor(
+  status: string,
+  applicationMasterStatus?: string | null,
+  department?: string | null,
+): { role: string | string[]; label: string; department?: string | null } | null {
+  // Reported directly: while the request's own status is still
+  // SM_APPROVAL_PENDING but its Application Name is a brand-new entry
+  // awaiting the Application Owner (see applicationNameAwareStatusLabel in
+  // Common.tsx, which overrides the Status badge the same way), the actual
+  // work is sitting with the Application Owner, not the SM yet -- checked
+  // first, ahead of the normal QA_PENDING_WITH-derived mapping below, since
+  // this is a sub-state of SM_APPROVAL_PENDING rather than its own status
+  // value. `department` is passed through here (and nowhere else in this
+  // function) because Application Owner is a department-scoped role
+  // enforced server-side (require_same_department in
+  // decide_app_owner_name) -- RoleGroupLink filters its member list to it
+  // when provided.
+  if (applicationNameAwareStatusLabel(status, applicationMasterStatus)) {
+    return { role: "APPLICATION_OWNER", label: "Application Owner", department };
+  }
+  const pendingWith = QA_PENDING_WITH[status];
+  // Reported directly: "SM mapping should be based on department level. but
+  // SM group details showing those are from different department." SM and
+  // Department Head are BOTH department-scoped roles enforced server-side
+  // (require_same_department in sm_decision/department_head_decision,
+  // functional.py) exactly like Application Owner above -- `department` was
+  // missing here, so RoleGroupLink showed every SM/Department Head in the
+  // system instead of just the ones who could actually act on this request.
+  if (pendingWith === "SM") return { role: "SM", label: "SM", department };
+  if (pendingWith === "Department Head") {
+    return { role: ["DEPARTMENT_HEAD_CM", "DEPARTMENT_HEAD_AGM"], label: "Department Head", department };
+  }
+  // Reported directly: this "QA Lead group members" list should only show
+  // literal QA_LEAD role holders -- Chief Manager - QA / AGM - QA act on
+  // this work via their own separate Executive bypass (isAssignedQALead
+  // below), not by being members of the QA Lead group, so they're
+  // deliberately excluded from this roster even though they can still open
+  // the request and act on it directly.
+  if (pendingWith === "QA Lead") return { role: "QA_LEAD", label: "QA Lead" };
+  // "QA" covers TESTER_ASSIGNED/TEST_DESIGN/EXECUTION_IN_PROGRESS/RETESTING --
+  // limited to QA_ENGINEER only (reported directly) -- "Assigned Tester(s)"
+  // elsewhere on the page names the specific individual, this names the
+  // execution-team group accountable for the stage; QA_LEAD has its own
+  // separate group above instead of also appearing here.
+  if (pendingWith === "QA") return { role: QA_EXECUTION_GROUP_ROLE, label: "QA" };
+  return null;
+}
 
 function StartExecutionModal({ req, busy, onCancel, onStart }: {
   req: FunctionalOut;
@@ -644,6 +717,11 @@ function FunctionalDetail({
   const [comments, setComments] = useState("");
   const [selectedQALead, setSelectedQALead] = useState("");
   const [selectedTesters, setSelectedTesters] = useState<string[]>([]);
+  // 2026-08 Reassignment CR -- a reason is mandatory when this is a genuine
+  // reassignment (not the very first tester assignment); the backend
+  // enforces this too (reassignment.require_reason), this is just the UI
+  // half. Reset whenever the request itself changes, same as selectedTesters.
+  const [reassignReason, setReassignReason] = useState("");
   // Whether the "require Department Head re-approval on return" popup (see
   // canReadinessDecide below) is open -- reported directly: an always-visible
   // checkbox next to "Readiness Failed" was easy to miss/forget before
@@ -778,8 +856,12 @@ function FunctionalDetail({
 
   const status = req.status;
   const sameDept = !!user?.department && user.department === req.department;
-  const isQALead = hasRole(user, "QA_LEAD");
-  const isAssignedQALead = isAdmin || (isQALead && req.qa_lead_id === user?.id);
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+  // gated action, same as Admin, without being listed as "QA Lead group"
+  // members anywhere (display-only concern, kept to literal QA_LEAD --
+  // see assignedGroupFor below). ORACLE_MIGRATION_2026-07.md section 59.
+  const isQALead = hasRole(user, "QA_LEAD", "CHIEF_MANAGER_QA", "AGM_QA");
+  const isAssignedQALead = isAdmin || isQALead;
   const assignedTesterIds = new Set(
     (req.assigned_tester_ids || "").split(",").filter(Boolean).map(Number)
   );
@@ -891,7 +973,44 @@ function FunctionalDetail({
     isAssignedQALead && status === "READINESS_VERIFICATION";
   const canBeginPlanning =
     isAssignedQALead && status === "QA_ACTIVITY_INITIATED";
-  const canAssignTester = isAssignedQALead && status === "PLANNING";
+  // 2026-08 -- reported directly: "once assigned there are no other option
+  // to reassign the tester or modify the tester. give qa lead to reassign as
+  // well as the current assign people can reasign to another qa member."
+  // Widened from "QA Lead group only, only while status === PLANNING" to:
+  // the QA Lead group OR any currently-assigned tester, at any point across
+  // TESTER_REASSIGNABLE_STATUSES (Planning through Retesting). The backend
+  // (functional.py's assign_tester) enforces the exact same window/authors
+  // -- this only decides whether the button renders.
+  const isInitialTesterAssignment = status === "PLANNING";
+  // 2026-08 Reassignment CR, reported directly: "Reassignment shall be
+  // permitted to: the current assignee, the Department Head of the
+  // department to which the current assignee belongs, or Admin users." --
+  // then, reported directly again: QA_LEAD is required to keep reassignment
+  // rights too, restoring parity with isAssignedQALead (which already gates
+  // the first assignment). Mirrors functional.py's
+  // _require_can_reassign_tester exactly.
+  const isQADepartmentHead =
+    isAdmin || (hasRole(user, "CHIEF_MANAGER_QA", "AGM_QA") && user?.department === QA_DEPARTMENT);
+  const canReassignTester = isAssignedTester || isQADepartmentHead || hasRole(user, "QA_LEAD");
+  const canAssignTester =
+    (isInitialTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignTester) &&
+    TESTER_REASSIGNABLE_STATUSES.includes(status);
+  // Pre-fill the picker with the currently-assigned tester(s) when this is a
+  // reassignment (not the first-ever assignment) -- so reassigning defaults
+  // to "hand off from the current roster" rather than starting blank. Only
+  // runs once per loaded request (keyed on id + the assignment string
+  // itself), so it won't stomp on in-progress edits to the picker.
+  useEffect(() => {
+    if (canAssignTester && !isInitialTesterAssignment) {
+      setSelectedTesters((req.assigned_tester_ids || "").split(",").filter(Boolean));
+    }
+    // req.assigned_tester_ids only actually changes once a reassignment has
+    // saved and reloaded, so clearing the reason field here (rather than
+    // optimistically after the act() call, which resolves the same whether
+    // the request succeeded or failed) only clears it on genuine success.
+    setReassignReason("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req.id, req.assigned_tester_ids, isInitialTesterAssignment]);
   const canStartTestDesign =
     isAssignedTester && status === "TESTER_ASSIGNED";
   const canStartExecution =
@@ -931,12 +1050,18 @@ function FunctionalDetail({
     isAssignedTester &&
     ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(status) &&
     openLinkedCycles.length > 0;
-  // Matches the backend's own role gate on POST /{id}/request-signoff and
-  // POST /api/signoffs (both require_roles(Role.QA_LEAD, Role.QA_ENGINEER))
-  // -- whichever of them actually ran QA through to completion should be
-  // able to raise the certificate, not just the QA Lead.
+  // 2026-08 -- reported directly: "'Request Sign Off' button is not
+  // enable[d] for QA lead ... if tester [is] no[t] available then at least
+  // [o]n behalf of QA he can raise the request." Previously this only
+  // checked isAssignedTester, so a QA Lead (not also the assigned tester)
+  // never saw the button even though whoever ran QA through to completion
+  // should be able to raise the certificate -- widened to match the
+  // backend's now-fixed "QA Lead group OR current tester" gate on both
+  // POST /{id}/request-signoff (functional.py) and POST /api/signoffs
+  // (signoff.py), so the QA Lead can raise it themselves when a tester
+  // isn't available to.
   const canRequestSignoff =
-    isAssignedTester &&
+    (isAssignedTester || isAssignedQALead) &&
     (hasRole(user, "ADMIN") || user?.department === QA_DEPARTMENT) &&
     status === "QA_COMPLETED";
   // "Confirm Sign-off" (a manual QA Lead click) removed -- the linked
@@ -1089,8 +1214,11 @@ function FunctionalDetail({
             <DetailField label="Department Head">
               {userName(users, req.department_head_id) || "—"}
             </DetailField>
-            <DetailField label="Assigned QA Lead">
-              {userName(users, req.qa_lead_id) || "Not assigned"}
+            <DetailField label="Assigned Group">
+              {(() => {
+                const assigned = assignedGroupFor(req.status, req.application_master_status, req.department);
+                return assigned ? <RoleGroupLink users={users} role={assigned.role} label={assigned.label} department={assigned.department} /> : "—";
+              })()}
             </DetailField>
             <DetailField label="Assigned Tester(s)">
               {req.assigned_tester_ids
@@ -1261,23 +1389,13 @@ function FunctionalDetail({
                       ? "Mandatory Readiness checklist item(s) are not self-declared ready -- see the notice above."
                       : undefined
                   }
-                  extraControlLabel="Assign COE - Quality Assurance QA Lead"
-                  extraControl={
-                    <UserAssignSelect
-                      value={selectedQALead}
-                      onChange={setSelectedQALead}
-                      users={qaLeads}
-                      placeholder="Select QA Lead..."
-                      disabled={!!busyAction}
-                      style={{ minWidth: 260 }}
-                    />
-                  }
-                  extraReady={!!selectedQALead}
+                  extraControlLabel="Assign to group"
+                  extraControl={<RoleGroupLink users={users} role="QA_LEAD" label="QA Lead" />}
+                  extraReady
                   onApprove={(signed) =>
                     act("department-head-decision", {
                       decision: "Approved",
                       comments: signed,
-                      qa_lead_id: Number(selectedQALead),
                     })
                   }
                   onReturn={(actionNote) =>
@@ -1306,6 +1424,19 @@ function FunctionalDetail({
               )}
               {canReadinessDecide && (
                 <>
+                  <div className="form-field" style={{ width: "100%" }}>
+                    <label htmlFor="readiness-earlier-behaviour">
+                      What was the behaviour earlier? <small className="muted">(optional)</small>
+                    </label>
+                    <textarea
+                      id="readiness-earlier-behaviour"
+                      rows={3}
+                      value={comments}
+                      onChange={(e) => setComments(e.target.value)}
+                      placeholder="Describe what the application's behaviour was before this QA cycle, for the tester's reference…"
+                      disabled={!!busyAction}
+                    />
+                  </div>
                   <button
                     className="btn btn-success btn-sm"
                     disabled={!!busyAction}
@@ -1368,20 +1499,41 @@ function FunctionalDetail({
                     value={selectedTesters}
                     onChange={setSelectedTesters}
                     users={testers}
-                    placeholder="Assign Tester(s)..."
+                    placeholder={
+                      isInitialTesterAssignment
+                        ? "Assign Tester(s)..."
+                        : "Reassign Tester(s)..."
+                    }
                     disabled={!!busyAction}
                     style={{ minWidth: 260 }}
                   />
+                  {!isInitialTesterAssignment && (
+                    <input
+                      className="reassign-reason-input"
+                      style={{ minWidth: 220 }}
+                      placeholder="Reason for reassignment *"
+                      value={reassignReason}
+                      onChange={(e) => setReassignReason(e.target.value)}
+                      disabled={!!busyAction}
+                    />
+                  )}
                   <button
                     className="btn btn-primary btn-sm"
-                    disabled={selectedTesters.length === 0 || !!busyAction}
+                    disabled={
+                      selectedTesters.length === 0 ||
+                      !!busyAction ||
+                      (!isInitialTesterAssignment && !reassignReason.trim())
+                    }
                     onClick={() =>
                       act("assign-tester", {
                         tester_ids: selectedTesters.map(Number),
+                        ...(isInitialTesterAssignment ? {} : { reason: reassignReason.trim() }),
                       })
                     }
                   >
-                    Assign Tester(s)
+                    {isInitialTesterAssignment
+                      ? "Assign Tester(s)"
+                      : "Reassign Tester(s)"}
                   </button>
                 </>
               )}
@@ -1750,9 +1902,9 @@ export default function Functional() {
             },
             {
               key: "qa_lead_id",
-              header: "Assigned QA Lead",
-              render: (r) => userName(users, r.qa_lead_id) || "Not assigned",
-              filterValue: (r) => userName(users, r.qa_lead_id) || "",
+              header: "Assigned Group",
+              render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || "—",
+              filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || "",
             },
             {
               key: "priority",

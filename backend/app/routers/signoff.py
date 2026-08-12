@@ -125,8 +125,13 @@ def get_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: mo
 
 @router.post("", response_model=schemas.SignOffOut)
 def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db),
-                    current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
-    """Raised by the QA Engineer who executed testing; starts as a Draft."""
+                    current_user: models.User = Depends(require_roles(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
+    """Raised by the QA Engineer who executed testing -- or, 2026-08 (reported
+    directly: "'Request Sign Off' button is not enable[d] for QA lead ... if
+    tester [is] no[t] available then at least [o]n behalf of QA he can raise
+    the request"), by the QA Lead group on behalf of a request whose tester
+    isn't available to raise it themselves. Starts as a Draft either way --
+    no different downstream handling based on who created it."""
     _require_qa_department(current_user)
     data = payload.model_dump()
     # Never trust the linked business request's department for approval
@@ -154,7 +159,10 @@ def update_signoff(signoff_id: int, payload: schemas.SignOffUpdate, db: Session 
     obj = _get_or_404(db, signoff_id)
     is_own = obj.requester_id == current_user.id
     is_admin = current_user.has_role(Role.ADMIN)
-    is_qa_lead = current_user.has_role(Role.QA_LEAD)
+    # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+    # gated action, same as ADMIN -- see ORACLE_MIGRATION_2026-07.md
+    # section 59.
+    is_qa_lead = current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
 
     # Checked in this order deliberately: the QA-Lead-reviewing-right-now window
     # is checked first so a user who happens to be both the original
@@ -216,7 +224,7 @@ def resubmit_signoff(signoff_id: int, db: Session = Depends(get_db), current_use
              "Reopened" if reopening else "Resubmitted",
              "Rejected certificate reopened and re-submitted" if reopening else "Returned certificate re-submitted")
     else:
-        obj.status = "DEPT_HEAD_COE_APPROVAL_PENDING"
+        obj.status = "DEPT_HEAD_QA_APPROVAL_PENDING"
         _log(db, obj.id, "Executive COE Approval", current_user, "Resubmitted", "Returned certificate re-submitted")
     db.commit()
     db.refresh(obj)
@@ -225,14 +233,15 @@ def resubmit_signoff(signoff_id: int, db: Session = Depends(get_db), current_use
 
 @router.post("/{signoff_id}/qa-lead-decision", response_model=schemas.SignOffOut)
 def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                     current_user: models.User = Depends(
+                         require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """QA Lead approval checkpoint before Executive COE final approval."""
     obj = _get_or_404(db, signoff_id)
     _require_qa_department(current_user)
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "SM_APPROVAL_PENDING", "QA Lead decision")
     if payload.decision == "Approved":
-        obj.status = "DEPT_HEAD_COE_APPROVAL_PENDING"
+        obj.status = "DEPT_HEAD_QA_APPROVAL_PENDING"
         obj.reviewed_by_id = current_user.id
     elif payload.decision == "Returned":
         obj.status = "RETURNED_BY_SM"
@@ -250,13 +259,20 @@ def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Ses
 @router.post("/{signoff_id}/executive-coe-decision", response_model=schemas.SignOffOut)
 def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
                            current_user: models.User = Depends(require_roles(
-                               Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
-                               Role.AGM_COE))):
-    """Final COE - Quality Assurance approval by Executive COE; approval issues the certificate."""
+                               Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
+    # 2026-08 -- this is now the "Executive Group" any-active-member
+    # checkpoint: any active Chief Manager QA or AGM QA holds identical
+    # authority here and either one's action completes this stage (reported
+    # directly -- see constants.py::Role's own comment on the
+    # CHIEF_MANAGER_QA/AGM_QA consolidation). Previously 3 roles
+    # (CHEIF_MANAGER_COE/CHEIF_MANAGER_QA/AGM_COE) with the COE variants
+    # retired; existing UserRole rows were migrated by the one-time
+    # role-consolidation data-fix script.
+    """Final COE - Quality Assurance approval by Executive COE (the QA Executive Group); approval issues the certificate."""
     obj = _get_or_404(db, signoff_id)
     _require_qa_department(current_user)
     require_not_requester(current_user, obj.requester_id)
-    _require(obj, "DEPT_HEAD_COE_APPROVAL_PENDING", "Executive COE decision")
+    _require(obj, "DEPT_HEAD_QA_APPROVAL_PENDING", "Executive COE decision")
     if payload.decision == "Approved":
         obj.status = "ISSUED"
         obj.approved_by_id = current_user.id
@@ -376,11 +392,10 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
     if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.QA_LEAD) and user.department == QA_DEPARTMENT
-    if status == "DEPT_HEAD_COE_APPROVAL_PENDING":
+        return user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA) and user.department == QA_DEPARTMENT
+    if status == "DEPT_HEAD_QA_APPROVAL_PENDING":
         return user.has_role(
-            Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
-            Role.AGM_COE,
+            Role.CHIEF_MANAGER_QA, Role.AGM_QA,
         ) and user.department == QA_DEPARTMENT
     return False
 

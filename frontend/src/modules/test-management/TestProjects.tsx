@@ -4,10 +4,10 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { hasRole, TEST_PROJECT_ROLES } from '../../constants'
+import { hasRole, QA_LEAD_GROUP_ROLES } from '../../constants'
 import {
   ApplicationMasterOut, TestProjectOut, TestCaseSummaryOut, TestCycleOut, ApprovalActionOut, DepartmentOut,
-  UserOut, TestProjectMemberOut, PageOut,
+  UserOut, PageOut,
 } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
@@ -28,7 +28,7 @@ const CAN_MANAGE_ROLES = ['QA_ENGINEER', 'QA_LEAD']
 // Projects in general (create, request activation/deactivation). Mirrors
 // backend deps.py::can_manage_project exactly.
 function canEditProjectDetails(user: UserOut | null | undefined, project: TestProjectOut): boolean {
-  return hasRole(user, 'QA_LEAD') || (hasRole(user, 'QA_ENGINEER') && project.owner_id === user?.id)
+  return hasRole(user, ...QA_LEAD_GROUP_ROLES) || (hasRole(user, 'QA_ENGINEER') && project.owner_id === user?.id)
 }
 
 function NewProjectModal({ applications, departments, users, currentUserId, onClose, onCreated }: {
@@ -44,8 +44,6 @@ function NewProjectModal({ applications, departments, users, currentUserId, onCl
   const [department, setDepartment] = useState('')
   const [description, setDescription] = useState('')
   const [ownerId, setOwnerId] = useState<number | ''>(currentUserId ?? '')
-  const [defaultReviewerId, setDefaultReviewerId] = useState<number | ''>('')
-  const [defaultQaLeadId, setDefaultQaLeadId] = useState<number | ''>('')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
@@ -72,8 +70,6 @@ function NewProjectModal({ applications, departments, users, currentUserId, onCl
         department,
         description: description.trim() || null,
         owner_id: ownerId || null,
-        default_reviewer_id: defaultReviewerId || null,
-        default_qa_lead_id: defaultQaLeadId || null,
       })
       onCreated(created)
     } catch (err) { setError(err) } finally { setBusy(false) }
@@ -114,29 +110,6 @@ function NewProjectModal({ applications, departments, users, currentUserId, onCl
             options={users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))}
           />
         </Field>
-        {/* 2026-08 Test Approval Workflow refactor (APR-001) -- project-level
-            defaults only, used to pre-fill Stage 1/Stage 2 assignment when a
-            test case has no per-item override yet (see PATCH .../approvers on
-            TestRepository.tsx). The selected assignee owns that stage's
-            decision after the required project-role check. */}
-        <Field label="Default Reviewer (Stage 1)">
-          <SearchableSelect
-            value={defaultReviewerId === '' ? '' : String(defaultReviewerId)}
-            onChange={(v) => setDefaultReviewerId(v ? Number(v) : '')}
-            placeholder="-- No default --"
-            options={users.filter((u) => u.is_active && u.id !== currentUserId && u.id !== ownerId).map((u) => ({ value: String(u.id), label: u.full_name }))}
-          />
-          <small className="muted">The selected person is automatically added to Members as Reviewer and becomes the Stage 1 default.</small>
-        </Field>
-        <Field label="Default Project Lead (Stage 2)">
-          <SearchableSelect
-            value={defaultQaLeadId === '' ? '' : String(defaultQaLeadId)}
-            onChange={(v) => setDefaultQaLeadId(v ? Number(v) : '')}
-            placeholder="-- No default --"
-            options={users.filter((u) => u.is_active && u.roles.includes('QA_LEAD')).map((u) => ({ value: String(u.id), label: u.full_name }))}
-          />
-          <small className="muted">The selected person is automatically added to Members as Project Lead and becomes the Stage 2 default.</small>
-        </Field>
         <Field label="Description">
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
@@ -170,8 +143,6 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
   const [department, setDepartment] = useState(project.department || '')
   const [description, setDescription] = useState(project.description || '')
   const [ownerId, setOwnerId] = useState<number | ''>(project.owner_id ?? '')
-  const [defaultReviewerId, setDefaultReviewerId] = useState<number | ''>(project.default_reviewer_id ?? '')
-  const [defaultQaLeadId, setDefaultQaLeadId] = useState<number | ''>(project.default_qa_lead_id ?? '')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
@@ -198,8 +169,6 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
         department,
         description: description.trim() || null,
         owner_id: ownerId || null,
-        default_reviewer_id: defaultReviewerId || null,
-        default_qa_lead_id: defaultQaLeadId || null,
       })
       onUpdated(updated)
     } catch (err) { setError(err) } finally { setBusy(false) }
@@ -233,24 +202,6 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
             placeholder="-- Select owner --"
             options={users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))}
           />
-        </Field>
-        <Field label="Default Reviewer (Stage 1)">
-          <SearchableSelect
-            value={defaultReviewerId === '' ? '' : String(defaultReviewerId)}
-            onChange={(v) => setDefaultReviewerId(v ? Number(v) : '')}
-            placeholder="-- No default --"
-            options={users.filter((u) => u.is_active && u.id !== ownerId).map((u) => ({ value: String(u.id), label: u.full_name }))}
-          />
-          <small className="muted">The selected person is automatically added to Members as Reviewer and becomes the Stage 1 default.</small>
-        </Field>
-        <Field label="Default Project Lead (Stage 2)">
-          <SearchableSelect
-            value={defaultQaLeadId === '' ? '' : String(defaultQaLeadId)}
-            onChange={(v) => setDefaultQaLeadId(v ? Number(v) : '')}
-            placeholder="-- No default --"
-            options={users.filter((u) => u.is_active && u.roles.includes('QA_LEAD')).map((u) => ({ value: String(u.id), label: u.full_name }))}
-          />
-          <small className="muted">The selected person is automatically added to Members as Project Lead and becomes the Stage 2 default.</small>
         </Field>
         <Field label="Description">
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -340,119 +291,6 @@ function UnarchiveProjectModal({ project, onClose, onDone }: {
   )
 }
 
-// PRJ-005/GOV-001 -- membership management, restricted (on the backend) to
-// this project's own owner or a QA Lead/Admin.
-function ProjectMembersModal({ project, users, canManageMembers, onClose }: {
-  project: TestProjectOut
-  users: UserOut[]
-  canManageMembers: boolean
-  onClose: () => void
-}) {
-  const [members, setMembers] = useState<TestProjectMemberOut[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<unknown>(null)
-  const [addUserId, setAddUserId] = useState<number | ''>('')
-  const [addRole, setAddRole] = useState<string>(TEST_PROJECT_ROLES[TEST_PROJECT_ROLES.length - 1] || 'Tester')
-  const [busy, setBusy] = useState(false)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try { setMembers(await api.get<TestProjectMemberOut[]>(`/api/test-projects/${project.id}/members`)) }
-    catch (err) { setError(err) } finally { setLoading(false) }
-  }, [project.id])
-  useEffect(() => { load() }, [load])
-
-  const memberUserIds = useMemo(() => new Set(members.map((m) => m.user_id)), [members])
-  const addableUsers = useMemo(() => users.filter((u) => u.is_active && !memberUserIds.has(u.id)), [users, memberUserIds])
-
-  async function addMember() {
-    if (!addUserId) return
-    setBusy(true)
-    setError(null)
-    try {
-      const created = await api.post<TestProjectMemberOut>(`/api/test-projects/${project.id}/members`, {
-        user_id: addUserId, project_role: addRole,
-      })
-      setMembers((prev) => [...prev, created])
-      setAddUserId('')
-    } catch (err) { setError(err) } finally { setBusy(false) }
-  }
-
-  async function changeRole(member: TestProjectMemberOut, role: string) {
-    setBusy(true)
-    setError(null)
-    try {
-      const updated = await api.patch<TestProjectMemberOut>(`/api/test-projects/${project.id}/members/${member.id}`, { project_role: role })
-      setMembers((prev) => prev.map((m) => m.id === updated.id ? updated : m))
-    } catch (err) { setError(err) } finally { setBusy(false) }
-  }
-
-  async function removeMember(member: TestProjectMemberOut) {
-    setBusy(true)
-    setError(null)
-    try {
-      await api.del(`/api/test-projects/${project.id}/members/${member.id}`)
-      setMembers((prev) => prev.filter((m) => m.id !== member.id))
-    } catch (err) { setError(err) } finally { setBusy(false) }
-  }
-
-  return (
-    <Modal title={`${project.project_key} · Members`} onClose={onClose} wide>
-      <ErrorText error={error} />
-      {loading ? <p className="muted">Loading members…</p> : (
-        <table className="simple-table">
-          <thead><tr><th>Name</th><th>Email</th><th>Project role</th>{canManageMembers && <th></th>}</tr></thead>
-          <tbody>
-            {members.map((member) => (
-              <tr key={member.id}>
-                <td>{member.user_name || `User #${member.user_id}`}</td>
-                <td>{member.user_email || '—'}</td>
-                <td>
-                  {canManageMembers && member.user_id !== project.owner_id ? (
-                    <select value={member.project_role} disabled={busy} onChange={(e) => changeRole(member, e.target.value)}>
-                      {TEST_PROJECT_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-                    </select>
-                  ) : member.project_role}
-                </td>
-                {canManageMembers && (
-                  <td>
-                    {member.user_id !== project.owner_id && (
-                      <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => removeMember(member)}>Remove</button>
-                    )}
-                  </td>
-                )}
-              </tr>
-            ))}
-            {members.length === 0 && (
-              <tr><td colSpan={canManageMembers ? 4 : 3} className="muted">No members yet.</td></tr>
-            )}
-          </tbody>
-        </table>
-      )}
-      {canManageMembers && (
-        <div style={{ display: 'flex', gap: 10, marginTop: 16, alignItems: 'flex-end' }}>
-          <div style={{ flex: 1 }}>
-            <Field label="Add member">
-              <SearchableSelect
-                value={addUserId === '' ? '' : String(addUserId)}
-                onChange={(v) => setAddUserId(v ? Number(v) : '')}
-                placeholder="-- Select user --"
-                options={addableUsers.map((u) => ({ value: String(u.id), label: u.full_name }))}
-              />
-            </Field>
-          </div>
-          <Field label="Role">
-            <select value={addRole} onChange={(e) => setAddRole(e.target.value)}>
-              {TEST_PROJECT_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-            </select>
-          </Field>
-          <button className="btn btn-primary" disabled={busy || !addUserId} onClick={addMember}>Add</button>
-        </div>
-      )}
-    </Modal>
-  )
-}
-
 export default function TestProjects() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -463,7 +301,9 @@ export default function TestProjects() {
   // flip is_active immediately, same as before -- only a QA Engineer's
   // toggle now goes through a request/approve step (see changeProjectStatus
   // and the new Approve/Reject flow below).
-  const canReview = hasRole(user, 'QA_LEAD')
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on this QA Lead
+  // checkpoint, same as Admin -- see ORACLE_MIGRATION_2026-07.md section 59.
+  const canReview = hasRole(user, ...QA_LEAD_GROUP_ROLES)
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [applications, setApplications] = useState<ApplicationMasterOut[]>([])
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
@@ -477,7 +317,6 @@ export default function TestProjects() {
   const [editProject, setEditProject] = useState<TestProjectOut | null>(null)
   const [archiveProject, setArchiveProject] = useState<TestProjectOut | null>(null)
   const [unarchiveProject, setUnarchiveProject] = useState<TestProjectOut | null>(null)
-  const [membersProject, setMembersProject] = useState<TestProjectOut | null>(null)
   const [statusBusy, setStatusBusy] = useState(false)
   const [projectFilter, setProjectFilter] = useState<'active' | 'inactive' | 'archived' | 'all'>('active')
   // Reported directly, alongside the approval workflow above: "Search under
@@ -674,32 +513,36 @@ export default function TestProjects() {
             <div className="tm-project-actions">
               <button onClick={() => navigate(`/test-repository?project=${project.id}`)}>Open repository</button>
               <button onClick={() => navigate(`/test-execution?project=${project.id}`)}>View execution</button>
-              <button onClick={() => setMembersProject(project)}>Members</button>
-              <button onClick={() => openActivity(project)}>Activity</button>
-              {!project.is_archived && canEditProjectDetails(user, project) && (
-                <button onClick={() => setEditProject(project)}>Edit</button>
-              )}
-              {!project.is_archived && (project.pending_is_active != null ? (
-                canReview && (
-                  <>
-                    <button className="primary" onClick={() => setActivationReview({ project, decision: 'APPROVE' })}>Approve</button>
-                    <button className="danger" onClick={() => setActivationReview({ project, decision: 'REJECT' })}>Reject</button>
-                  </>
-                )
-              ) : canReview ? (
-                <button className={project.is_active ? 'danger' : ''} onClick={() => setStatusProject(project)}>
-                  {project.is_active ? 'Deactivate' : 'Reactivate'}
-                </button>
-              ) : canManage && (
-                <button onClick={() => setStatusProject(project)}>
-                  {project.is_active ? 'Request deactivation' : 'Request reactivation'}
-                </button>
-              ))}
-              {canReview && (
-                project.is_archived
-                  ? <button onClick={() => setUnarchiveProject(project)}>Unarchive</button>
-                  : <button className="danger" onClick={() => setArchiveProject(project)}>Archive</button>
-              )}
+              <details className="tm-project-more">
+                <summary>More <span>⌄</span></summary>
+                <div>
+                  <button onClick={() => openActivity(project)}>Activity</button>
+                  {!project.is_archived && canEditProjectDetails(user, project) && (
+                    <button onClick={() => setEditProject(project)}>Edit project</button>
+                  )}
+                  {!project.is_archived && (project.pending_is_active != null ? (
+                    canReview && (
+                      <>
+                        <button className="primary" onClick={() => setActivationReview({ project, decision: 'APPROVE' })}>Approve request</button>
+                        <button className="danger" onClick={() => setActivationReview({ project, decision: 'REJECT' })}>Reject request</button>
+                      </>
+                    )
+                  ) : canReview ? (
+                    <button className={project.is_active ? 'danger' : ''} onClick={() => setStatusProject(project)}>
+                      {project.is_active ? 'Deactivate' : 'Reactivate'}
+                    </button>
+                  ) : canManage && (
+                    <button onClick={() => setStatusProject(project)}>
+                      {project.is_active ? 'Request deactivation' : 'Request reactivation'}
+                    </button>
+                  ))}
+                  {canReview && (
+                    project.is_archived
+                      ? <button onClick={() => setUnarchiveProject(project)}>Unarchive</button>
+                      : <button className="danger" onClick={() => setArchiveProject(project)}>Archive</button>
+                  )}
+                </div>
+              </details>
             </div>
           </article>
         ))}
@@ -742,14 +585,6 @@ export default function TestProjects() {
           project={unarchiveProject}
           onClose={() => setUnarchiveProject(null)}
           onDone={(p) => { setProjects((prev) => prev.map((project) => project.id === p.id ? p : project)); setUnarchiveProject(null) }}
-        />
-      )}
-      {membersProject && (
-        <ProjectMembersModal
-          project={membersProject}
-          users={users}
-          canManageMembers={hasRole(user, 'QA_LEAD') || membersProject.owner_id === user?.id}
-          onClose={() => setMembersProject(null)}
         />
       )}
       {activityProject && (

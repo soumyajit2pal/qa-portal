@@ -953,12 +953,24 @@ export interface TestCaseOut {
   current_approved_version_id?: number | null
   current_draft_version_id?: number | null
   current_draft_author_id?: number | null
+  current_draft_author_name?: string | null
+  // GOV-002 gap fix -- see backend schemas.TestCaseOut's matching comment.
+  current_draft_submitted_by_id?: number | null
+  current_draft_reviewed_by_id?: number | null
+  // "show submitted by as well" -- see backend schemas.TestCaseOut's matching comment.
+  current_draft_submitted_by_name?: string | null
+  // "Add Recommended By once recommended" -- see backend schemas.TestCaseOut's matching comment.
+  current_draft_reviewed_by_name?: string | null
   created_by_id?: number | null
   created_by_name?: string | null
   created_at: string
   updated_at: string
   checked_out_by_id?: number | null
   checked_out_by_name?: string | null
+  // 2026-08 "Recycle Bin" requirement -- see backend schemas.TestCaseOut's matching comment.
+  is_deleted?: boolean
+  deleted_by_name?: string | null
+  deleted_at?: string | null
   checked_out_at?: string | null
   steps: TestStepOut[]
   // Also present on the PAG-005 list schema below (which has no `steps` at
@@ -994,12 +1006,24 @@ export interface TestCaseListOut {
   current_approved_version_id?: number | null
   current_draft_version_id?: number | null
   current_draft_author_id?: number | null
+  current_draft_author_name?: string | null
+  // GOV-002 gap fix -- see backend schemas.TestCaseOut's matching comment.
+  current_draft_submitted_by_id?: number | null
+  current_draft_reviewed_by_id?: number | null
+  // "show submitted by as well" -- see backend schemas.TestCaseOut's matching comment.
+  current_draft_submitted_by_name?: string | null
+  // "Add Recommended By once recommended" -- see backend schemas.TestCaseOut's matching comment.
+  current_draft_reviewed_by_name?: string | null
   created_by_id?: number | null
   created_by_name?: string | null
   created_at: string
   updated_at: string
   checked_out_by_id?: number | null
   checked_out_by_name?: string | null
+  // 2026-08 "Recycle Bin" requirement -- see backend schemas.TestCaseOut's matching comment.
+  is_deleted?: boolean
+  deleted_by_name?: string | null
+  deleted_at?: string | null
   checked_out_at?: string | null
   steps_count: number
   pending_with_user_id?: number | null
@@ -1019,6 +1043,8 @@ export interface TestCaseSummaryOut {
   review_completed_count: number
   critical_count: number
   tags: string[]
+  archived_count: number
+  recycle_bin_count: number
 }
 
 export type TestCaseVersionStepOut = TestStepIn & { id: number; version_id: number }
@@ -1082,14 +1108,12 @@ export interface TestCaseReassignApproversIn {
 export type TestCaseReviewDecision = "RECOMMEND" | "APPROVE" | "RETURN" | "REJECT"
 export interface TestCaseReviewIn {
   decision: TestCaseReviewDecision
-  assigned_qa_lead_id?: number | null
   comments?: string | null
 }
 
 // Request body for POST /api/projects/{id}/test-cases/bulk-recommend.
 export interface TestCaseBulkRecommendIn {
   ids: number[]
-  assigned_qa_lead_id: number
   comments?: string | null
 }
 
@@ -1197,6 +1221,9 @@ export interface TestExecutionOut {
   executed_by_id?: number | null
   executed_by_name?: string | null
   executed_at?: string | null
+  // Scenario 1 self-remove fix -- see backend schemas.TestExecutionOut's matching comment.
+  added_by_id?: number | null
+  added_by_name?: string | null
   run_count: number
   // SRS EXE-007 optimistic concurrency -- send back as expected_run_version
   // on the next save; a 409 means someone else recorded a newer attempt
@@ -1215,6 +1242,19 @@ export interface TestExecutionOut {
   // this is only for disabling the option and explaining why before the
   // user even submits.
   linked_defects?: LinkedGovernedDefectRef[]
+}
+
+// Mirrors backend schemas.DefectLinkableExecutionOut -- the batch
+// GET /api/test-execution/executions/blocked-or-failed response Defects.tsx
+// uses to build its "pick a Failed/Blocked execution" pickers, replacing the
+// old per-project cycles + per-cycle executions fan-out. Same shape as
+// Defects.tsx's own pre-existing local `ExecutionContext` interface, so that
+// interface can simply become an alias for this instead of a separately
+// re-derived type.
+export interface DefectLinkableExecutionOut {
+  project: TestProjectOut
+  cycle: TestCycleOut
+  execution: TestExecutionOut
 }
 
 // Mirrors backend schemas.TestExecutionSummaryOut -- see its own docstring
@@ -1296,6 +1336,12 @@ export interface DefectOut {
   cycle_id?: number | null
   cycle_key?: string | null
   project_id?: number | null
+  // 2026-08 -- reported directly: "During assigning defect, department
+  // should be auto populated based on linked request or Failed / Blocked
+  // Test Execution." Mirrors backend models.Defect.project_department --
+  // the linked Test Cycle's own Project.department, null whenever no
+  // execution/cycle is linked. See Defects.tsx's TransitionModal.
+  project_department?: string | null
   primary_test_case_id?: number | null
   test_case_key?: string | null
   execution_id?: number | null
@@ -1318,6 +1364,11 @@ export interface DefectOut {
   assigned_by_id?: number | null
   assigned_by_name?: string | null
   assigned_at?: string | null
+  // 2026-08 -- reported directly: the "Remarks" typed while transitioning a
+  // defect to Assigned was captured by the backend (models.Defect.
+  // assignment_remarks) but never exposed on this type, so it was never
+  // rendered anywhere. See Defects.tsx's Workflow Details section.
+  assignment_remarks?: string | null
   retest_tester_id?: number | null
   device_details?: string | null
   build_version?: string | null

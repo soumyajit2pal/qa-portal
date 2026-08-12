@@ -234,20 +234,27 @@ interface CardProps {
   className?: string;
 }
 
+export function InfoTooltip({ content, label = "More information" }: { content: ReactNode; label?: string }) {
+  return (
+    <span className="stat-card-info shared-info-tooltip">
+      <button type="button" aria-label={label}>i</button>
+      <span className="stat-card-tooltip" role="tooltip">{content}</span>
+    </span>
+  );
+}
+
 export function Card({ title, subtitle, children, right, style, className }: CardProps) {
   return (
     <div className={`card${className ? ` ${className}` : ""}`} style={style}>
-      {(title || right) && (
+      {(title || subtitle || right) && (
         <div className="card-head">
           <div>
             {title && <h3>{title}</h3>}
-            {subtitle && (
-              <p className="muted small" style={{ margin: "2px 0 0" }}>
-                {subtitle}
-              </p>
-            )}
           </div>
-          {right}
+          <div className="card-head-actions">
+            {subtitle && <InfoTooltip content={subtitle} label={`About ${typeof title === "string" ? title : "this section"}`} />}
+            {right}
+          </div>
         </div>
       )}
       {children}
@@ -267,15 +274,15 @@ export function MetricCard({
   // Items", which is the same count as the Dashboard's Ageing
   // Distribution donut) had no visible explanation of their scope, so
   // people had to ask what they meant instead of reading it on screen.
-  // Always rendered (not a hover-only tooltip) so it's self-explanatory
-  // at a glance.
+  // Available through the shared information control so metric cards keep
+  // the same compact behaviour throughout the application.
   hint?: ReactNode;
 }) {
   return (
     <div className="metric-card">
+      {hint && <InfoTooltip content={hint} label={`About ${typeof label === "string" ? label : "this metric"}`} />}
       <div className="value">{value ?? 0}</div>
       <div className="label">{label}</div>
-      {hint && <div className="hint">{hint}</div>}
     </div>
   );
 }
@@ -288,14 +295,21 @@ export function BarChart({ data }: { data?: Record<string, number> | null }) {
     <div className="bar-chart">
       {entries.map(([k, v]) => (
         <div className="bar-row" key={k}>
-          <span>{k}</span>
+          <span
+            className="bar-label"
+            title={k.replace(/_/g, " ")}
+          >
+            {k.includes("_")
+              ? k.toLowerCase().split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
+              : k}
+          </span>
           <div className="bar-track">
             <div
               className="bar-fill"
               style={{ width: `${(v / max) * 100}%` }}
             />
           </div>
-          <span>{v}</span>
+          <span className="bar-value">{v}</span>
         </div>
       ))}
     </div>
@@ -933,13 +947,11 @@ export interface TableColumn<T> {
 // not the whole dataset, so Table can no longer do its own client-side
 // filtering/slicing over `rows` -- there's nothing left in the browser to
 // filter beyond what the server already sent. Passing this prop switches
-// Table into that mode: the per-column filter popovers are hidden (exact-
-// match filtering over one page of 25 rows would silently hide records the
-// filter never even saw, which is worse than no filter at all -- the
-// module-specific search/status/department controls each list page already
-// renders above its Table are the real filter UI in this mode), and the
-// footer's pagination controls/counts are driven by these values instead of
-// by `rows.length`.
+// Table into that mode. Column filters remain available so the filtering
+// experience is consistent throughout the application; because `rows` is
+// the current API page, those value filters refine the current page while
+// each module's search/status/department controls continue to query the full
+// dataset. The footer makes that scope explicit whenever a filter is active.
 export interface TableServerPagination {
   page: number;
   pageSize: number;
@@ -973,7 +985,7 @@ interface TableProps<T> {
   server?: TableServerPagination;
 }
 
-const SERVER_PAGE_SIZE_OPTIONS = [25, 50, 100];
+const SERVER_PAGE_SIZE_OPTIONS = [5, 10, 25, 50, 100];
 
 export function Table<T extends Record<string, any>>({
   columns,
@@ -1183,10 +1195,7 @@ export function Table<T extends Record<string, any>>({
   );
 
   const filteredRows = useMemo(() => {
-    // In server mode `rows` is already just this page's data, filtered and
-    // sorted by the backend (PAG-007) -- there's nothing left to filter
-    // client-side, and the per-column filter icons are hidden below anyway.
-    if (server || activeFilters.length === 0) return rows;
+    if (activeFilters.length === 0) return rows;
     return rows.filter((row) =>
       activeFilters.every(([key, value]) => {
         const col = availableColumns.find((c) => c.key === key);
@@ -1220,7 +1229,7 @@ export function Table<T extends Record<string, any>>({
   const effectivePageSize = server ? server.pageSize : pageSize;
   const pagedRows = useMemo(
     () =>
-      server ? rows : filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+      server ? filteredRows : filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
     [server, rows, filteredRows, currentPage, pageSize]
   );
 
@@ -1288,7 +1297,7 @@ export function Table<T extends Record<string, any>>({
               <th key={c.key}>
                 <div className="th-cell">
                   <span>{c.header}</span>
-                  {!server && c.filterable !== false && (
+                  {c.filterable !== false && (
                     <button
                       type="button"
                       className={`th-filter-btn ${
@@ -1351,6 +1360,12 @@ export function Table<T extends Record<string, any>>({
           <div className="table-footer">
             <div className="table-footer-filters">
               {server.loading && <span>Loading…</span>}
+              {!server.loading && activeFilters.length > 0 && (
+                <>
+                  <span>Showing {filteredRows.length} of {rows.length} rows on this page</span>
+                  <button type="button" onClick={clearFilters}>Clear filters</button>
+                </>
+              )}
             </div>
             <div className="table-pagination">
               <span>

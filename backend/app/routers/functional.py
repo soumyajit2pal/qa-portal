@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session, joinedload
 from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
+from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
+from .. import reassignment
 
 router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
 
@@ -63,8 +64,16 @@ def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> m
 
 
 def _require_assigned_qa_lead(obj: "models.FunctionalRequest", user: models.User) -> None:
-    if not user.has_role(Role.ADMIN) and obj.qa_lead_id != user.id:
-        raise HTTPException(403, "Only the QA Lead assigned by the Department Head can perform this action")
+    # Reported directly: "AGM QA / Chief Manager QA does not need to assign
+    # QA lead separately as they [a]re the executive[s], ... they have super
+    # power" -- CHIEF_MANAGER_QA/AGM_QA get a blanket Executive bypass on
+    # every QA-Lead-gated action, same as has_role()'s own ADMIN bypass,
+    # WITHOUT being listed as "QA Lead group" members anywhere in the UI
+    # (see ORACLE_MIGRATION_2026-07.md section 59 -- that's a display-only
+    # concern, kept to literal QA_LEAD; this is the separate action-
+    # authorization check).
+    if not user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        raise HTTPException(403, "Only a member of the QA Lead group can perform this action")
 
 
 def _assigned_tester_ids(obj: "models.FunctionalRequest") -> set[int]:
@@ -74,6 +83,57 @@ def _assigned_tester_ids(obj: "models.FunctionalRequest") -> set[int]:
 def _require_assigned_tester(obj: "models.FunctionalRequest", user: models.User) -> None:
     if not user.has_role(Role.ADMIN) and user.id not in _assigned_tester_ids(obj):
         raise HTTPException(403, "Only a COE - Quality Assurance QA Tester assigned by the QA Lead can perform this action")
+
+
+# 2026-08 -- reported directly, see TESTER_REASSIGNABLE_STATUSES' own
+# comment on constants.py: reassigning is now open to the QA Lead group at
+# any point (not just the very first PLANNING assignment), AND to whoever
+# is currently assigned -- "the current assign[ed] people can reassign to
+# another qa member" -- so an overloaded tester can hand their own slot off
+# to a colleague without needing to go back to the QA Lead first. A user
+# with no roles in common with either group (e.g. a QA Engineer who was
+# never assigned to THIS request) is still blocked -- being a QA Engineer
+# generally isn't enough, only actually being on this request's own
+# assigned_tester_ids is.
+def _require_assigned_qa_lead_or_current_tester(obj: "models.FunctionalRequest", user: models.User,
+                                                 action: str = "reassign the tester(s) on this request") -> None:
+    if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        return
+    if user.id in _assigned_tester_ids(obj):
+        return
+    raise HTTPException(403, f"Only the QA Lead group or a currently assigned tester can {action}")
+
+
+# 2026-08 Reassignment CR, reported directly: "Reassignment shall be
+# permitted to: the current assignee, the Department Head of the department
+# to which the current assignee belongs, or Admin users." Deliberately
+# narrower than _require_assigned_qa_lead_or_current_tester above (which
+# still gates the FIRST assignment, unchanged) -- QA_LEAD on its own is not
+# a Department Head per the CR's own clarification table (COE - Quality
+# Assurance's Department Head is specifically AGM_QA/CHIEF_MANAGER_QA), so a
+# QA Lead who isn't also currently assigned can no longer reassign someone
+# else's slot once the first assignment has happened. See assign_tester's
+# `is_initial_assignment` branch for where each gate applies.
+def _require_can_reassign_tester(obj: "models.FunctionalRequest", user: models.User) -> None:
+    if user.has_role(Role.ADMIN):
+        return
+    if user.id in _assigned_tester_ids(obj):
+        return
+    if user.department == QA_DEPARTMENT and user.has_role(*reassignment.department_head_roles(QA_DEPARTMENT)):
+        return
+    # 2026-08 -- reported directly: QA_LEAD is required to keep reassignment
+    # rights here too, not just CHIEF_MANAGER_QA/AGM_QA. The CR's own
+    # eligibility list (current assignee / Department Head / Admin) would
+    # otherwise narrow existing behavior -- a plain QA_LEAD could previously
+    # reassign any tester on any request, same as the initial-assignment gate
+    # (_require_assigned_qa_lead_or_current_tester) already allows.
+    if user.has_role(Role.QA_LEAD):
+        return
+    raise HTTPException(
+        403,
+        "Only a currently assigned tester, a QA Lead, the QA Department Head (Chief Manager QA / AGM QA), "
+        "or an Administrator can reassign the tester(s) on this request",
+    )
 
 
 @router.get("", response_model=pagination.Page[schemas.FunctionalListOut])
@@ -374,8 +434,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
     obj.department_head_id = current_user.id
 
     if payload.decision == "Approved":
-        qa_lead = _it_qa_user(db, payload.qa_lead_id, Role.QA_LEAD, "qa_lead_id")
-        obj.qa_lead_id = qa_lead.id
+        obj.qa_lead_id = None
         obj.status = QAStatus.QA_LEAD_ASSIGNED
     elif payload.decision == "Returned":
         obj.status = QAStatus.RETURNED_BY_DEPARTMENT_HEAD
@@ -393,7 +452,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
 # ---- QA Lead: Readiness Verification ----
 @router.post("/{req_id}/start-readiness-verification", response_model=schemas.FunctionalOut)
 def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.QA_LEAD_ASSIGNED, "Start readiness verification")
     _require_assigned_qa_lead(obj, current_user)
@@ -406,7 +465,7 @@ def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/readiness-decision", response_model=schemas.FunctionalOut)
 def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                        current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.READINESS_VERIFICATION, "Readiness decision")
     _require_assigned_qa_lead(obj, current_user)
@@ -457,7 +516,7 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
 # ---- QA Activity: Planning -> Tester Assignment -> Test Design -> Execution ----
 @router.post("/{req_id}/begin-planning", response_model=schemas.FunctionalOut)
 def begin_planning(req_id: int, db: Session = Depends(get_db),
-                    current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                    current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.QA_ACTIVITY_INITIATED, "Begin planning")
     _require_assigned_qa_lead(obj, current_user)
@@ -470,23 +529,64 @@ def begin_planning(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/assign-tester", response_model=schemas.FunctionalOut)
 def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = Depends(get_db),
-                   current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                   current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.QA_ENGINEER))):
+    """2026-08 -- reported directly: "once assigned there are no other
+    option to reassign the tester or modify the tester." Previously only
+    ever callable while status was exactly PLANNING (the very first
+    assignment) by the QA Lead group -- see TESTER_REASSIGNABLE_STATUSES'
+    own comment on constants.py. Now callable through the whole active-
+    testing range, by either the QA Lead group OR any currently-assigned
+    tester on this request (self-handoff to another QA member, see
+    _require_assigned_qa_lead_or_current_tester above). Reassigning after
+    the initial PLANNING->TESTER_ASSIGNED transition deliberately does NOT
+    touch `status` -- a request already at, say, EXECUTION_IN_PROGRESS must
+    stay there after a tester swap, not regress back to "Tester Assigned"
+    and lose track of where the work actually is.
+
+    2026-08 Reassignment CR -- once this is a genuine reassignment (status
+    already past PLANNING), eligibility narrows to
+    _require_can_reassign_tester (current tester / QA Department Head /
+    Admin) and a reason becomes mandatory; the newly-added tester(s) are
+    notified, and a dedicated "Reassigned" audit row (with previous/new
+    names and the reason) is written alongside the existing history log
+    entry below."""
     obj = _get_or_404(db, req_id)
-    _require(obj, QAStatus.PLANNING, "Assign tester")
-    _require_assigned_qa_lead(obj, current_user)
+    _require(obj, TESTER_REASSIGNABLE_STATUSES, "Assign tester")
+    is_initial_assignment = obj.status == QAStatus.PLANNING
+    previous_ids = _assigned_tester_ids(obj)
+    if is_initial_assignment:
+        _require_assigned_qa_lead_or_current_tester(obj, current_user)
+    else:
+        _require_can_reassign_tester(obj, current_user)
+        reassignment.require_reason(payload.reason)
     if not payload.tester_ids:
         raise HTTPException(400, "At least one tester_id is required")
     unique_ids = list(dict.fromkeys(payload.tester_ids))
     testers = [_it_qa_user(db, tester_id, Role.QA_ENGINEER, f"tester_id {tester_id}") for tester_id in unique_ids]
     obj.assigned_tester_ids = ",".join(str(i) for i in unique_ids)
-    obj.status = QAStatus.TESTER_ASSIGNED
+    if is_initial_assignment:
+        obj.status = QAStatus.TESTER_ASSIGNED
     # Resolve to full names for the history log -- previously logged the raw
     # numeric ids (e.g. "Assigned tester user ids: [3]"), which meant nothing
     # to anyone reading the History tab. Falls back to "user #<id>" for any
     # id that doesn't resolve (e.g. a since-deleted account).
     name_by_id = {u.id: u.full_name for u in testers}
     tester_names = [name_by_id[i] for i in unique_ids]
-    _log(db, obj.id, "Planning", current_user, "Tester Assigned", f"Assigned tester(s): {', '.join(tester_names)}")
+    decision = "Tester Assigned" if is_initial_assignment else "Tester Reassigned"
+    step = "Planning" if is_initial_assignment else QA_REQUEST_STATUS_LABELS.get(obj.status, obj.status)
+    _log(db, obj.id, step, current_user, decision, f"Assigned tester(s): {', '.join(tester_names)}")
+    if not is_initial_assignment:
+        previous_users = db.query(models.User).filter(models.User.id.in_(previous_ids)).all() if previous_ids else []
+        previous_label = ", ".join(u.full_name for u in previous_users) if previous_users else "Unassigned"
+        reassignment.record_reassignment(
+            db, "FUNCTIONAL_REQUEST", obj.id, current_user,
+            previous_label, ", ".join(tester_names), payload.reason,
+        )
+        for new_id in set(unique_ids) - previous_ids:
+            reassignment.notify_new_assignee(
+                db, new_id, "FUNCTIONAL_REQUEST", obj.id, obj.request_id,
+                f"You have been assigned as tester on {obj.request_id}.", current_user.id,
+            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -727,7 +827,16 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.QA_COMPLETED, "Request sign-off")
-    _require_assigned_tester(obj, current_user)
+    # 2026-08 -- reported directly: "'Request Sign Off' button is not
+    # enable[d] for QA lead ... if tester [is] no[t] available then at
+    # least [o]n behalf of QA he can raise the request." Previously this
+    # called _require_assigned_tester, which only ever let the literal
+    # assigned tester (or Admin) through -- the route's own
+    # require_roles(QA_LEAD, QA_ENGINEER) above never actually reached a
+    # QA Lead in practice. Now the QA Lead group can always raise sign-off
+    # on a request they own, same "QA Lead group OR current tester" shape
+    # as tester reassignment.
+    _require_assigned_qa_lead_or_current_tester(obj, current_user, "request sign-off on this request")
     # The frontend now creates the QA Sign-off Certificate (POST /api/signoffs)
     # right before calling this, via SignOff.tsx's NewSignOffModal opened from
     # this request's own "Request Sign-off" button -- link it immediately
@@ -747,7 +856,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
 
 @router.post("/{req_id}/confirm-signoff", response_model=schemas.FunctionalOut)
 def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """Confirms the QA Sign-off certificate (optionally linking a Module 8 QASignOff
     record created via /api/signoffs) and hands the request to the requester for
     final verification.
@@ -806,7 +915,7 @@ def get_checklist(req_id: int, db: Session = Depends(get_db), current_user: mode
 @router.put("/{req_id}/checklist/{item_id}", response_model=schemas.ChecklistItemOut)
 def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistItemUpdate,
                            db: Session = Depends(get_db),
-                           current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                           current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     item = db.query(models.ReadinessChecklistItem).filter_by(id=item_id, functional_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")

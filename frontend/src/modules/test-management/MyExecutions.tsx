@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
@@ -34,6 +35,45 @@ function QuickResultActions({ execution, onChanged, onError }: {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState('')
   const [busy, setBusy] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [position, setPosition] = useState<{ top: number; left: number; width: number } | null>(null)
+
+  function togglePanel() {
+    if (open) { setOpen(false); return }
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const gap = 8
+    const viewportGap = 12
+    const width = Math.min(330, window.innerWidth - viewportGap * 2)
+    const estimatedHeight = 265
+    setPosition({
+      left: Math.min(Math.max(viewportGap, rect.right - width), window.innerWidth - width - viewportGap),
+      top: window.innerHeight - rect.bottom >= estimatedHeight + gap ? rect.bottom + gap : Math.max(viewportGap, rect.top - estimatedHeight - gap),
+      width,
+    })
+    setOpen(true)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    function closeOutside(event: MouseEvent) {
+      const target = event.target as Node
+      if (!panelRef.current?.contains(target) && !triggerRef.current?.contains(target)) setOpen(false)
+    }
+    function closeOnMove() { setOpen(false) }
+    function closeOnEscape(event: KeyboardEvent) { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', closeOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    window.addEventListener('resize', closeOnMove)
+    window.addEventListener('scroll', closeOnMove, true)
+    return () => {
+      document.removeEventListener('mousedown', closeOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+      window.removeEventListener('resize', closeOnMove)
+      window.removeEventListener('scroll', closeOnMove, true)
+    }
+  }, [open])
 
   async function saveResult() {
     if (!result) return
@@ -53,26 +93,28 @@ function QuickResultActions({ execution, onChanged, onError }: {
 
   return (
     <div className="tm-inline-run" onClick={(event) => event.stopPropagation()}>
-      <button type="button" className="tm-play-button" disabled={busy} onClick={() => setOpen((v) => !v)}>
+      <button ref={triggerRef} type="button" className="tm-play-button" disabled={busy} onClick={togglePanel}>
         <span>▶</span> Run
       </button>
-      {open && (
-        <div className="tm-inline-run-panel">
-          <strong>Record new result</strong><small>Creates Attempt #{(execution.run_count || 0) + 1}</small>
+      {open && position && createPortal(
+        <div ref={panelRef} className="tm-inline-run-panel portaled" style={position} onClick={(event) => event.stopPropagation()}>
+          <div className="tm-inline-run-head"><span><small>Quick execution</small><strong>Record result</strong></span><b>Attempt #{(execution.run_count || 0) + 1}</b></div>
           <div className="tm-inline-result-options">
             {TEST_EXECUTION_STATUSES.filter((status) => status !== 'Not Executed').map((status) => {
               const blocked = executionStatusGate(execution.linked_defects, execution.runs, status)
-              return <button type="button" key={status} className={result === status ? 'selected' : ''} disabled={!!blocked} title={blocked || undefined} onClick={() => setResult(status)}>{status}</button>
+              const tone = status.toLowerCase().replace(/\s+/g, '-')
+              return <button type="button" key={status} className={`${result === status ? 'selected ' : ''}result-${tone}`} disabled={!!blocked} title={blocked || undefined} onClick={() => setResult(status)}><i />{status}</button>
             })}
           </div>
           {result && executionStatusGate(execution.linked_defects, execution.runs, result) && (
             <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result)}</small>
           )}
           <div className="tm-inline-run-actions">
-            <button type="button" className="btn btn-sm" onClick={() => setOpen(false)}>Cancel</button>
-            <button type="button" className="btn btn-sm btn-primary" disabled={!result || busy} onClick={saveResult}>{busy ? 'Saving…' : 'Save result'}</button>
+            <span>{result ? `${result} selected` : 'Select one result'}</span>
+            <button type="button" className="btn btn-sm" onClick={() => { setResult(''); setOpen(false) }}>Cancel</button>
+            <button type="button" className="btn btn-sm btn-primary" disabled={!result || busy} onClick={saveResult}>{busy ? 'Saving…' : 'Save attempt'}</button>
           </div>
-        </div>
+        </div>, document.body
       )}
     </div>
   )
@@ -181,14 +223,15 @@ export default function MyExecutions() {
 
   const notExecutedCount = rows.filter((row) => row.execution.status === 'Not Executed').length
   const failedCount = rows.filter((row) => ['Fail', 'Blocked'].includes(row.execution.status)).length
+  const completedCount = rows.filter((row) => ['Pass', 'NA', 'Retest Passed'].includes(row.execution.status)).length
 
   const columns: TableColumn<MyExecutionRow>[] = [
-    { key: 'project', header: 'Project', render: (row) => `${row.project.project_key} · ${row.project.name}`, filterValue: (row) => `${row.project.project_key} ${row.project.name}` },
+    { key: 'project', header: 'Project', render: (row) => <span className="my-execution-context"><strong>{row.project.project_key}</strong><small>{row.project.name}</small></span>, filterValue: (row) => `${row.project.project_key} ${row.project.name}` },
     { key: 'cycle', header: 'Cycle', render: (row) => (
-        <span>{row.cycle.cycle_key} · {row.cycle.name} <Badge status={row.cycle.status} /></span>
+        <span className="my-execution-context"><strong>{row.cycle.cycle_key}</strong><small>{row.cycle.name}</small><Badge status={row.cycle.status} /></span>
       ), filterValue: (row) => `${row.cycle.cycle_key} ${row.cycle.name} ${row.cycle.status}` },
     { key: 'test_case', header: 'Test Case', render: (row) => (
-        row.execution.test_case ? `${row.execution.test_case.test_case_key} · ${row.execution.test_case.test_scenario || row.execution.test_case.description || ''}` : `#${row.execution.test_case_id}`
+        row.execution.test_case ? <span className="my-execution-context"><strong>{row.execution.test_case.test_case_key}</strong><small>{row.execution.test_case.test_scenario || row.execution.test_case.description || 'Scenario not provided'}</small></span> : <strong>#{row.execution.test_case_id}</strong>
       ), filterValue: (row) => `${row.execution.test_case?.test_case_key || ''} ${row.execution.test_case?.test_scenario || ''}` },
     { key: 'pinned_version_label', header: 'Version', render: (row) => row.execution.pinned_version_label || '—', filterable: false },
     { key: 'status', header: 'Result', render: (row) => (
@@ -198,7 +241,7 @@ export default function MyExecutions() {
         </span>
       ), filterValue: (row) => row.execution.status },
     { key: 'actions', header: '', filterable: false, render: (row) => (
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="my-execution-actions">
           <QuickResultActions execution={row.execution} onChanged={updateExecution} onError={setError} />
           <QuickDefectLink execution={row.execution} onChanged={updateExecution} onError={setError} />
           <button type="button" className="btn btn-sm" onClick={(e) => { e.stopPropagation(); navigate(`/test-execution?project=${row.project.id}&cycle=${row.cycle.id}`) }}>Open cycle</button>
@@ -207,32 +250,36 @@ export default function MyExecutions() {
   ]
 
   return (
-    <div className="tm-page">
+    <div className="tm-page my-executions-page">
       <ErrorText error={error} />
       <PageHeader
         title="My Executions" count={visibleRows.length}
         subtitle="Test cases assigned to you for execution, across every project you have access to."
       />
-      <div className="toolbar" style={{ marginBottom: 14, gap: 16 }}>
-        <div className="tm-project-stats" style={{ flex: 1 }}>
-          <div><strong>{rows.length}</strong><span>Assigned to you</span></div>
-          <div><strong>{notExecutedCount}</strong><span>Not executed</span></div>
-          <div><strong>{failedCount}</strong><span>Fail / Blocked</span></div>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 400, whiteSpace: 'nowrap' }}>
-          <input type="checkbox" checked={hideCompleted} onChange={(e) => setHideCompleted(e.target.checked)} />
-          Hide Pass / NA / Retest Passed
-        </label>
-      </div>
-      {loading ? <p className="muted">Loading your assignments…</p> : (
-        <Table columns={columns} rows={visibleRows} rowKey="id" tableId="my-executions" />
-      )}
-      {!loading && visibleRows.length === 0 && (
-        <div className="tm-empty">
-          <strong>Nothing to execute right now</strong>
-          <span>{rows.length === 0 ? 'No test cases are currently assigned to you across your projects.' : 'Everything currently assigned to you is already Pass, NA, or Retest Passed.'}</span>
-        </div>
-      )}
+      <section className="my-execution-overview">
+        <div><span>Assigned</span><strong>{rows.length}</strong><small>Across active cycles</small></div>
+        <div className="ready"><span>Ready to run</span><strong>{notExecutedCount}</strong><small>Not executed</small></div>
+        <div className={failedCount ? 'attention' : ''}><span>Needs attention</span><strong>{failedCount}</strong><small>Failed or blocked</small></div>
+        <div className="complete"><span>Completed</span><strong>{completedCount}</strong><small>Pass, NA or retest passed</small></div>
+      </section>
+      <section className="my-execution-register">
+        <header>
+          <div><span>Personal work queue</span><h3>Assigned test cases</h3><p>{visibleRows.length} actionable item{visibleRows.length !== 1 ? 's' : ''} in this view</p></div>
+          <label className="my-execution-completed-toggle">
+            <input type="checkbox" checked={hideCompleted} onChange={(e) => setHideCompleted(e.target.checked)} />
+            <span><strong>Focus mode</strong><small>Hide completed results</small></span>
+          </label>
+        </header>
+        {loading ? <div className="my-execution-loading">Loading your assignments…</div> : (
+          <Table columns={columns} rows={visibleRows} rowKey="id" tableId="my-executions" />
+        )}
+        {!loading && visibleRows.length === 0 && (
+          <div className="tm-empty">
+            <strong>Nothing to execute right now</strong>
+            <span>{rows.length === 0 ? 'No test cases are currently assigned to you across your projects.' : 'Everything currently assigned to you is already Pass, NA, or Retest Passed.'}</span>
+          </div>
+        )}
+      </section>
     </div>
   )
 }

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS, hasRole } from '../constants'
+import { ROLE_LABELS, hasRole, DEFECT_MANAGEMENT_ROLES } from '../constants'
 import { UserOut } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
@@ -67,7 +67,15 @@ function navGroups(user: UserOut | null): NavGroup[] {
         { to: '/test-projects', label: 'Projects', icon: IconApps },
         { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
         { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
-        { to: '/defects', label: 'Defect Management', icon: IconTarget },
+        // 2026-08 -- reported directly (see DEFECT_MANAGEMENT_ROLES' own
+        // comment in constants.ts): "other than QA team, for others there
+        // should not be any option to open any defects," then corrected the
+        // same day to also include everyone who can raise a defect
+        // (Requester/Business Analyst/Application Owner). Nav item hidden
+        // for anyone outside that combined set, same way Audit Log is below.
+        ...(hasRole(user, ...DEFECT_MANAGEMENT_ROLES)
+          ? [{ to: '/defects', label: 'Defect Management', icon: IconTarget }]
+          : []),
         // SRS EXE-002 "My Executions" -- the signed-in user's own actionable
         // items across every authorized project, one cross-project view
         // instead of hunting through each project's own Test Execution page.
@@ -84,7 +92,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
         { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
-        ...(hasRole(user, 'ADMIN', 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE')
+        ...(hasRole(user, 'ADMIN', 'CHIEF_MANAGER_QA', 'AGM_QA')
           ? [{ to: '/audit-log', label: 'Audit Log', icon: IconSearch }]
           : []),
       ],
@@ -105,7 +113,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
     adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers })
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
   }
-  if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE')) {
+  if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'CHIEF_MANAGER_QA', 'AGM_QA')) {
     adminItems.push({ to: '/department-admin', label: 'Department Coordinator', icon: IconUsers })
   }
   if (adminItems.length > 0) {
@@ -265,7 +273,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
   }
 
   return (
-    <div className="app-shell redesigned-shell navigation-v2 navigation-v3 navigation-v4">
+    <div className="app-shell redesigned-shell navigation-v2 navigation-v3 navigation-v4 navigation-v5 navigation-v6">
       <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">
@@ -281,14 +289,15 @@ export default function Layout({ children }: { children?: ReactNode }) {
         </div>
 
         <nav aria-label="Application modules">
-          <div className="nav-workspace-label"><span>Workspace</span><i /></div>
-          {groups.map((group) => (
+          <div className="nav-workspace-label"><span>Quality operations</span><i /></div>
+          {groups.map((group, groupIndex) => (
             <div className={`nav-group ${sidebarCollapsed || expandedGroups.has(group.label) ? 'group-open' : ''}`} key={group.label}>
               <button className="nav-group-toggle" onClick={() => toggleGroup(group.label)} aria-expanded={sidebarCollapsed || expandedGroups.has(group.label)}>
+                <b className="nav-group-code">{String(groupIndex + 1).padStart(2, '0')}</b>
                 <span>{group.label}</span><i>⌄</i>
               </button>
               <div className="nav-group-items">
-                {group.items.map((item) => {
+                {group.items.map((item, itemIndex) => {
                   const Icon = item.icon
                   return (
                     <NavLink key={item.to} to={item.to} end={item.to === '/'} onClick={() => setSidebarOpen(false)}
@@ -296,6 +305,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
                              className={({ isActive }) => (isActive ? 'active' : '')}>
                       <span className="nav-icon"><Icon /></span>
                       <span className="nav-label">{item.label}</span>
+                      <span className="nav-sequence">{String(groupIndex + 1).padStart(2, '0')}.{String(itemIndex + 1).padStart(2, '0')}</span>
                     </NavLink>
                   )
                 })}

@@ -236,7 +236,8 @@ interface StatCardProps {
   // scope/definition under the hood (distinct project epics vs. individual
   // requests vs. specific approval-gate statuses), so they were never meant
   // to add up to each other -- without this line there was nothing on
-  // screen saying so. Always visible, not a hover-only tooltip.
+  // screen saying so. Displayed through the accessible information control
+  // so cards stay compact without losing the metric definition.
   hint?: React.ReactNode
   footline?: React.ReactNode
   spark?: Record<string, number>
@@ -248,12 +249,21 @@ function StatCard({ icon: Icon, iconClass, tag, value, label, hint, footline, sp
     <div className={`stat-card stat-card-${iconClass}`}>
       <div className="top-row">
         <div className={`icon-chip ${iconClass}`}><Icon width={17} height={17} /></div>
-        {tag && <span className="chip-tag">{tag}</span>}
+        <div className="stat-card-meta">
+          {tag && <span className="chip-tag">{tag}</span>}
+          {(hint || footline) && (
+            <span className="stat-card-info">
+              <button type="button" aria-label={`About ${String(label)}`}>i</button>
+              <span className="stat-card-tooltip" role="tooltip">
+                {hint && <span>{hint}</span>}
+                {footline && <small>{footline}</small>}
+              </span>
+            </span>
+          )}
+        </div>
       </div>
       <div className="value">{value}</div>
       <div className="label">{label}</div>
-      {hint && <div className="hint">{hint}</div>}
-      {footline && <div className="footline">{footline}</div>}
       {spark && <Sparkline values={spark} />}
       {segments && <SegmentBar segments={segments} />}
     </div>
@@ -1039,18 +1049,17 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
 
 // Reported directly: the "My Requests" tab (renamed to just "Requests" --
 // see below) should be hidden for these roles -- QA Engineer, QA Lead,
-// Security Analyst, and Executive COE (CHEIF_MANAGER_COE /
-// CHEIF_MANAGER_QA / AGM_COE, split 2026-08 from the single old
-// DEPARTMENT_HEAD_COE role but with identical authority/visibility) --
-// they work across every team's requests as part of their job, so a
-// "requests I personally raised" view isn't relevant to them the way it is
-// for a Requester/Business Analyst/SM/Department Head. Checked directly
-// against `user.roles` (not the shared `hasRole` helper, which treats ADMIN
-// as satisfying any role check) so an Admin who also happens to hold one of
-// these roles still sees the tab, matching "Admin always sees everything"
-// elsewhere in the app.
+// Security Analyst, and the QA Executive Group (CHIEF_MANAGER_QA / AGM_QA,
+// 2026-08 -- see constants.py::Role's own comment on the CHEIF_MANAGER_COE/
+// AGM_COE consolidation) -- they work across every team's requests as part
+// of their job, so a "requests I personally raised" view isn't relevant to
+// them the way it is for a Requester/Business Analyst/SM/Department Head.
+// Checked directly against `user.roles` (not the shared `hasRole` helper,
+// which treats ADMIN as satisfying any role check) so an Admin who also
+// happens to hold one of these roles still sees the tab, matching "Admin
+// always sees everything" elsewhere in the app.
 const REQUESTS_TAB_HIDDEN_ROLES = [
-  'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE',
+  'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA',
 ]
 
 export default function Dashboard() {
@@ -1065,7 +1074,7 @@ export default function Dashboard() {
   // a direct role check (not hasRole's Admin bypass): Admin-only accounts are
   // not QA team members and therefore must not see this restricted view.
   const showTesterOverviewTab = !!user?.roles?.some((role) => (
-    ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE'].includes(role)
+    ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA'].includes(role)
   ))
 
   const tabs = [

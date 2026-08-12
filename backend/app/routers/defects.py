@@ -9,11 +9,12 @@ from sqlalchemy.orm import Session, joinedload
 
 from .. import documents as doc_store
 from .. import models, schemas, pagination
-from ..constants import ENVIRONMENTS, Role
+from ..constants import ENVIRONMENTS, Role, DEFECT_MANAGEMENT_ROLES, DEFECT_REASSIGNABLE_STATUSES
 from ..database import get_db
-from ..deps import get_current_user, get_project_member_role, dashboard_department_scope
+from ..deps import get_current_user, require_roles, dashboard_department_scope
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from . import notifications
+from .. import reassignment
 
 router = APIRouter(prefix="/api/defects", tags=["defect-management"])
 
@@ -37,10 +38,22 @@ TRANSITIONS = {
     "Duplicate": set(),
 }
 CREATE_ROLES = (
-    Role.QA_ENGINEER, Role.QA_LEAD, Role.CHEIF_MANAGER_QA,
+    Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA,
     Role.SECURITY_ANALYST, Role.REQUESTER, Role.BUSINESS_ANALYST,
     Role.APPLICATION_OWNER,
 )
+# 2026-08 -- reported directly, then corrected same day (see
+# DEFECT_MANAGEMENT_ROLES' own comment in constants.py): "other than QA
+# team, for others there should not be any option to open any defects,"
+# then "defect can be raised by requster, business analyst application
+# owner too so defect management tool should be available for them as
+# well." DEFECT_MANAGEMENT_ROLES (imported above, shared with
+# routers/test_execution.py's batch picker) gates
+# list_defects/defect_dashboard/export_defects below -- effectively
+# "whoever CREATE_ROLES already lets report/link a defect, plus AGM_QA" --
+# scoped narrowly to the *register* (browsing defects at all); a
+# single-defect deep link (GET /{id}, GET /by-key/{key} -- e.g. from a
+# notification) stays open to any authenticated user regardless.
 _DOC_MODULE = "DEFECT"
 
 
@@ -90,12 +103,12 @@ def _can_touch_defect(db: Session, obj: models.Defect, user: models.User) -> boo
 
 
 def _is_manager(db: Session, obj: models.Defect, user: models.User) -> bool:
-    if user.has_role(Role.QA_LEAD) or user.has_role(Role.CHEIF_MANAGER_QA):
-        return True
-    if not obj.cycle:
-        return False
-    project_role = get_project_member_role(db, obj.cycle.project_id, user.id)
-    return project_role in {"Project Lead", "Owner"}
+    # 2026-08 "Simplified Test Management" whole-module simplification: the
+    # old per-project "Project Lead"/"Owner" TestProjectMember carve-out is
+    # gone -- QA Lead Group system role (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA,
+    # matching the Executive bypass elsewhere -- ORACLE_MIGRATION_2026-07.md
+    # section 59) is the sole "manager" authority now.
+    return user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
 
 
 def _can_defer(db: Session, obj: models.Defect, user: models.User) -> bool:
@@ -132,16 +145,15 @@ def _require_execution_link_access(db: Session, cycle: models.TestCycle, current
     at creation time isn't a way to bypass this.
 
     CREATE_ROLES is broad (Requester/Business Analyst/Application Owner
-    included, not just QA staff), so a non-member additionally needs their
-    department scope to include this execution's own project -- same
-    dashboard_department_scope semantics used everywhere else (QA/Security/
-    Executive-COE roles and Admin stay unrestricted). An actual Tester/
-    Project Lead/Owner member of THIS project may act regardless of
-    department, same override every other project-role check in this app
-    grants."""
-    project_role = get_project_member_role(db, cycle.project_id, current_user.id)
-    if project_role in {"Project Lead", "Owner", "Tester"}:
-        return
+    included, not just QA staff), so access needs their department scope to
+    include this execution's own project -- same dashboard_department_scope
+    semantics used everywhere else (QA/Security/Executive-COE roles and Admin
+    stay unrestricted). 2026-08 whole-module simplification: the old
+    "Tester/Project Lead/Owner member of THIS project acts regardless of
+    department" TestProjectMember carve-out is gone -- QA staff already get
+    the equivalent unrestricted access here via dashboard_department_scope's
+    own QA/Security/Executive-COE carve-out, so no separate escape hatch is
+    needed now that project membership itself is no longer assigned."""
     if not current_user.has_role(*CREATE_ROLES):
         raise HTTPException(403, "You are not authorized to link defects in this Test Cycle")
     scope = dashboard_department_scope(current_user)
@@ -277,7 +289,7 @@ def list_defects(status: Optional[str] = None, severity: Optional[str] = None,
                  ),
                  params: pagination.PageParams = Depends(),
                  db: Session = Depends(get_db),
-                 current_user: models.User = Depends(get_current_user)):
+                 current_user: models.User = Depends(require_roles(*DEFECT_MANAGEMENT_ROLES))):
     # Kept as plain query params (not folded into PageParams.status) since
     # they're single-value exact filters used by other modules' own narrow
     # pickers (e.g. TestExecution.tsx's `?cycle_id=`), same convention as
@@ -322,7 +334,7 @@ def list_defects(status: Optional[str] = None, severity: Optional[str] = None,
 
 
 @router.get("/dashboard", response_model=schemas.DefectDashboardOut)
-def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(*DEFECT_MANAGEMENT_ROLES))):
     # SRS 7.2 pagination rollout -- previously fetched every scoped defect's
     # full ORM row into Python just to run Counter() over it, an unbounded
     # fetch that grew with the register regardless of how many rows anyone
@@ -398,7 +410,7 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
 
 
 @router.get("/export-xlsx")
-def export_defects(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def export_defects(db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(*DEFECT_MANAGEMENT_ROLES))):
     """Export the governed defect register with workflow and traceability fields."""
     defects = _scoped_defects(db, current_user).order_by(models.Defect.created_at.desc()).all()
     status_counts = Counter(item.status for item in defects)
@@ -610,7 +622,7 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         # retest cycle and may no longer be current by the time a Closed
         # defect resurfaces, whereas the reporter is who'd actually notice.
         if obj.status == "Closed" and not (
-            current_user.has_role(Role.QA_LEAD) or current_user.has_role(Role.CHEIF_MANAGER_QA)
+            current_user.has_role(Role.QA_LEAD) or current_user.has_role(Role.CHIEF_MANAGER_QA)
             or obj.reporter_id == current_user.id
         ):
             raise HTTPException(403, "Only the reporter, a QA Lead, or an Administrator can reopen a Closed defect")
@@ -639,6 +651,20 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         obj.assigned_by_id = current_user.id; obj.assigned_at = models.now(); obj.assignment_remarks = remarks or None
         details = f"Assigned to {assignee_user.full_name} ({department.name})"
         if previous_assignee: details += f"; previous assignee: {previous_assignee}"
+        # 2026-08 -- reported directly: "whenever assigning defect to
+        # requester, system asking for remark, that remark not showing any
+        # where in the ui." The remark was already saved to
+        # obj.assignment_remarks, but that column was never rendered
+        # anywhere on the frontend, and it wasn't folded into the audit
+        # trail `details` text either (unlike every other transition, e.g.
+        # Retest's `details = remarks or "Retesting started."`) -- so it was
+        # captured but genuinely invisible. Appending it here surfaces it
+        # immediately in the existing Activity feed (DefectDetail ->
+        # JiraActivity, GET /api/approvals?entity_type=DEFECT&entity_id=...)
+        # without waiting on a schema/frontend round-trip; it's also now
+        # rendered as its own labelled field (see DefectOut.assignment_remarks
+        # + Defects.tsx's Workflow Details section).
+        if remarks: details += f" -- {remarks}"
     elif requested == "Resolved":
         if payload.resolution_type not in RESOLUTION_TYPES:
             raise HTTPException(400, "Select a valid Resolution Type")
@@ -686,6 +712,47 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     recipient_ids = [obj.reporter_id, obj.assignee_id, obj.retest_tester_id]
     notifications.fire(db, recipient_ids, f"Defect {requested}", "DEFECT", obj.id, obj.defect_key,
                        f"{obj.defect_key} changed from {previous} to {requested}.", current_user.id)
+    db.commit(); db.refresh(obj)
+    return obj
+
+
+# 2026-08 Reassignment Requirement -- the "Assigned" transition above is
+# only reachable from New/Reopened/Deferred, so once a defect is In
+# Progress/Resolved/Retest/Reopened/Deferred there was previously no way to
+# change who it's assigned to at all. Dedicated endpoint, deliberately kept
+# separate from transition_defect: it changes only the assignee, leaving
+# status/history untouched, exactly as the CR requires ("The record's
+# existing status and history shall remain unchanged").
+@router.post("/{defect_id}/reassign", response_model=schemas.DefectOut)
+def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session = Depends(get_db),
+                     current_user: models.User = Depends(get_current_user)):
+    obj = _get(defect_id, db)
+    if not obj.assignee_id or obj.status not in DEFECT_REASSIGNABLE_STATUSES:
+        raise HTTPException(400, f"{obj.defect_key} does not currently have an assignee that can be reassigned.")
+    previous_assignee = db.query(models.User).get(obj.assignee_id)
+    reassignment.require_can_reassign(current_user, obj.assignee_id, previous_assignee.department if previous_assignee else None)
+    reason = reassignment.require_reason(payload.reason)
+    new_assignee = db.query(models.User).get(payload.assignee_id)
+    if not new_assignee or not new_assignee.is_active:
+        raise HTTPException(404, "Selected assignee was not found or is inactive")
+    if payload.assigned_team:
+        department = db.query(models.Department).filter(
+            models.Department.name == payload.assigned_team,
+            models.Department.is_active == True,  # noqa: E712
+        ).first()
+        if not department:
+            raise HTTPException(400, "Select a valid active Department")
+        obj.assigned_team = department.name
+    previous_label = previous_assignee.full_name if previous_assignee else (obj.assignee_name or "Unassigned")
+    obj.assignee_id = new_assignee.id
+    obj.assigned_by_id = current_user.id
+    obj.assigned_at = models.now()
+    reassignment.record_reassignment(db, "DEFECT", obj.id, current_user, previous_label, new_assignee.full_name, reason)
+    if not previous_assignee or new_assignee.id != previous_assignee.id:
+        reassignment.notify_new_assignee(
+            db, new_assignee.id, "DEFECT", obj.id, obj.defect_key,
+            f"You have been reassigned {obj.defect_key}.", current_user.id,
+        )
     db.commit(); db.refresh(obj)
     return obj
 

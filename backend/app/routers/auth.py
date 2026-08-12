@@ -422,15 +422,15 @@ def reset_password(user_id: int, payload: schemas.PasswordReset, request: Reques
 # version of the Admin-only ones above: a local admin can only ever see/
 # touch users already mapped to their own department, can only assign
 # their own kind's working-level role subset (a business Department Head
-# gets DEPARTMENT_ADMIN_ASSIGNABLE_ROLES; an Executive COE -- who is mapped
+# gets DEPARTMENT_ADMIN_ASSIGNABLE_ROLES; a QA Executive -- who is mapped
 # to constants.QA_DEPARTMENT same as every other QA staffer, so the
 # department-scoping below already confines them to QA -- gets
 # QA_ADMIN_ASSIGNABLE_ROLES instead), can never touch ADMIN/
-# DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHEIF_MANAGER_COE/
-# CHEIF_MANAGER_QA/AGM_COE on anyone (including roles a target user already
-# holds outside their own assignable subset -- see the "preserved" logic
-# below, which protects the OTHER kind of local admin's roles too), and can
-# never edit their own account this way.
+# DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHIEF_MANAGER_QA/AGM_QA on anyone
+# (including roles a target user already holds outside their own assignable
+# subset -- see the "preserved" logic below, which protects the OTHER kind
+# of local admin's roles too), and can never edit their own account this
+# way.
 def _require_own_department_target(current_user: models.User, target: models.User) -> None:
     if target.id == current_user.id:
         raise HTTPException(status_code=403, detail="You cannot manage your own account here")
@@ -458,7 +458,7 @@ def _require_own_department_target(current_user: models.User, target: models.Use
 
 def _local_admin_assignable_roles(current_user: models.User) -> list:
     """Which role subset this particular local admin may assign -- the
-    Executive COE (QA department's own local admin) gets QA_ADMIN_ASSIGNABLE_ROLES,
+    QA Executive (QA department's own local admin) gets QA_ADMIN_ASSIGNABLE_ROLES,
     every other local admin (a business Department Head) gets
     DEPARTMENT_ADMIN_ASSIGNABLE_ROLES. Checked by role rather than by
     department string so it stays correct even if QA_DEPARTMENT's exact
@@ -467,7 +467,7 @@ def _local_admin_assignable_roles(current_user: models.User) -> list:
     account regardless of which role(s) it's asked about, which would
     wrongly hand an Admin who somehow hits this endpoint the QA subset."""
     if any(role in current_user.roles for role in (
-        Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA, Role.AGM_COE,
+        Role.CHIEF_MANAGER_QA, Role.AGM_QA,
     )):
         return QA_ADMIN_ASSIGNABLE_ROLES
     return DEPARTMENT_ADMIN_ASSIGNABLE_ROLES
@@ -477,8 +477,7 @@ def _local_admin_assignable_roles(current_user: models.User) -> list:
 def list_local_admin_users(db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(
                                 Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
-                                Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
-                                Role.AGM_COE))):
+                                Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """Every user mapped to the local admin's own department (any status,
     so a previously-disabled account can be re-activated too), excluding
     their own account, any Administrator accounts, any account flagged
@@ -512,8 +511,7 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
                              db: Session = Depends(get_db),
                              current_user: models.User = Depends(require_roles(
                                  Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
-                                 Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
-                                 Role.AGM_COE))):
+                                 Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     user = db.query(models.User).get(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

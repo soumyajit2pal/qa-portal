@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
+from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
+from .. import reassignment
 
 router = APIRouter(tags=["sast-dast"])
 
@@ -166,13 +167,45 @@ def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> m
 
 
 def _require_assigned_qa_lead(obj, user: models.User) -> None:
-    if not user.has_role(Role.ADMIN) and obj.security_lead_id != user.id:
-        raise HTTPException(403, "Only the QA Lead assigned by the Department Head can perform this action")
+    # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+    # gated action, same as ADMIN, without being listed as "QA Lead group"
+    # members (display-only concern, kept to literal QA_LEAD elsewhere --
+    # see ORACLE_MIGRATION_2026-07.md section 59).
+    if not user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        raise HTTPException(403, "Only a member of the QA Lead group can perform this action")
 
 
 def _require_assigned_security_analyst(obj, user: models.User) -> None:
     if not user.has_role(Role.ADMIN) and obj.security_analyst_id != user.id:
         raise HTTPException(403, "Only the Security Analyst assigned by the QA Lead can perform this action")
+
+
+# 2026-08 Reassignment CR, reported directly: "Reassignment shall be
+# permitted to: the current assignee, the Department Head of the department
+# to which the current assignee belongs, or Admin users." Applies once this
+# is a genuine reassignment (status already past the initial PLANNING
+# assignment) -- the first assignment stays QA-Lead-group-only
+# (_require_assigned_qa_lead), unchanged. See functional.py's identically-
+# shaped _require_can_reassign_tester for the full reasoning.
+def _require_can_reassign_security_analyst(obj, user: models.User) -> None:
+    if user.has_role(Role.ADMIN):
+        return
+    if obj.security_analyst_id and obj.security_analyst_id == user.id:
+        return
+    if user.department == QA_DEPARTMENT and user.has_role(*reassignment.department_head_roles(QA_DEPARTMENT)):
+        return
+    # 2026-08 -- reported directly: QA_LEAD is required to keep reassignment
+    # rights here too, mirroring functional.py/performance.py's identical
+    # fix -- the CR's own eligibility list would otherwise narrow existing
+    # behavior, where a plain QA_LEAD could reassign the analyst, same as
+    # the initial-assignment gate (_require_assigned_qa_lead) allows.
+    if user.has_role(Role.QA_LEAD):
+        return
+    raise HTTPException(
+        403,
+        "Only the currently assigned Security Analyst, a QA Lead, the QA Department Head (Chief Manager QA / AGM QA), "
+        "or an Administrator can reassign the Security Analyst on this request",
+    )
 
 
 def _can_upload_documents(obj, user: models.User) -> bool:
@@ -359,9 +392,7 @@ def _department_head_decision(db: Session, obj, payload, current_user):
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
         raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     if payload.decision == "Approved":
-        qa_lead_id = payload.qa_lead_id or payload.security_lead_id
-        qa_lead = _it_qa_user(db, qa_lead_id, Role.QA_LEAD, "qa_lead_id")
-        obj.security_lead_id = qa_lead.id
+        obj.security_lead_id = None
         obj.security_analyst_id = None
         obj.status = "SECURITY_LEAD_ASSIGNED"
     elif payload.decision == "Returned":
@@ -425,14 +456,45 @@ def _readiness_decision(db: Session, obj, payload, current_user):
 
 
 def _assign_security_analyst(db: Session, obj, payload, current_user):
-    _require(obj, "PLANNING", "Assign Security Analyst")
-    _require_assigned_qa_lead(obj, current_user)
+    """2026-08 Reassignment CR, reported directly: "Everywhere the system
+    provides an Assign option ... it must also provide a Reassign option."
+    Previously single-shot -- callable only while status was exactly
+    PLANNING. Now also callable through the rest of the active-scan window
+    (SAST_DAST_ANALYST_REASSIGNABLE_STATUSES: Configuration..Security
+    Complete), by either the QA Lead group (unchanged -- the initial
+    assignment gate) or, once a reassignment, the CR's own eligibility list
+    (current analyst / QA Department Head / Admin) with a mandatory reason.
+    Reassigning after the initial PLANNING->CONFIGURATION transition
+    deliberately does NOT touch `status` -- a request already at, say,
+    SCANNING must stay there after an analyst swap."""
+    _require(obj, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, "Assign Security Analyst")
+    is_initial_assignment = obj.status == "PLANNING"
+    previous_id = obj.security_analyst_id
+    if is_initial_assignment:
+        _require_assigned_qa_lead(obj, current_user)
+    else:
+        _require_can_reassign_security_analyst(obj, current_user)
+        reassignment.require_reason(payload.reason)
     analyst = _it_qa_user(db, payload.security_analyst_id, Role.SECURITY_ANALYST,
                           "security_analyst_id")
     obj.security_analyst_id = analyst.id
-    obj.status = "CONFIGURATION"
-    _log(db, obj, "Planning", current_user, "Security Analyst Assigned",
-         f"Assigned Security Analyst: {analyst.full_name}")
+    if is_initial_assignment:
+        obj.status = "CONFIGURATION"
+    decision = "Security Analyst Assigned" if is_initial_assignment else "Security Analyst Reassigned"
+    step = "Planning" if is_initial_assignment else SAST_DAST_STATUS_LABELS.get(obj.status, obj.status)
+    _log(db, obj, step, current_user, decision, f"Assigned Security Analyst: {analyst.full_name}")
+    if not is_initial_assignment:
+        entity_type = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+        previous_user = db.query(models.User).get(previous_id) if previous_id else None
+        reassignment.record_reassignment(
+            db, entity_type, obj.id, current_user,
+            previous_user.full_name if previous_user else "Unassigned", analyst.full_name, payload.reason,
+        )
+        if analyst.id != previous_id:
+            reassignment.notify_new_assignee(
+                db, analyst.id, entity_type, obj.id, obj.request_id,
+                f"You have been assigned as Security Analyst on {obj.request_id}.", current_user.id,
+            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -802,26 +864,34 @@ def sast_department_head_decision(req_id: int, payload: schemas.SecurityDeptHead
 
 @router.post("/api/sast-requests/{req_id}/start-readiness", response_model=schemas.SASTOut)
 def sast_start_readiness(req_id: int, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                          current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     return _start_readiness(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/readiness-decision", response_model=schemas.SASTOut)
 def sast_readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                             current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     return _readiness_decision(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), payload, current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/start-configuration", response_model=schemas.SASTOut)
 def sast_start_configuration(req_id: int, db: Session = Depends(get_db),
-                              current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                              current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     return _start_configuration(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/assign-security-analyst", response_model=schemas.SASTOut)
 def sast_assign_security_analyst(req_id: int, payload: schemas.AssignSecurityAnalystIn,
                                   db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                  # 2026-08 Reassignment CR -- widened to include
+                                  # SECURITY_ANALYST so the currently-assigned analyst
+                                  # can hand their own assignment off (self-handoff,
+                                  # same shape as Functional/Performance's tester
+                                  # reassignment); _assign_security_analyst itself
+                                  # still enforces exactly who may call it at each
+                                  # stage (QA Lead group for the initial assignment,
+                                  # the CR's narrower list once it's a reassignment).
+                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.SECURITY_ANALYST))):
     return _assign_security_analyst(
         db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), payload, current_user
     )
@@ -1072,7 +1142,7 @@ def get_sast_checklist(req_id: int, db: Session = Depends(get_db), current_user:
 @router.put("/api/sast-requests/{req_id}/checklist/{item_id}", response_model=schemas.ChecklistItemOut)
 def update_sast_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistItemUpdate,
                                 db: Session = Depends(get_db),
-                                current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     item = db.query(models.SASTChecklistItem).filter_by(id=item_id, sast_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")
@@ -1272,21 +1342,21 @@ def dast_department_head_decision(req_id: int, payload: schemas.SecurityDeptHead
 
 @router.post("/api/dast-requests/{req_id}/start-readiness", response_model=schemas.DASTOut)
 def dast_start_readiness(req_id: int, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                          current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _start_readiness(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return _dast_out(obj, current_user)
 
 
 @router.post("/api/dast-requests/{req_id}/readiness-decision", response_model=schemas.DASTOut)
 def dast_readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                             current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _readiness_decision(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), payload, current_user)
     return _dast_out(obj, current_user)
 
 
 @router.post("/api/dast-requests/{req_id}/start-configuration", response_model=schemas.DASTOut)
 def dast_start_configuration(req_id: int, db: Session = Depends(get_db),
-                              current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                              current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _start_configuration(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return _dast_out(obj, current_user)
 
@@ -1294,7 +1364,9 @@ def dast_start_configuration(req_id: int, db: Session = Depends(get_db),
 @router.post("/api/dast-requests/{req_id}/assign-security-analyst", response_model=schemas.DASTOut)
 def dast_assign_security_analyst(req_id: int, payload: schemas.AssignSecurityAnalystIn,
                                   db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                  # 2026-08 Reassignment CR -- see sast_assign_security_analyst's
+                                  # identical comment for why SECURITY_ANALYST is added here.
+                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.SECURITY_ANALYST))):
     obj = _assign_security_analyst(
         db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), payload, current_user
     )
@@ -1554,7 +1626,7 @@ def get_dast_checklist(req_id: int, db: Session = Depends(get_db), current_user:
 @router.put("/api/dast-requests/{req_id}/checklist/{item_id}", response_model=schemas.ChecklistItemOut)
 def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistItemUpdate,
                                 db: Session = Depends(get_db),
-                                current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     item = db.query(models.DASTChecklistItem).filter_by(id=item_id, dast_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")

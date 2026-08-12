@@ -17,7 +17,7 @@ configure_logging()  # must run before `from .database import ...` below, since
                       # this and database.py's own call are both harmless.
 logger = logging.getLogger("qa_portal")
 
-from .database import Base, engine, SessionLocal
+from .database import Base, engine, SessionLocal, AuditSessionLocal
 from . import cache, models  # noqa: F401  (models ensures models are registered before create_all)
 from .auth import decode_access_token
 from .audit_service import write_audit
@@ -235,8 +235,18 @@ _DASHBOARD_SUMMARY_INVALIDATING_MODULES = {
 
 
 def _write_request_audit(request, request_id, status_code, duration_ms, error_name=None):
-    """Persist an API audit entry after the response has been sent."""
-    db = SessionLocal()
+    """Persist an API audit entry after the response has been sent.
+
+    2026-08 -- uses AuditSessionLocal (its own, deliberately smaller
+    connection pool -- see database.py's own comment) rather than the main
+    request-handling SessionLocal. This runs as a BackgroundTask on every
+    single /api request, so under concurrent load it was competing with
+    real user requests for the same DB_POOL_SIZE + DB_MAX_OVERFLOW budget;
+    reported directly as a contributing factor to "API calls too slow."
+    Giving it a separate pool means an audit-write backlog can no longer
+    starve normal request handling of connections, and vice versa.
+    """
+    db = AuditSessionLocal()
     try:
         # AUD-008 -- get_current_user (deps.py) already decoded the JWT and
         # loaded the User row once per request; reuse that instead of doing

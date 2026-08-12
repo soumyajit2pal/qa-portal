@@ -2325,3 +2325,2099 @@ reproduce the original traceback directly; verified by re-tracing the exact same
 both reported tracebacks (`_write_request_audit` → `actor.username` / `actor.roles_csv`) and confirming neither
 code path touches the detached object any more. Documents and outputs copies re-synced and confirmed identical
 via `diff -rq`.
+
+## 50. Group-Based QA Assignment spec -- discovered mostly implemented; consolidated the QA Executive roles
+
+**Context:** handed a full "Group-Based QA Assignment and Approval Requirement" spec asking for individual
+QA Lead/Executive assignment to be replaced with role-based "any active group member can act" assignment.
+Investigated the current codebase before writing any code, per this session's standing discipline.
+
+**Finding:** the spec's core mechanic was already live, not a gap. Every approval gate that matters (QA Lead
+review, Department Head Approval, Executive COE/Sign-off) was already authorized via `require_roles(...)` --
+role membership, never an individually-assigned user. `functional.py`'s `_require_assigned_qa_lead` function
+name is stale relative to what it does -- it only checks `user.has_role(Role.QA_LEAD)`. The individual-assignee
+columns (`qa_lead_id`, `security_lead_id`, `engineer_id`) still exist on `FunctionalRequest`/`SASTRequest`/
+`DASTRequest`/`PerformanceRequest` but every write path already nulls them out unconditionally -- dead columns,
+not a missing mechanism. The frontend already replaced any individual picker with `RoleGroupLink.tsx`
+("Any member of this group can act on work assigned to {label}"), used identically across Functional/SAST/
+DAST/Performance. An in-app notification system with a group-fanout helper (`notifications.fire()`) already
+exists. Confirmed directly with the person who supplied the spec; no code changes were made for the
+already-implemented mechanics -- this section documents the actual gap instead.
+
+**The real, confirmed gap: two overlapping "QA Executive" role pairs causing genuine confusion.**
+`CHEIF_MANAGER_COE`/`CHEIF_MANAGER_QA`/`AGM_COE` (3 roles, all identical authority at the Executive COE / QA
+Sign-off checkpoint -- a 2026-08 split from a single old `DEPARTMENT_HEAD_COE` role purely so approval logs
+could show CM vs AGM) coexisted with `CHEIF_MANAGER_QA`/`AGM_QA` (the pair already used for Test Management
+Stage 2 final approval). Confirmed directly ("no ther pair is required, creating lots of confusion"): consolidate
+down to exactly one QA Executive Group -- `CHIEF_MANAGER_QA` and `AGM_QA` -- used consistently everywhere.
+`CHEIF_MANAGER_COE` and `AGM_COE` are retired entirely. `CHEIF_MANAGER_QA`'s own spelling ("Cheif") is also
+corrected to `CHIEF_MANAGER_QA`, baked into the constant's value itself, not just its label.
+
+**Backend:**
+- `constants.py`: `Role.CHEIF_MANAGER_QA` renamed to `Role.CHIEF_MANAGER_QA` (name and value both corrected).
+  `Role.CHEIF_MANAGER_COE` and `Role.AGM_COE` removed entirely. `ALL_ROLES`/`ROLE_LABELS` updated to match.
+- Every authorization check, role set, and comment across `deps.py` (`DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES`,
+  `can_give_final_approval`, project-membership checks), `routers/notifications.py`, `routers/audit.py`
+  (`AUDIT_ROLES`), `routers/dashboard.py` (`qa_tester_workload`'s team check), `routers/defects.py`,
+  `routers/test_execution.py`, `routers/test_repository.py`, `routers/auth.py` (local-admin assignable-role
+  logic and both local-admin `require_roles(...)` gates), `routers/pending_approvals.py`, and --
+  the one place this is a genuine authorization-narrowing change, not just a rename -- `routers/signoff.py`'s
+  `executive_coe_decision` and `_can_view_signoff` (the Executive COE / QA Sign-off checkpoint) now check
+  `Role.CHIEF_MANAGER_QA, Role.AGM_QA` (2 roles) instead of `Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
+  Role.AGM_COE` (3 roles) -- confirmed directly this is the intended checkpoint the "Executive Group" describes.
+  `seed.py`'s demo users consolidated from 3 (`cm1`/`cheifmanagerqa1`/`agm1`) to 2.
+- `TEST_MANAGEMENT_PERMISSIONS.md` (live documentation, not changelog history) updated to match.
+- **New: `app/migrate_role_consolidation_2026_08.py`** -- this app has no Alembic (additive-only schema, see
+  `database.py`'s own docstring), and the role values above are *data* already stored on live `qap_user_roles`
+  rows, not schema `create_all()` would ever touch. This one-time, idempotent, safe-to-re-run script (run via
+  `python -m app.migrate_role_consolidation_2026_08`) renames existing rows: `CHEIF_MANAGER_QA` (misspelled) ->
+  `CHIEF_MANAGER_QA`, `CHEIF_MANAGER_COE` -> `CHIEF_MANAGER_QA`, `AGM_COE` -> `AGM_QA`, deleting rather than
+  double-inserting when a user already holds the merge target (`qap_user_roles` has
+  `UniqueConstraint(user_id, role)`). **This must be run by hand against the live database after deploying this
+  code** -- not run in this session, since no live database exists in this sandbox.
+
+**Frontend:** `constants.ts` (`ROLE_LABELS`, `ALL_ROLES`, `DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES`), plus every
+component with a hardcoded role check: `DepartmentAdmin.tsx` (`isQAAdmin`), `SignOff.tsx`
+(`canExecutiveCoeDecide`), `TestExecution.tsx`, `Defects.tsx`, `Layout.tsx` (Audit Log nav gate, Department
+Coordinator nav gate), `TestRepository.tsx`, `Dashboard.tsx` (`REQUESTS_TAB_HIDDEN_ROLES`,
+`showTesterOverviewTab`) -- same rename/consolidation applied throughout.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean. Repo-wide
+grep confirms zero remaining live-code references to `CHEIF_MANAGER_QA`/`CHEIF_MANAGER_COE`/`AGM_COE` (only
+explanatory comments and the migration script's own literal old-value strings remain). Documents and outputs
+copies re-synced and confirmed identical via `diff -rq`.
+
+**Not yet done (deliberately out of this pass, no user request yet):** the spec's "first valid action wins"
+concurrency conflict message, the structured audit-field list in its Section 9, and its exact Pending Approvals
+column set were not implemented -- the person's answers scoped this pass specifically to the role consolidation
+and the "which stage is the Executive Group" mapping; those other items weren't confirmed as wanted yet.
+
+## 51. "Assigned Group" showed "QA Lead" unconditionally, regardless of actual workflow stage
+
+**Reported:** on a Functional Request still sitting at SM Approval Pending, the detail page's People section
+showed "Assigned Group: QA Lead (2)" -- screenshot with "sm aprroval not completed but still QA Lead assigned".
+
+**Root cause:** `Functional.tsx`, `SAST.tsx`, `DAST.tsx`, and `Performance.tsx` each rendered this field (and
+the identically-named list column) as a hardcoded literal --
+`<RoleGroupLink users={users} role="QA_LEAD" label="QA Lead" />` / `render: () => 'QA Lead'` -- never reading
+`req.status` at all. Every request showed "QA Lead" from the moment it was created, including while still with
+the requester, SM, or Department Head. Apparently copy-pasted boilerplate from whichever module got
+`RoleGroupLink` first, never made status-aware in the other three.
+
+**Fix:** added a per-module `assignedGroupFor(status)` helper to each of the four files, used by both the
+detail-view field and the list column. Rather than hand-deriving a fresh status list per module (risking a
+second, differently-wrong mapping), each helper is built directly on top of that module's existing, already
+backend-verified "Pending With" table (`QA_PENDING_WITH` / `SAST_DAST_PENDING_WITH` / `PERFORMANCE_PENDING_WITH`
+in `constants.ts`, each already kept in sync with its router's `require_roles(...)` gates and already driving
+the list's own "Pending With" column) -- translating the small set of group-owned labels ("SM", "Department
+Head", "QA Lead", "Security Analyst", "QA") into `{role, label}` pairs for `RoleGroupLink`, and returning `null`
+(rendered as "--") for every requester-owned or terminal status ("Requester", "--"). `RoleGroupLink.tsx` was
+widened to accept `role: string | string[]` to support Department Head's two roles
+(`DEPARTMENT_HEAD_CM`/`DEPARTMENT_HEAD_AGM`) and Functional/Performance's joint QA_LEAD+QA_ENGINEER "QA" stages.
+
+An early draft of the SAST/DAST helper (before this reuse-the-existing-table approach) had independently
+listed `WAITING_FOR_FIX` under Security Analyst -- wrong, per `SAST_DAST_PENDING_WITH`'s own comment: that
+stage is genuinely "Requester" (the analyst has handed the finding back for a fix), even though an analyst or
+admin may also click "Mark Fixed". Building the helper on top of the existing table instead of a fresh status
+list caught and avoided shipping that mistake.
+
+Left untouched: the `extraControl={<RoleGroupLink ... role="QA_LEAD" label="QA Lead" />}` shown only inside
+Functional's Department-Head-decision approval buttons (a "here's who picks this up next if you approve"
+preview, correct as-is, not the same field as the bug).
+
+**Verified:** `npx tsc --noEmit -p .` clean (frontend-only change, no backend edits needed). Documents and
+outputs copies re-synced and confirmed byte-identical via `diff` on all 5 touched files
+(`RoleGroupLink.tsx`, `Functional.tsx`, `SAST.tsx`, `DAST.tsx`, `Performance.tsx`).
+
+## 52. "What was the behaviour earlier?" moved from Start Execution to Readiness Passed (and Start Execution's version reverted)
+
+**Corrected:** the original request -- "while start qa execution, system should ask tester, what was the
+behaviour earlier" -- had been placed at the Functional Request's "Start Execution" step (see the now-reverted
+first draft of this section, previously numbered 52). Follow-up: "revert the changes, and encorporate below.
+While QA lead verify the readiness, then he will assign tester, this was the system behaviour earlier" --
+i.e. the question belongs at Readiness Verification, asked of the QA Lead, before they hand off to Assign
+Tester (Planning -> Assign Tester -> Tester Assigned), not at Start Execution (which happens much later, after
+Test Design). The Start Execution draft (required `earlier_behaviour` field on `StartFunctionalExecutionIn`,
+the matching `StartExecutionModal` textarea, and the "Behaviour earlier: ..." audit log line) was fully
+reverted -- `schemas.py`, `functional.py`, and `Functional.tsx` all back to their pre-section-52 state.
+
+**Fix, correctly scoped this time:** `readiness_decision` (`functional.py`) now rejects a `"Passed"` decision
+with 400 ("Describe what the behaviour was earlier before readiness can pass") unless `payload.comments` is
+non-blank -- `ReadinessDecisionIn.comments` already existed as an optional field, no schema change needed.
+Only `"Passed"` is gated (leads into Planning/Assign Tester); `"Failed"` returns to the requester, a different
+flow this note isn't part of.
+
+On the frontend, this incidentally surfaced a pre-existing dead-state bug scoped to this one action: the
+`comments` state `Functional.tsx` already threads into `readiness-decision`, `raise-defect`,
+`mark-waiting-for-fix`, `start-retesting`, and `complete-qa` calls had no textarea anywhere in the component --
+it was always `""`. A textarea (labelled "What was the behaviour earlier? (required before Readiness Passed)",
+using the shared `.form-field` style) is now rendered specifically inside the `canReadinessDecide` block, and
+"Readiness Passed" is disabled until it's non-blank. The other four call sites sharing this same `comments`
+state were deliberately left alone (still no textarea for them) -- out of scope for this fix, not something to
+silently sweep in.
+
+**Verified:** `npx tsc --noEmit -p .` and `python3 -m py_compile app/*.py app/routers/*.py` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on all 3 touched files
+(`schemas.py`, `functional.py`, `Functional.tsx`).
+
+**Correction:** "this is not required !!!!!!!!!!" -- the field should capture the note when the QA Lead has
+one, not block the workflow when they don't. Removed the 400 guard in `readiness_decision` (`functional.py`)
+entirely (back to `ReadinessDecisionIn.comments` being purely optional, as it always was) and removed the
+`disabled={!!busyAction || !comments.trim()}` gate on "Readiness Passed" (back to `disabled={!!busyAction}`).
+Label changed from "(required before Readiness Passed)" to "(optional)". The textarea itself stays -- that
+part of the ask (surfacing the field at all) was correct, only the "required" enforcement was not.
+
+## 53. Redefined the "QA" / "QA Lead" / "Executive" role-group membership (and fixed a real Executive COE gating bug found along the way)
+
+**Requested** (following a screenshot question, "why is agm missing?", about the "QA" group tile on a
+Functional Request): "QA group limit to QA_Engineer only / QA_LEAD different Group where Chief manager and
+AGM both can come if assigned / Executive also Chief Manager and AGM only." Three role-group membership rules,
+all about which users a `RoleGroupLink` tile lists as members -- not an authorization/require_roles() change:
+
+- **"QA" execution-stage tile** (Functional/Performance, shown at TESTER_ASSIGNED/TEST_DESIGN/
+  EXECUTION_IN_PROGRESS/RETESTING / ENVIRONMENT_SETUP/SCRIPT_DEVELOPMENT/BASELINE/LOAD_TEST_EXECUTION): was
+  `[QA_LEAD, QA_ENGINEER]`, now `QA_ENGINEER` only.
+- **"QA Lead" tile** (all 4 modules' own `assignedGroupFor`, plus the Department-Head-decision "who picks
+  this up next" `extraControl` preview in all 4): was `QA_LEAD` only, now also lists `CHIEF_MANAGER_QA`/
+  `AGM_QA` -- "if assigned", i.e. only accounts that actually hold `QA_LEAD` (whether or not they also hold
+  one of the executive roles) show up; the executive roles alone don't qualify someone for this tile.
+- **"Executive" checkpoint** (SignOff.tsx's Executive COE decision): unchanged by request -- already
+  `CHIEF_MANAGER_QA`/`AGM_QA` only, no `QA_LEAD`.
+
+New shared constants in `constants.ts`, `QA_LEAD_GROUP_ROLES = ['QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']` and
+`QA_EXECUTION_GROUP_ROLE = 'QA_ENGINEER'`, imported into `Functional.tsx`/`SAST.tsx`/`DAST.tsx`/
+`Performance.tsx` rather than hand-duplicating the role list across 8 call sites -- this session already hit
+one real bug (SAST/DAST's `WAITING_FOR_FIX`, section 51) from independently-derived duplicate lists drifting
+apart, so this one is centralized instead.
+
+**Bug found while verifying the "Executive" claim:** `SignOff.tsx`'s `canExecutiveCoeDecide` read
+`hasRole(user, 'AGM_QA')` only -- `CHIEF_MANAGER_QA` was missing entirely, even though the backend's
+`executive_coe_decision` (`signoff.py`) already `require_roles(Role.CHIEF_MANAGER_QA, Role.AGM_QA)`'d both
+(since the section-50 role consolidation). A Chief Manager - QA account could never see the Approve/Return
+buttons at this checkpoint -- fixed to `hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA')`, matching the backend.
+
+**Verified:** `npx tsc --noEmit -p .` clean (frontend-only change, no backend edits needed). Documents and
+outputs copies re-synced and confirmed byte-identical via `diff` on all 6 touched files (`constants.ts`,
+`Functional.tsx`, `SAST.tsx`, `DAST.tsx`, `Performance.tsx`, `SignOff.tsx`).
+
+## 54. Debugging pass: every CHIEF_MANAGER_QA/AGM_QA check in the codebase, hunting for asymmetry
+
+**Requested:** "debug the code and if you find any ambiguity regarding AGM_QA, CHIEF_MANAGER_QA check and fix
+the code" -- following the Executive-COE gating bug found in section 53. Grepped every backend and frontend
+reference to both roles (~50 call sites) and read each one in context. Two real bugs fixed, one doc
+inaccuracy corrected, and one deliberately-asymmetric cluster left alone with reasoning written down so it
+reads as a decision, not an oversight, if anyone re-checks this later.
+
+**Fixed -- `test_repository.py::_validate_stage2_assignee`:** rejected `AGM_QA` outright ("Stage 2 must be
+assigned to a QA Lead or Chief Manager - QA"), directly contradicting `_stage2_approver_ids` nine lines above
+it in the same file ("All active CM QA and AGM QA users; either one may complete Stage 2"). Since the
+`eligible-users` picker isn't role-filtered, an admin could actually select an AGM_QA-only user as a test
+case's Stage 2 approver in the UI and get a 400 on save. Now accepts `QA_LEAD`/`CHIEF_MANAGER_QA`/`AGM_QA`,
+matching the rest of the file; error message updated to mention AGM - QA.
+
+**Fixed -- `deps.py::_project_role_permits`:** the "don't give CM-QA the legacy non-member Test Management
+access" carve-out only named `CHIEF_MANAGER_QA`. An `AGM_QA`-only account (no `QA_ENGINEER`/`QA_LEAD`) fell
+through to unrestricted access on every project -- the exact "legacy QA staff" shortcut this check exists to
+deny CM-QA. This was a real over-privilege, not just a gap: AGM_QA had *more* access than CM-QA here, backwards
+from every other place the two roles are compared. Now both roles get the identical restriction.
+
+**Fixed -- doc/comment accuracy, no behavior change:** `test_repository.py`'s `_AUTHOR_ROLES` comment said "QA
+Engineer + QA Lead both author" without mentioning the `CHIEF_MANAGER_QA`/`AGM_QA` already in the tuple.
+`TEST_MANAGEMENT_PERMISSIONS.md`'s system-role list and CM-QA row didn't mention `AGM_QA` at all, even though
+the code already gives it identical Author-tier and Stage 2 standing -- updated to state plainly what's shared
+(Author tier, Stage 2 approval, the project-entry restriction above) versus what isn't (see next paragraph).
+
+**Investigated, left as-is (deliberate, not a bug):** `defects.py`'s `CREATE_ROLES`/`_is_manager` (who can
+create a defect / bypass rules as a "manager"), the reopen-a-Closed-defect check, and `test_execution.py`'s
+residual-defect cycle-completion override all treat `QA_LEAD`/`CHIEF_MANAGER_QA` as "manager"-tier but
+deliberately exclude `AGM_QA` -- consistently, on both backend and its frontend mirrors (`TestExecution.tsx`'s
+`CAN_EXEC_ROLES`, `Defects.tsx`'s manager checks). This reads as a genuine, pre-existing, well-commented
+design distinct from the Aug-2026 Executive-role consolidation (which only ever claimed "identical authority
+at the Executive COE / QA Sign-off checkpoint," never blanket parity everywhere) -- not something to widen
+without being asked, since it's a real authorization change in a banking app. Flagging in case the intent is
+actually full parity: if so, the fix is adding `Role.AGM_QA` to `defects.py`'s `CREATE_ROLES`/`_is_manager`
+(both call sites) and `test_execution.py`'s residual-defect override, plus the two frontend mirrors.
+`test_execution.py::_runner_or_404`'s runner-eligibility role set (`QA_ENGINEER`/`QA_LEAD`/`CHIEF_MANAGER_QA`,
+no `AGM_QA`) was also checked and left alone -- an AGM-tier account being hands-on-assigned as a test runner
+doesn't fit the role's purpose, so this one reads as correct rather than ambiguous.
+
+**Also confirmed clean:** repo-wide grep for the retired `CHEIF_MANAGER_QA`/`CHEIF_MANAGER_COE`/`AGM_COE`
+spellings -- zero remaining live-code references anywhere (backend or frontend); every hit is either a
+historical comment or the migration script's own intentional literal old-value strings.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. Documents and outputs copies re-synced
+and confirmed byte-identical via `diff` on all 3 touched files (`deps.py`, `test_repository.py`,
+`TEST_MANAGEMENT_PERMISSIONS.md`).
+
+## 55. "Application Owner" made a clickable RoleGroupLink, scoped to the request's department
+
+**Requested:** "Application Owner Approval Pending -> HERE IN APPLICATION OWNER CREATE A LINK SO THAT ON CLICK
+A MODAL OPEN WHO EVER APPLICATION ONWER ON THAT DEPARTMENT SHOULD SHOW."
+
+**Context:** while a Functional/SAST/DAST/Performance request's own `status` is still `SM_APPROVAL_PENDING`
+but its Application Name is a brand-new "Other" entry awaiting the Application Owner
+(`application_master_status === 'PENDING_APP_OWNER'`), the Status badge already shows "Application Owner
+Approval Pending" via `applicationNameAwareStatusLabel` (Common.tsx) -- but the "Assigned Group" field/column
+next to it (People section) never accounted for this sub-state at all: it called `assignedGroupFor(req.status)`
+directly, which -- since the underlying status is still `SM_APPROVAL_PENDING` -- showed a clickable "SM" group
+instead, actively wrong while the request is genuinely sitting with the Application Owner. SAST/DAST's
+"Assigned Group" *list column* had the same gap (their "Pending With" column already special-cased this, but
+"Assigned Group" didn't).
+
+**Fix:** `assignedGroupFor` in all 4 modules now takes two more (optional) parameters,
+`applicationMasterStatus` and `department`, and checks `applicationNameAwareStatusLabel(status,
+applicationMasterStatus)` first, ahead of the normal status-driven mapping -- returning `{ role:
+'APPLICATION_OWNER', label: 'Application Owner', department }` whenever that sub-state applies. Every detail-
+view call site now passes `req.application_master_status, req.department`; every list-column call site passes
+`r.application_master_status` (list rows don't render a clickable link, so `department` isn't needed there --
+see below).
+
+`RoleGroupLink.tsx` gained an optional `department` prop: when set, it further filters the member list to
+`user.department === department`, on top of the existing role filter. Application Owner is enforced
+server-side by `require_same_department` (`decide_app_owner_name`), so without this, the modal would list
+every Application-Owner-role-holder company-wide, including people who could never actually decide this
+specific request's name -- misleading given the modal's own copy ("Any member of this group can act on work
+assigned to..."). The empty-state and summary copy both mention the department now too when scoped.
+
+**Deliberately not changed:** the "Assigned Group" *list column* stays plain text (`.label`), not a clickable
+link -- consistent with how every other group (SM, Department Head, QA Lead, ...) has always rendered in that
+column; only the *label text itself* needed fixing there (was wrongly showing "SM"), not its interactivity.
+The other `RoleGroupLink` consumers (SM, Department Head, QA Lead, Security Analyst, Executive, QA) were left
+un-scoped by department -- SM and Department Head are also department-enforced server-side and would benefit
+from the same treatment, but that's a separate, unrequested change; flagging it in case it's wanted next.
+
+**Verified:** `npx tsc --noEmit -p .` clean (frontend-only change, no backend edits needed). Documents and
+outputs copies re-synced and confirmed byte-identical via `diff` on all 5 touched files (`RoleGroupLink.tsx`,
+`Functional.tsx`, `SAST.tsx`, `DAST.tsx`, `Performance.tsx`).
+
+## 56. Correction: the Application Owner link belonged on the QA Request gateway page, not the child requests
+
+**Corrected:** "I AM ASKING HERE" -- with a screenshot of the master QA Request gateway's own Overview tab
+(`QARequests/RequestDetail.tsx`), Application & Change section, Application Name field -- not the child
+Functional/SAST/DAST/Performance pages section 55 touched. This is where `ApplicationNameBanner`/the
+"Application Owner Approval Pending" status pill genuinely live (per its own comment: "the actual App
+Owner/SM decision banner... now lives on this one master QA Request page instead of being duplicated across
+every linked ... request's own page"). That pill was a plain, non-interactive
+`<span className="badge badge-yellow">Application Owner Approval Pending</span>`.
+
+**Fix:** `RoleGroupLink.tsx` gained an optional `renderTrigger?: (count, onClick) => ReactNode` prop -- every
+other consumer of this component (including section 55's own new usage) is fine with its default "{label}
+{count}" button, but this pill needed to open the exact same members modal while keeping its own existing
+pill styling/wording completely unchanged. The pill is now a `<button>` (same `badge badge-yellow` classes,
+plus `border: none`/`font: inherit` inline so it doesn't pick up native button chrome in the browser's default
+stylesheet) wrapped in `RoleGroupLink` with `role="APPLICATION_OWNER"` and `department={req.department}` --
+same department-scoped member list as section 55, on the page actually being asked about this time.
+
+**Verified:** `npx tsc --noEmit -p .` clean. Documents and outputs copies re-synced and confirmed byte-identical
+via `diff` on both touched files (`RoleGroupLink.tsx`, `QARequests/RequestDetail.tsx`).
+
+## 57. "QA Readiness Verification Pending" (and its SAST/DAST/Performance equivalents) now also surface in Pending Approvals
+
+**Reported:** "While QA Readiness Verification Pending, that should also come as Pending Approval section."
+
+**Root cause:** `pending_approvals.py::_readiness_items` (`_READINESS_MODULES`) only ever queried each module's
+*second* QA-Lead-group checkpoint -- `READINESS_VERIFICATION` / `SECURITY_READINESS` / `READINESS` (the
+"Readiness Passed/Failed" decision) -- never the *first* one: `QA_LEAD_ASSIGNED` / `SECURITY_LEAD_ASSIGNED` /
+`ENGINEER_ASSIGNED` (the "Start Readiness Verification" click that precedes it). `QA_LEAD_ASSIGNED` is
+literally labelled "QA Readiness Verification Pending" in `QA_STATUS_LABELS` -- the exact phrase reported --
+so a request sitting at that status (QA Lead assigned, not yet started) never appeared in Pending Approvals at
+all, even though the assigned QA Lead group can act on it right now via
+`functional.py::start_readiness_verification`.
+
+Confirmed this affects all four request types identically, not just Functional: `start_readiness_verification`
+/ `sast_dast.py::_start_readiness` / `performance.py::start_readiness` and their respective
+`readiness_decision`/`_readiness_decision` all gate on the exact same `_require_assigned_qa_lead`, which (per
+its own current body, `if not user.has_role(Role.QA_LEAD): raise HTTPException(403, ...)`) is a flat
+group-membership check with no per-request assignee restriction -- so both stages are, and always were,
+equally "pending" for the whole QA Lead group, and per the file's own top-of-file design principle (a
+category's inclusion must mirror its real endpoint's authorization exactly), both belong in the queue.
+
+**Fix:** `_READINESS_MODULES` gained a second status column per module (`assigned_status` alongside the
+existing `verification_status`: `QA_LEAD_ASSIGNED`, `SECURITY_LEAD_ASSIGNED` x2, `ENGINEER_ASSIGNED`).
+`_readiness_items` now queries `model.status.in_([assigned_status, verification_status])` instead of a single
+equality check, and labels each resulting item's category as "Start Readiness Verification" or "Readiness
+Verification" depending on which of the two statuses it actually matched, so the two stages remain
+distinguishable in the Pending Approvals filter chips rather than collapsing into one. `status_label` for both
+new statuses was already present in each module's own labels map (`QA_STATUS_LABELS["QA_LEAD_ASSIGNED"] = "QA
+Readiness Verification Pending"`, `SAST_DAST_STATUS_LABELS["SECURITY_LEAD_ASSIGNED"] = "Security Readiness
+Verification Pending"`, `PERFORMANCE_STATUS_LABELS["ENGINEER_ASSIGNED"] = "Readiness Verification Pending"`) --
+no label-map changes needed.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. Documents and outputs copies re-synced
+and confirmed byte-identical via `diff` on the one touched file (`pending_approvals.py`). Backend-only change;
+`PendingApprovals.tsx` already renders whatever categories/status labels the endpoint returns with no
+hardcoded list, so no frontend edit was needed.
+
+## 58-59. CHIEF_MANAGER_QA/AGM_QA get an Executive bypass on QA Lead actions -- kept OUT of the "QA Lead group" display
+
+**Reported (3 messages, same thread):**
+1. Screenshot of a SAST request, "AGM QA 1 not able to assign security analyst, where Chief Manager QA able to
+   do the same."
+2. Screenshot of the resulting "QA Lead group members" modal listing AGM QA 1 + Chief Manager QA: "only the
+   show whose role assigned as QA Lead."
+3. "AGM QA / Chief Manager QA does not need to assign QA lead separately as they [a]re the executive[s], ...
+   they have super power."
+
+**Iteration history (all three within this session, final design below is what shipped):** first pass widened
+BOTH the "QA Lead group" *display* (`RoleGroupLink`/`assignedGroupFor`, via a new `QA_LEAD_GROUP_ROLES`
+constant) and the *action* authorization to include CHIEF_MANAGER_QA/AGM_QA -- but action authorization had
+actually never been widened to match the (separately, earlier-session) redefined display group, which is what
+report #1 exposed (a CM-QA test account happened to also hold a literal QA_LEAD role; the AGM-QA account
+didn't). Report #2 then said the *display* should go back to literal QA_LEAD only. Taken alone, `AskUserQuestion`
+confirmed a full revert (both display AND actions back to QA_LEAD-only) -- but report #3 arrived immediately
+after, clarifying the real intent: CHIEF_MANAGER_QA/AGM_QA should keep the ability to act (an "Executive"
+super-user bypass, the same way Administrator already bypasses every `has_role()` check), just without being
+listed as members of the "QA Lead group" itself. Confirmed via a second `AskUserQuestion` before finalizing.
+
+**Final design:**
+- **Action authorization** (backend `require_roles(...)`/`_require_assigned_qa_lead`-style helpers, frontend
+  `isQALead`/`isAssignedQALead`/`canQALeadDecide`/`canReview`/`canEditProjectDetails`) -- CHIEF_MANAGER_QA and
+  AGM_QA are accepted alongside QA_LEAD, everywhere a QA-Lead-gated workflow action is checked:
+  `functional.py`'s `_require_assigned_qa_lead` + 6 `require_roles` decorators (start-readiness-verification,
+  readiness-decision, begin-planning, assign-tester, confirm-signoff, checklist item update); `sast_dast.py`'s
+  `_require_assigned_qa_lead` (shared SAST+DAST) + 10 decorators (start-readiness, readiness-decision,
+  start-configuration, assign-security-analyst, checklist item update, x2 each); `performance.py`'s
+  `_require_assigned_qa_lead` + `_require_performance_execution_owner` + 8 plain decorators + 5
+  `Role.QA_LEAD, Role.QA_ENGINEER` decorators; `signoff.py`'s `update_signoff` edit-window check, the
+  `qa-lead-decision` endpoint decorator, and `_can_upload_documents`'s `SM_APPROVAL_PENDING` branch;
+  `test_projects.py`'s `activation-review`/`archive`/`unarchive` decorators and `is_qa_lead_or_admin`;
+  `deps.py::can_manage_project`; and `pending_approvals.py`'s `_readiness_items`, `_signoff_items`'s QA Lead
+  checkpoint, and `_test_project_items` (each kept mirroring its real endpoint's authorization exactly, per
+  this file's own stated design principle for that module).
+- **Display** (who shows up as a "QA Lead group member") -- kept to literal `QA_LEAD` only: `RoleGroupLink`
+  "QA Lead group members" modal, `assignedGroupFor`'s `"QA Lead"` case in `Functional.tsx`/`SAST.tsx`/
+  `DAST.tsx`/`Performance.tsx` (now `{ role: "QA_LEAD", ... }`, not `QA_LEAD_GROUP_ROLES`), and the
+  Department-Head-decision `extraControl` preview in all four modules. `QA_LEAD_GROUP_ROLES` in `constants.ts`
+  is now purely an action-authorization set (still used by `SignOff.tsx`/`TestProjects.tsx`'s action gates),
+  re-documented accordingly; it is deliberately NOT used for anything display-facing anymore.
+
+**Deliberately NOT widened -- Test Management's own, separately-audited internal permission scheme** (see
+section 54's own debugging pass and `TEST_MANAGEMENT_PERMISSIONS.md`, which already documents CM-QA/AGM-QA as
+identical in some Test Management contexts and deliberately different in others, predating this session):
+`deps.py::can_review_repository` (Stage-1 repository review, strict membership + system QA_LEAD only by
+design, no non-member fallback -- `can_give_final_approval` right below it already has its own correct,
+separate CM-QA/AGM-QA handling for Stage 2), `test_projects.py::_is_project_owner_or_lead` (PRJ-005/GOV-001
+membership management, and its frontend mirror `TestProjects.tsx`'s `canManageMembers`), `test_execution.py`'s
+CYC-007 `_require_scope_change_permission` and the defect-unlink QA_LEAD-or-linker check, and the residual
+Medium/Low-defect cycle-completion "manager" override (already reviewed in section 54 and deliberately kept
+CHIEF_MANAGER_QA-only, distinct from AGM_QA). None of these are the "assign/readiness/planning" style request
+workflow actions the report was about, and re-opening them risks contradicting decisions already made
+deliberately and documented.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean at every
+intermediate step and at the final design. Documents and outputs copies re-synced and confirmed byte-identical
+via `diff` on all touched files (`deps.py`, `functional.py`, `sast_dast.py`, `performance.py`, `signoff.py`,
+`pending_approvals.py`, `test_projects.py`, `constants.ts`, `Functional.tsx`, `SAST.tsx`, `DAST.tsx`,
+`Performance.tsx`, `SignOff.tsx`, `TestProjects.tsx`).
+
+## 60. "Simplified Test Management Review and Approval" requirement -- Test Management's entire project-membership model replaced with QA Group / QA Lead Group system roles
+
+**Reported:** a full, formal SRS-style specification document ("Simplified Test Management Review and
+Approval Requirement," 15 sections plus 20 acceptance criteria) pasted in full, covering: a Simplified Role
+Model (QA Group does Stage 1 recommendation, QA Lead Group does Stage 2 final approval, no individual
+reviewer/QA-Lead selection anywhere, no project member-management UI), Project Requirements, Test Case
+Creation/Upload, the two-stage Approval Workflow, a new status vocabulary, Concurrency/Bulk Upload/Approved-
+Modification/Notification/Audit requirements. This replaces the entire pre-existing `TestProjectMember`
+project-role model (Owner/Project Lead/Author/Tester/Reviewer/Viewer, opt-in per project -- sections 10, 12,
+13, 14, 15, 17 of this log) with a flat, system-role-based two-group model.
+
+**Scope decisions (`AskUserQuestion`, 3 questions before implementation):**
+1. **Scope: whole module (not just test-case approval).** Project-membership gating is removed everywhere in
+   Test Management -- test execution, Test Project activation approval, Defect Management's manager override
+   -- not only test-case Stage 1/Stage 2.
+2. **Role mapping: reuse existing system roles.** QA Group = `QA_ENGINEER`. QA Lead Group =
+   `QA_LEAD`/`CHIEF_MANAGER_QA`/`AGM_QA` (the same set section 59 above just finished establishing as the
+   Executive-bypass action-authorization group) -- no new roles introduced.
+3. **Migration: new cases only, not migrate-in-place.** A `TestCaseVersion` already sitting at `"In Review"`/
+   `"Review Completed"`/`"Returned"` (the OLD, pre-existing "Test Approval Workflow" refactor's vocabulary,
+   section 17) keeps running that exact logic, completely unchanged, to completion. Only a case still in
+   `Draft`, or resubmitting from a NEW-vocabulary Returned status, follows the new workflow. Both paths run
+   through the *same* endpoints, branched by the draft's current status at the moment of the action -- not
+   separate endpoints, and not a data migration.
+
+**Design principle used throughout:** distinguish STATEFUL items (a `TestCaseVersion`, whose `status` column
+itself encodes which workflow generation it belongs to -- old vs. new statuses are the discriminator) from
+STATELESS current-moment permission checks (test execution, Defect Management's manager override, Test
+Project lifecycle, repository-governance actions not tied to review status). Only the stateful review chain
+needed a dual-path design; everything stateless moved to the new group model immediately, no
+migration/dual-path complexity.
+
+**New status vocabulary** (`backend/app/constants.py::TEST_CASE_NEW_STATUSES`, mirrored in
+`frontend/src/constants.ts::TEST_CASE_NEW_STATUSES`): `"Recommendation Pending"` (NEW Stage 1, QA Group),
+`"QA Lead Approval Pending"` (NEW Stage 2, QA Lead Group), `"Returned by QA"`, `"Returned by QA Lead"` (NEW
+Returned variants, so a resubmission can tell which generation it's rejoining). `_OLD_WORKFLOW_STATUSES =
+{"In Review", "Review Completed", "Returned"}` in `test_repository.py` is the discriminator switch.
+
+**Backend -- `test_repository.py` (Test Case Stage 1/Stage 2 rewrite):**
+- New `_qa_group_ids`/`_qa_lead_group_ids` helpers (active users holding the respective group's roles,
+  excluding the draft's author) replace individual-assignee routing for the NEW path.
+- `_submit_draft`/`submit_test_case`/`bulk_submit_test_cases` -- branch `is_old_path = previous_state ==
+  "Returned"` (the OLD literal string only); a fresh Draft always enters the NEW path.
+- `review_test_case` -- one endpoint, now four branches by `draft.status`: NEW Stage 1
+  (`"Recommendation Pending"`, `QA_ENGINEER` gate), NEW Stage 2 (`"QA Lead Approval Pending"`, QA Lead Group
+  gate), OLD Stage 1 (`"In Review"`, unchanged), OLD Stage 2 (`"Review Completed"`, unchanged). GOV-002
+  self-authorship block applies identically to all four.
+- `bulk_recommend_test_cases`/`bulk_approve_test_cases` -- same dual-path pattern: validate against both the
+  OLD and NEW target status for that stage, compute the set of statuses actually present in the selection,
+  reject (400) a selection mixing an OLD-path and a NEW-path row ("select one group at a time"), then branch
+  authorization/notify-recipients/target-status by whichever single generation is present.
+- `reassign_test_case_approvers` (`PATCH .../approvers`) -- now unconditionally returns 409, "Individual
+  reviewer assignment is disabled; test cases use automatic role-based group routing." (Already effectively
+  dead code before this change -- confirmed via grep that `TestCaseSubmit`/`TestCaseBulkSubmit` schemas never
+  had reviewer/QA-Lead picker fields to begin with, so this mostly formalizes an existing state.)
+- `delete_folder`/`checkout_override`/`archive_test_case`/`restore_test_case` -- these are repository-
+  governance actions with no old/new-status concept of their own (they don't act on a case's review-in-
+  progress status). Switched from `require_can_review_repository` (project-membership-aware) to a new
+  `require_can_manage_repository_governance` (QA Lead Group, plain role check) -- **not** the same function
+  `bulk_recommend_test_cases`'s OLD-path branch still calls, which is deliberately left alone.
+
+**Backend -- `deps.py`:**
+- `can_author_repository` -- now always `True` (a no-op). Every caller already sits behind
+  `require_roles(*_AUTHOR_ROLES)` at the router level, so the project-membership check on top of it was pure
+  narrowing that no longer applies.
+- New `can_manage_repository_governance`/`require_can_manage_repository_governance` -- QA Lead Group, plain
+  role check. Explicitly documented as separate from `can_review_repository`/`require_can_review_repository`
+  right above it, which are left **completely unmodified** -- they remain the OLD-path-only helper
+  `bulk_recommend_test_cases` still calls for its `"In Review"` branch.
+- `can_give_final_approval`/`require_can_give_final_approval` -- left completely unmodified (OLD-path-only,
+  same reasoning).
+- `can_execute_project` -- now `current_user.has_role(QA_ENGINEER, QA_LEAD, CHIEF_MANAGER_QA, AGM_QA)`, no
+  membership.
+- `can_manage_execution_governance` -- now QA Lead Group, no membership.
+- `can_manage_project` -- unchanged from section 59 (already Executive-bypass-aware; checks `owner_id`
+  directly, never read `TestProjectMember`, so nothing to change here).
+
+**Backend -- `test_execution.py`:** `_require_scope_change_permission` (CYC-007) and the inline residual-
+Medium/Low-defect cycle-completion "manager" check both dropped their "or a Project Lead/Owner member of this
+project" carve-out -- QA Lead Group system role is the sole authority now. Removed the now-unused
+`get_project_member_role` import.
+
+**Backend -- `defects.py`:** `_is_manager` dropped its project-membership carve-out -- now
+`user.has_role(QA_LEAD, CHIEF_MANAGER_QA, AGM_QA)` only (previously `QA_LEAD`/`CHIEF_MANAGER_QA` only via
+membership fallback, which also silently excluded `AGM_QA` from ever qualifying as a project's own Project
+Lead/Owner -- that gap is closed as a side effect). `_require_execution_link_access` dropped its "Tester/
+Project Lead/Owner member of this project acts regardless of department" escape hatch -- QA staff already get
+equivalent unrestricted access through `dashboard_department_scope`'s own QA/Security/Executive-COE carve-out,
+so the separate membership-based one was redundant once membership itself is no longer assigned.
+
+**Backend -- `test_projects.py`:**
+- `_ensure_default_member_role` deleted -- `create_test_project`/`update_test_project` no longer auto-create
+  a Reviewer/Project Lead `TestProjectMember` row from `default_reviewer_id`/`default_qa_lead_id`. Those two
+  columns are kept purely as legacy metadata (still read by the OLD-path Stage 2 notify list for projects with
+  in-flight pre-existing drafts).
+- `add_project_member`/`update_project_member`/`remove_project_member` -- now unconditionally 409, same
+  pattern as `reassign_test_case_approvers`. `list_project_members` stays a working, read-only historical
+  view. `_is_project_owner_or_lead` (now unused) deleted.
+
+**Frontend:**
+- `constants.ts` -- `TEST_CASE_STATUSES` extended with `TEST_CASE_NEW_STATUSES`;
+  `TEST_CASE_STATUS_LABELS`/`TEST_CASE_PENDING_WITH`/`TEST_CASE_PENDING_DECISION_STATUSES` all extended to
+  cover the 4 new statuses, mirroring `constants.py` exactly.
+- `TestProjects.tsx` -- `ProjectMembersModal` and its "Members" button/state removed entirely (TM-PROJ-002).
+  `NewProjectModal`/`EditProjectModal` never had default-Reviewer/default-QA-Lead pickers to begin with
+  (TM-PROJ-004 was already satisfied there); the project-card stat display of `default_reviewer_name`/
+  `default_qa_lead_name` is left as read-only legacy info, not a selection control.
+- `TestRepository.tsx` -- the single-case review panel, decision-outcome/lock-context copy, archive/restore/
+  checkout-override gating, folder-delete gating, and the bulk recommend/approve eligibility filters and
+  status quick-filter buttons (`Review queue`/`Final approval queue`, which count OLD+NEW together via
+  `TestCaseSummaryOut`) were all extended to recognize and correctly gate the 4 new statuses alongside the old
+  ones, using two new plain-role consts (`canQAGroupNewPath` = `QA_ENGINEER`, `canManageRepoGovernance` = QA
+  Lead Group) that intentionally do **not** reuse the OLD-path, `myAccess`-derived `canReview`/
+  `canGiveFinalApproval` props for anything status-independent (archive/restore/checkout-override/delete-
+  folder), since those two props stay OLD-path-only on the backend.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on all touched files.
+`TEST_MANAGEMENT_PERMISSIONS.md` rewritten from scratch to describe the new model (superseding the
+project-membership document it replaced), including the dual-path OLD-path exception.
+
+## 61. ORA-12899 -- the new test-case status values overflowed the `STATUS` column's VARCHAR2(20)
+
+**Reported:** a live stack trace, submitting a test case under the new (section 60) workflow --
+`sqlalchemy.exc.DatabaseError: (oracledb.exceptions.DatabaseError) ORA-12899: value too large for column
+"QA_PORTAL"."QAP_TEST_CASES"."STATUS" (actual: 22, maximum: 20)` -- while writing `status='Recommendation
+Pending'` (22 characters) on `UPDATE qap_test_cases`.
+
+**Cause:** `TestCase.status`/`TestCaseVersion.status` (`models.py`) were both `Column(String(20), ...)`,
+sized for the pre-existing "Test Approval Workflow" vocabulary where `"Review Completed"` (17 chars) was the
+longest value -- the comment on `TestCase.status` said as much at the time. Section 60 above added four new
+values (`TEST_CASE_NEW_STATUSES`) without checking them against that limit: `"Recommendation Pending"` (22),
+`"Returned by QA"` (15), `"Returned by QA Lead"` (19), and `"QA Lead Approval Pending"` (24 -- the new
+longest). `constants.py`'s own string lists have no length enforcement, so nothing caught this until Oracle
+did, at write time.
+
+**Fix:**
+- `models.py` -- both `TestCase.status` and `TestCaseVersion.status` widened `String(20)` -> `String(30)`
+  (room to spare past the current longest value, 24 chars, for any future addition).
+- New `backend/scripts/2026-08_widen_test_case_status_columns.sql` -- `ALTER TABLE ... MODIFY (status
+  VARCHAR2(30))` for both `qap_test_cases` and `qap_test_case_versions`. Needed because `create_all()` never
+  alters an existing column's size on a table that already exists (additive-only convention, same reasoning
+  as every other manual-`ALTER TABLE` script in `backend/scripts/`) -- widening the Python model alone does
+  nothing for an already-deployed schema. **Must be run against the production/any pre-existing Oracle schema
+  before (or as part of) deploying this fix** -- a fresh/new schema gets `VARCHAR2(30)` automatically from
+  `create_all()`. Widening a `VARCHAR2` column is a fast, in-place, metadata-only operation in Oracle (no
+  table rewrite) since the new size is larger than the old one; the script is safe to re-run.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. Documents and outputs copies re-synced
+and confirmed byte-identical via `diff` on `models.py` and the new script.
+
+## 62. "Pending with Author" showing no name, clickable pending group, and a real GOV-002 gap (submitter could immediately record their own Stage 1 decision)
+
+**Reported, four related points in one message:** (1) "Pending with author, give details who have uploaded" --
+the Workflow column just said "Author" with no actual name; (2) "also show the group name where pending
+approval, on click of group name, members will be visible" -- for the new (section 60) group-pending statuses;
+(3) "tester 1 is author, now tester 2 logged in, able to submit for review, is it right behaviour?"; (4) "if
+right then i saw i am able to submit for review and also recommend for qa lead approval which is not correct
+i think."
+
+**Point 3 -- investigated, confirmed as intended, not a bug:** `checkout_test_case`/`submit_test_case` were
+checked directly. Neither restricts the action to the draft's own author -- any Author-tier user
+(QA_ENGINEER/QA_LEAD/CM-QA/AGM-QA) can check out and submit *any* other person's draft. This is deliberate,
+team-based authoring (matches how the QA Group/QA Lead Group model in section 60 is scoped to teams, not
+individuals) -- Tester 2 submitting Tester 1's draft is correct, existing behavior. No code change for this
+point.
+
+**Point 4 -- confirmed as a real GOV-002 gap.** Every self-authorship check in `test_repository.py`
+(`review_test_case`, `bulk_recommend_test_cases`, `bulk_approve_test_cases`) only ever compared against
+`draft.author_id` -- the person who originally wrote the content. It never checked who had performed the
+*submit* action, or (for the Stage 2 decision) who had performed the *Stage 1 recommend* action. Since point 3
+confirms submitting someone else's draft is allowed by design, Tester 2 could submit Tester 1's draft and then
+immediately record the Stage 1 (or, after that, Stage 2) decision on the very item they'd just acted on --
+maker and checker being the same person, which is exactly what GOV-002 exists to prevent. Scoped strictly to
+the section-60 NEW workflow path only; the pre-existing "Test Approval Workflow" (OLD path,
+`_OLD_WORKFLOW_STATUSES`) already had its own correct author-only GOV-002 check and was left untouched.
+
+**Fix -- `backend/app/routers/test_repository.py`:**
+- `review_test_case` -- two new checks added after the existing author check: if `draft.status ==
+  "Recommendation Pending"`, blocks `draft.submitted_by_id == current_user.id` from recording the Stage 1
+  decision; if `draft.status == "QA Lead Approval Pending"`, blocks whoever was either the submitter
+  (`submitted_by_id`) or the Stage 1 reviewer (`reviewed_by_id`) from recording the Stage 2 decision.
+- `bulk_approve_test_cases` / `bulk_recommend_test_cases` -- same rule applied per-row, gated behind `if not
+  is_old_path:`, rejecting the whole batch (all-or-nothing, matching this codebase's existing bulk-endpoint
+  convention) with the offending test case keys named in the error if any selected row was acted on earlier by
+  the same caller.
+
+**Fix -- `backend/app/models.py`, `TestCase`:** three new properties mirroring the existing
+`current_draft_author_id` pattern -- `current_draft_submitted_by_id`, `current_draft_reviewed_by_id`,
+`current_draft_author_name` -- so the frontend can know who acted at each stage without a round trip, and
+proactively hide/disable actions rather than only ever discovering the block from a 403. Exposed through
+`schemas.py`'s `TestCaseOut`/`TestCaseListOut` and `frontend/src/types.ts`'s matching interfaces.
+
+**Fix -- points 1 & 2, "Pending with Author" / clickable group -- `models.py`,
+`TestCaseVersion.pending_with_user_name`:** extended to return `"QA Group"` for `"Recommendation Pending"` and
+`"QA Lead Group"` for `"QA Lead Approval Pending"` (previously fell through to `None` for both -- these are the
+two new group-pending statuses from section 60 and had never been wired into this property at all). The
+Returned family (`"Returned"`, `"Returned by QA"`, `"Returned by QA Lead"`) already resolved to
+`self.author_name`; a never-submitted `Draft` still isn't covered by this per-version property (it has no
+draft *action* pending yet), so the frontend falls back to the new `current_draft_author_name` for that one
+case, giving a real name instead of the bare word "Author".
+
+**Fix -- `frontend/src/modules/test-management/TestRepository.tsx`:**
+- Workflow column now renders, for the two group-pending statuses, the existing `RoleGroupLink` component
+  (already used the same way for Functional/SAST/DAST/Performance's "Assigned Group") via a new
+  `TEST_CASE_PENDING_GROUP_ROLES` map (`'Recommendation Pending' -> QA_ENGINEER`, `'QA Lead Approval Pending'
+  -> QA_LEAD_GROUP_ROLES`) -- clicking the group name opens the members modal, purely client-side against the
+  page's already-fetched `users` list. Left the two OLD-path statuses ("In Review"/"Review Completed") as
+  plain text, since eligibility there is role-*or*-project-membership based and a pure role list would
+  misrepresent who's actually eligible.
+- New `isBlockedFromNewStage1`/`isBlockedFromNewStage2` flags (author, or submitter, or -- for stage 2 --
+  Stage-1 reviewer) replace the old `isCurrentDraftAuthor`-only disabled check on both the single-case action
+  buttons and the bulk "Recommend"/"Approve" selection filters, with the lock-reason message now naming
+  whichever specific stage the current user already acted on.
+- Also fixed in passing: the single-case "Submit for review" button's status check was missing the two NEW-path
+  Returned statuses (`'Returned by QA'`, `'Returned by QA Lead'`) -- an author whose new-path draft was
+  returned could resubmit via bulk submit (already correct) but not via the single-case modal. Widened to an
+  array `.includes()` covering all four resubmittable statuses.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on every touched file
+(`models.py`, `schemas.py`, `test_repository.py`, `types.ts`, `TestRepository.tsx`, `index.css`).
+
+## 63. Login "pending approvals" notice, and reminder/escalation notifications, never fired for the NEW test-case workflow
+
+**Reported:** "earlier notification was there in pending approval, if any testcase review pending it shows a
+notification on login, where the functionality gone?"
+
+**Investigation:** the notification system itself was never removed. Two layers exist: the bell/toast feed
+(`models.Notification` + `routers/notifications.py`'s `fire()` calls + `NotificationBell.tsx`) already fires
+correctly on submit/recommend/return/reject/approve under the NEW workflow -- not broken. The actual "on
+login" feature the user meant is `frontend/src/components/PendingApprovalsNotice.tsx`, mounted once per
+sign-in from `App.tsx`, which calls `GET /api/pending-approvals` and pops an "N approvals awaiting your
+action" modal if the count is non-zero. That component was also intact and correctly wired.
+
+**Root cause:** `backend/app/routers/pending_approvals.py`'s `_test_case_items()` -- the aggregator
+`GET /api/pending-approvals` actually calls -- only ever queried the two OLD "Test Approval Workflow" status
+strings, `"In Review"` and `"Review Completed"`. When section 60's "Simplified Test Management" rewrite
+introduced the NEW workflow's `"Recommendation Pending"` / `"QA Lead Approval Pending"` statuses (which every
+fresh submission routes to exclusively -- project membership no longer exists as a routing signal), this
+checkpoint list was never updated to include them. Since virtually all live test-case submissions go through
+the NEW path now, `_test_case_items()` returns an empty list for essentially every QA Group / QA Lead Group
+user, so `/api/pending-approvals` reports 0 items and `PendingApprovalsNotice.tsx` silently no-ops on login --
+not because the feature was removed, but because its backend query stopped matching any real data the moment
+section 60 shipped. `routers/notifications.py`'s `sweep_overdue_approvals()` (the separate reminder/escalation
+sweep behind "notify after N business days waiting") had the identical gap -- its own status filter was the
+same two OLD-path strings only.
+
+**Fix -- `pending_approvals.py`:** added two new checkpoints to `_test_case_items()`'s `checkpoints` tuple --
+`"Recommendation Pending"` (new `_qa_group_checker`, `Role.QA_ENGINEER`) and `"QA Lead Approval Pending"` (new
+`_qa_lead_group_checker`, `can_manage_repository_governance` -- QA_LEAD/CHIEF_MANAGER_QA/AGM_QA), mirroring
+exactly what `review_test_case`/`bulk_recommend_test_cases`/`bulk_approve_test_cases` already check for these
+two statuses. Also added the NEW-path GOV-002 self-action exclusions from section 62 (excludes the submitter
+from seeing their own Stage 1 item; excludes the submitter and Stage 1 reviewer from seeing their own Stage 2
+item) so the login notice never invites a user to a decision they're not actually allowed to make. The OLD
+path's two checkpoints and their existing filtering (including the pre-existing `"In Review"` +
+`not has_role(QA_LEAD)` extra gate) were left completely untouched.
+
+**Fix -- `notifications.py`'s `sweep_overdue_approvals()`:** extended the status filter to all four statuses;
+`stage_started`/recipient-selection logic now branches four ways instead of two (`stage1_statuses = ("In
+Review", "Recommendation Pending")` determines whether elapsed time is measured from `submitted_at` or
+`reviewed_at`), with NEW-path recipients drawn from the QA Group / QA Lead Group role sets and the same
+GOV-002 exclusions as above, instead of the OLD path's literal `Role.QA_LEAD` / `{CHIEF_MANAGER_QA, AGM_QA}`
+checks.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. No frontend changes needed --
+`PendingApprovalsNotice.tsx`/`NotificationBell.tsx` were already correct and just needed real data from the
+backend. Documents and outputs copies re-synced and confirmed byte-identical via `diff` on
+`pending_approvals.py` and `notifications.py`.
+
+## 64. Bulk "Recommend"/"Approve" buttons hidden for QA Group/QA Lead Group users outside the testcase detail modal
+
+**Reported, direct follow-up to section 63:** "QA 2 submitted TC-01 for shared QA review, now QA 1 logged in,
+and on click of that testcase inside getting 'Recommend for approval' [the Stage 1 decision panel's
+Recommend Approval/Return for Correction/Reject buttons], but outside also should be visible for those
+testcases whom QA 1 are eligible for recommend" -- i.e. opening TC-01's detail modal correctly showed QA 1 as
+eligible to act, but the list view's own bulk-action toolbar (select the row's checkbox, act without opening
+the modal) showed nothing for the same eligible testcase.
+
+**Root cause -- `frontend/src/modules/test-management/TestRepository.tsx`:** `recommendSelectedIds`/
+`finalApproveSelectedIds` (the arrays actually deciding which selected rows are eligible) were already correct
+-- both include the NEW-path branch (`status === 'Recommendation Pending' && canQAGroupNewPath && ...` /
+`status === 'QA Lead Approval Pending' && canManageRepoGovernance && ...`). But the two buttons that render
+from those arrays, `Bulk recommend pending (N)` / `Bulk approve pending (N)`, were still gated on the
+OLD-path-only `canReview` / `canGiveFinalApproval` flags alone -- never updated to also admit
+`canQAGroupNewPath` / `canManageRepoGovernance`, unlike the "Review queue"/"Final approval queue" filter
+buttons a few lines above them in the same toolbar, which already did exactly that OR. A QA Group member with
+no OLD-path project access (the normal case now that project membership no longer routes anything, per
+section 60) could correctly select an eligible NEW-path testcase's checkbox, but the button to act on the
+selection simply never rendered.
+
+**Fix:** `(canReview || canQAGroupNewPath) && recommendSelectedIds.length > 0` and `(canGiveFinalApproval ||
+canManageRepoGovernance) && finalApproveSelectedIds.length > 0` -- matching the pattern already used by the
+queue-filter buttons.
+
+**Verified:** `npx tsc --noEmit -p .` clean. Documents and outputs copies re-synced and confirmed
+byte-identical via `diff` on `TestRepository.tsx`.
+
+## 65. Bulk Return/Reject, "Submitted by" in the Workflow column, Bulk update hidden while pending approval, and per-row checkbox eligibility for bulk recommendation
+
+**Reported, several related points plus a formal "Bulk Test Case Recommendation - Checkbox Validation
+Requirements" spec pasted in full:**
+1. Follow-up to section 64's screenshot ("Pending QA Recommendation" / "Pending with QA Group 2"): "same Return
+   for Correction and Reject as well" -- the single-case Stage 1/2 decision panel already offered Recommend
+   Approval/Return for Correction/Reject, but only Recommend/Approve had bulk equivalents.
+2. "if testcase under pending approval then bulk update button should not be visible."
+3. "along with Pending with details, show submitted by as well."
+4. A detailed spec requiring per-row checkbox eligibility (disabled + tooltip for anyone not currently
+   entitled to act, GOV-002-aware), an eligibility-aware Select All with an indeterminate state, and the
+   selected count/bulk-button state/API payload staying in sync with actual eligibility rather than raw
+   checkbox clicks.
+
+**Fix 1 -- bulk Return/Reject, NEW-path only (`test_repository.py`):** new `POST .../test-cases/bulk-return`
+and `POST .../test-cases/bulk-reject` (schemas `TestCaseBulkReturn`/`TestCaseBulkReject`, mandatory
+`comments`), sharing a new `_bulk_new_path_decision_rows()` helper factored out of the same validation
+`bulk_recommend_test_cases`/`bulk_approve_test_cases` already run (homogeneous-stage selection, matching group
+role, GOV-002 author/submitter/reviewer exclusions). Acts on whichever NEW-path stage the selection is at --
+"Recommendation Pending" -> "Returned by QA" or terminal "Rejected"; "QA Lead Approval Pending" -> "Returned by
+QA Lead" or terminal "Rejected". OLD-path rows stay single-case-only, unchanged, same "new cases only"
+convention as every other NEW-path-only addition this migration. Frontend: one shared `BulkDecisionModal`
+(action="return"|"reject") replacing what would otherwise be two near-duplicate modals, two new toolbar
+buttons gated on `(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0`.
+
+**Fix 2 -- Bulk update button hidden while any selected testcase is pending approval:** root cause was the
+exact same class of bug fixed repeatedly this migration -- `selectedCasesIncludeWorkflowLock` (the flag that
+disables field-editing while a workflow decision is in flight) only ever checked the two OLD-path statuses
+("In Review"/"Review Completed"), never the NEW-path pair. Fixed to reuse the existing, already-complete
+`TEST_CASE_PENDING_DECISION_STATUSES` constant (all four statuses) instead of a separately hand-maintained
+two-status list -- the same constant the modal's own internal per-row lock and the single-case panel already
+relied on. Also removed `canBulkUpdateAssignments`'s blanket carve-out that let a self-authored pending-review
+testcase's "assignment" fields stay editable regardless of workflow lock.
+
+**Fix 3 -- "Submitted by" alongside "Pending with":** new `TestCase.current_draft_submitted_by_name` model
+property (mirrors the existing `current_draft_author_name`, bridging through `TestCaseVersion.submitted_by_name`),
+exposed on `TestCaseOut`/`TestCaseListOut`/`types.ts`. Workflow column now shows a second line, "Submitted by
+{name}", whenever the current draft has actually been submitted (absent for a never-submitted Draft).
+
+**Fix 4 -- per-row checkbox eligibility (the pasted spec):** new `checkboxEligibility(testCase)` in
+`TestRepository.tsx`, evaluated per row rather than only against the current selection -- for the four review
+checkpoints (In Review/Review Completed OLD-path, Recommendation Pending/QA Lead Approval Pending NEW-path) it
+mirrors the exact predicates already used by `recommendSelectedIds`/`finalApproveSelectedIds`/
+`returnRejectSelectedIds`, returning `{ eligible, reason }`; every other status (Draft/Returned/Approved/
+Archived/Rejected) stays unrestricted, since Submit/Delete/Bulk update aren't per-row GOV-002-gated the way
+the four review checkpoints are and disabling those would have been a regression, not a fix. The row checkbox
+is now `disabled` with a `title` tooltip explaining the specific reason (author, wrong group, or already acted
+at an earlier stage) whenever ineligible -- since a disabled checkbox can never be toggled, `selectedCaseIds`
+can now only ever contain ids the eligibility check already approved, so the selected count, bulk-button
+enablement, and the eventual API payload stay consistent by construction rather than needing a separate
+recalculation step. Select All (`toggleAllVisible`) now operates only over `eligibleOnPageIds`, is disabled
+outright when the current page has zero eligible rows, and renders an indeterminate (dash) state via a ref
+when some but not all eligible rows are selected. A new `useEffect` keyed on `cases` prunes any previously
+selected id that's still on the current page but has since become ineligible (e.g. another user just acted on
+it) -- ids selected on a different page are left alone, matching this list's existing across-page selection
+behavior. Backend validation (the all-or-nothing atomic rejection with named offending keys, already in place
+per section 62) is unchanged and remains the authoritative check -- this frontend work prevents the
+now-far-less-likely race from reaching the user as a raw 403 in the first place, rather than replacing that
+check with the spec's proposed partial-success/skipped-ids response shape, which would have been a much larger
+change to this app's established "bulk operations are atomic" convention across every other bulk endpoint.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on every touched file
+(`schemas.py`, `test_repository.py`, `models.py`, `types.ts`, `TestRepository.tsx`).
+
+## 66. "Final-Approved Test Case Deletion and Archive Requirement" -- hardening around what was already mostly correct
+
+**Reported:** a formal requirements document for governed test cases (once "Approved," must never be hard-
+deletable; Archive/Restore instead; mandatory archive reason; bulk behavior; 409 on every delete path; full
+audit trail). An investigation pass first confirmed most of the core rule was already correctly built (sections
+7/60-62): `delete_test_case`/`bulk_delete_test_cases` already blocked any ever-approved/archived/rejected case,
+`restore_test_case` already returned straight to Approved with no re-approval, and cycle assignment already
+excluded Archived cases. The gaps below are what the audit actually found.
+
+**409 instead of 400, clearer messages:** both `delete_test_case` and `bulk_delete_test_cases` now raise `409
+Conflict` (was `400`) -- correct semantics, since the request is well-formed but conflicts with the test case's
+own governed state. `detail` stays a plain string, not the spec's proposed nested `{"message":...,
+"test_case_id":...}` -- this app's own Section 8 API standard (`main.py::http_exception_handler`) keeps
+`detail` a string every existing router and the frontend's error parsing already depend on; the envelope
+(`request_id`/`status_code`) is added uniformly by that same handler already.
+
+**Mandatory archive reason:** `schemas.TestCaseArchive.reason` changed `Optional[str] = None` -> `str`,
+`archive_test_case` now rejects a blank/whitespace-only reason explicitly. Frontend: the single-case Archive
+modal's field relabeled "Archive reason *" (was "Reason (optional)"), now `required`, with the confirmation
+copy matching the spec's own wording.
+
+**Bulk-archive, new:** `POST .../test-cases/bulk-archive` (schema `TestCaseBulkArchive`) -- archives several
+Approved test cases in one action, same mandatory-reason rule, silently skips an already-Archived row in the
+same selection rather than failing the batch. New `BulkArchiveModal` + "Archive selected (N)" toolbar button.
+
+**Bulk delete now differentiates eligibility instead of all-or-nothing:** new `deletableSelectedIds` (never
+governed) / `governedSelectedIds` (ever approved/archived/rejected) on the frontend, built the same way as
+every other bulk-eligibility array this migration (`recommendSelectedIds` etc.) -- "Bulk delete" only ever
+targets `deletableSelectedIds` and shows its count in the button label; a governed case in the same selection
+is called out separately ("N eligible for deletion" style breakdown per the spec's own UX example) with
+"Archive selected" offered alongside it instead of rejecting the whole batch. The backend's existing atomic
+all-or-nothing check remains in place as the authoritative race-condition guard (same reasoning as section 65's
+identical decision for bulk-recommend), now just far less likely to ever actually be hit from the UI.
+
+**Archive/Restore audit rows now record previous_state/new_state:** `_case_workflow_action` already supported
+these fields (used everywhere else in this file) but the Archive/Restore call sites never passed them --
+`archive_test_case`/`bulk_archive_test_cases` now pass `previous_state="Approved", new_state="Archived"`,
+`restore_test_case` passes the reverse.
+
+**Archived test cases were still editable:** `update_test_case` had no guard on `current_approved_version.
+status == "Archived"` -- without an in-progress draft, editing silently spun a brand-new Draft off the archived
+content, bringing it back into active editing without ever going through Restore. Now explicitly blocked
+("This test case is archived -- restore it before editing").
+
+**Archived test cases are now excluded from the default list:** `list_test_cases` now filters out `status ==
+"Archived"` whenever the caller hasn't specified a status filter at all -- an explicit filter (including
+picking "Archived" from the existing status dropdown, which already satisfied "available under an archive
+filter") is untouched. Deliberately done as a backend default rather than hard-coding the status enumeration
+into the frontend's exclusion list, since `frontend/src/constants.ts`'s `TEST_CASE_STATUSES` would need to be
+kept in perfect sync with every current and future status value to do that safely -- see the note below about
+what was actually found on that front.
+
+**Single-case Delete button visibility fixed to match the backend rule exactly:** was gated only on
+`current_approved_version_id` being unset, which missed a Rejected-and-never-approved case (backend already
+blocked deleting it, UI didn't know). Now also excludes `status === 'Rejected'`.
+
+**Deliberately not built, with reasoning:**
+- **"Source screen or API" on every audit row** -- `ApprovalAction` has no such column, and adding one is an
+  ALTER TABLE on an existing Oracle table (this app's `create_all()`-only, no-Alembic constraint means that's a
+  manual SQL script the user runs themselves, per the established `backend/scripts/` convention) for a field
+  with no other consumer anywhere in the app. Not built this round; flagging it here so it isn't silently
+  forgotten if it's actually needed.
+- **A literal per-row action-menu dropdown (View/Clone/Archive, no Delete)** -- this app's existing pattern is
+  clicking a row to open the full detail modal, where View/Clone/Archive/Delete already live as buttons (now
+  correctly gated per the rules above) rather than a separate menu duplicating them. Building a second,
+  parallel row-level menu was judged to be UI duplication rather than a functional gap, given Delete is already
+  correctly hidden wherever it must be.
+- **Found in passing, not fixed:** `frontend/src/constants.ts`'s `TEST_CASE_STATUSES` (the status filter
+  dropdown's option list) only has the 7 OLD-workflow status values -- it's missing all four NEW-path statuses
+  (`Recommendation Pending`, `QA Lead Approval Pending`, `Returned by QA`, `Returned by QA Lead`) introduced in
+  section 60, so none of them can currently be picked from that dropdown as an explicit filter. Out of scope for
+  this section (unrelated to the archive/delete requirement), flagged here for a future pass.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on every touched file
+(`schemas.py`, `test_repository.py`, `TestRepository.tsx`).
+
+## 67. "Create Recycle bin and Archive folder" -- soft-delete with restore, QA-Lead-only permanent purge, and an Archive shortcut
+
+**Reported requirement (verbatim):** "Create Recycle bin and Archieve folder. All archieve testcases will go to
+Archieve folder. and Create Recycle bin any delete testcases before approve will go to recycle bin. only QA
+lead can clear from recycle bin."
+
+Two asks bundled together: (1) deleting a pre-approval test case should no longer be an irreversible
+`db.delete()` -- it should land in a recoverable Recycle Bin, permanently cleared only by an authorized QA
+Lead; (2) both "Archived" and "Recycle Bin" should be first-class, discoverable views in the Repository
+sidebar rather than something only reachable via the status filter dropdown.
+
+**Delete converted from hard-delete to soft-delete.** `TestCase` gained four columns: `is_deleted` (Boolean,
+default False), `deleted_by_id` (FK to `qap_users`), `deleted_at`, `deleted_reason`. `delete_test_case`
+(single) and `bulk_delete_test_cases` no longer call `db.delete()` -- they set `is_deleted=True`,
+`deleted_by_id`, `deleted_at`, and log a `"Moved to Recycle Bin"` audit row via the existing
+`_case_workflow_action` helper. The pre-existing 409 rule from section 66 (a test case that has ever been
+Approved/Archived/Rejected can never be deleted, full stop) is unchanged and still enforced first -- soft-delete
+only applies to the same pre-approval cases that hard-delete used to apply to. A case already in the Recycle
+Bin now 400s with "This test case is already in the Recycle Bin" if deleted again.
+
+**`_selected_project_cases` hardened once, benefiting every bulk endpoint.** Rather than adding an
+`is_deleted` guard to each of the ~8 existing bulk endpoints individually, the shared helper now filters
+`is_deleted.is_(False)` by default and takes an `include_deleted: bool = False` opt-in, used only by the two
+recycle-bin-specific bulk endpoints below. Every other existing and future bulk endpoint (approve, reject,
+return, archive, update...) automatically treats a soft-deleted row as "not found" with no per-endpoint change
+required. `list_test_cases`, `list_all_test_cases_for_project`, and `get_test_case_summary` all now exclude
+`is_deleted=True` rows the same way they already excluded nothing before -- deleted cases disappear from every
+normal list and count.
+
+**New Recycle Bin endpoints, mirroring the Archive endpoints' shape:**
+- `GET /projects/{project_id}/test-cases/recycle-bin` -- paginated, searchable, sorted by `deleted_at` by
+  default.
+- `POST /test-cases/{case_id}/restore-from-recycle-bin` + bulk `.../test-cases/bulk-restore-from-recycle-bin`
+  -- Author-tier (`require_can_author_repository`, same tier that could delete in the first place), clears all
+  four soft-delete columns and logs `"Restored from Recycle Bin"`.
+  `DELETE /test-cases/{case_id}/purge` + bulk `.../test-cases/bulk-purge` -- gated to QA Lead Group only
+  (`require_can_manage_repository_governance`, matching "only QA lead can clear from recycle bin" exactly), the
+  only remaining code path in the app that issues a real `db.delete()`. The audit row (`"Purged from Recycle
+  Bin"`) is logged *before* the delete, which is safe because `ApprovalAction.entity_id` is a plain
+  unconstrained Integer with no FK -- the audit trail survives the row it describes being gone.
+
+**New Oracle columns require a manual ALTER.** Per this app's no-Alembic, additive-only (`create_all()`)
+convention, `backend/scripts/2026-08_add_test_case_recycle_bin_columns.sql` was added
+(`is_deleted NUMBER(1) DEFAULT 0 NOT NULL`, `deleted_by_id`, `deleted_at`, `deleted_reason`). **This still needs
+to be run by hand against the live Oracle schema** (`sqlplus ... @2026-08_add_test_case_recycle_bin_columns.sql`)
+before deploying this app code -- deploying first would 500 every Repository list/delete/restore/purge call
+with ORA-00904.
+
+**Sidebar: two new pinned pseudo-folder shortcuts.** Following the exact pattern already established by the
+`UNFILED` sentinel (a virtual entry pinned above the real folder tree, not a real `TestFolder` row),
+`ARCHIVE_VIEW` and `RECYCLE_BIN` sentinels were added the same way -- deliberately not implemented as either
+(a) physically moving cases into a real folder, which would destroy their original folder context, or (b)
+leaving this as "pick Archived from the status dropdown," which was the actual reported discoverability
+complaint. Clicking "Archived" filters `status=['Archived']` against the normal list endpoint; clicking
+"Recycle Bin" switches the data source entirely to the new `.../recycle-bin` endpoint. Both show live counts
+(`archived_count`, `recycle_bin_count`, added to `TestCaseSummaryOut` alongside the existing folder counts).
+
+**New `RecycleBinPanel` component**, deliberately not reusing the main list's `Table` column configuration
+(Workflow badges, checkout state, GOV-002-aware checkbox eligibility -- all meaningless for an already-deleted
+case). Own local selection state; columns for test case, status-when-deleted, deleted-by, deleted-on; row-level
+and bulk Restore (visible to any author) and "Clear permanently" / "Empty selected" (visible only to QA Lead
+Group, wrapped in a destructive `ConfirmModal`).
+
+**Delete confirmation copy corrected for the new reversible behaviour.** Both the single-case delete modal
+(`TestCaseModal`) and the bulk-delete modal previously said "permanently delete... cannot be undone," which
+became inaccurate the moment delete became a soft-delete. Both now say the case moves to the Recycle Bin and
+can be restored or later purged by a QA Lead. The Recycle Bin panel's own purge confirmations correctly kept
+the "permanently... cannot be undone" wording, since purge is the one remaining truly irreversible action.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on every touched file
+(`models.py`, `schemas.py`, `test_repository.py`, `types.ts`, `TestRepository.tsx`, the new `.sql` script).
+
+**Outstanding manual action:** `backend/scripts/2026-08_add_test_case_recycle_bin_columns.sql` has not been run
+against the live Oracle database yet -- required before this code is deployed.
+
+## 67a. Fix: ORA error on every `is_deleted` filter (`IS 0`/`IS 1` rejected by Oracle)
+
+The user hit this against a live Oracle DB immediately after section 67 shipped:
+`qap_test_cases.is_deleted IS 0` -- Oracle's `IS` operator only accepts `NULL`/`TRUE`/`FALSE` (23c+), not a bare
+numeric literal, so every one of the seven `models.TestCase.is_deleted.is_(False)` / `.is_(True)` filters added
+in section 67 (`list_test_cases`, `get_test_case_summary` x3, `list_all_test_cases_for_project`,
+`_selected_project_cases`, `list_recycle_bin`) 500'd on first real use. This exact footgun was already
+documented in this same file's `_stage1_reviewer_ids` (`models.User.is_active == 1`, "Oracle stores SQLAlchemy
+Boolean as NUMBER(1); `.is_(True)` emits `IS 1`, which Oracle rejects with ORA-00908. Equality emits `= 1`.") --
+missed when writing the new Recycle Bin filters. Fixed by switching all seven to `== False` / `== True` (with
+`# noqa: E712`, matching the equality-comparison convention already used everywhere else in this codebase --
+`departments.py`, `auth.py`, `test_projects.py`, `functional.py`, `notifications.py`).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. Documents and outputs copies re-synced,
+`test_repository.py` confirmed byte-identical via `diff`.
+
+## 67b. Fix misleading checkbox tooltip + add "Recommended By" to the Workflow column
+
+Two small follow-ups reported while using the bulk-recommend checkboxes added in section 63/126:
+
+**Misleading disabled-checkbox reason.** A row disabled for QA 2 because QA 2 authored its content (GOV-002:
+the author may never act on their own draft, full stop -- independent of who actually submitted it, since
+authoring/checkout is a broad team-tier permission and a different QA_ENGINEER can pick up and submit someone
+else's draft) showed the tooltip "You cannot recommend a test case submitted by you," which is simply wrong
+when the author and the submitter are different people. `checkboxEligibility`'s `Recommendation Pending`
+branch now says "You authored this test case. Another QA Group member must record its Stage 1 decision,"
+matching the wording already used by the other three checkpoints (`In Review`, `Review Completed`, `QA Lead
+Approval Pending`).
+
+**No visibility into WHO authored a case, only who submitted it.** Same root cause as the above -- the
+Workflow column showed "Submitted by X" but never "Authored by Y," so a disabled checkbox with author != submitter
+was inexplicable from the list alone. Added a conditional "Authored by" line, shown only when it differs from
+"Submitted by" (avoids a redundant restatement on the common case where the same person authored and submitted).
+
+**"Add Recommended By once recommended."** Once a NEW-path draft clears Stage 1 (status moves to "QA Lead
+Approval Pending"), `TestCaseVersion.reviewed_by_id` records who made that recommend decision -- already set by
+both `review_test_case` and `bulk_recommend_test_cases`, just never surfaced. Added
+`TestCase.current_draft_reviewed_by_name` (mirrors `current_draft_submitted_by_name`'s existing pattern exactly),
+exposed on both `TestCaseOut`/`TestCaseListOut` and `types.ts`, rendered as a new "Recommended by" line in the
+Workflow column -- naturally absent while still at "Recommendation Pending" (nothing decided yet) and appears
+once it moves on.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on every touched file
+(`models.py`, `schemas.py`, `types.ts`, `TestRepository.tsx`). No new Oracle column -- `reviewed_by_id` already
+existed on `qap_test_case_versions` (used by the pre-existing OLD-path Stage 1/Stage 2 flow), so no SQL script
+needed this round.
+
+## 67c. Fix ORA-00001 editing a Rejected test case with no approved baseline
+
+Reported directly, with the full Oracle traceback: editing TQA-TC-50 (test_case_id 540) 500'd with
+`ORA-00001: unique constraint (UQ_QAP_TCV_CASE_VERSION) violated ... row with column values (TEST_CASE_ID:540,
+VERSION_MAJOR:1, VERSION_MINOR:0) already exists`.
+
+**Root cause.** `_next_provisional_version_numbers` assigned a brand-new draft's version number by asking "does
+this case have an approved baseline?" -- no baseline meant "nothing has ever existed for this case, start at
+1.0," which was true the first time but stops being true after a Reject: `review_test_case`'s REJECT branch
+sets `draft.status = "Rejected"` but -- unlike APPROVE, which explicitly clears `obj.current_draft_version_id
+= None` -- deliberately leaves `current_draft_version_id` pointing at the now-Rejected version (Rejected is
+terminal/frozen-in-history, not cleared, so `current_draft_version` keeps resolving to it for
+`update_test_case`'s `rejected_base` handling, same doc comment). So a case that's been rejected once already
+has a real row sitting at `(1, 0)` in `qap_test_case_versions` with NO approved baseline. Editing it again
+(`update_test_case`'s `rejected_base` path, or `bulk_update_test_cases`) spun off a fresh draft, asked for
+"the next version number," got told `(1, 0)` again (since "no approved" was the only signal it looked at), and
+tried to INSERT a second row at that same key -- guaranteed collision, on literally the very next edit after
+any rejection.
+
+**Fix.** `_next_provisional_version_numbers` now falls back to the case's actual version history
+(`case.versions`, the ORM relationship, not just `current_approved_version`) when there's no approved baseline:
+if any version rows exist at all, the next number is one past the highest `(version_major, version_minor)`
+among them; only a case with truly zero version rows (can't happen post-creation, but defensively kept) still
+starts at `(1, 0)`. Same fix protects both call sites (`update_test_case`'s Rejected-edit path and
+`bulk_update_test_cases`'s no-draft path) since both go through this one shared helper.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. Documents and outputs copies re-synced,
+`test_repository.py` confirmed byte-identical via `diff`. No schema change -- this is a pure application-logic
+fix, no SQL script needed. The failed insert that produced the reported traceback rolled back cleanly (Oracle
+rejected the whole INSERT), so there's no bad data left behind to clean up.
+
+## 68. "Remove from cycle" restricted to QA Lead + blocked once execution history exists; Administration supersedes
+
+Reported directly, verbatim: "'Remove from cycle' should be available only for QA lead, also once execution
+history created then remove from cycle should not be enable for everyone. Same for Test Cycle, once execution
+history created then remove option should not be there for QA lead. Administration can supersede everything."
+
+Two rules bundled together, applied to both "remove a testcase from a cycle" and "delete a whole cycle": (1)
+role -- QA_ENGINEER can no longer remove/delete, only the QA Lead Group (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA) can;
+(2) once recorded -- even a QA Lead loses the ability the moment there's execution history to protect; only an
+Administrator may still act. Admin supersedes both rules everywhere, per "Administration can supersede
+everything."
+
+**`remove_execution` (single, `DELETE /executions/{execution_id}`) and `bulk_remove_executions`
+(`POST .../executions/bulk-remove`).** Router-level role narrowed from `_EXEC_ROLES` (included QA_ENGINEER) to
+`require_roles(QA_LEAD, CHIEF_MANAGER_QA, AGM_QA)` (Admin still bypasses via `has_role`'s standing ADMIN
+short-circuit). New helper `_require_can_remove_execution` blocks removal of a SPECIFIC execution slot once it
+has any recorded attempt (`TestExecutionRun` row) -- deliberately per-slot, not cycle-wide like the pre-existing
+`_require_scope_change_permission` (still used, unchanged, by `add_test_cases_to_cycle` only -- not touched by
+this change, since the report was specifically about removal), so other still-untouched slots in the same
+cycle stay removable by a QA Lead. `bulk_remove_executions` applies the same per-slot check across the whole
+selection and stops the entire batch (all-or-nothing, matching this codebase's established atomic bulk
+convention) if any selected slot already has history and the caller isn't an Administrator.
+
+**`delete_cycle` (`DELETE /cycles/{cycle_id}`).** Was already QA-Lead-Group-gated via
+`require_can_manage_execution_governance`, and already blocked deleting any NON-EMPTY cycle regardless of role
+(stricter than "once history exists" -- blocks even an empty-of-history cycle that still has un-executed
+testcase slots in it) -- both already satisfied the reported rule for QA Lead. What was missing: Admin
+couldn't override it either. An Administrator can now delete a non-empty cycle outright; doing so cascades to
+every execution slot, its full attempt history, and its evidence documents in one step (same cleanup
+`bulk_remove_executions` performs per-slot, reused here for the whole cycle), logged as a single
+`ApprovalAction` audit row (`entity_type="TEST_CYCLE"`, decision "Deleted (Administrator override)") before the
+cycle itself is removed. Files are only deleted from disk after the database commit succeeds, matching the
+existing pattern.
+
+**Frontend (`TestExecution.tsx`).** New `QA_LEAD_GROUP_ROLES` constant (`QA_LEAD`/`CHIEF_MANAGER_QA`/`AGM_QA`,
+matching the backend exactly) replaces the previous `CAN_EXEC_ROLES`-based role check for `canDeleteCycle` --
+which, in passing, fixes a pre-existing bug: `CAN_EXEC_ROLES` never included `AGM_QA` even though
+`myAccess.can_manage_execution_governance` already correctly reflected AGM_QA on the backend, so an AGM_QA user
+never actually saw the Delete Cycle button despite having the right on the backend. New
+`removeFromCycleEligibility(execution)` (mirrors `TestRepository.tsx`'s `checkboxEligibility` pattern) drives:
+the single-execution "Remove from Cycle" button in `RecordResultModal` (now shown/enabled based on eligibility,
+with the blocked reason surfaced as help text when hidden); the bulk toolbar "Remove from cycle" button
+(re-gated on the new `canManageExecutionGovernance` flag instead of the broader `canManageRunners`); and
+`BulkRemoveModal`, which now splits the selection into removable vs. blocked-by-history, shows the blocked
+testcase keys explicitly in the confirmation dialog, and only submits the removable subset (same "silently
+exclude what the backend would reject anyway" pattern as `TestRepository.tsx`'s bulk delete). The Delete Cycle
+confirmation copy now explains the Administrator override explicitly.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on both touched files
+(`test_execution.py`, `TestExecution.tsx`). No schema change -- pure application-logic/permission change, no
+SQL script needed.
+
+## 69. Scenario 1 refinement: the original adder may self-remove a not-yet-executed testcase
+
+Reported directly, as a follow-up scenario to section 68: "tester add testcase in lifecycle, but not executed
+it, just added, means no execution history. might be by mistake that testcases has been added. now system
+should allow to remove from lifecycle as there are no test execution history." Section 68 had restricted
+"Remove from cycle" to the QA Lead Group only, with no exception -- which meant a QA_ENGINEER could no longer
+undo their own same-session, zero-consequence mistake without escalating to a QA Lead. Asked directly which
+of three options to implement; confirmed: the ADDER may remove their own addition, but only while it still has
+no execution history -- not any tester, not once anything's been recorded against it.
+
+**New column: `TestExecution.added_by_id`.** No prior column recorded who added a testcase slot to a cycle.
+Added (nullable FK to `qap_users`), set to `current_user.id` in `add_test_cases_to_cycle` (the only place
+`TestExecution` rows are created). A slot created before this column existed simply has `added_by_id = NULL`
+and falls back to "QA Lead Group/Admin only" removal, same as if the feature didn't exist for it. New
+`backend/scripts/2026-08_add_test_execution_added_by_column.sql` -- **still needs to be run by hand** against
+the live Oracle schema, same manual-ALTER convention as every other schema change this cycle.
+
+**`_execution_removal_block_reason` (renamed/rewritten from section 68's `_require_can_remove_execution`)**
+now has three tiers instead of two, checked in order: (1) Admin -- always allowed. (2) Any recorded attempt on
+this specific slot -- QA Lead Group loses the ability too now (same as section 68); Admin only. (3) No
+attempt yet -- QA Lead Group may remove any slot; a plain QA_ENGINEER may remove only a slot where
+`added_by_id == current_user.id`; anyone else is still blocked. Router-level role on `remove_execution`/
+`bulk_remove_executions` widened back to include `QA_ENGINEER` (was QA Lead Group only) so path 3's self-remove
+case can even reach the function -- the actual gate lives entirely in this one helper, not the router
+decorator. `bulk_remove_executions`'s per-item history check was replaced with a call to this same helper, so
+a mixed bulk selection (some added-by-me-unexecuted, some added-by-someone-else, some with history) is
+evaluated identically to the single-item path.
+
+**Frontend.** `removeFromCycleEligibility` (`TestExecution.tsx`) mirrors the backend's three-tier priority
+exactly, reading the new `added_by_id`/`added_by_name` fields (added to `TestExecutionOut` on both ends). The
+bulk toolbar "Remove from cycle" button is now visible to any exec-capable user (not just QA Lead Group),
+since a QA_ENGINEER may now have something eligible to remove too -- `BulkRemoveModal` takes the eligibility
+function directly (was a plain `isAdmin` boolean) and filters/labels removable vs. blocked exactly like the
+single-item case.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
+Documents and outputs copies re-synced and confirmed byte-identical via `diff` on every touched file
+(`models.py`, `schemas.py`, `test_execution.py`, `types.ts`, `TestExecution.tsx`, the new `.sql` script).
+
+**Outstanding manual action:** `backend/scripts/2026-08_add_test_execution_added_by_column.sql` has not been
+run against the live Oracle database yet -- required before this code is deployed.
+
+## 70. "Admin and Scale 6+ Access-Control Requirement" -- Admin department-scoping bug, reversing an earlier explicit decision
+
+Reported directly, as a full formal spec: "Currently, a user assigned the `ADMIN` role cannot view system data
+or perform administrative actions unless the same user is also assigned the `SCALE_6_PLUS` role... The `ADMIN`
+role must operate independently and must not depend on `SCALE_6_PLUS`, department membership, QA role,
+Executive role, or any other business role."
+
+**Root cause, confirmed real.** `deps.py::dashboard_department_scope` -- the single function every
+department-scoped list/dashboard endpoint in the app calls to decide "confine this query to one department, or
+show everything" -- checked `set(current_user.roles) & DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES` (QA_LEAD/
+QA_ENGINEER/SECURITY_ANALYST/CHIEF_MANAGER_QA/AGM_QA/SCALE_6_PLUS) directly against the raw roles list, NOT
+`has_role()`. `ADMIN` was never a member of that set, so a user whose only role is `ADMIN` fell through to
+`return current_user.department or None` -- scoped to their own single department exactly like a plain
+business user, unless they ALSO held `SCALE_6_PLUS` (or one of the QA/Security roles). This is a real,
+system-wide defect: every one of this function's 30+ call sites was affected in one shot (`dashboard.py`,
+`qa_requests.py`, `defects.py`, `test_projects.py`, `test_reports.py`, `functional.py`, `performance.py`,
+`sast_dast.py`, `suppression.py`, `signoff.py`, `approvals.py`, `reports.py`).
+
+**Notable: this reverses an earlier, explicitly "confirmed directly" decision in this same codebase's history.**
+The function's own comment (now rewritten) used to say: "Checked directly against the raw roles list... NOT
+has_role() -- has_role() treats ADMIN as satisfying any role check, which would incorrectly also exempt an
+Admin account from this scoping even though Admin is one of the roles that IS meant to be scoped here
+(confirmed directly)." That was a deliberate choice made and explicitly confirmed earlier in this project's
+history. This new, much more detailed formal requirement is unambiguous on the exact same point in the
+opposite direction ("The system shall grant administrative access without checking... Department") and
+explicitly frames the OLD behavior as "a critical role-mapping and authorization defect." Implemented as
+requested -- flagging the reversal here rather than silently overwriting the earlier decision's reasoning.
+
+**Fix.** `dashboard_department_scope` now checks `current_user.has_role(Role.ADMIN)` first and returns `None`
+(unrestricted) immediately if true -- before the `DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES` check, matching the
+pattern `deps.py::require_same_department` (the per-record, action-level department check) already used
+unconditionally. Every other role's behavior is unchanged: `SCALE_6_PLUS`, QA/Security roles, and plain
+business users are scoped exactly as before.
+
+**Verified already satisfied elsewhere (spec Section 4.2, "Admin can act at any workflow stage"), no further
+change needed.** Audited for the same "AND-with-another-role" coupling bug pattern across the rest of the
+backend (`grep` for raw `set(current_user.roles)`-style checks, since `has_role()` itself already
+short-circuits on ADMIN and is used almost everywhere) -- the dashboard/list-scope function above was the only
+place an Admin's OWN access was gated on anything besides the `ADMIN` role itself. Every action-level
+permission helper (`require_roles`, `can_manage_repository_governance`, `can_manage_execution_governance`,
+`require_same_department`, etc.) is built on `has_role()`, which has always treated `ADMIN` as satisfying any
+role check -- an Admin can already approve/recommend/assign/reassign/return/reject/archive/restore at any
+workflow stage across every module in this app without needing `SCALE_6_PLUS` or a matching department. The
+one unrelated `current_user.department != ...` inline check found (`auth.py::_require_own_department_target`)
+governs a deliberately narrow "local Department Admin" self-service feature (a business Department Head/QA
+Executive managing users within their own department), not the global system `ADMIN` role's own access --
+out of scope for this defect.
+
+**Explicitly NOT built this round -- large net-new features, not bug fixes, flagged here rather than silently
+skipped:**
+- **Section 5 -- a dedicated department-selection landing screen for `SCALE_6_PLUS` users, plus a persistent
+  department switcher in the header/nav** that refreshes dashboards/lists/counts and cancels in-flight
+  requests on change. No such UI exists anywhere in the frontend today (confirmed via search) -- `SCALE_6_PLUS`
+  currently gets the SAME "no restriction, show everything at once" list/dashboard behavior as the QA roles it
+  was modeled on, with no forced single-department landing step or in-app switcher. This is a genuine new UX
+  flow across essentially every list/dashboard screen, not a fix to existing code.
+- **Section 8 -- an "All Departments" / per-department context selector for Admin.** Same reasoning: no
+  department-selector UI exists for any role today.
+- **Section 5.3's exact 403 JSON shape** (`{"message": "Scale 6+ access is read-only..."}`) for mutation
+  attempts. Not needed for correctness -- `SCALE_6_PLUS` was never included in any write-permission role tuple
+  anywhere in the backend (confirmed via search), so mutations by a Scale 6+-only user already 403 today, just
+  with each endpoint's own generic "None of your roles are permitted" message rather than this specific one.
+- **Section 4.3 -- structured "administrative override" audit rows** (e.g. "approved by Admin User through
+  administrative override. Original assigned group: X") and **mandatory override-reason capture for sensitive
+  Admin actions.** Existing `ApprovalAction` audit rows already record actor/actor_role/decision/comments/
+  timestamp for every governed action Admin performs, but do not currently distinguish "Admin acting as the
+  assigned party" from "Admin overriding an assignment restriction," and there's no dedicated override-reason
+  prompt in the UI.
+- **Section 9's full audit field set** (IP/session, IP/session for department-switch events) -- not currently
+  captured anywhere in this app's audit trail.
+
+These four are substantial, cross-cutting builds (a new onboarding/navigation flow, a new UI component reused
+across every list screen, and an audit-schema extension) rather than defect fixes -- flagging them for an
+explicit decision on priority/scope rather than attempting a partial, unreviewed implementation of all of them
+in the same pass as the confirmed critical bug above.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. Documents and outputs copies re-synced
+and confirmed byte-identical via `diff` on the touched file (`deps.py`). No schema change, no SQL script
+needed -- pure application-logic fix in one shared function.
+
+## 71. SM / Department Head group member list showed every department, not just the request's own
+
+Reported directly, with a screenshot: a request raised under one department (Agriculture) showed an "SM 2"
+assigned-group pill; clicking it listed SM users from a DIFFERENT department, not Agriculture. "SM mapping
+should be based on department level... check the defect and debug through all group if any miss other group
+like department head as well."
+
+**Confirmed backend authorization was already correct.** `functional.py::sm_decision`/`department_head_
+decision`, `performance.py`, and `sast_dast.py`'s equivalents all already call `require_same_department`
+before allowing an SM/Department Head decision -- an SM from another department could never actually act on
+this request. This was a pure frontend DISPLAY bug: `RoleGroupLink` (`components/RoleGroupLink.tsx`) has
+supported an optional `department` prop since the Application Owner group-link work (filters its member list
+to a matching department when provided) -- but each module's local `assignedGroupFor()` helper, which decides
+what role/label/department to pass it per status, only ever passed `department` through for the Application
+Owner branch. The SM and Department Head branches returned `{ role: 'SM', label: 'SM' }` /
+`{ role: [...], label: 'Department Head' }` with no `department` at all, so the modal fell back to showing
+every active SM / Department Head in the entire system, not just the ones who could actually act on this
+specific request.
+
+**Confirmed across every module that has this pattern** (checked directly, per the "debug through all
+groups" ask) -- the exact same two-line omission existed in all four request modules that share this
+copy-pasted `assignedGroupFor` shape: `Functional.tsx`, `Performance.tsx`, `SAST.tsx`, `DAST.tsx` (SAST and
+DAST share one backend router, `sast_dast.py`, and near-identical frontend structure). `Suppression.tsx` was
+checked too -- no `assignedGroupFor`/`RoleGroupLink` usage there at all, not affected. Fixed all 4 files (SM
+and Department Head branches in each, 8 call sites total) to pass `department` through, exactly matching the
+already-correct Application Owner branch immediately above each one.
+
+**Verified:** `npx tsc --noEmit -p .` clean. Documents and outputs copies re-synced and confirmed
+byte-identical via `diff` on every touched file (`Functional.tsx`, `Performance.tsx`, `SAST.tsx`,
+`DAST.tsx`). No backend change -- authorization was already correct; this was display-only.
+
+## 72. NameError crash report + API slowness investigation
+
+**Reported:** a live-server traceback -- `NameError: name 'removed_attempt_count' is not defined` at
+`test_execution.py` line 1793 in `bulk_remove_executions`, plus a general "API calls too slow" complaint,
+both under a multi-worker deployment.
+
+**NameError -- root cause is a stale deployment, not a current code bug.** The reported line number (1793)
+does not match this function's current structure at all. Confirmed directly: in the current file,
+`removed_attempt_count = sum(len(execution.runs) for execution in ordered)` is computed and assigned well
+before its only use in the `TestExecutionBulkRemoveResult(...)` return statement, with no branch in between
+that could skip the assignment -- the ordering is correct and has been throughout this function's several
+edits this session (Recycle Bin work, the QA-Lead-only restriction, the Scenario 1 self-remove change). The
+traceback's line number is consistent with an OLDER copy of this file still running on the live server (most
+likely a worker process that wasn't restarted, or a partial/rolling deploy that left some workers on stale
+code while others got the update). Action needed on the live server: stop all worker processes and restart
+them from the currently deployed file, rather than restarting one at a time -- a partial restart would leave
+some workers serving the old, broken code alongside the fixed one, causing exactly this kind of intermittent
+failure. Separately: this crash was already being handled safely by design -- `main.py`'s
+`unhandled_exception_handler` logs the full traceback (to `backend/logs/app.log`, correlated by request ID)
+and returns a clean generic-500 JSON to the client rather than leaking a raw stack trace, so the traceback
+appearing in logs is the intended diagnostic path working correctly, not a sign that clients received a raw
+crash.
+
+**Slowness -- three concrete findings, in priority order (no live DB access in this sandbox, so these are
+diagnosable/actionable leads, not a single confirmed root cause):**
+
+1. **DB connection pool sizing vs. worker count.** `database.py`'s pool defaults are `DB_POOL_SIZE=10` +
+   `DB_MAX_OVERFLOW=20` = up to 30 Oracle connections per worker process, and each worker gets its own pool
+   (`database.py`'s own comment already flags this: "scaled down per-worker once running with multiple API
+   workers"). With the Dockerfile's default `WEB_CONCURRENCY=4`, that's up to 120 concurrent Oracle
+   connections demanded by the web tier alone. If the Oracle user/schema's actual session or process limit is
+   lower than that (common in shared enterprise Oracle instances), requests queue for a connection until
+   `DB_POOL_TIMEOUT` (default 30s) -- which presents exactly as "API calls are slow" under concurrent load,
+   and eventually as pool-timeout errors. Action: check the live `DB_POOL_SIZE`/`DB_MAX_OVERFLOW`/
+   `WEB_CONCURRENCY` env vars against Oracle's actual `PROCESSES`/`SESSIONS` limit for this app's DB user, and
+   scale `DB_POOL_SIZE` down per-worker if needed (e.g. `DB_POOL_SIZE=5` with 4 workers instead of the default
+   10).
+2. **Per-request audit write.** `application_audit_middleware` (`main.py`) fires `_write_request_audit` as a
+   background task on every single `/api` request (not just mutations -- GETs too, anything except
+   `/api/health` and the login/logout endpoints). Each call opens its own `SessionLocal()`, does a query (if
+   no user snapshot) plus an INSERT and commit, then closes. This doesn't block the client response (it's a
+   `BackgroundTask`, runs after the response is already sent), but it is a full extra DB round-trip per API
+   call, and it competes for the same connection pool covered in (1) under high concurrency. Not something to
+   change without a decision from the user (audit completeness is presumably a deliberate compliance
+   requirement, not just an oversight), but worth knowing as a contributing factor if (1) turns out to be
+   under-provisioned.
+3. **Missing index on `TestCase.is_deleted` -- fixed in this pass.** `is_deleted` was added for the Recycle
+   Bin feature after the IDX-001..007 indexing pass (section 39) and was never itself indexed, despite being
+   filtered on nearly every test-case query alongside `project_id` (`list_test_cases`,
+   `get_test_case_summary` x3, `list_all_test_cases_for_project`, `_selected_project_cases`,
+   `list_recycle_bin` -- all filter `project_id == X AND is_deleted == True/False` together, confirmed by
+   grep). `project_id` alone is already covered by the existing `ix_qap_tc_proj_folder_created` composite, so
+   this was a secondary rather than catastrophic gap (Oracle can still range-scan by `project_id`), but every
+   one of those queries was falling back to a table-access-by-rowid to evaluate `is_deleted` on each candidate
+   row instead of filtering it from the index directly.
+
+**`backend/app/models.py`:** added `Index("ix_qap_tc_proj_deleted_created", TestCase.project_id,
+TestCase.is_deleted, TestCase.created_at)` (26 bytes, within Oracle's 30-byte identifier limit). Not a
+duplicate of `ix_qap_tc_proj_folder_created` under IDX-005 -- different second column (`is_deleted` vs.
+`folder_id`), so it covers a distinct filter combination rather than a subset of it.
+
+**`backend/scripts/2026-08_add_test_case_deleted_index.sql` (new):** same no-op-safe `CREATE INDEX`
+convention as the original performance-indexes script, since this app has no Alembic and `create_all()` only
+emits DDL for tables that don't exist yet -- an existing Oracle schema needs this run by hand.
+
+**Not yet done / needs the user's live server, not this sandbox:** confirming which specific endpoints are
+actually slow (this pass diagnosed structural risk factors, not a measured bottleneck), checking real Oracle
+session counts under load, and checking whether `DB_POOL_SIZE` has already been tuned down from its default
+in the live `.env`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. Documents and outputs copies re-synced
+and confirmed byte-identical via `diff` on `models.py` and the new SQL script.
+
+## 73. Separate connection pool for audit writes
+
+**Context:** direct follow-up to section 72's finding #2 (per-request audit write competing with real request
+handling for the same DB connection pool). Asked directly which of four options to implement (separate pool /
+in-memory batching / Redis-backed queue / audit fewer things) -- chose the separate-pool option: lowest risk,
+no change to durability, timing, or what gets audited, just stops audit writes and real request handling from
+fighting over the same `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` budget.
+
+Worth noting for context: a fuller async/message-broker audit design (AUD-003) was already proposed once
+before (section 37/39) and explicitly descoped by the user at the time ("stay SYNC"), on the reasoning that
+the existing `BackgroundTask`-based write already kept audit off the response's critical path without new
+infrastructure. That reasoning still holds -- this change doesn't revisit it. It only fixes the part that
+reasoning didn't cover: the background write still pulled from the *same* pool as live request handling, so
+under concurrent load it could still make real requests wait for a connection.
+
+**`backend/app/database.py`:** added a second, independent engine/pool (`audit_engine`/`AuditSessionLocal`),
+same `DATABASE_URL` and same `DB_POOL_TIMEOUT`/`DB_POOL_RECYCLE`/`DB_POOL_PRE_PING`/`DB_QUERY_TIMEOUT_MS` as
+the main engine, but its own pool size via new `AUDIT_DB_POOL_SIZE` (default 3) / `AUDIT_DB_MAX_OVERFLOW`
+(default 5) env vars -- deliberately small, since an audit write holds its connection only briefly (one
+INSERT + commit). Logged alongside the main pool's own startup log line for visibility.
+
+**`backend/app/main.py`:** `_write_request_audit` (the function `application_audit_middleware` schedules as a
+`BackgroundTask` on every `/api` request) now opens its session via `AuditSessionLocal()` instead of the main
+`SessionLocal()`. Nothing else in the function changed -- same fallback-user-lookup path, same `write_audit()`
+call, same close-in-`finally`.
+
+**`backend/.env.example`:** documented the two new optional env vars alongside the existing pool settings.
+
+**Not a fix for section 72's finding #1** (overall pool sizing vs. worker count / Oracle session limit) --
+that's a live-environment tuning question this sandbox can't answer, still open. This change only stops audit
+writes specifically from contributing to that contention.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; both edited files also parsed with
+`ast.parse` directly as an extra check since this touches engine/session construction at import time. No
+`sqlalchemy` package available in this sandbox to actually instantiate the new engine end-to-end (same
+constraint noted elsewhere in this log) -- please run `python -c "from app import database"` against a real
+environment before deploying, as a final sanity check. No new schema/table, so no manual SQL script needed.
+
+## 74. Bulk "Restore from Archive" for the Archive view
+
+**Requested directly:** "Add Bulk 'Restore from Archive' while testcases are Archived." The single-case
+restore (Archived -> Approved, `restore_test_case`) and bulk archive (`bulk_archive_test_cases`) already
+existed; only the bulk counterpart of restore was missing, so an authorized user archiving/restoring several
+testcases at once from the Archive view had to restore them one at a time.
+
+**`backend/app/schemas.py`:** added `TestCaseBulkRestoreFromArchive(ids: List[int])` -- no reason field,
+matching the single-case `/restore` endpoint (only the Archive direction requires a documented reason;
+reversing it back to Approved isn't a governance decision the way archiving or deleting is).
+
+**`backend/app/routers/test_repository.py`:** added `bulk_restore_test_cases`
+(`POST /projects/{project_id}/test-cases/bulk-restore-from-archive`), mirroring `bulk_archive_test_cases`'s
+own shape exactly -- same `require_can_manage_repository_governance` (QA Lead Group/Admin) gate,
+`_selected_project_cases` lookup, and per-row `_case_workflow_action` audit trail (`"Restored"`,
+`previous_state="Archived"`, `new_state="Approved"`, same wording the single-case endpoint already uses).
+Rows in the selection that aren't currently Archived are silently skipped rather than failing the whole
+batch -- mirrors bulk-archive's own "already Archived isn't a meaningful conflict" reasoning, just in the
+opposite direction, so a row restored by someone else a moment earlier doesn't block the rest of the batch.
+
+**`frontend/src/modules/test-management/TestRepository.tsx`:**
+- `restorableSelectedIds` -- same shape as `archivableSelectedIds`, gated on `canManageRepoGovernance`, only
+  ever includes currently-`Archived` rows. Naturally empty outside the Archive view (or an "All test cases"
+  selection filtered to `status=Archived`), same as `archivableSelectedIds` isn't gated to any one view either.
+- `BulkRestoreFromArchiveModal` -- new component, mirrors `BulkArchiveModal`'s confirm/progress/success/error
+  shape and CSS classes (`tm-operation-state`/`tm-progress-track`/`tm-operation-error`, same as
+  `BulkApproveModal`) exactly, minus the mandatory reason field.
+- "Restore selected (N)" button added to the bulk action bar next to "Archive selected", calling
+  `POST .../bulk-restore-from-archive`; on success, `refreshCases()` + clears selection, same as Archive's own
+  `onArchived` callback.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean. No schema
+change, so no manual SQL script needed.
+
+## 75. Test Project names must be unique
+
+**Reported directly:** "while creating project with same project name you can not create project, project
+should be unique as well." `TestProject.name` had no uniqueness enforcement at all -- two projects could be
+created with the identical name.
+
+**`backend/app/routers/test_projects.py`:** added `_require_unique_project_name(db, name, exclude_id=None)`
+and call it from both `create_test_project` and `update_test_project` (only when the name is actually
+changing, in the update case). Case-insensitive and whitespace-trimmed comparison (`func.lower(...)`) --
+"MILTON" and "milton " collide, matching what a person would actually mean by "unique," not a byte-for-byte
+match. Checks every project regardless of Active/Inactive/Archived status, same as `Department.name` and
+`ApplicationMaster.name`, both of which are already DB-level `unique=True` with no such carve-out. Raises 409
+with the colliding project's actual name in the message.
+
+**Enforced at the application layer, not a DB constraint.** `TestProject.name` stays `nullable=False` with no
+`unique=True` added -- this app has no Alembic (`create_all()` only emits DDL for tables that don't exist
+yet), and retrofitting a hard `UNIQUE` constraint onto an existing, already-populated production table risks
+failing outright at deploy time if any duplicate names already exist there today. The application-layer check
+gives the same guarantee for every new create/rename going forward without that risk; this matches how this
+router already hand-checks other "must be valid" rules (e.g. department-must-exist-and-be-active) rather than
+leaning on DB constraints for them.
+
+**No frontend change needed** -- both the create and edit project forms already render any thrown error
+generically via `<ErrorText error={error} />`, so the new 409 message surfaces automatically.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. No schema/migration script needed
+(application-layer check only).
+
+## 76. One active Test Project per Application
+
+**Follow-up, discussed directly rather than assumed:** "also under one application create one project only.
+more than one project under same application should not be allowed? what do you say" -- reasoning shared back
+first (the model's own header comment already documents "one TestProject maps to one Application" as an
+explicit product decision, but that was only ever enforced in the FK direction), then the user confirmed the
+exact rule to implement: block a second project for an application only while an existing project for that
+application is still active -- i.e. not yet Archived. A merely Inactive-but-not-Archived project still counts
+as "the" current project for that application (SRS PRJ-003's three states) and still blocks a duplicate; only
+Archiving frees the application up for a fresh project.
+
+**`backend/app/routers/test_projects.py`:** added `_require_no_active_project_for_application(db,
+application_master_id, exclude_id=None)`. No-ops when `application_master_id` is `None` -- projects with no
+application link (a nullable field; plenty of department-only projects have none) don't collide with each
+other just for both being unlinked. Checks `is_archived == False OR is_archived IS NULL` rather than a bare
+`!= True` -- `is_archived` is nullable, and Oracle's three-valued boolean logic means `!= True` would silently
+evaluate to NULL/unknown (and so be excluded) for a legacy row that's NULL rather than False; the explicit
+`OR is_(None)` treats "no explicit archive flag" as "not archived," matching the existing Python-side `not
+project.is_archived` checks elsewhere (test_reports.py's project-count summary).
+
+Wired into three places:
+- `create_test_project` -- checked right after `application_master_id` resolves.
+- `update_test_project` -- checked only when `application_master_id` is actually present in the payload and
+  different from the project's current value (editing any other field on a project doesn't re-trigger this).
+- `unarchive_test_project` -- closes a gap the other two alone would leave open: Archive project A for
+  application X (frees X up) -> create project B for X (now allowed) -> Unarchive A without this check would
+  leave X with two non-archived projects again, exactly what create/update block up front.
+
+Same "application layer, not a DB constraint" reasoning as section 75's name-uniqueness fix -- no
+`unique=True` added to `application_master_id`, since retrofitting that onto an existing, already-populated
+production table risks failing outright at deploy time if any application already has more than one
+non-archived project today.
+
+**No frontend change needed** -- same as section 75, both the create and edit project forms already render
+any thrown error generically via `<ErrorText error={error} />`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean. No schema/migration script needed
+(application-layer check only).
+
+## 77. Target Promotion Environment could be left blank and still pass Next
+
+**Reported directly, with a screenshot:** "'Select Target Promotion Environment' is getting as selection. If
+i am selecting there are no other option to select environment, still it's allowing to go next." Two related
+gaps in the New QA Request wizard's "Release & Environment" step (`DetailsStep.tsx`), both in
+`validation.ts`'s `detailsStepError`:
+
+1. **The actual reported bug:** `detailsStepError`'s own header comment claimed every mandatory select
+   "always defaults to a real (non-blank) value, so they can't be left empty through the UI" -- true for
+   Deployment Environment (no blank option ever rendered), but false for Target Promotion Environment, whose
+   `<select>` always renders a real `<option value="">Select Target Promotion Environment</option>`
+   placeholder alongside the real choices (`DetailsStep.tsx` line ~275). Nothing explicitly checked for that
+   blank value, so it could stay selected and Next/Submit still passed -- confirmed the same gap exists
+   server-side too (`schemas.py`'s `target_promotion_environment: Optional[str] = None`, and
+   `constants.py::validate_environment_promotion` deliberately "silently passes if either value isn't a
+   recognised pipeline stage," i.e. blank). Left the backend as-is here, matching this codebase's existing
+   pattern for this step's other mandatory fields (`CR_NUMBER_REGEX`/`EPIC_NUMBER_REGEX` are likewise
+   frontend-only gates, not independently re-checked server-side at submit).
+2. **A latent edge case the fix for #1 would otherwise have collided with:** `validTargetPromotionOptions`
+   returns an empty list when Deployment Environment is already `"Production"` -- the final stage in
+   `SIT -> UAT -> Pre-Production -> Production` -- since there's nowhere later left to promote to. The field
+   is marked mandatory (`"Target Promotion Environment *"`), so simply adding a blank-value check would have
+   made the form impossible to complete for any Production deployment instead of just under-validated.
+
+**`frontend/src/QARequests/validation.ts`:** added the explicit check -- `if
+(validTargetPromotionOptions(f.environment).length > 0 && !f.target_promotion_environment) return 'Please
+select a Target Promotion Environment.'` -- only enforced when there's actually a valid choice to make,
+addressing #1 without reintroducing #2.
+
+**`frontend/src/QARequests/steps/DetailsStep.tsx`:** Target Promotion Environment's `<Field>` now computes
+`targetOptions`/`hasTargetOptions` from the same `validTargetPromotionOptions(form.environment)` call and
+uses it to disable the `<select>` and drop the `"*"` from its own label when Deployment Environment is
+Production, with the placeholder option's text changing to "Not applicable -- Production is the final stage"
+instead of "Select Target Promotion Environment" -- so the UI's own required-ness signal always matches what
+`detailsStepError` is actually enforcing at that moment.
+
+**Deliberately not touched:** `Functional.tsx`'s "Edit Details" modal has the same two fields, but neither is
+marked mandatory there (no `"*"` on either label) and its own submit path has no equivalent gate to fix --
+left alone as out of scope for this report, which was specifically about the New Request wizard.
+
+**Verified:** `npx tsc --noEmit -p .` clean. No backend change, no schema/migration script needed.
+
+## 78. Production removed as a selectable Deployment Environment, everywhere the pairing exists
+
+**Follow-up, reported directly:** "There Should not be any option Production in deployment Environemnt. and
+this replicate everywhere where the target promotion and deployment environment scnarios present." Rationale:
+a QA Request/certificate/testing record is raised to plan the path TO Production, not deployed straight to
+it -- Production only makes sense as a Target Promotion Environment (the pipeline's final destination), never
+as the Deployment Environment a record starts from.
+
+**`frontend/src/constants.ts`:** added `DEPLOYMENT_ENVIRONMENTS = ENVIRONMENT_PIPELINE_ORDER.slice(0, -1)` --
+`['SIT', 'UAT', 'Pre-Production']`, i.e. every pipeline stage except the last -- as the one shared source of
+truth every "Deployment Environment"-equivalent dropdown now reads from, instead of each screen hand-filtering
+`ENVIRONMENTS` (`['Dev', 'SIT', 'UAT', 'Pre-Production', 'Production']`) locally. `ENVIRONMENT_PIPELINE_ORDER`
+itself is untouched -- Target Promotion Environment dropdowns still correctly offer Production as a valid
+target.
+
+**Every location with a Deployment/Environment-Tested + Target Promotion Environment pairing, found by
+grepping for `target_promotion_environment` across the frontend and checking each match for an actual
+editable counterpart field (not just a read-only mirror):**
+- `QARequests/steps/DetailsStep.tsx` -- New QA Request wizard's "Deployment Environment" (the field the
+  original report's screenshot was about).
+- `modules/functional/Functional.tsx` -- "Edit Details" modal's "Deployment Environment".
+- `modules/governance/SignOff.tsx` -- "Environment Tested" on both the standalone Create Certificate form and
+  the create-from-request form (2 occurrences -- same field, different modal).
+- `modules/specialised-testing/Performance.tsx` -- Edit modal's "Environment" field, paired with its own
+  "Target Promotion Environment" further down the same form.
+
+All four switched from `ENVIRONMENTS.map(...)` (or an inline `.filter((e_) => e_ !== "Dev")`) to
+`DEPLOYMENT_ENVIRONMENTS.map(...)`.
+
+**Deliberately left alone, confirmed not part of this pairing:**
+- `modules/security/DAST.tsx`'s per-target "environment" select (Targets repeatable rows) -- a different
+  concept entirely (which environment a scan target URL lives in), no paired Target Promotion Environment
+  field alongside it.
+- `modules/security/SAST.tsx` and `DAST.tsx`'s "Deployment Environment"/"Target Promotion Environment"
+  `DetailField`s -- read-only mirrors of the parent QA Request's own values (`req.deployment_environment`/
+  `req.target_promotion_environment`), not independent editable dropdowns -- they already reflect whatever
+  the (now-fixed) QA Request contains, with nothing further to change.
+- `DastStep.tsx`/`PerformanceStep.tsx`'s own wizard "environment" pickers -- already restricted to
+  `POST_SIT_ENVIRONMENTS` (UAT/Pre-Production only, no Dev, no Production) for an unrelated reason (DAST scans
+  and Performance tests are never run against Dev/SIT/Production at all), so already correct.
+
+**Incidental effect on section 77's fallback:** `DetailsStep.tsx`'s "Target Promotion Environment has zero
+valid options" edge case (`validTargetPromotionOptions('Production') === []`) can no longer be reached via any
+FRESH selection now that Production isn't offered as a Deployment Environment choice at all -- the
+disabled-field/dropped-`"*"` fallback added in section 77 stays in place purely as a safety net for any
+pre-existing Draft saved with `environment='Production'` before this change; comment updated in place to say
+so rather than removing the fallback outright.
+
+**Not changed:** no backend enum/allowed-value validation added for `environment` (`schemas.py`'s
+`environment: Optional[str] = None` stays a free string) -- matches this codebase's existing pattern for this
+same field pairing (dropdown option lists are the enforcement layer client-side; the backend only checks
+cross-field *ordering*, via `validate_environment_promotion`, not the individual value's membership in any
+particular allowed set). A stale pre-existing record with `environment='Production'` already saved is
+therefore unaffected by this change and remains readable/displayable as-is.
+
+**Verified:** `npx tsc --noEmit -p .` clean. No backend change, no schema/migration script needed.
+
+## 79. Tester reassignment: QA Lead group AND the current tester(s) can now hand off to another QA member, at any point after initial assignment
+
+Reported directly: "after qa lead readiness, lead assigning to tester, current problem is once assigned
+there are no other option to reassign the tester or modify the tester. give qa lead to reassign as well as
+the current assign people can reasign to another qa member."
+
+**Before:** `assign-tester` (Functional) / `complete-planning` (Performance) were each callable exactly once,
+only while `status === PLANNING`, only by the QA Lead group. Once a tester was assigned and the request moved
+on, there was no way to change who was assigned -- not even for the QA Lead, and not for the tester themself
+to hand off to a colleague.
+
+**After, both modules:** the action is now callable across the entire active-testing window, by either the
+QA Lead group OR whoever is currently assigned:
+- Functional -- `TESTER_REASSIGNABLE_STATUSES` (new, `constants.py`): `PLANNING, TESTER_ASSIGNED, TEST_DESIGN,
+  EXECUTION_IN_PROGRESS, DEFECT_RAISED, WAITING_FOR_FIX, RETESTING`.
+- Performance -- `PERFORMANCE_TESTER_REASSIGNABLE_STATUSES` (new, `constants.py`): every
+  `PERFORMANCE_STAGE_ORDER` entry from `PLANNING` onward (`PLANNING` through `REPORT`).
+
+**Status handling, both modules:** calling the action while `status` is still exactly `PLANNING` is treated as
+the *initial* assignment and behaves exactly as before (Functional advances to `TESTER_ASSIGNED`; Performance
+advances straight to `ENVIRONMENT_SETUP`, same fused assign+advance mechanic it always had). Calling it at any
+later status in the reassignable window is a pure *reassignment* -- the tester list is updated but `status` is
+left untouched, so a request mid-`LOAD_TEST_EXECUTION` (say) stays there after a tester swap instead of
+regressing back to an earlier stage. The audit log records "Tester Assigned"/"QA Tester Assigned" for the
+initial case and "Tester Reassigned"/"QA Tester Reassigned" for the rest, against the correct current-stage
+label (`QA_REQUEST_STATUS_LABELS`/`PERFORMANCE_STATUS_LABELS`).
+
+**Backend (`routers/functional.py`):**
+- New `_require_assigned_qa_lead_or_current_tester(obj, user)` -- passes for the QA Lead group (with the usual
+  CM-QA/AGM-QA Executive bypass) or for any user ID currently in `obj.assigned_tester_ids`.
+- `assign_tester`'s route dependency widened to also accept `Role.QA_ENGINEER` (previously QA Lead group
+  only) -- the permission check itself is still done by the helper above, this just lets a plain QA Engineer
+  reach the endpoint at all.
+- `_require(obj, TESTER_REASSIGNABLE_STATUSES, "Assign tester")` replaces the old single-status check.
+
+**Backend (`routers/performance.py`):** identical shape --
+`_require_assigned_qa_lead_or_current_performance_tester` (deliberately a separate function from the
+pre-existing `_require_performance_execution_owner`, which gates the request's own execution-step actions --
+"who may change WHO is assigned" is a different concern from "who may act on the request's own steps," kept
+separate so one can't silently change the other), `complete_planning`'s route dependency widened to add
+`Role.QA_ENGINEER`, `_require(obj, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, "Assign QA Tester")`.
+
+**Frontend, both `Functional.tsx` and `Performance.tsx`:**
+- `canAssignTester`/`canCompletePlanning` widened from `isAssignedQALead && status === 'PLANNING'` to
+  `(isAssignedQALead || isAssignedTester) && <reassignable-statuses>.includes(status)`.
+- The tester picker is pre-filled with the currently-assigned tester(s) (via a `useEffect` keyed on
+  `req.id`/`req.assigned_tester_ids`) whenever this is a reassignment rather than the initial assignment, so
+  reassigning defaults to "hand off from the current roster" instead of starting blank.
+- Button/placeholder copy switches to "Reassign Tester(s)..." / "Reassign Tester(s)" (Functional) and
+  "Reassign QA Tester(s)..." / "Reassign Tester(s)" (Performance, dropping "& Complete Planning" since status
+  no longer advances on a reassignment) once past the initial-assignment case.
+- `TESTER_REASSIGNABLE_STATUSES` / `PERFORMANCE_TESTER_REASSIGNABLE_STATUSES` added to `constants.ts`,
+  mirroring the two new backend constants exactly (same dual-mirroring convention as
+  `ENVIRONMENT_PIPELINE_ORDER`).
+
+**Not changed:** no schema/migration script -- no new columns, `assigned_tester_ids` (comma-separated string)
+already existed and is simply overwritten on reassignment, same as it always was on initial assignment.
+
+**Verified:** `python3 -m py_compile` clean on `functional.py`/`performance.py`/`constants.py`;
+`npx tsc --noEmit -p .` clean.
+
+## 80. Test Cycle Blocked/Resumed now auto-syncs its linked Functional request's status
+
+Reported directly: "If test lifecycle is Blocked, then automatically mark linked QA request
+WAITING_FOR_FIX and again lifecycle marked as In Progress then linked qa request again marked as
+EXECUTION_IN_PROGRESS."
+
+**Where:** `routers/test_execution.py`'s `update_cycle` (`PATCH /api/test-execution/cycles/{cycle_id}`) --
+the same endpoint that already validates and records every Test Cycle lifecycle transition
+(`_ALLOWED_CYCLE_TRANSITIONS`/`_CYCLE_TRANSITION_ACTIONS`). New helper
+`_sync_linked_functional_request_status(db, cycle, transition_action, current_user)` is called right after
+the existing "Lifecycle" `ApprovalAction` is written, only for the two transitions that matter:
+`"Block Execution"` (`In Progress -> Blocked`) and `"Resume Execution"` (`Blocked -> In Progress`).
+
+**Rule:**
+- **Block Execution:** if the linked Functional request's status is currently `EXECUTION_IN_PROGRESS`, set it
+  to `WAITING_FOR_FIX` and record an audit row (`entity_type="FUNCTIONAL_REQUEST"`) noting which cycle caused
+  it.
+- **Resume Execution:** if the linked Functional request's status is currently `WAITING_FOR_FIX`, restore it
+  to `EXECUTION_IN_PROGRESS` -- but only if none of that request's *other* linked Test Cycles are still
+  `Blocked` (a Functional request can have several cycles linked at once -- see
+  `FunctionalRequest.linked_test_cycles` / `complete_qa`'s pre-existing "every linked cycle must be Completed"
+  gate for the same multi-cycle pattern). If another cycle is still Blocked, the request correctly stays at
+  `WAITING_FOR_FIX`.
+- The guard on both directions (only firing from the *specific* status the sync itself would have produced)
+  means it can never clobber an unrelated, manually-reached status -- e.g. `QA_COMPLETED`, or `DEFECT_RAISED`
+  sitting in the separate manual (unlinked-cycle) defect flow.
+
+**Scope:** Functional requests only. A Test Cycle can structurally link to SAST/DAST/Performance requests too
+(`TestCycleChildRequestLink.child_type`), but only Functional's status vocabulary has this exact
+Execution-In-Progress / Waiting-For-Fix pair -- Performance's own lifecycle folds that concern into a single
+`DEFECT_FIX_RETEST` status with no direct equivalent, so it's deliberately left out of this pass rather than
+guessing a mapping; SAST/DAST don't use Test Cycles/Executions at all. The sync no-ops immediately (`link.child_type != "Functional"`) for any other linked type.
+
+**Not changed:** no schema/migration script -- reuses the existing `TestCycleChildRequestLink`/
+`FunctionalRequest.status` columns and the existing `ApprovalAction` audit table.
+
+**Verified:** `python3 -m py_compile` clean on `test_execution.py`.
+
+## 81. QA Lead can now raise "Request Sign-off" on behalf of an unavailable tester
+
+Reported directly: "'Request Sign Off' button is not enable[d] for QA lead, sign off as well as from
+request section, if tester [is] no[t] available then at least [o]n behalf of QA he can raise the request."
+
+**The bug had three layers, all pointing the same way -- a QA Lead was blocked at every one of them, not
+just the frontend button:**
+
+1. **`routers/functional.py`'s `request_signoff`** (`POST /{req_id}/request-signoff`) -- its route decorator
+   already allowed `Role.QA_LEAD`, but an in-function call to `_require_assigned_tester(obj, current_user)`
+   silently overrode that and 403'd anyone but the literal assigned tester (or Admin). Swapped for the
+   already-existing `_require_assigned_qa_lead_or_current_tester` helper (added for tester reassignment, see
+   section 79) -- generalized to take an `action` string for its error message rather than a hardcoded
+   "reassign the tester(s)..." wording, since it's now shared by two different actions.
+2. **`routers/signoff.py`'s `create_signoff`** (`POST /api/signoffs`, the call `NewSignOffModal` actually makes
+   first to create the certificate) -- its role gate was `require_roles(Role.QA_ENGINEER)` only, with no
+   `QA_LEAD` at all (contrary to a stale frontend comment that claimed it already matched
+   `request-signoff`'s gate). Widened to `require_roles(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA,
+   Role.AGM_QA)`. Self-approval is still blocked further down the certificate's own approval chain
+   (`qa_lead_decision`'s existing `require_not_requester` check) -- a QA Lead who drafts a certificate still
+   cannot be the one who later approves it as QA Lead.
+3. **Frontend, `Functional.tsx`'s `canRequestSignoff`** -- only checked `isAssignedTester`; widened to
+   `(isAssignedTester || isAssignedQALead)`, same shape as the existing `canAssignTester`.
+4. **Frontend, `SignOff.tsx`'s `canCreate`** (gates the standalone "+ New Sign-off Certificate" button on the
+   Sign-off module's own list page -- the "sign off ... section" half of the report) -- widened from
+   `QA_ENGINEER`-only to `hasRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')`.
+
+**Not changed:** the certificate/request picker inside `NewSignOffModal` -- it was never filtered by assigned
+tester, so no change needed there; a QA Lead already saw every eligible request in the picker, they just
+couldn't previously submit.
+
+**Verified:** `python3 -m py_compile` clean on `functional.py`/`signoff.py`; `npx tsc --noEmit -p .` clean.
+
+## 82. Defect Management register restricted to the QA team
+
+Reported directly: "other than QA team, for others there should not be any option to open any defects."
+
+Before this, `GET /api/defects` (list) was department-scoped but not role-scoped (any authenticated user
+could browse their own department's defects), and `GET /api/defects/{id}` / `GET /api/defects/by-key/{key}`
+(detail) had **no scoping of any kind** -- any authenticated user who knew or guessed a defect id/key could
+open it. There was no nav, route, or page-level gate either -- "Defect Management" showed for every logged-in
+user.
+
+Given the user's own reported tradeoff (asked and confirmed directly): rather than also touching who may
+*report/link* a defect (`CREATE_ROLES` in `defects.py`, which stays exactly as-is -- Requester/Business
+Analyst/Application Owner can still report and link a defect same as before) or trying to preserve a
+reporter's ability to see just their own defect, this pass locks down the **register/browsing surface and the
+page itself**, accepting that non-QA users lose the Defect Management page entirely (including its create
+buttons) rather than partially.
+
+**Backend:**
+- New shared `QA_TEAM_ROLES` constant (`constants.py`): `QA_ENGINEER, QA_LEAD, CHIEF_MANAGER_QA, AGM_QA,
+  SECURITY_ANALYST` (plus the standard ADMIN bypass via `has_role()`) -- Security Analyst included per direct
+  confirmation, since SAST/DAST findings also flow into this module.
+- `defects.py`'s `list_defects` (`GET /api/defects`), `defect_dashboard` (`GET /api/defects/dashboard`), and
+  `export_defects` (`GET /api/defects/export-xlsx`) now depend on `require_roles(*QA_TEAM_ROLES)` instead of
+  plain `get_current_user`.
+- **Deliberately unchanged**: `get_defect`, `get_defect_by_key`, and the attachment endpoints stay open to any
+  authenticated user -- a direct deep link (e.g. from a notification) still opens for whoever already has one,
+  matching the confirmed "least change" option.
+
+**Frontend:**
+- New shared `DEFECT_MANAGEMENT_ROLES` constant (`constants.ts`), mirroring `QA_TEAM_ROLES` exactly.
+- `Layout.tsx`'s "Defect Management" nav item is now conditionally rendered (`...(hasRole(user,
+  ...DEFECT_MANAGEMENT_ROLES) ? [...] : [])`), same pattern as the existing Audit Log nav gate.
+- `Defects.tsx` gets an Admin.tsx-style page-level gate: an "Access Restricted" `Card` returned after every
+  hook (so the Rules of Hooks aren't violated) instead of the register, for anyone outside
+  `DEFECT_MANAGEMENT_ROLES`. `load()` itself also short-circuits at the top for the same check, so a non-QA
+  user's page load doesn't even fire the page's data-fetch burst in the first place.
+
+**Verified:** `python3 -m py_compile` clean on `defects.py`/`constants.py`; `npx tsc --noEmit -p .` clean.
+
+## 83. Defect Management's page-load API burst collapsed from O(projects + cycles) calls to 2
+
+Reported directly, with a DevTools screenshot: "lot's of api call, if there are 30 project then 30 api call
+i don't think a good approach same for cycles, executions."
+
+**Root cause:** `Defects.tsx`'s `load()` fetched every active project's `/my-access` (N calls), then every
+active project's `/cycles` (another N calls), then -- for every cycle returned by every one of those -- a
+further `/executions?status=Fail&status=Blocked` call. Total calls scaled as `N + N + (total in-progress
+cycles across all N projects)`, worse than linear as cycle counts grow, purely to build (a) a per-project
+capability lookup only ever consulted for whichever ONE defect is currently open, and (b) the "pick a
+Failed/Blocked execution" dropdown used when creating or linking a defect.
+
+**Fix, two independent pieces:**
+
+1. **`/my-access` -- eager-for-all became on-demand-for-one.** `GET /api/test-projects/{id}/my-access`'s own
+   docstring already says it's meant to be called "once per project selection," and its other two callers
+   (`TestExecution.tsx`, `TestRepository.tsx`) already do exactly that. `Defects.tsx` was the outlier, fetching
+   it for every project eagerly at page load even though the result (`can_give_final_approval`) is only ever
+   read for whichever defect happens to be open. Replaced the eager `Record<projectId, TestProjectMyAccessOut>`
+   fan-out with a single `useEffect` keyed on `selected?.project_id` that fetches on demand only when a defect
+   with a project is actually opened -- 0-1 calls per defect-open instead of N calls at every page load,
+   regardless of how many defects get opened in the session.
+
+2. **Cycles + executions -- N+1-of-N+1 became one batch endpoint.** New `GET
+   /api/test-execution/executions/blocked-or-failed` (`test_execution.py::list_blocked_failed_executions`)
+   joins `TestProject -> TestCycle -> TestExecution` server-side in one query (active projects only, status
+   in `Fail`/`Blocked`, department-scoped via `dashboard_department_scope` -- though QA team roles are already
+   department-unrestricted, so this is defense in depth rather than a behavior change for the actual callers),
+   returning one flattened row per execution via the new `DefectLinkableExecutionOut` schema (`project` +
+   `cycle` + `execution`, deliberately shaped to match `Defects.tsx`'s own pre-existing local `ExecutionContext`
+   interface exactly, which is now just a type alias for it) -- so no consumer-side logic in `CreateDefectModal`/
+   `LinkExecutionModal`/the "Other affected Test Cases" picker needed to change, only where the data comes from.
+   Gated to `QA_TEAM_ROLES` (defense in depth, since only the now QA-team-only Defects.tsx page calls it) and no
+   longer needs a separate `/api/test-projects` fetch at all -- that was only ever used to drive this fan-out.
+
+**Net effect:** `Defects.tsx`'s page load now makes 2 fixed API calls for this data (one batch executions call,
+plus dashboard/register calls unrelated to this fix) regardless of project or cycle count, instead of scaling
+with both. Combined with section 82's access restriction, this endpoint and this page are now only ever
+reached by QA team accounts in the first place.
+
+**Not changed:** no schema/migration script -- no new columns, purely new read-only endpoints/queries.
+
+**Verified:** `python3 -m py_compile` clean on `test_execution.py`/`schemas.py`; `npx tsc --noEmit -p .` clean.
+
+## 84. Correction to section 82 -- Defect Management reopened to Requester/Business Analyst/Application Owner
+
+Reported directly, same day as section 82: "you are correct defect can be raised by requster, business
+analyst application owner too so defect management tool should be available for them as well."
+
+Section 82 locked Defect Management down to "QA team only" (`QA_ENGINEER`/`QA_LEAD`/`CHIEF_MANAGER_QA`/
+`AGM_QA`/`SECURITY_ANALYST`). That was too narrow -- `defects.py`'s own pre-existing `CREATE_ROLES` already
+lets Requester/Business Analyst/Application Owner report and link a defect, so locking the whole module away
+from them left no UI path to actually use that ability.
+
+**Fix:** the shared role constant (backend `constants.py`, frontend `constants.ts`) is renamed from
+`QA_TEAM_ROLES` to `DEFECT_MANAGEMENT_ROLES` and broadened to add `REQUESTER`, `BUSINESS_ANALYST`, and
+`APPLICATION_OWNER` -- i.e. every role in `CREATE_ROLES` plus `AGM_QA` (the one Executive-bypass role
+`CREATE_ROLES` itself doesn't separately list). No other logic changed: `list_defects`/`defect_dashboard`/
+`export_defects` (`defects.py`), `list_blocked_failed_executions` (`test_execution.py`), and the frontend
+nav/page gate (`Layout.tsx`/`Defects.tsx`) all just pick up the broader set automatically since they already
+referenced the shared constant by name. The department-scoping on the new batch executions endpoint (section
+83) now does real work for these three roles too, since they -- unlike QA team -- are NOT in
+`dashboard_department_scope`'s unrestricted set, so their own picker/register is correctly narrowed to their
+own department, same as everywhere else they already see department-scoped data.
+
+Still excluded: SM, Department Head (CM/AGM), SCALE_6_PLUS -- roles with no legitimate stake in defects at
+all, matching the original report's intent.
+
+**Verified:** `python3 -m py_compile` clean on `constants.py`/`defects.py`/`test_execution.py`; `npx tsc
+--noEmit -p .` clean.
+
+## 85. Defect assignment auto-populates Department from the linked request or Failed/Blocked execution
+
+Reported directly: "During assigning defect, department should be auto populated based on linked request or
+Failed / Blocked Test Execution."
+
+**Before:** the "Assigned" transition's Department field (`TransitionModal` in `Defects.tsx`) only ever
+prefilled from `requestDepartment` -- the linked QA Request's own department -- passed down from `Defects.tsx`
+as `requests.find((r) => r.id === selected.qa_request_id)?.department`.
+
+**After:** a new, more specific signal is checked first -- `models.Defect.project_department` (new property,
+`models.py`): `self.cycle.project.department if self.cycle and self.cycle.project else None`, i.e. the
+department of the Test Project that owns the linked Test Cycle, only ever set once this defect is linked to a
+Failed/Blocked execution (via `cycle_id`). Exposed as `DefectOut.project_department` (`schemas.py`, mirrored
+in `types.ts`).
+
+**Priority order** (`TransitionModal`'s new `autoDepartment`): `defect.project_department` (linked execution's
+project) -> `requestDepartment` (linked QA Request) -> `defect.assigned_team` (whatever it was previously set
+to, for re-assigning). The project department is prioritized because it's the more specific "which team
+actually owns the failing area" signal; the request department remains the fallback for a defect opened
+standalone (no execution ever linked). The hint text under the field now names which of the two sources
+actually supplied the value ("Defaulted from the linked Failed / Blocked Test Execution's project" vs.
+"Defaulted from the linked QA Request").
+
+**Not changed:** the Department field itself -- still a normal editable `SearchableSelect`, this only changes
+its starting value; the user can still pick a different department before assigning. No schema/migration
+script -- `project_department` is a computed property/response field, not a new column.
+
+**Verified:** `python3 -m py_compile` clean on `models.py`/`schemas.py`; `npx tsc --noEmit -p .` clean.
+
+## 86. "Report Defect from Execution" QA Request picker filtered to the linked request, with Other + manual fallback
+
+Reported directly: "if defect open from 'report defect from execution', currently showing all request id,
+logically it should be filter based on request linked with that test cycle, else also give Other, and add
+one field for free to text."
+
+**Before:** `CreateDefectModal`'s "QA Request ID *" `SearchableSelect` always listed every QA Request in the
+system (up to the page's own 100-row fetch), regardless of which execution/Test Cycle the defect was actually
+being raised from. A `linkedRequest` value was already computed (matching the selected execution's Test
+Cycle's `linked_request_type`/`linked_request_id` against each QA Request's own linked child requests) and
+used to *pre-select* the right one, but the dropdown's full option list never reflected that -- nothing
+stopped a reporter from picking an unrelated QA Request instead.
+
+**Now, in `Defects.tsx`'s `CreateDefectModal`:**
+- `findLinkedRequests()` (renamed/generalized from the old single-`find()` `linkedRequest`, now a `.filter()`)
+  returns every QA Request whose own linked child requests include the one this Test Cycle is linked to --
+  normally 0 or 1.
+- When at least one linked request is found (and this isn't the standalone "Open Defect" flow), the picker
+  shows **only** that request (or requests), plus an appended **"Other (choose a different QA Request)"**
+  option (sentinel `OTHER_REQUEST`, same pattern as `DetailsStep.tsx`'s existing Application Name "Other"
+  flow). Picking "Other" flips `showAllRequests` to `true`, which swaps the option list to every QA Request in
+  the system -- the previous, unfiltered behavior, now opt-in rather than the default.
+- When no linked request is found at all (cycle isn't linked to any child request, or standalone mode), the
+  picker falls back to the full list automatically -- nothing to filter by.
+- **New**: a manual free-text input ("or type the QA Request ID directly, e.g. TQA-REQ-07") sits below the
+  picker. Since `POST /api/defects` requires a real `QARequest.id` integer FK (confirmed: no backend
+  lookup-by-request_id-string endpoint exists anywhere in `qa_requests.py`), this resolves what's typed
+  client-side against the already-fetched `requests` list (case-insensitive match on `request_id`) -- a match
+  immediately sets the real `requestId` and switches to "showing all" mode; no match shows a small inline "No
+  QA Request found with this ID" hint rather than silently failing at submit.
+- Switching the selected execution now always re-derives (and resets the manual text field) instead of only
+  updating `requestId` when a link was found -- fixes a pre-existing bug where switching to an execution with
+  no linked request left the *previous* execution's request selection stale in the field.
+- New CSS (`index.css`): `.defect-request-picker`/`.defect-request-manual`/`.defect-request-manual-hint`,
+  scoped to this one field wrapper so it doesn't affect any other `Field` elsewhere in the app.
+
+**Not changed:** backend `create_defect` -- still just resolves whatever integer `qa_request_id` it's given;
+no new endpoint, no schema/migration script.
+
+**Verified:** `npx tsc --noEmit -p .` clean.
+
+## 87. Simplified #86: dropped the "Other" option and manual free-text field, just auto-populate
+
+Immediate follow-up feedback on #86, after seeing it live: "no need of textbox, just auto populate the
+linked request id. nothing others, creating so much complexity otherwise."
+
+**Before (#86):** picker pre-filtered to the linked request(s) but still rendered as an editable
+`SearchableSelect` (with an appended "Other" option to escape to the full list) plus a separate manual
+free-text input below it for typing a QA Request ID directly.
+
+**Now:** when `CreateDefectModal` is opened from an execution (`!standalone`) and `findLinkedRequest()` finds
+the QA Request tied to that execution's Test Cycle, the "QA Request ID" field renders as a plain read-only
+`<input>` showing `request_id · application_name` -- same treatment as the existing read-only Application
+field right next to it -- with `requestId` locked to that value. No dropdown, no "Other", no free-text box.
+The `SearchableSelect` (full `requests` list) only reappears for the standalone "Open Defect" flow, or the
+rare case where the selected execution's Test Cycle isn't linked to any child request at all (nothing to
+auto-populate).
+
+**Removed:** `OTHER_REQUEST` sentinel, `showAllRequests`/`manualRequestKey` state, the `requestOptions`
+"Other" append, the manual-entry match/hint logic, and the `.defect-request-picker`/`.defect-request-manual`/
+`.defect-request-manual-hint` CSS added in #86. `findLinkedRequests` (plural, `.filter()`) is now
+`findLinkedRequest` (singular, `.find()`) since only ever the first match was used.
+
+**Verified:** `npx tsc --noEmit -p .` clean.
+
+## 88. Test Cycle "Unlink QA Request" now uses ConfirmModal/InfoModal instead of window.confirm
+
+Reported directly: "Unlink request id in test cycle not working sometime, opening as javascript alert
+window. show as proper alert window like other places have, and send confirmation message if succesful."
+
+**Before:** `TestExecution.tsx`'s `unlinkCycleRequest()` (the "Unlink" button next to a Test Cycle's
+"Linked <Functional/SAST/DAST/Performance>" sidebar chip) gated the whole action behind a raw browser
+`window.confirm(...)` -- native `confirm`/`alert` popups are exactly the kind that some browsers suppress or
+auto-dismiss under certain popup-blocking/embedding policies, which lines up with the "not working
+sometime" report. There was also no success feedback of any kind afterward -- the link chip just silently
+disappeared from the sidebar if it worked.
+
+**Now:** the button (`onClick={() => setPendingUnlinkCycleRequest(true)}`) opens the same `ConfirmModal`
+component used for every other confirmation on this page (e.g. `cycleToDelete` right above it) -- "Unlink QA
+Request?" / "Unlink \<key\> from \<cycle\>? ... will remain unchanged." / Unlink · Cancel. `unlinkCycleRequest()`
+itself now runs only from `onConfirm`, no longer reads `window.confirm`'s return value, and on success shows
+an `InfoModal` ("Request unlinked" / "\<key\> has been unlinked from \<cycle\>.") -- new `InfoModal` import,
+matching the existing "OK, got it" acknowledgement pattern used elsewhere (e.g. QA Sign-off Save Draft). On
+failure the existing `ErrorText`/`setError(err)` path is unchanged.
+
+New state: `pendingUnlinkCycleRequest` (boolean, drives the ConfirmModal), `unlinkedCycleRequestNotice`
+(string | null, drives the InfoModal). No backend or schema changes -- `DELETE
+/api/test-execution/cycles/{id}/request-link` itself was already working correctly; this was purely a
+frontend confirmation/feedback UX fix.
+
+**Verified:** `npx tsc --noEmit -p .` clean.
+
+## 89. Defect "Assigned" remark was captured but never displayed anywhere + added a "currently assigned to" label
+
+Reported directly: "whenever assigning defect to requester, system asking for remark, that remark not showing
+any where in the ui. also add current assign lebel which show the name whom currently assigned."
+
+**Root cause (remark):** the "Assigned" transition's Remarks field was already being saved correctly to
+`models.Defect.assignment_remarks` (`defects.py`'s `transition` endpoint), and `DefectOut` already exposed
+that column -- but the value was never actually used anywhere downstream. It wasn't folded into the audit
+trail `details` text (unlike every other transition, e.g. Retest's `details = remarks or "Retesting
+started."`), so it didn't show up in the existing Activity feed either. And `assignment_remarks` was flat-out
+missing from the frontend's `DefectOut` interface (`types.ts`), so even a future UI read of it would've been
+a silent `undefined`. Net effect: typed, saved, and then genuinely unreachable.
+
+**Fixed in three places:**
+1. `defects.py`'s Assigned branch: `details` now appends `" -- {remarks}"` when a remark was entered, so it
+   surfaces immediately in the Activity feed (`GET /api/approvals?entity_type=DEFECT&entity_id=...`, already
+   rendered by `JiraActivity` in `DefectDetail`) -- no schema or endpoint change needed for this half.
+2. `types.ts`: added the missing `assignment_remarks?: string | null` to `DefectOut`.
+3. `Defects.tsx`'s `DefectDetail`: Workflow Details section now includes an "Assignment" item (labelled with
+   `assigned_by_name` when available) whenever `defect.assignment_remarks` is set -- same
+   `MarkdownComment`/rich-text rendering as Resolution/Retest/Reopened/Deferred/Rejected already get.
+
+**"Currently assigned to" label:** `TransitionModal`'s Assigned block (`target === 'Assigned'`) now opens with
+`{defect.assignee_name && <p className="defect-assignment-current">Currently assigned to <strong>{defect.
+assignee_name}</strong>{...department...}.</p>}`, above the Department/Assignee pickers -- so a lead
+re-assigning or reopening-then-reassigning a defect can see who currently holds it before picking someone
+new. Empty (nothing rendered) on a defect's first-ever assignment, since there's no current assignee yet. New
+CSS `.defect-assignment-current` (amber, distinct from the existing teal `.defect-assignment-default`
+"defaulted from..." hint, since this reflects actual current state rather than a suggested default).
+
+**Also:** moved the Assigned transition's own dedicated Remarks field (previously falling through to the
+generic `!['Resolved','Closed',...].includes(target)` catch-all at the bottom of the fieldset) up into the
+Assigned block itself, directly under the auto-department hint -- same field, just now excluded from the
+generic fallback (`'Assigned'` added to that exclusion list) so it isn't accidentally duplicated.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean.
+
+## 90. Closing a defect opened from Test Execution's "Cycle Defects" panel now returns to that Test Cycle
+
+Reported directly (with a screenshot): clicking a defect in Test Execution's "Cycle Defects" panel opens the
+defect page, and closing it left the user stranded on the Defects register instead of back on the Test
+Execution page/cycle they came from.
+
+**Root cause:** `LinkedDefects.tsx` (the shared "linked defects" panel used by Test Execution's Cycle Defects,
+Test Repository's per-testcase defects, and QA Request's linked defects) opens a defect via a full-page
+navigation, `navigate('/defects?open=<key>')` -- not a same-page modal. `Defects.tsx`'s `DefectDetail`
+`onClose` only ever did `setSelected(null); setSearchParams({})`, which clears the `open` param but stays on
+the `/defects` route -- there was never any memory of which page the click originated from.
+
+**Fix:** `LinkedDefects` gained an optional `returnTo?: string` prop; when supplied, it's carried through as
+`&return=<encoded url>` on the navigation to `/defects?open=...`. `Defects.tsx`'s top-level component now
+also calls `useNavigate()`, and `DefectDetail`'s `onClose` checks `searchParams.get('return')` first --
+if present, `navigate(returnTo)` (back to the originating page); otherwise falls back to the original
+clear-params-and-stay-on-register behavior (unchanged for row clicks within the Defects page itself, or
+`open=` deep links from Global Search/notifications, which never set `return`).
+
+**Wired up for:** `TestExecution.tsx`'s Cycle Defects panel only --
+`returnTo={\`/test-execution?project=${projectId}&cycle=${selectedCycle.id}\`}`, matching the same
+`?project=&cycle=` URL shape `DefectDetail`'s own trace-grid "Test Cycle" button already navigates to.
+`LinkedDefects`'s other two call sites (`TestRepository.tsx`'s per-testcase panel, `QARequests/RequestDetail.
+tsx`'s per-request panel) were left as-is -- same latent "doesn't return you" behavior remains there, since
+`returnTo` is optional and off by default; worth the same treatment later if reported.
+
+**Verified:** `npx tsc --noEmit -p .` clean.
+
+## 91. Test Case modal's Save button no longer closes the modal
+
+Reported directly: "On save button click of testcase closing the modal, it should not close the modal."
+
+**Before:** `TestCaseModal`'s `submit()` (`TestRepository.tsx`) already called `onSaved(saved)` with the saved
+`TestCaseOut`, but the call site (`onSaved={() => { refreshCases(); setEditingCase(null) }}`) discarded that
+value and always closed the modal via `setEditingCase(null)` -- Save was the only action in this modal that
+closed it; checkout, Submit for review, and every review decision all leave it open.
+
+**Now:** `onSaved={(saved) => { refreshCases(); setEditingCase(saved) }}` -- the list refreshes in the
+background, but the modal stays open against the now-saved record. This also fixes the mechanics for a
+brand-new test case: `existing` (was `null` while `editingCase === 'new'`) becomes the real saved record, so
+a second Save correctly PATCHes instead of re-POSTing a duplicate, the title switches from "New Test Case" to
+`Test Case <key>`, and the version-history/activity `useEffect` (keyed on `existing`) now fires to load them.
+Since there's no other visual cue that Save succeeded once the modal doesn't close, added a small "Saved"
+label (`justSaved` state, self-clears after 2.5s, new `.tm-save-confirm` CSS) next to the Save button.
+
+**Backend follow-on (`test_repository.py`'s `create_test_case`):** `_create_case_with_first_draft` (shared
+with import/clone, which shouldn't auto-lock every case to whoever ran that bulk action) never sets
+`checked_out_by_id`, so a brand-new case reads back as unreserved -- previously invisible, since the modal
+always closed straight after create. With the modal now staying open, that would have forced the form
+straight into "Read-only until reserved" the instant a new case was saved, right out from under the person
+who just wrote it. Fixed by setting `obj.checked_out_by_id = current_user.id` in `create_test_case` itself
+(single-case endpoint only, not the shared helper) -- a freshly created case is now auto-reserved to its own
+author, same as if they'd clicked Start editing, so authoring can continue without an extra click.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean.
+
+## 92. Reassignment Requirement -- Assign now has a Reassign counterpart everywhere, app-wide
+
+Formal CR, quoted in full: everywhere the system offers an Assign option (Assign Tester, Assign Defect,
+Assign QA Lead, Assign Analyst), it must also offer Reassign. Reassignment is permitted only to the current
+assignee, the Department Head of the current assignee's department, or an Admin. During reassignment: only
+eligible users are shown, a reason is mandatory, the new assignee is notified, the previous assignee loses
+action permission, the record's existing status/history stays unchanged, and the audit trail captures
+previous assignee, new assignee, reassigned by, date/time, and reason. Department Head mapping: COE - Quality
+Assurance uses Chief Manager - QA / AGM - QA; every other department uses Chief Manager - Department / AGM -
+Department (`Role.DEPARTMENT_HEAD_CM`/`Role.DEPARTMENT_HEAD_AGM`).
+
+**Shared backend helper (`app/reassignment.py`, new file):** every module below calls into this instead of
+duplicating eligibility/audit/notification logic -- directly serving the CR's own "must be implemented
+consistently across all modules" line. `department_head_roles(department)` returns the CM/AGM role pair for
+a department (QA gets `CHIEF_MANAGER_QA`/`AGM_QA`; everything else gets `DEPARTMENT_HEAD_CM`/
+`DEPARTMENT_HEAD_AGM`). `require_can_reassign(current_user, current_assignee_id, department)` 403s unless
+Admin, the current assignee, or a Department Head of that department (scoped to their own department, same
+as every existing Department Head checkpoint). `require_reason(reason)` 400s on a blank reason. `record_
+reassignment(...)` writes one `ApprovalAction` row (decision="Reassigned", `previous_state`/`new_state` as
+plain label strings -- not `User` objects, so multi-assignee modules can pass comma-joined name lists).
+`notify_new_assignee(...)` fires one notification to the new assignee via the existing `notifications.fire`.
+
+**Rolled out to six flows, each following the same first-assignment-stays-broad /
+reassignment-narrows-to-current-assignee-or-department-head-or-admin split:**
+
+- **Functional tester** (`functional.py` `assign_tester`, multi-assignee) -- reassigning one of the
+  currently-assigned testers now requires a mandatory reason and is gated to a current tester or QA
+  Department Head (was: any Assigned QA Lead or current tester, no reason). `Functional.tsx` gained a
+  conditional reason input, gated Save button, and narrowed `canAssignTester` once already assigned.
+- **Performance tester** (`performance.py` `complete_planning`) -- identical pattern; `Performance.tsx` mirrors
+  Functional.tsx exactly.
+- **SAST/DAST Security Analyst** (`sast_dast.py` `_assign_security_analyst`) -- brand-new capability: this was
+  previously single-shot, PLANNING-status-only, QA-Lead-Group-only. Now reassignable across every "live" scan
+  status (`SAST_DAST_ANALYST_REASSIGNABLE_STATUSES`, PLANNING through SECURITY_COMPLETE), and the endpoint's
+  own role gate widened to let the currently-assigned analyst self-handoff. `SAST.tsx`/`DAST.tsx` both gained
+  the reason input + narrowed gate, button label toggling "Assign"/"Reassign Security Analyst".
+- **Test Execution runner** (`test_execution.py` `assign_execution` + `bulk_assign_executions`) -- explicit
+  unassignment while currently assigned is treated as a reassignment too (mandatory reason, same gate), closing
+  a two-step bypass (unassign under the broad gate, then anyone reassigns fresh). Bulk assign splits rows into
+  previously-assigned vs. fresh per request, checking eligibility per distinct previous owner. Frontend
+  (`TestExecution.tsx`): the inline per-row picker and `RecordResultModal`'s runner control now hold the picked
+  value and prompt for a reason before firing when the slot is already assigned (a small `ReassignRunnerModal`-
+  style confirm for the row picker; an inline confirm block for `RecordResultModal`); the bulk-assign bar shows
+  a reason input and relabels to "Reassign (n)" whenever any selected row already has a runner.
+- **Test Cycle owner** (`test_execution.py` `update_cycle`) -- owner changes used to fold into the generic
+  multi-field PATCH with no dedicated reason/eligibility/notification. Now: changing (or clearing) an
+  already-set owner is detected against the pre-mutation snapshot, gated, reasoned, and separately audited/
+  notified (`step_name="Owner Reassignment"`), on top of the existing generic "Cycle Details" change log.
+  `CycleModal` (`TestExecution.tsx`) shows the Owner picker only to eligible users once one is already set
+  (read-only otherwise), with a conditional mandatory-reason field.
+- **Defect assignee** (`defects.py`, brand-new `POST /{id}/reassign` endpoint) -- previously there was no way
+  at all to change a defect's assignee once assigned: `transition_defect`'s "Assigned" status is only
+  reachable from New/Reopened/Deferred (`TRANSITIONS`), so a defect already In Progress/Resolved/Retest/
+  Reopened/Deferred was stuck with its original assignee. New `DEFECT_REASSIGNABLE_STATUSES` constant
+  (`Assigned`/`In Progress`/`Resolved`/`Retest`/`Reopened`/`Deferred`) and dedicated `DefectReassign` schema/
+  endpoint change only the assignee (and optionally `assigned_team`), leaving status/history untouched exactly
+  as required. Defects are the one flow where the current assignee's department isn't always QA (assigned_team
+  can route to any active department), so this is also the first flow using the general Department Head
+  mapping rather than hardcoding `CHIEF_MANAGER_QA`/`AGM_QA` -- added `departmentHeadRoles(department)` and
+  `canReassign(user, currentAssigneeId, currentAssigneeDepartment)` to the frontend's `constants.ts` for this
+  (widened the existing `RoleBearer` interface with optional `id`/`department`). `Defects.tsx`'s `DefectDetail`
+  gained a "Reassign" action (new `ReassignDefectModal`) alongside the existing Assigned/status-transition
+  buttons, visible only when eligible.
+
+**Scope exclusions, decided with the user up front (not unilateral):** the vestigial `qa_lead_id`/
+`security_lead_id`/`engineer_id`-style fields on Functional/SAST/DAST/Performance requests are never actually
+set to a real person anywhere in the app (only ever reset to `None`) -- confirmed out of scope, left as-is.
+Test Case reviewer/QA Lead individual reassignment (`PATCH /api/test-repository/test-cases/{id}/approvers`)
+stays disabled -- it was deliberately replaced by automatic role-based group routing in the recent "Simplified
+Test Management Review and Approval" refactor (section 91 and earlier), and reversing that now would undo a
+recent, intentional decision; confirmed to leave it disabled.
+
+**Known, deliberate behavior narrowing (flagging since it's a real change, not just additive):** applying the
+CR's literal eligibility list (current assignee / Department Head / Admin) to Functional, Performance, and
+SAST/DAST reassignment is strictly narrower than what a plain `QA_LEAD` could do before in those three flows.
+Previously any Assigned QA Lead could reassign a tester or security analyst; now, once the first assignment
+has happened, a plain `QA_LEAD` (as opposed to `CHIEF_MANAGER_QA`/`AGM_QA`) can no longer do so, since
+`QA_LEAD` itself is not a "Department Head" per the CR's own clarification table. First assignment is
+unaffected -- a QA Lead can still make the initial assignment in every one of these flows exactly as before.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean, across
+every phase of this rollout.
+
+## 93. Reassignment Requirement follow-up -- QA_LEAD restored, Test Execution runner reassignment widened to any QA user
+
+Two corrections reported directly right after section 92 shipped, both about the same narrowing flagged in
+that section's own "Known, deliberate behavior narrowing" note.
+
+**QA_LEAD restored across Functional/Performance/SAST-DAST reassignment:** "add QA_LEAD as well, QA_LEAD also
+required." `_require_can_reassign_tester` (`functional.py`), `_require_can_reassign_performance_tester`
+(`performance.py`), and `_require_can_reassign_security_analyst` (`sast_dast.py`) each gained a
+`user.has_role(Role.QA_LEAD)` bypass alongside the existing Admin/current-assignee/QA-Department-Head checks
+-- restoring parity with each flow's own first-assignment gate (`_require_assigned_qa_lead_or_current_tester`
+/ `_require_assigned_qa_lead_or_current_performance_tester` / `_require_assigned_qa_lead`), all of which
+already treat plain `QA_LEAD` as sufficient. `Functional.tsx`/`Performance.tsx`/`SAST.tsx`/`DAST.tsx`'s own
+`canReassign*` variables each gained the matching `|| hasRole(user, 'QA_LEAD')`.
+
+**Test Execution runner reassignment widened further, to any QA user:** "for test execution reassignment of
+testcase can be perform by any QA user, otherwise it will be hectic for qa lead." Rather than adding QA_LEAD
+as one more exception (as above), this flow drops the CR's narrow eligibility list entirely and reuses the
+SAME broad gate as first assignment (`_require_qa_assignment_manager` -- any QA_ENGINEER/QA_LEAD/
+CHIEF_MANAGER_QA member of COE - Quality Assurance, or Admin) for both `assign_execution` and
+`bulk_assign_executions`; only the mandatory reason (once a runner is already assigned) still distinguishes
+reassignment from first assignment. `TestExecution.tsx`'s `canReassignExecution` now simply returns
+`canManageRunners` regardless of the execution passed in (kept as a function since every call site already
+expects one); the bulk-assign bar's now-always-true eligibility check and its associated tooltip were removed
+as dead weight rather than left silently unreachable. This matches wording that was already sitting in
+`RecordResultModal`'s own read-only banner ("Any COE - Quality Assurance QA Engineer or QA Lead can reassign
+the testcase when needed") -- section 92's narrowing had drifted away from that existing, correct copy without
+noticing.
+
+**Deliberately NOT widened:** Test Cycle owner reassignment and Defect assignee reassignment keep the CR's
+literal eligibility list (current assignee / Department Head / Admin, no QA_LEAD carve-out) -- neither report
+mentioned them, and QA_LEAD isn't a natural fit for either: a Test Cycle owner can be any active user org-wide
+(not QA-role-scoped), and a Defect's assignee can be routed to any active department, not just QA.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean.
+
+## 94. Test Execution runner reassignment reason had no visible log anywhere
+
+Reported directly, right after section 93's "any QA user" widening: "there are not logging, it should be
+required right?" -- the mandatory reason itself was never actually at risk (confirmed both frontend and
+backend still require and store it: `TestExecutionAssign`/`TestExecutionBulkAssign`'s `reason` field,
+`reassignment.require_reason` in `assign_execution`/`bulk_assign_executions`, both still called unconditionally
+whenever `is_reassignment`/`previously_assigned`). The actual gap was visibility -- `reassignment.
+record_reassignment` was writing the reason into `ApprovalAction` with `entity_type="TEST_CASE"` all along, but
+nothing in the Test Execution module ever displayed it: `RecordResultModal` only shows `AttemptHistory` (run
+results, not assignment history), and the page's own "Test Cycle Activity & Audit History" panel deliberately
+filters to `entity_type="TEST_CYCLE"` only (comments, details, request links, lifecycle -- not per-testcase
+events). The only place this audit trail was ever reachable was Test Repository's own test case activity tab,
+which isn't where someone reassigning a runner from Test Execution would think to look.
+
+**Fix (`TestExecution.tsx`'s `RecordResultModal`, frontend only -- no backend change needed, the data already
+existed):** added a `reassignmentHistory` state, fetched via the same `GET /api/approvals?entity_type=TEST_CASE
+&entity_id=...` endpoint Test Repository already uses (open to any authenticated user, no extra role gate),
+filtered to `decision === 'Reassigned'`, and re-fetched immediately after a successful reassignment (`assign()`
+now calls `loadReassignmentHistory()` whenever a `reason` was sent). Rendered as a new "Reassignment history"
+section directly under the runner panel -- previous → new assignee, actor, timestamp, and the reason itself --
+same visibility principle as an earlier defect assignment-remarks fix (a value was being captured correctly
+but never shown anywhere in the UI). New `.tm-reassignment-history` CSS, styled after `.defect-workflow-item`.
+
+**Verified:** `npx tsc --noEmit -p .` clean; `python3 -m py_compile app/*.py app/routers/*.py` clean (unchanged,
+included for completeness since no backend file was touched in this section).

@@ -4,8 +4,9 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
 import {
-  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, hasRole,
+  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, DEPLOYMENT_ENVIRONMENTS, hasRole,
   SIGNOFF_EDITABLE_STATUSES, QA_DEPARTMENT, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
+  QA_LEAD_GROUP_ROLES,
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, FunctionalListOut, PageOut, ApprovalActionOut } from '../../types'
 import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
@@ -310,9 +311,16 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
               {RISK_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
+          {/* Reported directly (QA Requests wizard, then extended here to
+              every Deployment/Environment-Tested + Target Promotion
+              Environment pair): Production should never be selectable as
+              the environment being tested/deployed FROM -- it's the
+              pipeline's final destination, only ever valid as a Target
+              Promotion Environment. See constants.ts's
+              DEPLOYMENT_ENVIRONMENTS for the shared list. */}
           <Field label="Environment Tested *">
             <select required value={form.environment_tested} onChange={(e) => set('environment_tested', e.target.value)}>
-              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+              {DEPLOYMENT_ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Target Promotion Environment *">
@@ -429,9 +437,11 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
               {RISK_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
+          {/* Same DEPLOYMENT_ENVIRONMENTS reasoning as the standalone
+              Create Certificate form above -- see that field's own comment. */}
           <Field label="Environment Tested *">
             <select required value={form.environment_tested} onChange={(e) => set('environment_tested', e.target.value)}>
-              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+              {DEPLOYMENT_ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Target Promotion Environment *">
@@ -501,8 +511,16 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   // instead. Admin still bypasses (matches the backend's
   // require_not_requester, which enforces the same check server-side).
   const isSelfApproval = item.requester_id === user?.id && !isAdmin
-  const canQALeadDecide = hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
-  const canExecutiveCoeDecide = hasRole(user, 'CHEIF_MANAGER_COE', 'CHEIF_MANAGER_QA', 'AGM_COE') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on this QA Lead
+  // checkpoint, same as Admin -- see ORACLE_MIGRATION_2026-07.md section 59.
+  const canQALeadDecide = hasRole(user, ...QA_LEAD_GROUP_ROLES) && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
+  // Reported directly ("Executive also Chief Manager and AGM only") while
+  // verifying this checkpoint's role set -- this was missing CHIEF_MANAGER_QA
+  // entirely (only checked AGM_QA), even though the backend's
+  // executive_coe_decision (signoff.py) already require_roles()'d both. A
+  // Chief Manager - QA account couldn't even see these buttons; now fixed to
+  // match the backend exactly.
+  const canExecutiveCoeDecide = hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && status === 'DEPT_HEAD_QA_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
   // Reported directly: "only the assigned person can update" -- once the
   // certificate has moved past the requester, document control passes
   // exclusively to whoever it's actually sitting with now, matching the
@@ -510,13 +528,13 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   const canManageDocuments = isAdmin || (
     ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status) ? isRequester :
     status === 'SM_APPROVAL_PENDING' ? canQALeadDecide :
-    status === 'DEPT_HEAD_COE_APPROVAL_PENDING' ? canExecutiveCoeDecide :
+    status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? canExecutiveCoeDecide :
     false
   )
   // Requester's own editable statuses, or a QA Lead editing during approval.
   // routers/signoff.py::update_signoff.
   const canEditDetails = (isRequester && SIGNOFF_EDITABLE_STATUSES.includes(status))
-    || (hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment)
+    || (hasRole(user, ...QA_LEAD_GROUP_ROLES) && status === 'SM_APPROVAL_PENDING' && isQADepartment)
 
   return (
     <Modal title={item.certificate_id} onClose={onClose} wide>
@@ -635,8 +653,14 @@ export default function SignOff() {
   const departments = useMemo(() => Array.from(new Set(rows.map((row) => row.request_department).filter((value): value is string => !!value))).sort((a, b) => a.localeCompare(b)), [rows])
   const visibleRows = useMemo(() => departmentFilter ? rows.filter((row) => row.request_department === departmentFilter) : rows, [rows, departmentFilter])
 
+  // 2026-08 -- reported directly: "'Request Sign Off' button is not
+  // enable[d] for QA lead ... in sign off ... section" -- widened from
+  // QA_ENGINEER-only to also include the QA Lead group, matching the
+  // backend's now-widened POST /api/signoffs role gate (signoff.py's
+  // create_signoff), so a QA Lead can raise a certificate themselves (e.g.
+  // on behalf of a request whose assigned tester isn't available).
   const canCreate = hasRole(user, 'ADMIN')
-    || (hasRole(user, 'QA_ENGINEER') && user?.department === QA_DEPARTMENT)
+    || (hasRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA') && user?.department === QA_DEPARTMENT)
 
   return (
     <div>

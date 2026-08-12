@@ -13,6 +13,7 @@ import {
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
 import { ApplicationNameBanner } from "../components/ApplicationNameBanner";
+import RoleGroupLink from "../components/RoleGroupLink";
 import {
   GATEWAY_CANCELLABLE_STATUSES,
   GATEWAY_EDITABLE_STATUSES,
@@ -559,9 +560,22 @@ export function RequestDetail({
                 )}
               {req.status !== "DRAFT" &&
                 req.application_master_status === "PENDING_APP_OWNER" && (
-                  <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                    Application Owner Approval Pending
-                  </span>
+                  <RoleGroupLink
+                    users={users}
+                    role="APPLICATION_OWNER"
+                    label="Application Owner"
+                    department={req.department}
+                    renderTrigger={(_count, onClick) => (
+                      <button
+                        type="button"
+                        className="badge badge-yellow"
+                        style={{ marginLeft: 8, cursor: "pointer", border: "none", font: "inherit", fontWeight: 600 }}
+                        onClick={onClick}
+                      >
+                        Application Owner Approval Pending
+                      </button>
+                    )}
+                  />
                 )}
               {req.status !== "DRAFT" &&
                 req.application_master_status === "PENDING_SM" && (

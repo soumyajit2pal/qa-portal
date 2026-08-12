@@ -38,8 +38,8 @@ from sqlalchemy.orm import Query as SAQuery
 T = TypeVar("T")
 
 # PAG-002
-DEFAULT_PAGE_SIZE = 25
-ALLOWED_PAGE_SIZES = (25, 50, 100)
+DEFAULT_PAGE_SIZE = 5
+ALLOWED_PAGE_SIZES = (5, 10, 25, 50, 100)
 MAX_PAGE_SIZE = 100
 
 
@@ -56,7 +56,7 @@ class PageParams:
     def __init__(
         self,
         page: int = Query(1, ge=1, description="Page number, starting from 1"),
-        page_size: int = Query(DEFAULT_PAGE_SIZE, description="Records per page (25, 50, or 100)"),
+        page_size: int = Query(DEFAULT_PAGE_SIZE, description="Records per page (5, 10, 25, 50, or 100)"),
         search: Optional[str] = Query(None, description="Free-text search"),
         status: Optional[List[str]] = Query(None, description="One or more status filters"),
         department: Optional[str] = Query(None, description="Department filter, where authorized"),

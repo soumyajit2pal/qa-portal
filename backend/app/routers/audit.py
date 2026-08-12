@@ -16,9 +16,8 @@ from ..deps import require_roles
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 AUDIT_ROLES = (
     Role.ADMIN,
-    Role.CHEIF_MANAGER_COE,
-    Role.CHEIF_MANAGER_QA,
-    Role.AGM_COE,
+    Role.CHIEF_MANAGER_QA,
+    Role.AGM_QA,
 )
 
 
@@ -74,7 +73,7 @@ def list_audit_logs(
     params (default 5, range 5-200) and a bespoke `{rows, total, page,
     page_size, summary}` envelope instead of the shared `pagination.py`
     contract every other list endpoint now follows. Migrated here purely
-    for consistency -- standard `page_size` of 25/50/100, the same
+    for consistency -- standard `page_size` of 5/10/25/50/100, the same
     `Page[T]` envelope, and `AuditLog.tsx`'s own hand-rolled Previous/Next
     footer replaced with the shared `<Table server={{...}}>` pager used
     everywhere else. `search`/`event_type`/`outcome`/`date_from`/`date_to`

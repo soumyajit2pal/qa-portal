@@ -9,12 +9,13 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
-    get_current_user, require_roles, get_project_member_role,
+    get_current_user, require_roles, dashboard_department_scope,
     require_can_execute_project, require_can_manage_execution_governance,
     get_project_or_404 as _get_project_or_404,
 )
-from ..constants import Role, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
+from ..constants import Role, QAStatus, DEFECT_MANAGEMENT_ROLES, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
 from .. import documents as doc_store
+from .. import reassignment
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 
 # PAG-005-adjacent -- list_executions below keeps the full TestExecutionOut
@@ -42,7 +43,7 @@ router = APIRouter(prefix="/api/test-execution", tags=["test-management"])
 # Same access as the Test Repository (test_repository.py) -- QA Engineer +
 # QA Lead both create cycles, add test cases to them, and record results.
 # Admin always bypasses via require_roles.
-_EXEC_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD, Role.CHEIF_MANAGER_QA)
+_EXEC_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA)
 _RESULT_IMAGE_MODULE = "TEST_EXEC_IMAGE"  # <= qap_module_documents.module VARCHAR2(20)
 _RESULT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 _RESULT_IMAGE_LIMIT = 8
@@ -90,6 +91,60 @@ _CYCLE_TRANSITION_ACTIONS = {
     ("Blocked", "In Progress"): "Resume Execution",
     ("In Progress", "Completed"): "Complete Execution",
 }
+
+
+def _sync_linked_functional_request_status(db: Session, cycle: "models.TestCycle",
+                                             transition_action: str,
+                                             current_user: "models.User") -> None:
+    """2026-08 -- reported directly: "If test lifecycle is Blocked, then
+    automatically mark linked QA request WAITING_FOR_FIX" and "again
+    lifecycle marked as In Progress then linked qa request again marked as
+    EXECUTION_IN_PROGRESS." Only wired for a Functional child link -- SAST/
+    DAST/Performance don't share this status vocabulary (Performance's own
+    lifecycle has no Blocked-equivalent Execution/Waiting-For-Fix pair --
+    see PERFORMANCE_STATUSES, which lumps that concern into a single
+    DEFECT_FIX_RETEST status -- so it's deliberately left untouched pending
+    its own design decision if this is ever extended there).
+
+    Guarded so this only ever moves a request between the two statuses this
+    sync itself owns -- it will never clobber a manually-reached state like
+    QA_COMPLETED, or a DEFECT_RAISED still awaiting a human decision on the
+    (unlinked-cycle) manual defect flow.
+
+    A Functional request may have several linked Test Cycles at once (see
+    FunctionalRequest.linked_test_cycles / complete_qa's own "every linked
+    cycle must be Completed" gate) -- Resume Execution only restores
+    EXECUTION_IN_PROGRESS once none of the request's OTHER linked cycles are
+    still Blocked, so one cycle resuming doesn't prematurely unblock a
+    request that's still genuinely stuck on a different cycle."""
+    link = cycle.child_request_link
+    if not link or link.child_type != "Functional":
+        return
+    freq = db.query(models.FunctionalRequest).get(link.child_id)
+    if not freq:
+        return
+    if transition_action == "Block Execution":
+        if freq.status == QAStatus.EXECUTION_IN_PROGRESS:
+            freq.status = QAStatus.WAITING_FOR_FIX
+            db.add(models.ApprovalAction(
+                entity_type="FUNCTIONAL_REQUEST", entity_id=freq.id, step_name="Execution In Progress",
+                actor_id=current_user.id, actor_role=current_user.roles_csv,
+                decision="Waiting For Fix (Test Cycle Blocked)",
+                comments=f"Auto-set: linked Test Cycle {cycle.cycle_key} - {cycle.name} was marked Blocked.",
+            ))
+    elif transition_action == "Resume Execution":
+        if freq.status == QAStatus.WAITING_FOR_FIX:
+            still_blocked = any(
+                other.status == "Blocked" for other in freq.linked_test_cycles if other.id != cycle.id
+            )
+            if not still_blocked:
+                freq.status = QAStatus.EXECUTION_IN_PROGRESS
+                db.add(models.ApprovalAction(
+                    entity_type="FUNCTIONAL_REQUEST", entity_id=freq.id, step_name="Waiting For Fix",
+                    actor_id=current_user.id, actor_role=current_user.roles_csv,
+                    decision="Execution In Progress (Test Cycle Resumed)",
+                    comments=f"Auto-set: linked Test Cycle {cycle.cycle_key} - {cycle.name} resumed to In Progress.",
+                ))
 
 
 def _validate_cycle_transition(current_status: str, requested_status: str,
@@ -169,21 +224,15 @@ def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_
 def _require_scope_change_permission(db: Session, cycle: models.TestCycle, current_user: models.User) -> None:
     """CYC-007 "Scope changes after execution starts shall require QA Lead
     permission and audit reason." Once at least one item in this cycle has
-    a recorded attempt, adding/removing testcase slots is QA-Lead/Admin-only
-    -- the audit reason half of CYC-007 is satisfied by the ApprovalAction
-    comment every caller of this already writes describing exactly what
-    scope changed and why (e.g. "N testcase(s) removed from ...")."""
-    if current_user.has_role(Role.QA_LEAD):
-        return
-    # A person holding the project-level "Project Lead" (or "Owner") role on
-    # THIS specific project qualifies too, even without the system-wide
-    # QA_LEAD role -- deliberately NOT using the usual
-    # can_manage_execution_governance backward-compatible helper here, since
-    # that treats "not a member" as unrestricted, which would wrongly let
-    # ANY QA_ENGINEER bypass this specific already-started scope-change
-    # lock. This check only ever ADDS a grant on top of the system-role
-    # check above, never relaxes it.
-    if get_project_member_role(db, cycle.project_id, current_user.id) in ("Project Lead", "Owner"):
+    a recorded attempt, adding/removing testcase slots is QA Lead Group/
+    Admin-only -- the audit reason half of CYC-007 is satisfied by the
+    ApprovalAction comment every caller of this already writes describing
+    exactly what scope changed and why (e.g. "N testcase(s) removed
+    from ..."). 2026-08 whole-module simplification: the old per-project
+    "Project Lead"/"Owner" TestProjectMember carve-out is gone -- the QA Lead
+    Group system-role set (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA) is the sole
+    authority now, matching can_manage_execution_governance in deps.py."""
+    if current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return
     has_started = db.query(models.TestExecutionRun.id).join(
         models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id,
@@ -194,6 +243,54 @@ def _require_scope_change_permission(db: Session, cycle: models.TestCycle, curre
             "This cycle already has recorded execution attempts -- only a QA Lead or Administrator "
             "can change its testcase scope now.",
         )
+
+
+# 2026-08 -- reported directly: "'Remove from cycle' should be available
+# only for QA lead, also once execution history created then remove from
+# cycle should not be enable for everyone. Same for Test Cycle, once
+# execution history created then remove option should not be there for QA
+# lead. Administration can supersede everything." Refined with Scenario 1
+# (also reported directly): "tester add testcase in lifecycle, but not
+# executed it, just added ... might be by mistake ... now system should
+# allow to remove from lifecycle as there are no test execution history."
+# Resolution (confirmed directly): whoever ADDED a testcase to a cycle may
+# remove their OWN addition themselves, but only while it still has zero
+# execution history -- self-correcting a same-person, zero-consequence
+# mistake, without needing a QA Lead. Full rule, in priority order:
+#   1. Admin always may (has_role's standing ADMIN short-circuit).
+#   2. Any recorded attempt on THIS slot -- QA Lead Group and the original
+#      adder both lose the ability; Admin only. Deliberately per-execution,
+#      not cycle-wide like _require_scope_change_permission above, since
+#      removal targets one slot at a time and other still-untouched slots in
+#      the same cycle should stay removable.
+#   3. No recorded attempt yet -- QA Lead Group may always remove (any
+#      slot, not just their own); the ORIGINAL ADDER (TestExecution.
+#      added_by_id, set once at add-to-cycle time) may remove only their own
+#      addition. Anyone else (a different QA_ENGINEER who didn't add it) is
+#      still blocked.
+# Router-level require_roles widened back to include QA_ENGINEER (was
+# QA_LEAD Group only) so path 3's self-remove case can even reach this
+# function -- the actual gate lives here, not at the router.
+def _execution_removal_block_reason(execution: models.TestExecution, current_user: models.User) -> Optional[str]:
+    """None if current_user may remove this execution; otherwise the reason
+    it's blocked (used both to raise a single-item 403 and to build the
+    bulk-remove skip list)."""
+    if current_user.has_role(Role.ADMIN):
+        return None
+    if execution.runs:
+        return "already has recorded execution history in this cycle -- only an Administrator can remove it now"
+    if current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        return None
+    if execution.added_by_id and execution.added_by_id == current_user.id:
+        return None
+    return "was not added to this cycle by you -- only the QA Lead Group, an Administrator, or whoever added it can remove it before it has been executed"
+
+
+def _require_can_remove_execution(execution: models.TestExecution, current_user: models.User) -> None:
+    reason = _execution_removal_block_reason(execution, current_user)
+    if reason:
+        key = execution.test_case.test_case_key if execution.test_case else "This test case"
+        raise HTTPException(403, f"{key} {reason}.")
 
 
 def _execution_or_404(db: Session, execution_id: int) -> models.TestExecution:
@@ -207,7 +304,7 @@ def _runner_or_404(db: Session, user_id: int) -> models.User:
     target = db.query(models.User).get(user_id)
     if not target or not target.is_active:
         raise HTTPException(404, "Selected runner was not found or is inactive")
-    if not (set(target.roles) & {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHEIF_MANAGER_QA}):
+    if not (set(target.roles) & {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA}):
         raise HTTPException(400, "Runner must have the QA Engineer, QA Lead, or CM-QA role")
     if target.department not in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS:
         raise HTTPException(400, f"Runner must be mapped to one of: {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)}")
@@ -651,11 +748,10 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                 models.Defect.status.in_(unresolved_statuses),
             ).all()
             if residual:
-                manager = (
-                    current_user.has_role(Role.QA_LEAD)
-                    or current_user.has_role(Role.CHEIF_MANAGER_QA)
-                    or get_project_member_role(db, obj.project_id, current_user.id) in {"Project Lead", "Owner"}
-                )
+                # 2026-08 whole-module simplification: QA Lead Group system
+                # role only -- the old per-project "Project Lead"/"Owner"
+                # TestProjectMember carve-out is gone.
+                manager = current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
                 if not manager:
                     raise HTTPException(403, "Open Medium or Low defects require QA Lead approval before cycle completion")
                 if not remarks:
@@ -676,6 +772,19 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     if "owner_id" in data and data["owner_id"] is not None:
         if not db.query(models.User).get(data["owner_id"]):
             raise HTTPException(404, "Selected cycle owner not found")
+    # 2026-08 Reassignment Requirement -- changing (or clearing) the cycle
+    # owner once one is already set is a reassignment: only the current
+    # owner, their Department Head, or an Admin may do it, and a reason is
+    # mandatory. Setting an owner for the first time keeps the existing
+    # broad _EXEC_ROLES gate already enforced at the endpoint level.
+    previous_owner_id = previous_values["owner_id"]
+    is_owner_reassignment = "owner_id" in data and previous_owner_id is not None and data["owner_id"] != previous_owner_id
+    previous_owner = None
+    owner_reason = None
+    if is_owner_reassignment:
+        previous_owner = db.query(models.User).get(previous_owner_id)
+        reassignment.require_can_reassign(current_user, previous_owner_id, previous_owner.department if previous_owner else None)
+        owner_reason = reassignment.require_reason(payload.reason)
     start_date = data.get("start_date", obj.start_date)
     end_date = data.get("end_date", obj.end_date)
     if start_date and end_date and start_date > end_date:
@@ -726,6 +835,8 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
             actor_id=current_user.id, actor_role=current_user.roles_csv,
             decision=transition_action, comments="\n".join(details),
         ))
+        if transition_action in ("Block Execution", "Resume Execution"):
+            _sync_linked_functional_request_status(db, obj, transition_action, current_user)
     if link_changed:
         new_link_type = obj.linked_request_type
         new_link_key = obj.linked_request_key
@@ -753,6 +864,19 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
             actor_id=current_user.id, actor_role=current_user.roles_csv,
             decision="Updated", comments=f"Updated: {', '.join(changed_labels)}.",
         ))
+    if is_owner_reassignment:
+        new_owner = db.query(models.User).get(obj.owner_id) if obj.owner_id else None
+        reassignment.record_reassignment(
+            db, "TEST_CYCLE", obj.id, current_user,
+            previous_owner.full_name if previous_owner else "Unassigned",
+            new_owner.full_name if new_owner else "Unassigned",
+            owner_reason, step_name="Owner Reassignment",
+        )
+        if new_owner and new_owner.id != previous_owner_id:
+            reassignment.notify_new_assignee(
+                db, new_owner.id, "TEST_CYCLE", obj.id, obj.cycle_key,
+                f"You have been assigned as owner of test cycle {obj.cycle_key}.", current_user.id,
+            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -789,21 +913,70 @@ def unlink_cycle_request(cycle_id: int, db: Session = Depends(get_db),
 @router.delete("/cycles/{cycle_id}")
 def delete_cycle(cycle_id: int, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    """Delete an empty Test Cycle. This governance action is limited to QA
-    Lead/Admin and never silently destroys recorded execution evidence."""
+    """Delete a Test Cycle. Governance is limited to the QA Lead Group
+    (require_can_manage_execution_governance below rejects a plain
+    QA_ENGINEER even though it passes this looser router-level check).
+
+    2026-08 -- reported directly: "once execution history created then
+    remove option should not be there for QA lead ... Administration can
+    supersede everything." A QA Lead may only delete an EMPTY cycle (must
+    remove every testcase slot first, via remove_execution/
+    bulk_remove_executions -- itself now blocked per-slot once that slot has
+    recorded history, see _require_can_remove_execution) -- unchanged, and
+    already stricter than "once history exists" since it blocks on ANY
+    slot being present, executed or not. An Administrator may override this
+    and delete a non-empty cycle outright; doing so cascades to every
+    execution slot, its full attempt history, and its evidence documents in
+    one step (same cleanup bulk_remove_executions performs per-slot, applied
+    to the whole cycle here), logged as a single audit row before the cycle
+    itself is removed."""
     obj = _get_cycle_or_404(db, cycle_id)
     _require_active_project(db, obj.project_id)
     _require_open_cycle(obj)
     require_can_manage_execution_governance(db, obj.project_id, current_user)
-    execution_count = db.query(models.TestExecution).filter_by(cycle_id=cycle_id).count()
-    if execution_count:
+    executions = db.query(models.TestExecution).filter_by(cycle_id=cycle_id).all()
+    is_admin_override = bool(executions) and current_user.has_role(Role.ADMIN)
+    if executions and not is_admin_override:
         raise HTTPException(
             400,
-            f"Cannot delete this Test Cycle because it contains {execution_count} test case execution record"
-            f"{'s' if execution_count != 1 else ''}. Remove the test cases from the cycle first."
+            f"Cannot delete this Test Cycle because it contains {len(executions)} test case execution record"
+            f"{'s' if len(executions) != 1 else ''}. Remove the test cases from the cycle first."
         )
+    documents_by_id = {}
+    if is_admin_override:
+        # Polymorphic documents have no FK back to TestExecution/
+        # TestExecutionRun (see remove_execution's own comment on this) --
+        # cleaned up explicitly for every execution in the cycle, same as a
+        # per-slot removal, rather than orphaning screenshots on disk.
+        for execution in executions:
+            for run in execution.runs:
+                for document in doc_store.list_documents(db, _RESULT_IMAGE_MODULE, run.id):
+                    documents_by_id[document.id] = document
+            for document in doc_store.list_documents(db, _RESULT_IMAGE_MODULE, execution.id):
+                documents_by_id[document.id] = document
+        db.add(models.ApprovalAction(
+            entity_type="TEST_CYCLE", entity_id=obj.id, step_name="Cycle Deletion",
+            actor_id=current_user.id, actor_role=current_user.roles_csv,
+            decision="Deleted (Administrator override)",
+            comments=(
+                f"{obj.cycle_key} - {obj.name} deleted with {len(executions)} test case execution record"
+                f"{'s' if len(executions) != 1 else ''} and {len(documents_by_id)} evidence file"
+                f"{'s' if len(documents_by_id) != 1 else ''} still attached, by Administrator override."
+            ),
+        ))
+        for document in documents_by_id.values():
+            db.delete(document)
+    file_paths = [doc_store.full_path(document) for document in documents_by_id.values()]
     db.delete(obj)
     db.commit()
+    # Database state is authoritative -- a stale/missing file is harmless and
+    # must not turn a successfully committed deletion into a false API error.
+    for path in file_paths:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
     return {"ok": True}
 
 
@@ -873,6 +1046,56 @@ def get_execution_summary(cycle_id: int, db: Session = Depends(get_db),
         assigned_count=assigned_count, unassigned_count=unassigned_count, mine_count=mine_count,
         total_run_count=total_run_count,
     )
+
+
+@router.get("/executions/blocked-or-failed", response_model=List[schemas.DefectLinkableExecutionOut])
+def list_blocked_failed_executions(db: Session = Depends(get_db),
+                                    current_user: models.User = Depends(require_roles(*DEFECT_MANAGEMENT_ROLES))):
+    """2026-08 -- reported directly: on Defect Management's page load, "if
+    there are 30 project[s] then 30 api call[s] ... same for cycles,
+    executions." Defects.tsx used to build its "pick a Failed/Blocked Test
+    Execution" dropdown (for creating or linking a defect) by fetching every
+    active project's cycles, then every one of THOSE cycles' Fail/Blocked
+    executions, one round trip at a time -- N projects + N cycle-list calls +
+    one execution-list call per cycle, scaling worse than linearly as the
+    number of in-progress cycles grows. This single batch query replaces all
+    of that: one SQL join across TestProject -> TestCycle -> TestExecution,
+    filtered to active projects and Fail/Blocked status, department-scoped
+    the same way every other cross-project list in this app is. This
+    actually matters now: DEFECT_MANAGEMENT_ROLES includes REQUESTER/
+    BUSINESS_ANALYST/APPLICATION_OWNER (2026-08, reported directly -- see
+    that constant's own comment in constants.py), none of which are in
+    dashboard_department_scope's unrestricted set, so their own picker is
+    correctly narrowed to their own department's projects, same as their
+    view of the defect register itself (defects.py's _scoped_defects). QA
+    team roles remain department-unrestricted as usual.
+
+    Only ever called by Defects.tsx, which is itself now
+    DEFECT_MANAGEMENT_ROLES-gated (see defects.py's own list_defects/
+    defect_dashboard/export_defects) -- gated here too rather than relying
+    solely on the frontend hiding the page. Returns one flattened row per
+    execution, each carrying its own project/cycle alongside it, mirroring
+    the frontend's pre-existing `ExecutionContext` shape exactly so no
+    consumer-side logic needs to change, only where the data comes from."""
+    q = (
+        db.query(models.TestExecution)
+        .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
+        .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+        .filter(models.TestProject.is_active == True)  # noqa: E712
+        .filter(models.TestExecution.status.in_(("Fail", "Blocked")))
+        .options(
+            joinedload(models.TestExecution.cycle).joinedload(models.TestCycle.project),
+            *_LIST_EXECUTION_EAGER_LOADS,
+        )
+    )
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.filter(models.TestProject.department == scope)
+    executions = q.order_by(models.TestProject.id, models.TestCycle.id, models.TestExecution.id).all()
+    return [
+        {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution}
+        for execution in executions
+    ]
 
 
 @router.get("/cycles/{cycle_id}/executions/case-ids", response_model=List[int])
@@ -1162,6 +1385,9 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
             assigned_to_id=assigned_runner.id if assigned_runner else None,
             assigned_by_id=current_user.id if assigned_runner else None,
             assigned_at=models.now() if assigned_runner else None,
+            # Scenario 1 self-remove fix -- see _execution_removal_block_
+            # reason below for how this is used.
+            added_by_id=current_user.id,
         )
         db.add(obj)
         created.append(obj)
@@ -1185,30 +1411,64 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
 def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
                      db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    """COE - Quality Assurance runner management for one testcase slot in a cycle."""
-    _require_qa_assignment_manager(current_user)
+    """COE - Quality Assurance runner management for one testcase slot in a
+    cycle.
+
+    2026-08 Reassignment CR, reported directly: "Everywhere the system
+    provides an Assign option ... it must also provide a Reassign option
+    ... Reassignment shall be permitted to: the current assignee, the
+    Department Head of the department to which the current assignee
+    belongs, or Admin users." Then, reported directly again: "for test
+    execution reassignment of testcase can be perform by any QA user,
+    otherwise it will be hectic for qa lead" -- unlike Functional/
+    Performance tester and SAST/DAST analyst reassignment (which do apply
+    the CR's narrower list, now widened back to also include QA_LEAD),
+    runner reassignment here stays on the SAME broad gate as the first
+    assignment (_require_qa_assignment_manager -- any Test Management
+    execution-role member in an eligible department), for both first
+    assignment and reassignment; a reason is still mandatory once the
+    execution already has a runner. Deliberately covers explicit
+    unassignment too, not just a hand-off to a named person, so the
+    reason requirement can't be bypassed by unassigning and having someone
+    else assign fresh."""
     obj = _execution_or_404(db, execution_id)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
+    previous_id = obj.assigned_to_id
     previous_name = obj.assigned_to_name
+    is_reassignment = previous_id is not None
+    _require_qa_assignment_manager(current_user)
+    if is_reassignment:
+        reassignment.require_reason(payload.reason)
     target = None
     if payload.assigned_to_id is not None:
         target = _runner_or_404(db, payload.assigned_to_id)
     obj.assigned_to_id = target.id if target else None
     obj.assigned_by_id = current_user.id
     obj.assigned_at = models.now()
+    test_case_label = obj.test_case.test_case_key if obj.test_case else f"Testcase #{obj.test_case_id}"
     db.add(models.ApprovalAction(
         entity_type="TEST_CASE", entity_id=obj.test_case_id, step_name="Testcase Assignment",
         actor_id=current_user.id, actor_role=current_user.roles_csv,
         decision="Assigned" if target else "Unassigned",
         comments=(
-            f"{obj.test_case.test_case_key if obj.test_case else f'Testcase #{obj.test_case_id}'} "
+            f"{test_case_label} "
             f"{'assigned to ' + target.full_name if target else 'unassigned'}"
             + (f" (previously {previous_name})" if previous_name else "")
         ),
     ))
+    if is_reassignment:
+        reassignment.record_reassignment(
+            db, "TEST_CASE", obj.test_case_id, current_user,
+            previous_name or "Unassigned", target.full_name if target else "Unassigned", payload.reason,
+        )
+        if target and target.id != previous_id:
+            reassignment.notify_new_assignee(
+                db, target.id, "TEST_CASE", obj.test_case_id, test_case_label,
+                f"You have been assigned to run {test_case_label} in {cycle.cycle_key}.", current_user.id,
+            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -1218,12 +1478,22 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
 def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssign,
                            db: Session = Depends(get_db),
                            current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    """Atomically assign one runner to selected testcase slots in a cycle."""
-    _require_qa_assignment_manager(current_user)
+    """Atomically assign one runner to selected testcase slots in a cycle.
+
+    2026-08 Reassignment CR, then reported directly again ("for test
+    execution reassignment of testcase can be perform by any QA user,
+    otherwise it will be hectic for qa lead") -- same broad
+    _require_qa_assignment_manager gate for both first assignment and
+    reassignment (see assign_execution's own docstring for the full
+    reasoning); a reason is mandatory the moment any selected row already
+    has a runner, checked per-row since a batch can freely mix currently-
+    unassigned and currently-assigned executions.
+    """
     cycle = _get_cycle_or_404(db, cycle_id)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
+    _require_qa_assignment_manager(current_user)
 
     execution_ids = list(dict.fromkeys(payload.execution_ids))
     if not execution_ids:
@@ -1241,6 +1511,11 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
         raise HTTPException(400, "Every selected testcase must belong to the current Test Cycle")
 
     ordered = [found_by_id[execution_id] for execution_id in execution_ids]
+    previously_assigned = [execution for execution in ordered if execution.assigned_to_id is not None]
+    if previously_assigned:
+        reassignment.require_reason(payload.reason)
+
+    previous_names = {execution.id: execution.assigned_to_name for execution in ordered}
     for execution in ordered:
         execution.assigned_to_id = target.id
         execution.assigned_by_id = current_user.id
@@ -1255,6 +1530,18 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
             actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Assigned",
             comments=f"{label} assigned to {target.full_name} in {cycle.cycle_key}.",
         ))
+        if execution.id in {e.id for e in previously_assigned}:
+            reassignment.record_reassignment(
+                db, "TEST_CASE", execution.test_case_id, current_user,
+                previous_names[execution.id] or "Unassigned", target.full_name, payload.reason,
+            )
+    # One notification for the whole batch (not per-row) -- target is a
+    # single person picking up however many reassigned testcases at once.
+    if previously_assigned:
+        reassignment.notify_new_assignee(
+            db, target.id, "TEST_CASE", cycle.id, cycle.cycle_key,
+            f"You have been reassigned {len(previously_assigned)} testcase(s) in {cycle.cycle_key}.", current_user.id,
+        )
     db.commit()
     for execution in ordered:
         db.refresh(execution)
@@ -1671,17 +1958,25 @@ def delete_result_image(execution_id: int, document_id: int, db: Session = Depen
 
 @router.delete("/executions/{execution_id}")
 def remove_execution(execution_id: int, db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+                      current_user: models.User = Depends(
+                          require_roles(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """Removes a test case from a cycle entirely (not the same as recording
-    a result) -- e.g. it was added by mistake."""
+    a result) -- e.g. it was added by mistake.
+
+    2026-08 -- reported directly, refined by Scenario 1: QA Lead Group may
+    always remove a not-yet-executed slot; a plain QA_ENGINEER may only
+    remove one they personally added to the cycle (TestExecution.
+    added_by_id), and only before it's been executed. Once a slot has any
+    recorded attempt, only an Administrator may remove it, regardless of who
+    added it or QA Lead standing -- see _execution_removal_block_reason's
+    own docstring for the full priority order."""
     obj = db.query(models.TestExecution).get(execution_id)
     if not obj:
         raise HTTPException(404, "Execution not found")
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)
-    require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
-    _require_scope_change_permission(db, cycle, current_user)
+    _require_can_remove_execution(obj, current_user)
     # Polymorphic documents have no FK back to TestExecution/TestExecutionRun,
     # so remove the protected files and their metadata explicitly rather than
     # orphaning screenshots when the execution itself is deliberately
@@ -1703,22 +1998,29 @@ def bulk_remove_executions(
     cycle_id: int,
     payload: schemas.TestExecutionBulkRemove,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_roles(*_EXEC_ROLES)),
+    current_user: models.User = Depends(require_roles(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)),
 ):
     """Remove several testcase slots, their attempts, linked defects and
     evidence metadata from one cycle as one governed database transaction.
 
-    Any COE - Quality Assurance QA Engineer/QA Lead may manage cycle membership, matching the
-    assignment permission. Files are unlinked only after the database commit
-    succeeds, so a failed transaction cannot leave retained rows pointing at
-    evidence that was already destroyed.
+    2026-08 -- reported directly, refined by Scenario 1: same per-execution
+    eligibility as remove_execution above (see _execution_removal_block_
+    reason) -- QA Lead Group may remove any not-yet-executed slot, a plain
+    QA_ENGINEER only one they personally added, Admin always. Any selected
+    slot the caller isn't eligible to remove stops the WHOLE batch below
+    (all-or-nothing, matching this codebase's established atomic
+    bulk-endpoint convention -- see _selected_project_cases in
+    test_repository.py for the same pattern; the frontend is expected to
+    have already filtered the selection down to what it knows is eligible,
+    same "safety net, not primary UX path" reasoning used throughout). Files
+    are unlinked only after the database commit succeeds, so a failed
+    transaction cannot leave retained rows pointing at evidence that was
+    already destroyed.
     """
     _require_qa_assignment_manager(current_user)
     cycle = _get_cycle_or_404(db, cycle_id)
     _require_active_project(db, cycle.project_id)
-    require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
-    _require_scope_change_permission(db, cycle, current_user)
     execution_ids = list(dict.fromkeys(payload.execution_ids))
     if not execution_ids:
         raise HTTPException(400, "Select at least one testcase to remove from the cycle")
@@ -1744,11 +2046,30 @@ def bulk_remove_executions(
             400,
             f"Bulk removal stopped. These testcases do not belong to the selected cycle: {labels}. Nothing was removed.",
         )
+    ineligible = [
+        (execution, reason) for execution in ordered
+        if (reason := _execution_removal_block_reason(execution, current_user))
+    ]
+    if ineligible:
+        labels = ", ".join(
+            execution.test_case.test_case_key if execution.test_case else f"Execution #{execution.id}"
+            for execution, _reason in ineligible[:5]
+        )
+        suffix = f" and {len(ineligible) - 5} more" if len(ineligible) > 5 else ""
+        raise HTTPException(
+            403,
+            f"Bulk removal stopped. These testcase(s) cannot be removed by you right now: {labels}{suffix}. "
+            "Nothing was removed.",
+        )
 
     removed_keys = [
         execution.test_case.test_case_key if execution.test_case else f"Testcase #{execution.test_case_id}"
         for execution in ordered
     ]
+    # Capture cascade impact before deleting the execution rows. The result
+    # response reports this value after commit, when the ORM collections may
+    # already be expired/deleted.
+    removed_attempt_count = sum(len(execution.runs) for execution in ordered)
     documents_by_id = {}
     for execution in ordered:
         # Current evidence belongs to individual TestExecutionRun rows. The

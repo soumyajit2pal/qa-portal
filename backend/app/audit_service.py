@@ -1,4 +1,6 @@
 import json
+import ipaddress
+import os
 from typing import Any, Optional
 
 from fastapi import Request
@@ -7,11 +9,60 @@ from sqlalchemy.orm import Session
 from . import models
 
 
+def _trusted_proxy_networks():
+    """Networks allowed to assert forwarded client-address headers."""
+    configured = os.getenv("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128")
+    networks = []
+    for value in configured.split(","):
+        try:
+            networks.append(ipaddress.ip_network(value.strip(), strict=False))
+        except ValueError:
+            continue
+    return tuple(networks)
+
+
+TRUSTED_PROXY_NETWORKS = _trusted_proxy_networks()
+
+
+def _ip(value: str | None):
+    value = (value or "").strip().strip('"')
+    if value.startswith("[") and "]" in value:
+        value = value[1:value.index("]")]
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _is_trusted_proxy(address) -> bool:
+    return bool(address) and any(address in network for network in TRUSTED_PROXY_NETWORKS)
+
+
 def request_ip(request: Request) -> Optional[str]:
+    """Resolve the client at the trusted edge of the forwarding chain.
+
+    Forwarding headers from an untrusted direct client are ignored. Starting
+    at the immediate peer, trusted proxies are removed from the right side of
+    X-Forwarded-For; the first untrusted address is recorded as the client.
+    """
+    peer = _ip(request.client.host if request.client else None)
+    if not peer:
+        return None
+    if not _is_trusted_proxy(peer):
+        return str(peer)[:64]
+
     forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()[:64]
-    return request.client.host[:64] if request.client else None
+    chain = [_ip(value) for value in forwarded.split(",")] if forwarded else []
+    chain = [address for address in chain if address]
+    if not chain:
+        real_ip = _ip(request.headers.get("x-real-ip"))
+        return str(real_ip or peer)[:64]
+
+    chain.append(peer)
+    for address in reversed(chain):
+        if not _is_trusted_proxy(address):
+            return str(address)[:64]
+    return str(chain[0])[:64]
 
 
 def user_snapshot(user: models.User) -> dict:

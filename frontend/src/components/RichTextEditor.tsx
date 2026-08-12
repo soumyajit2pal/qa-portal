@@ -130,8 +130,24 @@ function inlineHtml(value: string): string {
 // this direction (JiraActivity's composer always starts empty), but it
 // belongs in the same codec as the rest of this file rather than living
 // off on its own.
-export function markdownToEditorHtml(value: string): string {
+export function normalizeStoredRichText(value: string): string {
   const lines = value.replace(/\r/g, '').split('\n')
+  return lines.map((line, index) => {
+    const trimmed = line.trim()
+    const previous = lines[index - 1]?.trim() || ''
+    const next = lines[index + 1]?.trim() || ''
+    // Older/editor-originated values can contain a Markdown table wrapped
+    // in a single backtick pair. That makes the entire table look like code
+    // and prevents both display and edit parsers from recognizing it.
+    if (trimmed === '`' && (previous.includes('|') || next.includes('|'))) return ''
+    if (/^`\s*\|/.test(line)) return line.replace(/^`\s*/, '')
+    if (/\|\s*`$/.test(line)) return line.replace(/`\s*$/, '')
+    return line
+  }).join('\n')
+}
+
+export function markdownToEditorHtml(value: string): string {
+  const lines = normalizeStoredRichText(value).split('\n')
   const blocks: string[] = []
   let index = 0
   while (index < lines.length) {

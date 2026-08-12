@@ -1,5 +1,6 @@
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from .. import models, schemas, pagination
@@ -9,7 +10,7 @@ from ..deps import (
     can_author_repository, can_review_repository, can_execute_project, can_manage_execution_governance,
     can_give_final_approval, require_can_manage_project, get_or_404, get_project_or_404,
 )
-from ..constants import Role, TEST_PROJECT_ROLES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
+from ..constants import Role, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
 
 router = APIRouter(prefix="/api/test-projects", tags=["test-management"])
 
@@ -20,53 +21,79 @@ router = APIRouter(prefix="/api/test-projects", tags=["test-management"])
 _MANAGE_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD)
 
 
-def _ensure_default_member_role(db: Session, project_id: int, user_id: int | None,
-                                project_role: str, added_by_id: int) -> None:
-    """Keep approval defaults and project membership aligned.
+# Reported directly: "while creating project with same project name you can
+# not create project, project should be unique as well." No DB-level UNIQUE
+# constraint on TestProject.name -- this app has no Alembic (create_all()
+# only emits DDL for tables that don't exist yet, see database.py's module
+# docstring), and retrofitting a hard UNIQUE constraint onto an EXISTING,
+# already-populated production table risks failing outright if any
+# duplicate names already exist there. Enforced here at the application
+# layer instead, same as every other "must be unique" business rule this
+# router already checks by hand (e.g. the department-must-exist-and-be-
+# active check just above/below this). Case-insensitive and whitespace-
+# trimmed -- "MILTON" and "milton " should collide, not silently coexist as
+# two "different" projects a person would never intend. Deliberately checks
+# every project regardless of Active/Inactive/Archived status (no carve-out
+# for reusing an old, retired project's name) -- matches how Department.name
+# and ApplicationMaster.name are both unique at the DB level with no such
+# carve-out either.
+def _require_unique_project_name(db: Session, name: str, exclude_id: Optional[int] = None) -> None:
+    q = db.query(models.TestProject).filter(func.lower(models.TestProject.name) == name.lower())
+    if exclude_id is not None:
+        q = q.filter(models.TestProject.id != exclude_id)
+    existing = q.first()
+    if existing:
+        raise HTTPException(409, f"A test project named \"{existing.name}\" already exists. Project names must be unique.")
 
-    A default Reviewer must be able to perform Stage 1 on this project, and
-    the default CM-QA must be able to perform Stage 2 as its Project Lead.
-    Never downgrade the broader Owner/Project Lead roles when the same person
-    is selected for more than one responsibility.
 
-    Bug fix (uq_qap_tpm_project_user unique-constraint violation): both
-    create_test_project and update_test_project call this helper twice per
-    request -- once for the default Reviewer, once for the default Project
-    Lead/CM-QA -- with no db.flush() between the two calls, and SessionLocal
-    runs with autoflush=False (database.py). Nothing stops the two defaults
-    from being the same user, so when they are and that user isn't already a
-    member, the first call's DB query correctly finds nothing and db.add()s a
-    new TestProjectMember row; the second call's own identical DB query never
-    sees that first call's still-unflushed insert and adds a byte-for-byte
-    duplicate for the same (project_id, user_id), which then violates
-    uq_qap_tpm_project_user at flush/commit time. Same bug class, same fix
-    shape, as defects.py's _ensure_case_link -- check this session's own
-    pending (db.new) objects first, in addition to the DB, so the second call
-    in the same request sees what the first one just added.
-    """
-    if not user_id:
+# Reported directly, as a follow-up to the name-uniqueness fix above: "also
+# under one application create one project only. more than one project
+# under same application should not be allowed?" -- discussed directly
+# rather than assumed: the chosen rule is one project per application only
+# while an existing project for that application hasn't been Archived yet
+# (SRS PRJ-003's three states -- Active/Inactive/Archived, see is_archived's
+# own comment on models.TestProject). Deliberately NOT keyed off is_active --
+# a merely Inactive (not yet Archived) project can be reactivated at any
+# time and is still "the" current project for that application, so it still
+# blocks a duplicate; only Archived (a deliberate, more final retirement --
+# see archive_test_project below) frees the application up for a fresh
+# project. Skipped entirely when application_master_id is None -- plenty of
+# projects have no application link at all (nullable field, department-only
+# projects), and those shouldn't collide with each other just for both being
+# unlinked. Same "application layer, not a DB constraint" reasoning as
+# _require_unique_project_name above -- no unique=True added to
+# application_master_id, since retrofitting that onto an existing,
+# already-populated production table risks failing outright if any
+# application already has more than one non-archived project today.
+def _require_no_active_project_for_application(db: Session, application_master_id: Optional[int], exclude_id: Optional[int] = None) -> None:
+    if not application_master_id:
         return
-    protected_roles = {"Owner", "Project Lead"} if project_role == "Reviewer" else {"Owner"}
-    pending_member = next((
-        obj for obj in db.new
-        if isinstance(obj, models.TestProjectMember)
-        and obj.project_id == project_id and obj.user_id == user_id
-    ), None)
-    if pending_member:
-        if pending_member.project_role not in protected_roles:
-            pending_member.project_role = project_role
-        return
-    member = db.query(models.TestProjectMember).filter_by(
-        project_id=project_id, user_id=user_id,
-    ).first()
-    if member:
-        if member.project_role not in protected_roles:
-            member.project_role = project_role
-        return
-    db.add(models.TestProjectMember(
-        project_id=project_id, user_id=user_id, project_role=project_role,
-        added_by_id=added_by_id,
-    ))
+    # is_archived is nullable (no nullable=False -- see its own comment on
+    # models.TestProject); a legacy row could in principle be NULL rather
+    # than False. Explicit OR with is_(None) rather than a bare `== False`,
+    # since Oracle's three-valued boolean logic means `is_archived != True`
+    # would evaluate to NULL/unknown (and so be filtered OUT) for a NULL row
+    # -- the safe reading of "no explicit archive flag" is "not archived",
+    # matching the Python-side `not project.is_archived` checks elsewhere
+    # (test_reports.py's project-count summary) where None is already
+    # treated as falsy.
+    q = db.query(models.TestProject).filter(
+        models.TestProject.application_master_id == application_master_id,
+        or_(
+            models.TestProject.is_archived == False,  # noqa: E712 - Oracle requires = 0, not IS 0
+            models.TestProject.is_archived.is_(None),
+        ),
+    )
+    if exclude_id is not None:
+        q = q.filter(models.TestProject.id != exclude_id)
+    existing = q.first()
+    if existing:
+        raise HTTPException(
+            409,
+            f"Application \"{existing.application_master.name if existing.application_master else ''}\" "
+            f"already has an active test project (\"{existing.name}\"). Archive it first, or reuse the "
+            "existing project, before creating another one for the same application.",
+        )
 
 
 @router.get("/eligible-users", response_model=List[schemas.UserOut])
@@ -174,6 +201,7 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Project name cannot be blank")
+    _require_unique_project_name(db, name)
 
     department = payload.department.strip()
     application_master_id = payload.application_master_id
@@ -182,6 +210,7 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
         department = (app_master.department or "").strip()
         if not department:
             raise HTTPException(400, "The selected Application does not have a mapped department")
+        _require_no_active_project_for_application(db, application_master_id)
     if not department:
         raise HTTPException(400, "Department is required")
     department_row = db.query(models.Department).filter(
@@ -213,13 +242,12 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
     db.add(models.TestProjectMember(
         project_id=obj.id, user_id=owner_id, project_role="Owner", added_by_id=current_user.id,
     ))
-    db.flush()
-    _ensure_default_member_role(
-        db, obj.id, payload.default_reviewer_id, "Reviewer", current_user.id,
-    )
-    _ensure_default_member_role(
-        db, obj.id, payload.default_qa_lead_id, "Project Lead", current_user.id,
-    )
+    # 2026-08 "Simplified Test Management Review and Approval" requirement --
+    # no more auto-creating a Reviewer/Project Lead TestProjectMember row
+    # from default_reviewer_id/default_qa_lead_id. Stage 1/Stage 2 authority
+    # now comes entirely from the QA Group/QA Lead Group system-role model
+    # (see test_repository.py's review_test_case), not project membership --
+    # see ORACLE_MIGRATION_2026-07.md for the full writeup.
     db.commit()
     db.refresh(obj)
     return obj
@@ -260,6 +288,8 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
         data["name"] = data["name"].strip()
         if not data["name"]:
             raise HTTPException(400, "Project name cannot be blank")
+        if data["name"].lower() != obj.name.lower():
+            _require_unique_project_name(db, data["name"], exclude_id=obj.id)
     if "department" in data:
         department = (data["department"] or "").strip()
         if not department:
@@ -271,7 +301,12 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
         if not department_row:
             raise HTTPException(400, "Select an active department from the system department list")
         data["department"] = department
-    is_qa_lead_or_admin = current_user.has_role(Role.QA_LEAD)
+    if "application_master_id" in data and data["application_master_id"] != obj.application_master_id:
+        _require_no_active_project_for_application(db, data["application_master_id"], exclude_id=obj.id)
+    # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+    # gated action, same as ADMIN -- see ORACLE_MIGRATION_2026-07.md
+    # section 59. (Variable name predates has_role()'s own ADMIN bypass.)
+    is_qa_lead_or_admin = current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
     requested_active = data.pop("is_active", None)
     if "owner_id" in data:
         new_owner_id = data.pop("owner_id")
@@ -333,16 +368,14 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
         new_qa_lead_id = data.pop("default_qa_lead_id")
         obj.default_qa_lead_id = new_qa_lead_id
 
-    # Defaults are actionable assignments, not display-only metadata. Ensure
-    # the chosen people appear in Members with the project roles required by
-    # their approval stages. Old defaults are intentionally not auto-removed
-    # when changed because their membership may have been assigned manually.
-    _ensure_default_member_role(
-        db, obj.id, obj.default_reviewer_id, "Reviewer", current_user.id,
-    )
-    _ensure_default_member_role(
-        db, obj.id, obj.default_qa_lead_id, "Project Lead", current_user.id,
-    )
+    # 2026-08 "Simplified Test Management Review and Approval" requirement --
+    # no more auto-creating/updating a Reviewer/Project Lead TestProjectMember
+    # row from these defaults. default_reviewer_id/default_qa_lead_id are
+    # kept purely as legacy metadata (still read by test_repository.py's
+    # OLD-path Stage 2 approval notify list for projects with in-flight
+    # pre-existing drafts) -- new Stage 1/Stage 2 authority comes entirely
+    # from the QA Group/QA Lead Group system-role model, not project
+    # membership.
 
     if requested_active is not None:
         if requested_active == obj.is_active:
@@ -384,7 +417,7 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
 @router.post("/{project_id}/activation-review", response_model=schemas.TestProjectOut)
 def review_project_activation(project_id: int, payload: schemas.TestProjectActivationReview,
                                db: Session = Depends(get_db),
-                               current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                               current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """QA Lead (or Admin) resolves a pending activate/deactivate request from
     a QA Engineer -- Approve applies the requested value to is_active,
     Reject discards the request and leaves is_active untouched. Reported
@@ -424,7 +457,7 @@ def review_project_activation(project_id: int, payload: schemas.TestProjectActiv
 
 @router.post("/{project_id}/archive", response_model=schemas.TestProjectOut)
 def archive_test_project(project_id: int, payload: schemas.TestProjectArchive, db: Session = Depends(get_db),
-                         current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                         current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """PRJ-003 -- a more deliberate retirement than a plain deactivation,
     reserved for QA Lead/Admin (no QA-Engineer-request path, unlike
     is_active's own approval workflow above -- archiving is meant to be
@@ -455,7 +488,7 @@ def archive_test_project(project_id: int, payload: schemas.TestProjectArchive, d
 
 @router.post("/{project_id}/unarchive", response_model=schemas.TestProjectOut)
 def unarchive_test_project(project_id: int, db: Session = Depends(get_db),
-                           current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                           current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """Lifts is_archived only -- the project comes back as Inactive, not
     Active, so reactivating it for new work is still its own deliberate
     decision through update_test_project (or a QA Engineer's own
@@ -463,6 +496,12 @@ def unarchive_test_project(project_id: int, db: Session = Depends(get_db),
     obj = get_project_or_404(db, project_id)
     if not obj.is_archived:
         raise HTTPException(400, "This project is not archived")
+    # Closes the gap the one-project-per-application rule would otherwise
+    # leave open: Archive project A for application X (frees X up) -> create
+    # project B for X (now allowed) -> Unarchive A -- without this check, X
+    # would end up with two non-archived projects again, exactly what
+    # create/update_test_project block up front.
+    _require_no_active_project_for_application(db, obj.application_master_id, exclude_id=obj.id)
     obj.is_archived = False
     obj.archived_by_id = None
     obj.archived_at = None
@@ -477,16 +516,19 @@ def unarchive_test_project(project_id: int, db: Session = Depends(get_db),
     return obj
 
 
-# ---- Membership (PRJ-005/GOV-001) ----
-def _is_project_owner_or_lead(db: Session, project: models.TestProject, current_user: models.User) -> bool:
-    if current_user.has_role(Role.QA_LEAD):
-        return True
-    return project.owner_id == current_user.id
-
-
+# ---- Membership (PRJ-005/GOV-001) -- read-only historical record only,
+# see list_project_members' docstring below for why. ----
 @router.get("/{project_id}/members", response_model=List[schemas.TestProjectMemberOut])
 def list_project_members(project_id: int, db: Session = Depends(get_db),
                          current_user: models.User = Depends(get_current_user)):
+    """2026-08 "Simplified Test Management Review and Approval" requirement
+    (TM-PROJ-002 "no project member-management UI") -- project membership is
+    no longer an active authorization mechanism (see deps.py's
+    can_author_repository/can_execute_project/can_manage_execution_governance,
+    all moved to the QA Group/QA Lead Group system-role model). This list
+    stays read-only, purely so any pre-existing TestProjectMember rows
+    remain visible for historical/audit reference; add/update/remove below
+    are disabled."""
     obj = get_project_or_404(db, project_id)
     return (db.query(models.TestProjectMember).filter_by(project_id=project_id)
             .order_by(models.TestProjectMember.added_at).all())
@@ -495,62 +537,36 @@ def list_project_members(project_id: int, db: Session = Depends(get_db),
 @router.post("/{project_id}/members", response_model=schemas.TestProjectMemberOut)
 def add_project_member(project_id: int, payload: schemas.TestProjectMemberCreate, db: Session = Depends(get_db),
                        current_user: models.User = Depends(require_roles(*_MANAGE_ROLES))):
-    """PRJ-005 "Project owners shall add project members with project-level
-    roles without granting broader system roles" -- restricted to the
-    project's own owner (or QA Lead/Admin), NOT every QA Engineer, even
-    though QA Engineers can otherwise manage most project fields."""
-    obj = get_project_or_404(db, project_id)
-    if not _is_project_owner_or_lead(db, obj, current_user):
-        raise HTTPException(403, "Only this project's owner or a QA Lead can add members")
-    role = (payload.project_role or "Tester").strip()
-    if role not in TEST_PROJECT_ROLES:
-        raise HTTPException(400, f"project_role must be one of: {', '.join(TEST_PROJECT_ROLES)}")
-    user = get_or_404(db, models.User, payload.user_id, "User")
-    existing = db.query(models.TestProjectMember).filter_by(project_id=project_id, user_id=payload.user_id).first()
-    if existing:
-        raise HTTPException(400, f"{user.full_name} is already a member of this project")
-    member = models.TestProjectMember(
-        project_id=project_id, user_id=payload.user_id, project_role=role, added_by_id=current_user.id,
+    """Retained temporarily for older clients; project membership management
+    is disabled -- see list_project_members' docstring above."""
+    raise HTTPException(
+        409,
+        "Project membership management is disabled; Test Management now routes automatically by "
+        "QA Group / QA Lead Group system role.",
     )
-    db.add(member)
-    db.commit()
-    db.refresh(member)
-    return member
 
 
 @router.patch("/{project_id}/members/{member_id}", response_model=schemas.TestProjectMemberOut)
 def update_project_member(project_id: int, member_id: int, payload: schemas.TestProjectMemberUpdate,
                           db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(*_MANAGE_ROLES))):
-    obj = get_project_or_404(db, project_id)
-    if not _is_project_owner_or_lead(db, obj, current_user):
-        raise HTTPException(403, "Only this project's owner or a QA Lead can change member roles")
-    member = db.query(models.TestProjectMember).filter_by(id=member_id, project_id=project_id).first()
-    if not member:
-        raise HTTPException(404, "Member not found in this project")
-    role = (payload.project_role or "").strip()
-    if role not in TEST_PROJECT_ROLES:
-        raise HTTPException(400, f"project_role must be one of: {', '.join(TEST_PROJECT_ROLES)}")
-    if member.user_id == obj.owner_id and role != "Owner":
-        raise HTTPException(400, "The project owner's membership role cannot be changed away from Owner -- reassign ownership first")
-    member.project_role = role
-    db.commit()
-    db.refresh(member)
-    return member
+    """Retained temporarily for older clients; project membership management
+    is disabled -- see list_project_members' docstring above."""
+    raise HTTPException(
+        409,
+        "Project membership management is disabled; Test Management now routes automatically by "
+        "QA Group / QA Lead Group system role.",
+    )
 
 
 @router.delete("/{project_id}/members/{member_id}")
 def remove_project_member(project_id: int, member_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(*_MANAGE_ROLES))):
-    obj = get_project_or_404(db, project_id)
-    if not _is_project_owner_or_lead(db, obj, current_user):
-        raise HTTPException(403, "Only this project's owner or a QA Lead can remove members")
-    member = db.query(models.TestProjectMember).filter_by(id=member_id, project_id=project_id).first()
-    if not member:
-        raise HTTPException(404, "Member not found in this project")
-    if member.user_id == obj.owner_id:
-        raise HTTPException(400, "The project owner cannot be removed from the project -- reassign ownership first")
-    db.delete(member)
-    db.commit()
-    return {"ok": True}
+    """Retained temporarily for older clients; project membership management
+    is disabled -- see list_project_members' docstring above."""
+    raise HTTPException(
+        409,
+        "Project membership management is disabled; Test Management now routes automatically by "
+        "QA Group / QA Lead Group system role.",
+    )
 

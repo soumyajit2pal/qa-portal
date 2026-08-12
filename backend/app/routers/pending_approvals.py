@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, can_review_repository, can_give_final_approval
+from ..deps import (
+    get_current_user, can_review_repository, can_give_final_approval,
+    can_manage_repository_governance,
+)
 from ..constants import (
     Role, QA_DEPARTMENT, GatewayStatus,
     QA_REQUEST_STATUS_LABELS, SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
@@ -182,16 +185,25 @@ _SM_DEPT_HEAD_MODULES = [
     (models.PerformanceRequest, "PERFORMANCE", "/performance", "Performance Testing", PERFORMANCE_STATUS_LABELS),
 ]
 
-# Readiness-style checkpoint (assigned to one specific QA Lead, not a
-# department-wide pool) -- column name differs per module (qa_lead_id /
-# security_lead_id / security_lead_id / engineer_id).
+# Readiness checkpoints belong to the shared QA Lead group. Legacy lead-ID
+# columns remain in the model for historical records but no longer scope the
+# queue. Each module actually has TWO consecutive QA-Lead-group checkpoints
+# gated by the exact same has_role(QA_LEAD) check (see each module's own
+# _require_assigned_qa_lead): "assigned_status" is the "Start Readiness
+# Verification" stage (QA_LEAD_ASSIGNED / SECURITY_LEAD_ASSIGNED /
+# ENGINEER_ASSIGNED -- e.g. functional.py::start_readiness_verification),
+# and "verification_status" is the "Readiness Passed/Failed" decision stage
+# right after it (e.g. functional.py::readiness_decision). Both surface
+# here, not just the latter.
 _READINESS_MODULES = [
     (models.FunctionalRequest, "FUNCTIONAL_REQUEST", "/functional-requests", "Functional Testing",
-     QA_REQUEST_STATUS_LABELS, "qa_lead_id", "READINESS_VERIFICATION"),
-    (models.SASTRequest, "SAST", "/sast", "SAST", SAST_DAST_STATUS_LABELS, "security_lead_id", "SECURITY_READINESS"),
-    (models.DASTRequest, "DAST", "/dast", "DAST", SAST_DAST_STATUS_LABELS, "security_lead_id", "SECURITY_READINESS"),
+     QA_REQUEST_STATUS_LABELS, "qa_lead_id", "QA_LEAD_ASSIGNED", "READINESS_VERIFICATION"),
+    (models.SASTRequest, "SAST", "/sast", "SAST", SAST_DAST_STATUS_LABELS, "security_lead_id",
+     "SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS"),
+    (models.DASTRequest, "DAST", "/dast", "DAST", SAST_DAST_STATUS_LABELS, "security_lead_id",
+     "SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS"),
     (models.PerformanceRequest, "PERFORMANCE", "/performance", "Performance Testing", PERFORMANCE_STATUS_LABELS,
-     "engineer_id", "READINESS"),
+     "engineer_id", "ENGINEER_ASSIGNED", "READINESS"),
 ]
 
 
@@ -252,21 +264,24 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
 
 
 def _readiness_items(db: Session, user: models.User) -> List[dict]:
-    """QA Lead / Security Lead / Engineer readiness checkpoints -- assigned to
-    one SPECIFIC person by the Department Head (see the *_lead_id/engineer_id
-    column), not a department-wide pool, so ADMIN aside, this is the one
-    category scoped by exact user id rather than department."""
-    if not user.has_role(Role.QA_LEAD):
+    """Readiness checkpoints shared by every active QA Lead, plus the
+    CHIEF_MANAGER_QA/AGM_QA Executive bypass (see ORACLE_MIGRATION_2026-07.md
+    section 59) -- both the not-yet-started "Start Readiness Verification"
+    stage and the in-progress "Readiness Passed/Failed" decision stage,
+    since both are gated by the identical has_role(QA_LEAD, CHIEF_MANAGER_QA,
+    AGM_QA) check on the backend (see each module's own
+    _require_assigned_qa_lead)."""
+    if not user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return []
     results: List[dict] = []
     is_admin = user.has_role(Role.ADMIN)
-    for model, entity_type, path, module_label, labels, lead_column, waiting_status in _READINESS_MODULES:
-        q = db.query(model).filter(model.status == waiting_status)
-        if not is_admin:
-            q = q.filter(getattr(model, lead_column) == user.id)
+    for (model, entity_type, path, module_label, labels, lead_column, assigned_status,
+         verification_status) in _READINESS_MODULES:
+        q = db.query(model).filter(model.status.in_([assigned_status, verification_status]))
         for obj in q.order_by(model.created_at).all():
+            action = "Start Readiness Verification" if obj.status == assigned_status else "Readiness Verification"
             results.append(_item(
-                f"{module_label} -- Readiness Verification", entity_type, obj.id, obj.request_id,
+                f"{module_label} -- {action}", entity_type, obj.id, obj.request_id,
                 f"{module_label}: {obj.application_name or '—'}", obj.status,
                 labels.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
                 obj.created_at, f"{path}?open={obj.request_id}",
@@ -342,7 +357,7 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
             q = q.filter(models.QASignOff.requester_id != user.id)
         return q
 
-    if user.has_role(Role.QA_LEAD):
+    if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         for obj in _query("SM_APPROVAL_PENDING").order_by(models.QASignOff.created_at).all():
             results.append(_item(
                 "QA Sign-off -- QA Lead Approval", "SIGNOFF", obj.id, obj.certificate_id,
@@ -350,8 +365,8 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
                 SIGNOFF_STATUS_LABELS.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
                 obj.created_at, f"/signoff?open={obj.certificate_id}",
             ))
-    if user.has_role(Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA, Role.AGM_COE):
-        for obj in _query("DEPT_HEAD_COE_APPROVAL_PENDING").order_by(models.QASignOff.created_at).all():
+    if user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        for obj in _query("DEPT_HEAD_QA_APPROVAL_PENDING").order_by(models.QASignOff.created_at).all():
             results.append(_item(
                 "QA Sign-off -- Executive COE Approval", "SIGNOFF", obj.id, obj.certificate_id,
                 f"QA Sign-off: {obj.application_name or '—'}", obj.status,
@@ -364,10 +379,12 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
 def _test_project_items(db: Session, user: models.User) -> List[dict]:
     """Test Project activation/deactivation -- reported directly: "Project
     Activation, deactivation should need approval from QA lead." See
-    routers/test_projects.py::review_project_activation -- QA_LEAD/ADMIN
-    only, org-wide (no department scoping, no requester exclusion -- mirrors
-    that endpoint's own gate exactly, not invented here)."""
-    if not user.has_role(Role.QA_LEAD):
+    routers/test_projects.py::review_project_activation -- QA Lead
+    (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA Executive bypass, see ORACLE_MIGRATION_
+    2026-07.md section 59)/ADMIN only, org-wide (no department scoping, no
+    requester exclusion -- mirrors that endpoint's own gate exactly, not
+    invented here)."""
+    if not user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return []
     results: List[dict] = []
     q = db.query(models.TestProject).filter(models.TestProject.pending_is_active.isnot(None))
@@ -382,27 +399,51 @@ def _test_project_items(db: Session, user: models.User) -> List[dict]:
     return results
 
 
+def _qa_group_checker(db: Session, project_id: int, user: models.User) -> bool:
+    """NEW-path Stage 1 ("Recommendation Pending") eligibility -- mirrors
+    bulk_recommend_test_cases'/review_test_case's own new-path check
+    exactly: membership in the QA Group (Role.QA_ENGINEER), independent of
+    project. db/project_id kept in the signature only so this matches the
+    other checkers' call shape used by the shared loop below."""
+    return user.has_role(Role.QA_ENGINEER)
+
+
+def _qa_lead_group_checker(db: Session, project_id: int, user: models.User) -> bool:
+    """NEW-path Stage 2 ("QA Lead Approval Pending") eligibility -- mirrors
+    review_test_case's own new-path check exactly: membership in the QA
+    Lead Group (can_manage_repository_governance -- QA_LEAD/CHIEF_MANAGER_QA/
+    AGM_QA)."""
+    return can_manage_repository_governance(user)
+
+
 def _test_case_items(db: Session, user: models.User) -> List[dict]:
-    """Test Case review (2026-08 "Test Approval Workflow" refactor,
-    APR-007) -- two checkpoints, mirroring routers/test_repository.py::
-    review_test_case's own two-stage gate exactly: can_review_repository
-    for a version "In Review" (Reviewer-tier), can_give_final_approval for
-    "Review Completed" (QA-Lead-tier). Both already correctly return True
-    for system QA_LEAD/Admin on every project internally, so no separate
-    is_admin short-circuit is needed the way other categories in this file
-    use one -- this file's own stated principle: "each category works out
-    is this awaiting me the exact same way its own decision endpoint
-    already gates the actual decision call," so this literally calls the
-    same two functions review_test_case calls. Queue VISIBILITY follows the
-    stage assignment: assigned_reviewer_id for In Review and
-    assigned_qa_lead_id for Review Completed. This does not change action
-    authorization -- another qualified project member may still act after
-    opening the testcase directly. Admin retains the cross-queue oversight
-    view. GOV-002 self-approval exclusion applies too."""
+    """Test Case review -- four checkpoints, covering both the OLD "Test
+    Approval Workflow" (In Review / Review Completed) and the 2026-08
+    "Simplified Test Management" NEW workflow (Recommendation Pending / QA
+    Lead Approval Pending) that superseded it for every fresh submission
+    (see ORACLE_MIGRATION_2026-07.md sections 60-62). The OLD-path pair was
+    the only one wired here originally; the NEW-path pair was missed at the
+    time of that rewrite, which silently stopped the login "pending
+    approvals" notice from ever firing for it since virtually all live
+    submissions route to the NEW path now. can_review_repository/
+    can_give_final_approval already correctly return True for system
+    QA_LEAD/Admin on every project internally, so no separate is_admin
+    short-circuit is needed the way other categories in this file use one
+    -- this file's own stated principle: "each category works out is this
+    awaiting me the exact same way its own decision endpoint already gates
+    the actual decision call," so this literally calls the same functions
+    review_test_case/bulk_recommend_test_cases/bulk_approve_test_cases call.
+    GOV-002 self-action exclusion applies to all four: the OLD path only
+    ever excludes the content author; the NEW path additionally excludes
+    whoever already performed submission (Stage 1) or the Stage 1
+    recommendation (Stage 2), matching section 62's fix to the decision
+    endpoints themselves."""
     results: List[dict] = []
     checkpoints = (
-        ("In Review", can_review_repository, "Test Case -- Reviewer Recommendation"),
-        ("Review Completed", can_give_final_approval, "Test Case -- QA Lead Final Approval"),
+        ("In Review", can_review_repository, "Test Case -- Stage 1 QA Review"),
+        ("Review Completed", can_give_final_approval, "Test Case -- QA Management Approval"),
+        ("Recommendation Pending", _qa_group_checker, "Test Case -- QA Recommendation (Stage 1)"),
+        ("QA Lead Approval Pending", _qa_lead_group_checker, "Test Case -- QA Lead Approval (Stage 2)"),
     )
     for status, checker, category in checkpoints:
         q = (
@@ -413,14 +454,14 @@ def _test_case_items(db: Session, user: models.User) -> List[dict]:
         for draft in q.order_by(models.TestCaseVersion.submitted_at).all():
             if draft.author_id == user.id:
                 continue
+            if status == "Recommendation Pending" and draft.submitted_by_id == user.id:
+                continue
+            if status == "QA Lead Approval Pending" and user.id in (draft.submitted_by_id, draft.reviewed_by_id):
+                continue
             case = draft.test_case
             if not case or not checker(db, case.project_id, user):
                 continue
-            assigned_user_id = (
-                draft.assigned_reviewer_id if status == "In Review"
-                else draft.assigned_qa_lead_id
-            )
-            if assigned_user_id != user.id and not user.has_role(Role.ADMIN):
+            if status == "In Review" and not user.has_role(Role.QA_LEAD):
                 continue
             project = case.project
             # Reported directly: "Parent Section should be Project Name, the

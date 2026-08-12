@@ -2,30 +2,67 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
+import { Table, Modal, Field, ErrorText, PageHeader, Badge, InfoTooltip } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import {
   hasRole, TEST_CASE_TYPES, TEST_CASE_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES,
   TEST_CASE_PENDING_DECISION_STATUSES, TEST_CASE_TERMINAL_STATUSES, TEST_CASE_REVIEW_ACTION_LABELS,
-  TEST_CASE_REVIEW_MANDATORY_COMMENT_DECISIONS,
+  TEST_CASE_REVIEW_MANDATORY_COMMENT_DECISIONS, QA_LEAD_GROUP_ROLES,
 } from '../../constants'
 import {
   TestProjectOut, TestFolderOut, TestCaseOut, TestCaseListOut, TestCaseSummaryOut, TestStepIn, TestCaseImportResult, ApprovalActionOut,
   TestCaseVersionSummary, TestCaseVersionCompareOut, TestProjectMyAccessOut, TestCaseVersionOut,
-  TestCaseReviewDecision, TestCaseReassignApproversIn, TestCaseBulkRecommendIn, UserOut, PageOut,
+  TestCaseReviewDecision, TestCaseBulkRecommendIn, UserOut, PageOut,
 } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import LinkedDefects from '../../components/LinkedDefects'
+import RoleGroupLink from '../../components/RoleGroupLink'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+
+// 2026-08 "Simplified Test Management" NEW-path group-pending statuses --
+// reported directly: "show the group name where pending approval, on click
+// of group name, members will be visible" -- maps each NEW-path
+// group-routed status to the system role(s) RoleGroupLink should filter its
+// member list to (same component/pattern Functional.tsx/SAST.tsx/etc.
+// already use for "Assigned Group"). OLD-path "In Review"/"Review
+// Completed" are deliberately NOT included -- eligibility there is role OR
+// project membership (can_review_repository/can_give_final_approval), which
+// a role-only member list would misrepresent; those keep their existing
+// plain-text label.
+const TEST_CASE_PENDING_GROUP_ROLES: Record<string, string | string[]> = {
+  'Recommendation Pending': 'QA_ENGINEER',
+  'QA Lead Approval Pending': QA_LEAD_GROUP_ROLES,
+}
 
 // Test Repository module -- folder tree + test case authoring/import, under
 // a selected Test Project. QA Engineer + QA Lead both author (create/edit/
 // import/delete); everyone with portal access can browse/read (Admin
 // bypasses the author gate automatically via hasRole).
-const CAN_AUTHOR_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHEIF_MANAGER_QA']
+const CAN_AUTHOR_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
 const UNFILED = '__unfiled__'
+// 2026-08 "Create Recycle bin and Archive folder" requirement -- two more
+// pinned pseudo-folder sentinels alongside UNFILED above, same mechanic:
+// not real TestFolder rows, just special selectedFolder values the main
+// list's own data-fetching branches on. ARCHIVE_VIEW is a flat,
+// project-wide "every Archived testcase regardless of its real folder"
+// view (status=Archived under the hood, on the existing paginated list
+// endpoint); RECYCLE_BIN routes to its own dedicated endpoint entirely,
+// since a soft-deleted case is excluded from every normal query and has no
+// status/folder scoping worth offering.
+const ARCHIVE_VIEW = '__archived__'
+const RECYCLE_BIN = '__recycle_bin__'
+// Quick-filter tokens for the "Review queue"/"Final approval queue" buttons
+// below -- each one expands to BOTH the OLD-path and NEW-path status for
+// that stage, matching TestCaseSummaryOut's own in_review_count/
+// review_completed_count (backend test_repository.py), which count both
+// generations together under the same field. Not real status values (never
+// sent as-is to the backend -- see the usePaginatedList status: mapping).
+const REVIEW_QUEUE_TOKEN = '__review_queue__'
+const REVIEW_QUEUE_STATUSES = ['In Review', 'Recommendation Pending']
+const FINAL_APPROVAL_QUEUE_TOKEN = '__final_approval_queue__'
+const FINAL_APPROVAL_QUEUE_STATUSES = ['Review Completed', 'QA Lead Approval Pending']
 
 function emptyStep(stepNo: number): TestStepIn {
   return { step_no: stepNo, step_text: '', expected_result: '' }
@@ -50,6 +87,18 @@ function workflowStatusNote(existing: TestCaseOut | null): string {
     case 'Review Completed':
       return "Recommended by Reviewer -- awaiting QA Lead's final decision."
     case 'Returned':
+      return 'Returned for correction -- edit and resubmit for review.'
+    // 2026-08 "Simplified Test Management Review and Approval" requirement --
+    // NEW-path statuses (any fresh Draft submission, or a NEW-vocabulary
+    // Returned status resubmitting). Stage 1 routes to the QA Group
+    // (QA_ENGINEER), Stage 2 to the QA Lead Group (QA_LEAD/CHIEF_MANAGER_QA/
+    // AGM_QA) -- no individual reviewer/QA-Lead assignment either way.
+    case 'Recommendation Pending':
+      return 'Submitted -- awaiting a QA Group recommendation.'
+    case 'QA Lead Approval Pending':
+      return "Recommended by the QA Group -- awaiting the QA Lead Group's final decision."
+    case 'Returned by QA':
+    case 'Returned by QA Lead':
       return 'Returned for correction -- edit and resubmit for review.'
     case 'Rejected':
       return 'Rejected by QA Lead -- edit to start a new draft revision.'
@@ -134,7 +183,7 @@ function FolderTreeRows({
   nodes: FolderTreeNode[]
   depth?: number
   maxDepth?: number
-  selectedFolder: number | typeof UNFILED | ''
+  selectedFolder: number | typeof UNFILED | typeof ARCHIVE_VIEW | typeof RECYCLE_BIN | ''
   onSelect: (id: number) => void
   folderCounts: Record<number, number>
   collapsedFolders: Set<number>
@@ -582,12 +631,16 @@ function StepsEditor({ steps, onChange }: { steps: TestStepIn[]; onChange: (s: T
 
 // Spec section 9 -- every review decision's confirmation must state the
 // RESULTING status and WHO owns it next, not just what button was clicked.
-function reviewDecisionOutcome(decision: TestCaseReviewDecision): string {
+function reviewDecisionOutcome(decision: TestCaseReviewDecision, currentStatus?: string): string {
   switch (decision) {
     case 'RECOMMEND':
-      return "Moves to Review Completed, awaiting the QA Lead's final decision."
+      return currentStatus === 'Recommendation Pending'
+        ? "Moves to QA Lead Approval Pending, awaiting the QA Lead Group's final decision."
+        : "Moves to Review Completed, awaiting the QA Lead's final decision."
     case 'APPROVE':
-      return 'The test case becomes Approved and is immediately available for Test Cycles.'
+      return currentStatus === 'In Review'
+        ? 'Completes Stage 1 and routes the test case to the shared CM QA / AGM QA approval queue.'
+        : 'The test case becomes Approved and is immediately available for Test Cycles.'
     case 'RETURN':
       return 'Returns to the Author as Returned -- they must edit and resubmit for review.'
     case 'REJECT':
@@ -602,25 +655,12 @@ function reviewDecisionOutcome(decision: TestCaseReviewDecision): string {
 // tier). The caller (the row/detail action buttons below) only ever offers
 // the decision that's valid for the case's current status, but the server
 // is still the real gate (400/403 on a mismatch).
-function TestCaseReviewModal({ testCase, decision, users, defaultQaLeadId, onClose, onReviewed }: {
+function TestCaseReviewModal({ testCase, decision, onClose, onReviewed }: {
   testCase: TestCaseOut
   decision: TestCaseReviewDecision
-  users: UserOut[]
-  defaultQaLeadId?: number | null
   onClose: () => void
   onReviewed: (testCase: TestCaseOut) => void
 }) {
-  const { user } = useAuth()
-  const qaLeadCandidates = useMemo(
-    () => users.filter((candidate) => candidate.is_active
-      && candidate.id !== testCase.current_draft_author_id
-      && candidate.id !== user?.id
-      && (candidate.roles.includes('QA_LEAD') || candidate.roles.includes('CHEIF_MANAGER_QA'))),
-    [users, testCase.current_draft_author_id, user?.id],
-  )
-  const [qaLeadId, setQaLeadId] = useState<number | ''>(
-    qaLeadCandidates.some((candidate) => candidate.id === defaultQaLeadId) ? defaultQaLeadId! : '',
-  )
   const [comments, setComments] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
@@ -640,7 +680,6 @@ function TestCaseReviewModal({ testCase, decision, users, defaultQaLeadId, onClo
     try {
       const reviewed = await api.post<TestCaseOut>(`/api/test-repository/test-cases/${testCase.id}/review`, {
         decision,
-        ...(decision === 'RECOMMEND' ? { assigned_qa_lead_id: qaLeadId } : {}),
         comments: comments.trim() || null,
       })
       onReviewed(reviewed)
@@ -654,17 +693,9 @@ function TestCaseReviewModal({ testCase, decision, users, defaultQaLeadId, onClo
           <strong>{testCase.test_case_key}</strong>
           <span>{testCase.test_scenario || 'No scenario provided'}</span>
         </div>
-        <p><strong>Result:</strong> {reviewDecisionOutcome(decision)}</p>
-        {decision === 'RECOMMEND' && (
-          <Field label="QA Lead (Stage 2) *">
-            <SearchableSelect
-              value={qaLeadId === '' ? '' : String(qaLeadId)}
-              onChange={(value) => setQaLeadId(value ? Number(value) : '')}
-              placeholder="-- Select QA Lead --"
-              options={qaLeadCandidates.map((candidate) => ({ value: String(candidate.id), label: candidate.full_name }))}
-            />
-          </Field>
-        )}
+        <p><strong>Result:</strong> {reviewDecisionOutcome(decision, testCase.status)}</p>
+        {testCase.status === 'In Review' && decision === 'APPROVE' && <div className="info-banner">Approval will automatically route to all active CM QA and AGM QA users. Either may complete Stage 2.</div>}
+        {testCase.status === 'Recommendation Pending' && decision === 'RECOMMEND' && <div className="info-banner">Recommending will automatically route to every active QA Lead Group member (QA Lead, CM QA, or AGM QA). Any of them may complete Stage 2.</div>}
         <Field label={mandatoryComment ? 'Reason and required changes *' : 'Comments (optional)'}>
           <textarea
             required={mandatoryComment}
@@ -676,12 +707,116 @@ function TestCaseReviewModal({ testCase, decision, users, defaultQaLeadId, onClo
         </Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-          <button className={`btn ${positive ? 'btn-primary' : 'btn-danger'}`} disabled={busy || (decision === 'RECOMMEND' && !qaLeadId)}>
+          <button className={`btn ${positive ? 'btn-primary' : 'btn-danger'}`} disabled={busy}>
             {busy ? 'Saving decision…' : label}
           </button>
           <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
         </div>
       </form>
+    </Modal>
+  )
+}
+
+// 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement":
+// bulk counterpart to the single-case Archive action, alongside Bulk
+// delete. Mirrors BulkApproveModal's own confirm/progress/success/error
+// shape; reason is mandatory, matching the single-case Archive modal's own
+// requirement (see TestCaseArchive's backend docstring).
+function BulkArchiveModal({ projectId, selectedIds, onClose, onArchived }: {
+  projectId: number
+  selectedIds: number[]
+  onClose: () => void
+  onArchived: (testCases: TestCaseOut[], archivedIds: number[]) => void
+}) {
+  const [archiveIds] = useState(selectedIds)
+  const [reason, setReason] = useState('')
+  const [stage, setStage] = useState<'confirm' | 'archiving' | 'success' | 'error'>('confirm')
+  const [progress, setProgress] = useState(0)
+  const [progressMessage, setProgressMessage] = useState('Waiting for confirmation')
+  const [error, setError] = useState<unknown>(null)
+
+  async function archive(e?: React.FormEvent) {
+    e?.preventDefault()
+    if (!reason.trim()) {
+      setError(new Error('An archive reason is required'))
+      setStage('confirm')
+      return
+    }
+    setError(null)
+    setStage('archiving')
+    setProgress(10)
+    setProgressMessage('Validating approved status…')
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => {
+      setProgress((current) => {
+        const next = Math.min(88, current + (current < 50 ? 10 : 5))
+        setProgressMessage(next >= 60 ? 'Recording the archive action…' : 'Verifying selected testcases…')
+        return next
+      })
+    }, 280)
+    try {
+      const archived = await api.post<TestCaseOut[]>(`/api/test-repository/projects/${projectId}/test-cases/bulk-archive`, {
+        ids: archiveIds,
+        reason: reason.trim(),
+      })
+      const remainingDisplayTime = Math.max(0, 750 - (Date.now() - startedAt))
+      if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))
+      window.clearInterval(timer)
+      setProgress(100)
+      setProgressMessage(`${archived.length} testcase${archived.length !== 1 ? 's' : ''} archived`)
+      onArchived(archived, archiveIds)
+      setStage('success')
+    } catch (err) {
+      window.clearInterval(timer)
+      setError(err)
+      setStage('error')
+    }
+  }
+
+  const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
+  const title = stage === 'archiving' ? 'Archiving testcases'
+    : stage === 'success' ? 'Bulk archive completed'
+      : stage === 'error' ? 'Bulk archive failed'
+        : `Archive ${archiveIds.length} test case${archiveIds.length !== 1 ? 's' : ''}?`
+
+  return (
+    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+      {stage === 'confirm' && (
+        <form onSubmit={archive}>
+          <div className="tm-bulk-confirm-count"><strong>{archiveIds.length}</strong><span>test case{archiveIds.length !== 1 ? 's' : ''} will be archived</span></div>
+          <p>The selected test cases will be removed from active lists but their approval history, execution history, attachments, comments, and audit records will be preserved. Restorable at any time by an authorized QA Lead or Admin.</p>
+          <Field label="Archive reason *">
+            <textarea required rows={4} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Explain why these testcases are being archived…" />
+          </Field>
+          <ErrorText error={error} />
+          <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+            <button className="btn btn-primary">Archive all</button>
+            <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {(stage === 'archiving' || stage === 'success') && (
+        <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
+          <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
+          <strong>{progressMessage}</strong>
+          <div className="tm-progress-track" role="progressbar" aria-label="Bulk archive progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-meta"><span>{progress < 100 ? 'Archive is being recorded atomically' : 'Archived testcases are now removed from active lists'}</span><strong>{progress}%</strong></div>
+          {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
+        </div>
+      )}
+      {stage === 'error' && (
+        <div className="tm-operation-state error" role="alert">
+          <div className="tm-operation-icon">!</div>
+          <strong>Nothing was archived</strong>
+          <p className="muted small">The bulk archive is atomic, so all selected testcases remain Approved.</p>
+          <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+            <button className="btn btn-primary" onClick={() => archive()}>Try again</button>
+            <button className="btn" onClick={() => { setError(null); setStage('confirm') }}>Edit reason</button>
+            <button className="btn" onClick={onClose}>Close</button>
+          </div>
+        </div>
+      )}
     </Modal>
   )
 }
@@ -791,30 +926,14 @@ function BulkApproveModal({ projectId, selectedIds, onClose, onApproved }: {
 // to bulk-recommend (only acts on "In Review" rows) and comments are
 // optional (RECOMMEND isn't in TEST_CASE_REVIEW_MANDATORY_COMMENT_DECISIONS,
 // unlike bulk-approve's own mandatory message).
-function BulkRecommendModal({ project, selectedCases, users, onClose, onRecommended }: {
+function BulkRecommendModal({ project, selectedCases, onClose, onRecommended }: {
   project: TestProjectOut
   selectedCases: TestCaseListOut[]
-  users: UserOut[]
   onClose: () => void
   onRecommended: (testCases: TestCaseOut[], recommendedIds: number[]) => void
 }) {
-  const { user } = useAuth()
   const [recommendCases] = useState(selectedCases)
   const recommendIds = useMemo(() => recommendCases.map((testCase) => testCase.id), [recommendCases])
-  const authorIds = useMemo(
-    () => new Set(recommendCases.map((testCase) => testCase.current_draft_author_id).filter((id): id is number => id != null)),
-    [recommendCases],
-  )
-  const qaLeadCandidates = useMemo(
-    () => users.filter((candidate) => candidate.is_active
-      && !authorIds.has(candidate.id)
-      && candidate.id !== user?.id
-      && (candidate.roles.includes('QA_LEAD') || candidate.roles.includes('CHEIF_MANAGER_QA'))),
-    [users, authorIds, user?.id],
-  )
-  const [qaLeadId, setQaLeadId] = useState<number | ''>(
-    qaLeadCandidates.some((candidate) => candidate.id === project.default_qa_lead_id) ? project.default_qa_lead_id! : '',
-  )
   const [comments, setComments] = useState('')
   const [stage, setStage] = useState<'confirm' | 'recommending' | 'success' | 'error'>('confirm')
   const [progress, setProgress] = useState(0)
@@ -836,7 +955,7 @@ function BulkRecommendModal({ project, selectedCases, users, onClose, onRecommen
       })
     }, 280)
     try {
-      const body: TestCaseBulkRecommendIn = { ids: recommendIds, assigned_qa_lead_id: Number(qaLeadId), comments: comments.trim() || null }
+      const body: TestCaseBulkRecommendIn = { ids: recommendIds, comments: comments.trim() || null }
       const recommended = await api.post<TestCaseOut[]>(`/api/test-repository/projects/${project.id}/test-cases/bulk-recommend`, body)
       const remainingDisplayTime = Math.max(0, 750 - (Date.now() - startedAt))
       if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))
@@ -862,23 +981,16 @@ function BulkRecommendModal({ project, selectedCases, users, onClose, onRecommen
     <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <form onSubmit={recommend}>
-          <div className="tm-bulk-confirm-count"><strong>{recommendIds.length}</strong><span>pending testcase{recommendIds.length !== 1 ? 's' : ''} will move to Review Completed</span></div>
+          <div className="tm-bulk-confirm-count"><strong>{recommendIds.length}</strong><span>pending testcase{recommendIds.length !== 1 ? 's' : ''} will move to Stage 2 final approval</span></div>
           <p>Confirm that the selected definitions and steps have been reviewed. They will await the QA Lead's final decision next -- Recommend does not approve or activate them.</p>
-          <Field label="QA Lead (Stage 2) *">
-            <SearchableSelect
-              value={qaLeadId === '' ? '' : String(qaLeadId)}
-              onChange={(value) => setQaLeadId(value ? Number(value) : '')}
-              placeholder="-- Select QA Lead --"
-              options={qaLeadCandidates.map((candidate) => ({ value: String(candidate.id), label: candidate.full_name }))}
-            />
-          </Field>
+          <div className="info-banner">These test cases will automatically route to the shared approval queue -- CM QA/AGM QA for a testcase already mid-review under the pre-existing workflow, or the whole QA Lead Group for a new submission.</div>
           <Field label="Comments (optional)">
             <textarea rows={4} value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Optional notes for the QA Lead…" />
           </Field>
           <p className="muted small">This message (if any) will be signed by you and recorded in every selected testcase's activity history.</p>
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className="btn btn-primary" disabled={!qaLeadId}>Recommend all</button>
+            <button className="btn btn-primary">Recommend all</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -909,49 +1021,138 @@ function BulkRecommendModal({ project, selectedCases, users, onClose, onRecommen
   )
 }
 
+// 2026-08 -- bulk Return/Reject, the missing bulk counterparts to the
+// existing single-case "Recommend Approval / Return for Correction /
+// Reject" panel (bulk-recommend/bulk-approve already existed for the first
+// of those three). Both share one shape (mandatory reason, atomic, NEW-path
+// only), so one component drives both via the `action` prop instead of two
+// near-duplicate modals.
+function BulkDecisionModal({ action, project, selectedCases, onClose, onDone }: {
+  action: 'return' | 'reject'
+  project: TestProjectOut
+  selectedCases: TestCaseListOut[]
+  onClose: () => void
+  onDone: (testCases: TestCaseOut[], ids: number[]) => void
+}) {
+  const [cases] = useState(selectedCases)
+  const ids = useMemo(() => cases.map((testCase) => testCase.id), [cases])
+  const [comments, setComments] = useState('')
+  const [stage, setStage] = useState<'confirm' | 'working' | 'success' | 'error'>('confirm')
+  const [progress, setProgress] = useState(0)
+  const [progressMessage, setProgressMessage] = useState('Waiting for confirmation')
+  const [error, setError] = useState<unknown>(null)
+  const verb = action === 'return' ? 'return' : 'reject'
+  const verbGerund = action === 'return' ? 'Returning' : 'Rejecting'
+  const verbPast = action === 'return' ? 'returned' : 'rejected'
+  const endpoint = action === 'return' ? 'bulk-return' : 'bulk-reject'
+
+  async function run(e?: React.FormEvent) {
+    e?.preventDefault()
+    if (!comments.trim()) {
+      setError(new Error(`Enter one reason to ${verb} the selected testcases`))
+      setStage('confirm')
+      return
+    }
+    setError(null)
+    setStage('working')
+    setProgress(10)
+    setProgressMessage('Validating pending status…')
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => {
+      setProgress((current) => {
+        const next = Math.min(88, current + (current < 50 ? 10 : 5))
+        setProgressMessage(next >= 60 ? `Recording the ${verb} decision…` : 'Verifying selected testcases…')
+        return next
+      })
+    }, 280)
+    try {
+      const result = await api.post<TestCaseOut[]>(
+        `/api/test-repository/projects/${project.id}/test-cases/${endpoint}`,
+        { ids, comments: comments.trim() },
+      )
+      const remainingDisplayTime = Math.max(0, 750 - (Date.now() - startedAt))
+      if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))
+      window.clearInterval(timer)
+      setProgress(100)
+      setProgressMessage(`${result.length} testcase${result.length !== 1 ? 's' : ''} ${verbPast}`)
+      onDone(result, ids)
+      setStage('success')
+    } catch (err) {
+      window.clearInterval(timer)
+      setError(err)
+      setStage('error')
+    }
+  }
+
+  const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
+  const title = stage === 'working' ? `${verbGerund} testcases`
+    : stage === 'success' ? `Bulk ${verb} completed`
+      : stage === 'error' ? `Bulk ${verb} failed`
+        : `${action === 'return' ? 'Return' : 'Reject'} ${ids.length} pending testcase${ids.length !== 1 ? 's' : ''}?`
+
+  return (
+    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+      {stage === 'confirm' && (
+        <form onSubmit={run}>
+          <div className="tm-bulk-confirm-count"><strong>{ids.length}</strong><span>pending testcase{ids.length !== 1 ? 's' : ''} will be {verbPast}</span></div>
+          <p>{action === 'return'
+            ? 'Sends each selected testcase back to its author for correction. It leaves the review/approval queue until resubmitted.'
+            : 'Terminal decision -- each selected testcase is rejected and leaves the review/approval queue permanently.'}</p>
+          <Field label="Reason *">
+            <textarea required rows={4} value={comments} onChange={(e) => setComments(e.target.value)} placeholder={`Explain why these testcases are being ${verbPast}…`} />
+          </Field>
+          <p className="muted small">This one reason will be signed by you and recorded in every selected testcase's activity history.</p>
+          <ErrorText error={error} />
+          <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+            <button className={`btn ${action === 'reject' ? 'btn-danger' : 'btn-primary'}`}>{action === 'return' ? 'Return all' : 'Reject all'}</button>
+            <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {(stage === 'working' || stage === 'success') && (
+        <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
+          <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
+          <strong>{progressMessage}</strong>
+          <div className="tm-progress-track" role="progressbar" aria-label={`Bulk ${verb} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-meta"><span>{progress < 100 ? `${verbGerund} is being recorded atomically` : `Testcases have been ${verbPast}`}</span><strong>{progress}%</strong></div>
+          {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
+        </div>
+      )}
+      {stage === 'error' && (
+        <div className="tm-operation-state error" role="alert">
+          <div className="tm-operation-icon">!</div>
+          <strong>Nothing was {verbPast}</strong>
+          <p className="muted small">The bulk {verb} is atomic, so all selected testcases remain pending.</p>
+          <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+            <button className="btn btn-primary" onClick={() => run()}>Try again</button>
+            <button className="btn" onClick={() => { setError(null); setStage('confirm') }}>Edit reason</button>
+            <button className="btn" onClick={onClose}>Close</button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
 // REV-001, bulk form. Reported directly: "i have 100 testcases, so it is
 // not possible to do manually edit one by one by author to submit" -- mirrors
 // BulkApproveModal's own confirm/progress/success/error shape, just for
 // Author's own Submit for review action instead of QA Lead's approval.
-function BulkSubmitModal({ project, selectedCases, users, onClose, onSubmitted }: {
+function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
   project: TestProjectOut
   selectedCases: TestCaseListOut[]
-  users: UserOut[]
   onClose: () => void
   onSubmitted: (testCases: TestCaseOut[], submittedIds: number[]) => void
 }) {
   const [submitCases] = useState(selectedCases)
   const submitIds = useMemo(() => submitCases.map((testCase) => testCase.id), [submitCases])
-  const authorIds = useMemo(
-    () => new Set(submitCases.map((testCase) => testCase.current_draft_author_id).filter((id): id is number => id != null)),
-    [submitCases],
-  )
-  const reviewerCandidates = useMemo(
-    () => users.filter((candidate) => candidate.is_active && !authorIds.has(candidate.id)),
-    [users, authorIds],
-  )
-  const qaLeadCandidates = useMemo(
-    () => users.filter((candidate) => candidate.is_active
-      && !authorIds.has(candidate.id)
-      && (candidate.roles.includes('QA_LEAD') || candidate.roles.includes('CHEIF_MANAGER_QA'))),
-    [users, authorIds],
-  )
-  const [reviewerId, setReviewerId] = useState<number | ''>(
-    reviewerCandidates.some((candidate) => candidate.id === project.default_reviewer_id) ? project.default_reviewer_id! : '',
-  )
-  const [qaLeadId, setQaLeadId] = useState<number | ''>(
-    project.default_qa_lead_id !== reviewerId
-      && qaLeadCandidates.some((candidate) => candidate.id === project.default_qa_lead_id) ? project.default_qa_lead_id! : '',
-  )
   const [note, setNote] = useState('')
   const [stage, setStage] = useState<'confirm' | 'submitting' | 'success' | 'error'>('confirm')
   const [progress, setProgress] = useState(0)
   const [progressMessage, setProgressMessage] = useState('Waiting for confirmation')
   const [error, setError] = useState<unknown>(null)
 
-  useEffect(() => {
-    if (reviewerId && qaLeadId === reviewerId) setQaLeadId('')
-  }, [reviewerId, qaLeadId])
 
   async function doSubmit(e?: React.FormEvent) {
     e?.preventDefault()
@@ -970,8 +1171,6 @@ function BulkSubmitModal({ project, selectedCases, users, onClose, onSubmitted }
     try {
       const submitted = await api.post<TestCaseOut[]>(`/api/test-repository/projects/${project.id}/test-cases/bulk-submit`, {
         ids: submitIds,
-        assigned_reviewer_id: reviewerId,
-        assigned_qa_lead_id: qaLeadId,
         note: note.trim() || null,
       })
       const remainingDisplayTime = Math.max(0, 750 - (Date.now() - startedAt))
@@ -998,34 +1197,17 @@ function BulkSubmitModal({ project, selectedCases, users, onClose, onSubmitted }
     <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
       {stage === 'confirm' && (
         <form onSubmit={doSubmit}>
-          <div className="tm-bulk-confirm-count"><strong>{submitIds.length}</strong><span>Draft / Returned testcase{submitIds.length !== 1 ? 's' : ''} will move to In Review</span></div>
+          <div className="tm-bulk-confirm-count"><strong>{submitIds.length}</strong><span>Draft / Returned testcase{submitIds.length !== 1 ? 's' : ''} will move to review</span></div>
           <p>Each one is checked for complete steps (TC-003) before anything is changed -- if any selected testcase isn't ready, none of them are submitted.</p>
-          <div className="tm-submit-assignment-grid">
-            <Field label="Reviewer (Stage 1) *">
-              <SearchableSelect
-                value={reviewerId === '' ? '' : String(reviewerId)}
-                onChange={(value) => setReviewerId(value ? Number(value) : '')}
-                placeholder="-- Select Reviewer --"
-                options={reviewerCandidates.map((candidate) => ({ value: String(candidate.id), label: candidate.full_name }))}
-              />
-            </Field>
-            <Field label="QA Lead (Stage 2) *">
-              <SearchableSelect
-                value={qaLeadId === '' ? '' : String(qaLeadId)}
-                onChange={(value) => setQaLeadId(value ? Number(value) : '')}
-                placeholder="-- Select QA Lead --"
-                options={qaLeadCandidates.filter((candidate) => candidate.id !== reviewerId).map((candidate) => ({ value: String(candidate.id), label: candidate.full_name }))}
-              />
-            </Field>
-          </div>
-          <p className="muted small">Assignments control routing and notifications. The testcase author is excluded from Stage 1.</p>
+          <div className="info-banner">Stage 1 is automatically shared with every eligible reviewer -- system QA Lead for a testcase already mid-review under the pre-existing workflow, or the whole QA Group for a fresh submission. After Stage 1 is complete, Stage 2 is shared with CM QA/AGM QA (pre-existing items) or the whole QA Lead Group (new submissions).</div>
+          <p className="muted small">Group routing controls notifications automatically -- there's no individual reviewer/QA Lead to assign. The testcase author is excluded from acting on their own submission at every stage.</p>
           <Field label="Note for the Reviewer (optional)">
             <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional context shared on every selected testcase…" />
           </Field>
           <p className="muted small">This note (if any) is recorded in every selected testcase's own activity history.</p>
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className="btn btn-primary" disabled={!reviewerId || !qaLeadId}>Submit {submitIds.length === 1 ? 'for review' : 'all for review'}</button>
+            <button className="btn btn-primary">Submit {submitIds.length === 1 ? 'for review' : 'all for review'}</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -1282,6 +1464,101 @@ function TestCaseCloneModal({ testCase, projects, onClose, onCloned }: {
 
 // TC-006 -- archives the approved baseline: preserves versions/cycle
 // membership/execution history, blocks new cycle selection.
+// 2026-08 -- bulk counterpart to the single-case "Restore from archive"
+// action (see the restore button in TestCaseReviewModal, ~line 1861), for
+// the Archive view. Mirrors BulkArchiveModal's own confirm/progress/
+// success/error shape, minus the reason field -- matches the single-case
+// /restore endpoint, which likewise doesn't require one (only Archive
+// itself demands a documented reason; reversing it back to Approved isn't
+// a governance decision the way archiving or deleting is).
+function BulkRestoreFromArchiveModal({ projectId, selectedIds, onClose, onRestored }: {
+  projectId: number
+  selectedIds: number[]
+  onClose: () => void
+  onRestored: (testCases: TestCaseOut[], restoredIds: number[]) => void
+}) {
+  const [restoreIds] = useState(selectedIds)
+  const [stage, setStage] = useState<'confirm' | 'restoring' | 'success' | 'error'>('confirm')
+  const [progress, setProgress] = useState(0)
+  const [progressMessage, setProgressMessage] = useState('Waiting for confirmation')
+  const [error, setError] = useState<unknown>(null)
+
+  async function restore(e?: React.FormEvent) {
+    e?.preventDefault()
+    setError(null)
+    setStage('restoring')
+    setProgress(10)
+    setProgressMessage('Validating archived status…')
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => {
+      setProgress((current) => {
+        const next = Math.min(88, current + (current < 50 ? 10 : 5))
+        setProgressMessage(next >= 60 ? 'Recording the restore action…' : 'Verifying selected testcases…')
+        return next
+      })
+    }, 280)
+    try {
+      const restored = await api.post<TestCaseOut[]>(`/api/test-repository/projects/${projectId}/test-cases/bulk-restore-from-archive`, {
+        ids: restoreIds,
+      })
+      const remainingDisplayTime = Math.max(0, 750 - (Date.now() - startedAt))
+      if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))
+      window.clearInterval(timer)
+      setProgress(100)
+      setProgressMessage(`${restored.length} testcase${restored.length !== 1 ? 's' : ''} restored`)
+      onRestored(restored, restoreIds)
+      setStage('success')
+    } catch (err) {
+      window.clearInterval(timer)
+      setError(err)
+      setStage('error')
+    }
+  }
+
+  const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
+  const title = stage === 'restoring' ? 'Restoring testcases'
+    : stage === 'success' ? 'Bulk restore completed'
+      : stage === 'error' ? 'Bulk restore failed'
+        : `Restore ${restoreIds.length} test case${restoreIds.length !== 1 ? 's' : ''} from archive?`
+
+  return (
+    <Modal title={title} onClose={onClose} variant="dialog" preventBackdropClose>
+      {stage === 'confirm' && (
+        <form onSubmit={restore}>
+          <div className="tm-bulk-confirm-count"><strong>{restoreIds.length}</strong><span>test case{restoreIds.length !== 1 ? 's' : ''} will be restored to Approved</span></div>
+          <p>The selected test cases will move out of Archived back to Approved, becoming available for new Test Cycle selection again. Their approval history, execution history, attachments, comments, and audit records are unaffected.</p>
+          <ErrorText error={error} />
+          <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+            <button className="btn btn-primary" disabled={!restoreIds.length}>Restore {restoreIds.length} test case{restoreIds.length !== 1 ? 's' : ''}</button>
+            <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          </div>
+        </form>
+      )}
+      {(stage === 'restoring' || stage === 'success') && (
+        <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
+          <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
+          <strong>{progressMessage}</strong>
+          <div className="tm-progress-track" role="progressbar" aria-label="Bulk restore progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-meta"><span>{progress < 100 ? 'Restore is being recorded atomically' : 'Restored testcases are now available for cycles'}</span><strong>{progress}%</strong></div>
+          {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
+        </div>
+      )}
+      {stage === 'error' && (
+        <div className="tm-operation-state error" role="alert">
+          <div className="tm-operation-icon">!</div>
+          <strong>Nothing was restored</strong>
+          <p className="muted small">The bulk restore is atomic, so all selected testcases remain archived.</p>
+          <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+            <button className="btn btn-primary" onClick={() => restore()}>Try again</button>
+            <button className="btn" onClick={onClose}>Close</button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
 function TestCaseArchiveModal({ testCase, onClose, onArchived }: {
   testCase: TestCaseOut
   onClose: () => void
@@ -1293,18 +1570,22 @@ function TestCaseArchiveModal({ testCase, onClose, onArchived }: {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    // 2026-08 -- "The user must provide an archive reason" (Final-Approved
+    // Test Case Deletion and Archive Requirement) -- reason is now
+    // mandatory, matching TestCaseArchive's backend schema.
+    if (!reason.trim()) { setError(new Error('An archive reason is required')); return }
     setBusy(true); setError(null)
     try {
-      onArchived(await api.post<TestCaseOut>(`/api/test-repository/test-cases/${testCase.id}/archive`, { reason: reason.trim() || null }))
+      onArchived(await api.post<TestCaseOut>(`/api/test-repository/test-cases/${testCase.id}/archive`, { reason: reason.trim() }))
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
   return (
     <Modal title={`Archive ${testCase.test_case_key}?`} onClose={onClose} variant="dialog" preventBackdropClose>
       <form onSubmit={submit}>
-        <p>Archiving retires the Approved version -- history, cycle membership, and execution results are preserved, but it can no longer be added to new cycles.</p>
-        <Field label="Reason (optional)">
-          <textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} />
+        <p>Are you sure you want to archive this test case? The test case will be removed from active lists but its history and execution records will be preserved.</p>
+        <Field label="Archive reason *">
+          <textarea required rows={3} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why is this test case being archived?" />
         </Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
@@ -1349,6 +1630,20 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
   )
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  // 2026-08 -- reported directly: "On save button click of testcase closing
+  // the modal, it should not close the modal." Save used to be the only
+  // action that closed this modal (onSaved -> setEditingCase(null) at the
+  // call site below) -- every other action here (checkout, submit, review
+  // decisions) leaves it open. Save now just persists and stays open; this
+  // is the only feedback that it actually happened (the modal itself gives
+  // no other visual cue once it doesn't close), so it's shown briefly next
+  // to the button and cleared on a timer, same idea as a toast.
+  const [justSaved, setJustSaved] = useState(false)
+  useEffect(() => {
+    if (!justSaved) return
+    const timer = window.setTimeout(() => setJustSaved(false), 2500)
+    return () => window.clearTimeout(timer)
+  }, [justSaved])
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [reviewDecision, setReviewDecision] = useState<TestCaseReviewDecision | null>(null)
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
@@ -1361,18 +1656,19 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
   const [versions, setVersions] = useState<TestCaseVersionSummary[]>([])
   const [showVersions, setShowVersions] = useState(false)
   const [compareIds, setCompareIds] = useState<{ left: number; right: number } | null>(null)
-  // APR-001 -- per-item override of the project's default_reviewer_id/
-  // default_qa_lead_id, fetched from the CURRENT version's own full detail
-  // (assigned_reviewer_id/assigned_qa_lead_id live there, not on TestCaseOut
-  // itself -- see types.ts TestCaseVersionOut). Project-role authorization
-  // and stage assignment are both required to record a workflow decision.
-  const [currentVersionDetail, setCurrentVersionDetail] = useState<TestCaseVersionOut | null>(null)
-  const [assignReviewerId, setAssignReviewerId] = useState<number | ''>('')
-  const [assignQaLeadId, setAssignQaLeadId] = useState<number | ''>('')
-  const [assignBusy, setAssignBusy] = useState(false)
-  const [assignSaved, setAssignSaved] = useState(false)
-  const [assignError, setAssignError] = useState<unknown>(null)
   const { user } = useAuth()
+  // 2026-08 "Simplified Test Management Review and Approval" requirement --
+  // repository-governance actions that aren't tied to a specific
+  // TestCaseVersion's old/new-workflow status (checkout override, archive/
+  // restore of an already-Approved baseline) moved off project membership
+  // to the plain QA Lead Group system-role model on the backend
+  // (require_can_manage_repository_governance, deps.py) -- mirror that
+  // exactly here instead of reusing the OLD-path-only canReview/
+  // canGiveFinalApproval props. QA Group / QA Lead Group new-path Stage 1/
+  // Stage 2 review authority is the same kind of plain system-role check
+  // (see canActOnPendingStage below).
+  const canManageRepoGovernance = hasRole(user, ...QA_LEAD_GROUP_ROLES)
+  const canQAGroupNewPath = hasRole(user, 'QA_ENGINEER')
   const currentProject = allProjects.find((project) => project.id === (existing?.project_id ?? projectId))
   // Reported directly: "check in checkout option should be available for
   // testcases, otherwise multiple people can edit at once, if checkout, the
@@ -1387,36 +1683,68 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
   // a decision -- mirrors backend constants.TEST_CASE_PENDING_DECISION_STATUSES.
   const pendingDecisionStatus = !!existing && TEST_CASE_PENDING_DECISION_STATUSES.includes(existing.status)
   const isCurrentDraftAuthor = !!existing && !!user?.id && (
-    existing.current_draft_author_id === user.id || currentVersionDetail?.author_id === user.id
+    existing.current_draft_author_id === user.id
   )
-  const isAssignedStageActor = !!existing && (
-    existing.pending_with_user_id === user?.id || hasRole(user, 'ADMIN')
+  // 2026-08 "Simplified Test Management" GOV-002 gap fix, NEW-path only --
+  // reported directly: Tester 2 (not the draft's author) submitted Tester
+  // 1's draft, then Tester 2 was immediately able to record the Stage 1
+  // decision on the very item they'd just submitted. Mirrors
+  // review_test_case's identical backend fix -- blocks whoever submitted
+  // the draft from also recording its Stage 1 decision, and whoever
+  // recorded Stage 1 from also recording Stage 2, not just the content
+  // author. OLD-path ("In Review"/"Review Completed") stays exactly
+  // isCurrentDraftAuthor, unchanged.
+  const isBlockedFromNewStage1 = !!existing && !!user?.id && (
+    isCurrentDraftAuthor || existing.current_draft_submitted_by_id === user.id
   )
-  const canActOnPendingStage = !isCurrentDraftAuthor && !!existing && (
-    (existing.status === 'In Review' && canReview && isAssignedStageActor)
-    || (existing.status === 'Review Completed' && canGiveFinalApproval && isAssignedStageActor)
+  const isBlockedFromNewStage2 = !!existing && !!user?.id && (
+    isCurrentDraftAuthor
+    || existing.current_draft_submitted_by_id === user.id
+    || existing.current_draft_reviewed_by_id === user.id
   )
+  const canActOnPendingStage = !!existing && (
+    (existing.status === 'In Review' && canReview && !isCurrentDraftAuthor)
+    || (existing.status === 'Review Completed' && canGiveFinalApproval && !isCurrentDraftAuthor)
+    || (existing.status === 'Recommendation Pending' && canQAGroupNewPath && !isBlockedFromNewStage1)
+    || (existing.status === 'QA Lead Approval Pending' && canManageRepoGovernance && !isBlockedFromNewStage2)
+  )
+  const gov002BlockedMessage = !existing ? null
+    : isCurrentDraftAuthor
+      ? 'You authored this testcase version, so you cannot review or approve it yourself. Another authorized reviewer must record the pending decision.'
+      : (existing.status === 'Recommendation Pending' && existing.current_draft_submitted_by_id === user?.id)
+        ? 'You submitted this testcase version for review, so you cannot also record its Stage 1 decision. Another QA Group member must record it.'
+        : (existing.status === 'QA Lead Approval Pending' && (existing.current_draft_submitted_by_id === user?.id || existing.current_draft_reviewed_by_id === user?.id))
+          ? 'You already acted on this testcase version at an earlier stage (submitted it, or recorded its Stage 1 decision), so you cannot also record its Stage 2 decision. Another QA Lead Group member must record it.'
+          : null
   const pendingLockContext = !pendingDecisionStatus || !existing ? null
-    : isCurrentDraftAuthor ? {
+    : gov002BlockedMessage ? {
       title: 'Maker-checker lock',
-      message: 'You authored this testcase version, so you cannot review or approve it yourself. Another authorized reviewer must record the pending decision.',
+      message: gov002BlockedMessage,
     }
-      : existing.status === 'In Review' && canReview && isAssignedStageActor ? {
+      : existing.status === 'In Review' && canReview ? {
         title: 'Reviewer mode — submitted content locked',
         message: 'The submitted testcase is preserved unchanged while you review it. Use the Stage 1 Reviewer decision controls below to recommend it or return it for correction.',
       }
-        : existing.status === 'Review Completed' && canGiveFinalApproval && isAssignedStageActor ? {
+        : existing.status === 'Review Completed' && canGiveFinalApproval ? {
           title: 'QA Lead approval mode — submitted content locked',
           message: 'The recommended testcase is preserved unchanged while you make the final decision. Use the Stage 2 controls below to approve, return, or reject it.',
         }
-          : existing.status === 'In Review' ? {
-            title: 'Editing locked — awaiting Reviewer recommendation',
-            message: 'The testcase content cannot change while Stage 1 review is pending. Editing reopens only if the Reviewer returns it for correction.',
+          : existing.status === 'Recommendation Pending' && canQAGroupNewPath ? {
+            title: 'QA Group mode — submitted content locked',
+            message: 'The submitted testcase is preserved unchanged while you review it. Use the Stage 1 QA Group decision controls below to recommend it or return it for correction.',
           }
-            : {
-              title: 'Editing locked — awaiting QA Lead final decision',
-              message: 'The testcase content cannot change while Stage 2 approval is pending. Editing reopens only if the QA Lead returns it for correction.',
+            : existing.status === 'QA Lead Approval Pending' && canManageRepoGovernance ? {
+              title: 'QA Lead Group mode — submitted content locked',
+              message: 'The recommended testcase is preserved unchanged while you make the final decision. Use the Stage 2 controls below to approve, return, or reject it.',
             }
+              : existing.status === 'In Review' || existing.status === 'Recommendation Pending' ? {
+                title: 'Editing locked — awaiting a QA recommendation',
+                message: 'The testcase content cannot change while Stage 1 review is pending. Editing reopens only if the QA reviewer returns it for correction.',
+              }
+                : {
+                  title: 'Editing locked — awaiting QA Lead final decision',
+                  message: 'The testcase content cannot change while Stage 2 approval is pending. Editing reopens only if the QA Lead returns it for correction.',
+                }
   const isTerminalStatus = !!existing && TEST_CASE_TERMINAL_STATUSES.includes(existing.status)
   const readOnly = !canAuthor || lockedByOther || (!!existing && !lockedByMe) || pendingDecisionStatus
 
@@ -1427,39 +1755,6 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
     }
   }, [existing])
 
-  // Pre-fill the assignment selects from the CURRENT version's own override
-  // (assigned_reviewer_id/assigned_qa_lead_id), falling back to the
-  // project's default_reviewer_id/default_qa_lead_id when the item has no
-  // override yet (APR-001).
-  useEffect(() => {
-    const versionId = existing?.current_draft_version_id || existing?.current_approved_version_id
-    if (!existing || !versionId) { setCurrentVersionDetail(null); return }
-    let active = true
-    api.get<TestCaseVersionOut>(`/api/test-repository/test-cases/${existing.id}/versions/${versionId}`)
-      .then((detail) => { if (active) setCurrentVersionDetail(detail) })
-      .catch(() => { if (active) setCurrentVersionDetail(null) })
-    return () => { active = false }
-  }, [existing?.id, existing?.current_draft_version_id, existing?.current_approved_version_id])
-
-  useEffect(() => {
-    setAssignReviewerId(currentVersionDetail?.assigned_reviewer_id ?? currentProject?.default_reviewer_id ?? '')
-    setAssignQaLeadId(currentVersionDetail?.assigned_qa_lead_id ?? currentProject?.default_qa_lead_id ?? '')
-    setAssignSaved(false)
-  }, [currentVersionDetail, currentProject?.default_reviewer_id, currentProject?.default_qa_lead_id])
-
-  async function saveAssignment() {
-    if (!existing) return
-    setAssignBusy(true); setAssignError(null); setAssignSaved(false)
-    try {
-      const body: TestCaseReassignApproversIn = {
-        assigned_reviewer_id: assignReviewerId || null,
-        assigned_qa_lead_id: assignQaLeadId || null,
-      }
-      const updated = await api.patch<TestCaseOut>(`/api/test-repository/test-cases/${existing.id}/approvers`, body)
-      onCheckoutChange(updated)
-      setAssignSaved(true)
-    } catch (err) { setAssignError(err) } finally { setAssignBusy(false) }
-  }
 
   async function toggleCheckout() {
     if (!existing) return
@@ -1490,6 +1785,7 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
         ? await api.patch<TestCaseOut>(`/api/test-repository/test-cases/${existing.id}`, body)
         : await api.post<TestCaseOut>(`/api/test-repository/projects/${projectId}/test-cases`, body)
       onSaved(saved)
+      setJustSaved(true)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
@@ -1602,39 +1898,9 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
                 {canAuthor && pendingDecisionStatus && (
                   <button type="button" className="btn btn-sm" disabled title="Editing is locked while an approval decision is pending">Start editing</button>
                 )}
-                {!pendingDecisionStatus && (canReview || canGiveFinalApproval) && lockedByOther && (
+                {!pendingDecisionStatus && canManageRepoGovernance && lockedByOther && (
                   <button type="button" className="btn btn-sm btn-danger" onClick={() => setShowOverride(true)}>Override checkout</button>
                 )}
-              </div>
-            </Field>
-          )}
-          {existing && canAuthor && isCurrentDraftAuthor && (
-            <Field label="Approver assignment">
-              <div className="tm-workflow-status-field" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
-                <small className="muted">The assigned Reviewer and QA Lead own their respective workflow decisions. Administrators retain oversight access. Leave blank to use the project's default.</small>
-                <div className="grid grid-2">
-                  <Field label="Assigned Reviewer (Stage 1)">
-                    <SearchableSelect
-                      value={assignReviewerId === '' ? '' : String(assignReviewerId)}
-                      onChange={(v) => setAssignReviewerId(v ? Number(v) : '')}
-                      placeholder="-- Use project default --"
-                      options={users.filter((u) => u.is_active && u.id !== existing.current_draft_author_id).map((u) => ({ value: String(u.id), label: u.full_name }))}
-                    />
-                  </Field>
-                  <Field label="Assigned QA Lead (Stage 2)">
-                    <SearchableSelect
-                      value={assignQaLeadId === '' ? '' : String(assignQaLeadId)}
-                      onChange={(v) => setAssignQaLeadId(v ? Number(v) : '')}
-                      placeholder="-- Use project default --"
-                      options={users.filter((u) => u.is_active && u.roles.includes('QA_LEAD')).map((u) => ({ value: String(u.id), label: u.full_name }))}
-                    />
-                  </Field>
-                </div>
-                <ErrorText error={assignError} />
-                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                  <button type="button" className="btn btn-sm" onClick={saveAssignment} disabled={assignBusy}>{assignBusy ? 'Saving…' : 'Save assignment'}</button>
-                  {assignSaved && <span className="storage-setting-saved">✓ Assignment updated</span>}
-                </div>
               </div>
             </Field>
           )}
@@ -1647,7 +1913,7 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
         {lockedByOther && !pendingDecisionStatus && (
           <div className="info-banner">
             <strong>{existing?.checked_out_by_name}</strong> has this test case checked out, so it's locked
-            for editing until they check it back in. {(canReview || canGiveFinalApproval) ? 'You can override the checkout above.' : 'Ask them, or a QA Lead/Reviewer on this project, to release it.'}
+            for editing until they check it back in. {canManageRepoGovernance ? 'You can override the checkout above.' : 'Ask them, or a member of the QA Lead Group, to release it.'}
           </div>
         )}
         {existing && canAuthor && !existing.checked_out_by_id && !pendingDecisionStatus && (
@@ -1674,15 +1940,22 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
         </Field>
         <ErrorText error={error} />
         {!readOnly && (
-          <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
             <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save'}</button>
+            {justSaved && <span className="tm-save-confirm">Saved</span>}
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
-            {existing && (existing.status === 'Draft' || existing.status === 'Returned') && (
+            {existing && ['Draft', 'Returned', 'Returned by QA', 'Returned by QA Lead'].includes(existing.status) && (
               <button type="button" className="btn btn-success" onClick={() => setShowSubmit(true)} disabled={busy}>
                 Submit for review
               </button>
             )}
-            {existing && !existing.current_approved_version_id && <button type="button" className="btn btn-danger" onClick={() => setConfirmDelete(true)} disabled={busy}>Delete</button>}
+            {/* 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement": Delete must stay hidden
+                for any governed test case, not just an Approved/Archived one (current_approved_version_id is
+                set for both, since archiving never clears the pointer) -- also hides it for a Rejected case
+                that's never been approved, which the plain current_approved_version_id check alone missed
+                (backend delete_test_case blocks it either way; this just keeps the button consistent with
+                what the backend will actually allow). */}
+            {existing && !existing.current_approved_version_id && existing.status !== 'Rejected' && <button type="button" className="btn btn-danger" onClick={() => setConfirmDelete(true)} disabled={busy}>Delete</button>}
           </div>
         )}
       </form>
@@ -1690,10 +1963,10 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
         <div className="tm-review-actions">
           <div><strong>More actions</strong><span>Clone into a new testcase, or archive the approved baseline.</span></div>
           <button className="btn" onClick={() => setShowClone(true)}>Clone…</button>
-          {canReview && existing.current_approved_version_id && existing.status !== 'Archived' && (
+          {canManageRepoGovernance && existing.current_approved_version_id && existing.status !== 'Archived' && (
             <button className="btn btn-danger" onClick={() => setShowArchive(true)}>Archive</button>
           )}
-          {canReview && existing.status === 'Archived' && (
+          {canManageRepoGovernance && existing.status === 'Archived' && (
             <button className="btn" disabled={archiveBusy} onClick={async () => {
               setArchiveBusy(true); setError(null)
               try { onReviewed(await api.post<TestCaseOut>(`/api/test-repository/test-cases/${existing.id}/restore`)) }
@@ -1705,18 +1978,41 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
       {/* Stage 1 -- Reviewer tier, only valid while "In Review" (RECOMMEND/RETURN). */}
       {existing && existing.status === 'In Review' && canReview && canActOnPendingStage && (
         <div className="tm-review-actions">
-          <div><strong>Reviewer decision (Stage 1)</strong><span>{isCurrentDraftAuthor ? 'You authored this testcase version. Another Reviewer must record the decision.' : "Recommend this test case for the QA Lead's final approval, or return it to the Author for changes."}</span></div>
-          <button className="btn btn-primary" disabled={isCurrentDraftAuthor} onClick={() => setReviewDecision('RECOMMEND')}>{TEST_CASE_REVIEW_ACTION_LABELS.RECOMMEND}</button>
+          <div><strong>QA review decision (Stage 1)</strong><span>{isCurrentDraftAuthor ? 'You authored this testcase version. Another Reviewer must record the decision.' : 'Approve for QA management, return for correction, or reject the test case.'}</span></div>
+          <button className="btn btn-primary" disabled={isCurrentDraftAuthor} onClick={() => setReviewDecision('APPROVE')}>Approve Stage 1</button>
           <button className="btn" disabled={isCurrentDraftAuthor} onClick={() => setReviewDecision('RETURN')}>{TEST_CASE_REVIEW_ACTION_LABELS.RETURN}</button>
+          <button className="btn btn-danger" disabled={isCurrentDraftAuthor} onClick={() => setReviewDecision('REJECT')}>{TEST_CASE_REVIEW_ACTION_LABELS.REJECT}</button>
         </div>
       )}
       {/* Stage 2 -- QA Lead tier, only valid while "Review Completed" (APPROVE/RETURN/REJECT). Strictly narrower than Stage 1 -- a plain Reviewer project role does not qualify. */}
       {existing && existing.status === 'Review Completed' && canGiveFinalApproval && canActOnPendingStage && (
         <div className="tm-review-actions">
-          <div><strong>QA Lead final decision (Stage 2)</strong><span>Approve and activate this test case, return it for changes, or reject it.</span></div>
+          <div><strong>QA management decision (Stage 2)</strong><span>CM QA or AGM QA may approve and activate this test case, return it for changes, or reject it.</span></div>
           <button className="btn btn-primary" onClick={() => setReviewDecision('APPROVE')}>{TEST_CASE_REVIEW_ACTION_LABELS.APPROVE}</button>
           <button className="btn" onClick={() => setReviewDecision('RETURN')}>{TEST_CASE_REVIEW_ACTION_LABELS.RETURN}</button>
           <button className="btn btn-danger" onClick={() => setReviewDecision('REJECT')}>{TEST_CASE_REVIEW_ACTION_LABELS.REJECT}</button>
+        </div>
+      )}
+      {/* 2026-08 "Simplified Test Management" NEW-path Stage 1 -- QA Group
+          (QA_ENGINEER) tier, only valid while "Recommendation Pending"
+          (RECOMMEND/RETURN/REJECT). No individual reviewer assignment --
+          any active QA Group member may act, GOV-002 self-authorship aside. */}
+      {existing && existing.status === 'Recommendation Pending' && canQAGroupNewPath && canActOnPendingStage && (
+        <div className="tm-review-actions">
+          <div><strong>QA recommendation (Stage 1)</strong><span>{isBlockedFromNewStage1 ? (isCurrentDraftAuthor ? 'You authored this testcase version. Another QA Group member must record the decision.' : 'You submitted this testcase version for review. Another QA Group member must record the decision.') : 'Recommend for QA Lead approval, return for correction, or reject the test case.'}</span></div>
+          <button className="btn btn-primary" disabled={isBlockedFromNewStage1} onClick={() => setReviewDecision('RECOMMEND')}>{TEST_CASE_REVIEW_ACTION_LABELS.RECOMMEND}</button>
+          <button className="btn" disabled={isBlockedFromNewStage1} onClick={() => setReviewDecision('RETURN')}>{TEST_CASE_REVIEW_ACTION_LABELS.RETURN}</button>
+          <button className="btn btn-danger" disabled={isBlockedFromNewStage1} onClick={() => setReviewDecision('REJECT')}>{TEST_CASE_REVIEW_ACTION_LABELS.REJECT}</button>
+        </div>
+      )}
+      {/* NEW-path Stage 2 -- QA Lead Group (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA)
+          tier, only valid while "QA Lead Approval Pending" (APPROVE/RETURN/REJECT). */}
+      {existing && existing.status === 'QA Lead Approval Pending' && canManageRepoGovernance && canActOnPendingStage && (
+        <div className="tm-review-actions">
+          <div><strong>QA Lead decision (Stage 2)</strong><span>{isBlockedFromNewStage2 ? (isCurrentDraftAuthor ? 'You authored this testcase version. Another QA Lead Group member must record the decision.' : 'You already acted on this testcase version at an earlier stage (submitted it, or recorded its Stage 1 decision). Another QA Lead Group member must record the decision.') : 'Any QA Lead Group member (QA Lead, CM QA, or AGM QA) may approve and activate this test case, return it for changes, or reject it.'}</span></div>
+          <button className="btn btn-primary" disabled={isBlockedFromNewStage2} onClick={() => setReviewDecision('APPROVE')}>{TEST_CASE_REVIEW_ACTION_LABELS.APPROVE}</button>
+          <button className="btn" disabled={isBlockedFromNewStage2} onClick={() => setReviewDecision('RETURN')}>{TEST_CASE_REVIEW_ACTION_LABELS.RETURN}</button>
+          <button className="btn btn-danger" disabled={isBlockedFromNewStage2} onClick={() => setReviewDecision('REJECT')}>{TEST_CASE_REVIEW_ACTION_LABELS.REJECT}</button>
         </div>
       )}
       {existing && <LinkedDefects query={`test_case_id=${existing.id}`} />}
@@ -1724,7 +2020,7 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
       {confirmDelete && existing && (
         <ConfirmModal
           title="Delete test case?"
-          message={<p>Delete <strong>{existing.test_case_key}</strong>? Its definition and steps will be permanently removed.</p>}
+          message={<p>Delete <strong>{existing.test_case_key}</strong>? It will move to the Recycle Bin, where it can be restored, or permanently cleared by an authorized QA Lead.</p>}
           confirmLabel="Delete test case" cancelLabel="Keep test case" destructive busy={busy}
           onConfirm={remove} onCancel={() => setConfirmDelete(false)}
         />
@@ -1733,8 +2029,6 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
         <TestCaseReviewModal
           testCase={existing}
           decision={reviewDecision}
-          users={users}
-          defaultQaLeadId={currentVersionDetail?.assigned_qa_lead_id ?? currentProject?.default_qa_lead_id}
           onClose={() => setReviewDecision(null)}
           onReviewed={onReviewed}
         />
@@ -1743,7 +2037,6 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
         <BulkSubmitModal
           project={currentProject}
           selectedCases={[existing]}
-          users={users}
           onClose={() => setShowSubmit(false)}
           onSubmitted={(submitted) => {
             setShowSubmit(false)
@@ -1801,12 +2094,10 @@ function BulkFieldCard({ title, description, enabled, onToggle, children, wide =
   )
 }
 
-function BulkUpdateModal({ projectId, selectedCases, folders, users, canUpdateAssignments, onClose, onUpdated }: {
+function BulkUpdateModal({ projectId, selectedCases, folders, onClose, onUpdated }: {
   projectId: number
   selectedCases: TestCaseListOut[]
   folders: TestFolderOut[]
-  users: UserOut[]
-  canUpdateAssignments: boolean
   onClose: () => void
   onUpdated: (cases: TestCaseOut[]) => void
 }) {
@@ -1818,23 +2109,17 @@ function BulkUpdateModal({ projectId, selectedCases, folders, users, canUpdateAs
     test_type?: string
     module_name?: string
     tags?: string[]
-    assigned_reviewer_id?: number | null
-    assigned_qa_lead_id?: number | null
   }
   const [folder, setFolder] = useState('unchanged')
   const [priority, setPriority] = useState('')
   const [testType, setTestType] = useState('')
   const [moduleName, setModuleName] = useState('')
   const [tags, setTags] = useState('')
-  const [reviewerId, setReviewerId] = useState<number | ''>('')
-  const [qaLeadId, setQaLeadId] = useState<number | ''>('')
   const [updateFolder, setUpdateFolder] = useState(false)
   const [updatePriority, setUpdatePriority] = useState(false)
   const [updateTestType, setUpdateTestType] = useState(false)
   const [updateModule, setUpdateModule] = useState(false)
   const [updateTags, setUpdateTags] = useState(false)
-  const [updateReviewer, setUpdateReviewer] = useState(false)
-  const [updateQaLead, setUpdateQaLead] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [stage, setStage] = useState<BulkUpdateStage>('edit')
   const [pendingBody, setPendingBody] = useState<BulkUpdateBody | null>(null)
@@ -1844,14 +2129,10 @@ function BulkUpdateModal({ projectId, selectedCases, folders, users, canUpdateAs
   const selectedIds = useMemo(() => selectedCases.map((testCase) => testCase.id), [selectedCases])
   const totalSelected = useState(selectedCases.length)[0]
   const workflowLockedCases = useMemo(
-    () => selectedCases.filter((testCase) => testCase.status === 'In Review' || testCase.status === 'Review Completed'),
+    () => selectedCases.filter((testCase) => TEST_CASE_PENDING_DECISION_STATUSES.includes(testCase.status)),
     [selectedCases],
   )
   const testcaseFieldsLocked = workflowLockedCases.length > 0
-  const selectedAuthorIds = useMemo(
-    () => new Set(selectedCases.map((testCase) => testCase.current_draft_author_id).filter((id): id is number => id != null)),
-    [selectedCases],
-  )
 
   const changeSummary = useMemo(() => {
     const changes: string[] = []
@@ -1863,10 +2144,8 @@ function BulkUpdateModal({ projectId, selectedCases, folders, users, canUpdateAs
     if (updateTestType) changes.push(`Test Type → ${testType}`)
     if (updateModule) changes.push(`Module Name → ${moduleName.trim() || 'None'}`)
     if (updateTags) changes.push(`Tags → ${tags.trim() || 'None'}`)
-    if (updateReviewer) changes.push(`Assigned Reviewer (Stage 1) → ${users.find((user) => user.id === reviewerId)?.full_name || 'Project default'}`)
-    if (updateQaLead) changes.push(`Assigned QA Lead (Stage 2) → ${users.find((user) => user.id === qaLeadId)?.full_name || 'Project default'}`)
     return changes
-  }, [folder, folders, priority, testType, moduleName, tags, reviewerId, qaLeadId, users, updateFolder, updatePriority, updateTestType, updateModule, updateTags, updateReviewer, updateQaLead])
+  }, [folder, folders, priority, testType, moduleName, tags, updateFolder, updatePriority, updateTestType, updateModule, updateTags])
 
   function review(e: React.FormEvent) {
     e.preventDefault()
@@ -1876,8 +2155,6 @@ function BulkUpdateModal({ projectId, selectedCases, folders, users, canUpdateAs
     if (updateTestType) body.test_type = testType
     if (updateModule) body.module_name = moduleName.trim()
     if (updateTags) body.tags = tags.split(',').map((tag) => tag.trim()).filter(Boolean)
-    if (updateReviewer) body.assigned_reviewer_id = reviewerId || null
-    if (updateQaLead) body.assigned_qa_lead_id = qaLeadId || null
     if (Object.keys(body).length === 1) {
       setError(new Error('Choose at least one field to update'))
       return
@@ -1943,36 +2220,6 @@ function BulkUpdateModal({ projectId, selectedCases, folders, users, canUpdateAs
         </div>
         <div className="tm-bulk-layout">
           <div className="tm-bulk-fields">
-            {canUpdateAssignments && <section className="tm-bulk-section">
-              <div className="tm-bulk-section-heading">
-                <div><strong>Approver Assignment</strong><span>Routing can be updated at any workflow stage.</span></div>
-                <span className="tm-bulk-section-status available">Available</span>
-              </div>
-              <div className="tm-bulk-field-grid">
-                <BulkFieldCard title="Assigned Reviewer (Stage 1)" description="Set the Stage 1 routing assignment" enabled={updateReviewer} onToggle={setUpdateReviewer}>
-                  <SearchableSelect
-                    value={reviewerId === '' ? '' : String(reviewerId)}
-                    onChange={(value) => setReviewerId(value ? Number(value) : '')}
-                    placeholder="-- Use project default --"
-                    options={[
-                      { value: '', label: '-- Use project default --' },
-                      ...users.filter((candidate) => candidate.is_active && !selectedAuthorIds.has(candidate.id)).map((candidate) => ({ value: String(candidate.id), label: candidate.full_name })),
-                    ]}
-                  />
-                </BulkFieldCard>
-                <BulkFieldCard title="Assigned QA Lead (Stage 2)" description="Set the Stage 2 routing assignment" enabled={updateQaLead} onToggle={setUpdateQaLead}>
-                  <SearchableSelect
-                    value={qaLeadId === '' ? '' : String(qaLeadId)}
-                    onChange={(value) => setQaLeadId(value ? Number(value) : '')}
-                    placeholder="-- Use project default --"
-                    options={[
-                      { value: '', label: '-- Use project default --' },
-                      ...users.filter((candidate) => candidate.is_active && candidate.roles.includes('QA_LEAD')).map((candidate) => ({ value: String(candidate.id), label: candidate.full_name })),
-                    ]}
-                  />
-                </BulkFieldCard>
-              </div>
-            </section>}
             <section className={`tm-bulk-section${testcaseFieldsLocked ? ' locked' : ''}`}>
               <div className="tm-bulk-section-heading">
                 <div><strong>Testcase Fields</strong><span>Update testcase classification and repository details.</span></div>
@@ -2059,6 +2306,173 @@ function BulkUpdateModal({ projectId, selectedCases, folders, users, canUpdateAs
   )
 }
 
+// 2026-08 "Create Recycle bin and Archive folder" requirement -- "any
+// delete testcases before approve will go to recycle bin. only QA lead can
+// clear from recycle bin." A deliberately self-contained view (own
+// selection state, own simple columns) rather than trying to force the
+// main list's much larger review-workflow-oriented Table configuration
+// (Workflow badges, checkout state, GOV-002-aware checkboxes, etc. -- all
+// meaningless for a case that's been deleted) to also cover this case.
+// Restore is Author-tier (canRestore, same as who could delete in the
+// first place); permanently clearing is QA Lead Group only (canPurge).
+function RecycleBinPanel({
+  projectId, items, loading, total, totalPages, page, pageSize, hasNext, hasPrevious,
+  onPageChange, onPageSizeChange, search, onSearchChange, canRestore, canPurge, onChanged,
+}: {
+  projectId: number
+  items: TestCaseListOut[]
+  loading: boolean
+  total: number; totalPages: number; page: number; pageSize: number
+  hasNext: boolean; hasPrevious: boolean
+  onPageChange: (p: number) => void
+  onPageSizeChange: (n: number) => void
+  search: string
+  onSearchChange: (s: string) => void
+  canRestore: boolean
+  canPurge: boolean
+  onChanged: () => void
+}) {
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [busyId, setBusyId] = useState<number | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [confirmBulkPurge, setConfirmBulkPurge] = useState(false)
+  const [confirmSingle, setConfirmSingle] = useState<{ id: number; key: string } | null>(null)
+
+  useEffect(() => { setSelectedIds(new Set()) }, [items])
+
+  function toggle(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const allSelected = items.length > 0 && items.every((tc) => selectedIds.has(tc.id))
+  function toggleAll() {
+    setSelectedIds((prev) => {
+      if (allSelected) return new Set()
+      return new Set(items.map((tc) => tc.id))
+    })
+  }
+
+  async function restoreOne(id: number) {
+    setBusyId(id); setError(null)
+    try {
+      await api.post(`/api/test-repository/test-cases/${id}/restore-from-recycle-bin`, {})
+      onChanged()
+    } catch (err) { setError(err) } finally { setBusyId(null) }
+  }
+
+  async function restoreSelected() {
+    if (selectedIds.size === 0) return
+    setBulkBusy(true); setError(null)
+    try {
+      await api.post(`/api/test-repository/projects/${projectId}/test-cases/bulk-restore-from-recycle-bin`, { ids: Array.from(selectedIds) })
+      setSelectedIds(new Set())
+      onChanged()
+    } catch (err) { setError(err) } finally { setBulkBusy(false) }
+  }
+
+  async function purgeOne(id: number) {
+    setBusyId(id); setError(null)
+    try {
+      await api.del(`/api/test-repository/test-cases/${id}/purge`)
+      onChanged()
+    } catch (err) { setError(err) } finally { setBusyId(null); setConfirmSingle(null) }
+  }
+
+  async function purgeSelected() {
+    if (selectedIds.size === 0) return
+    setBulkBusy(true); setError(null)
+    try {
+      await api.post(`/api/test-repository/projects/${projectId}/test-cases/bulk-purge`, { ids: Array.from(selectedIds) })
+      setSelectedIds(new Set())
+      onChanged()
+    } catch (err) { setError(err) } finally { setBulkBusy(false); setConfirmBulkPurge(false) }
+  }
+
+  return (
+    <>
+      <div className="tm-current-view">
+        <div>
+          <small>Current view</small>
+          <h3>Recycle Bin</h3>
+          <p>Test cases deleted before ever being approved. Restorable by any author, or permanently cleared by an authorized QA Lead.</p>
+        </div>
+        <span>{total} test case{total !== 1 ? 's' : ''}</span>
+      </div>
+      <div className="tm-list-toolbar">
+        <ClearableSearchInput value={search} onChange={(e) => onSearchChange(e.target.value)} onClear={() => onSearchChange('')} clearLabel="Clear Recycle Bin search" wrapperClassName="search-grow" placeholder="Search deleted cases by key or scenario…" />
+      </div>
+      <ErrorText error={error} />
+      {selectedIds.size > 0 && (
+        <div className="tm-bulk-bar" role="region" aria-label="Recycle Bin bulk actions">
+          <strong>{selectedIds.size} test case{selectedIds.size !== 1 ? 's' : ''} selected</strong>
+          {canRestore && <button className="btn btn-sm btn-primary" disabled={bulkBusy} onClick={restoreSelected}>Restore selected ({selectedIds.size})</button>}
+          {canPurge && <button className="btn btn-sm btn-danger" disabled={bulkBusy} onClick={() => setConfirmBulkPurge(true)}>Empty selected ({selectedIds.size})</button>}
+          <button className="btn btn-sm" onClick={() => setSelectedIds(new Set())}>Clear selection</button>
+        </div>
+      )}
+      <Table
+        rowKey="id"
+        server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange, onPageSizeChange, loading }}
+        columns={[
+          {
+            key: 'selection',
+            header: (canRestore || canPurge) && items.length > 0 ? (
+              <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label={allSelected ? 'Deselect all' : 'Select all'} />
+            ) : null,
+            render: (c) => (canRestore || canPurge) ? (
+              <input type="checkbox" checked={selectedIds.has(c.id)} onChange={() => toggle(c.id)} aria-label={`Select ${c.test_case_key}`} />
+            ) : null,
+            filterable: false,
+          },
+          { key: 'test_case_key', header: 'Test Case', render: (c) => <span className="tm-test-case-cell"><strong>{c.test_case_key}</strong><small>{c.test_scenario || 'Scenario not provided'}</small></span>, filterValue: (c) => `${c.test_case_key} ${c.test_scenario || ''}` },
+          { key: 'status', header: 'Status when deleted', render: (c) => <Badge status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} /> },
+          { key: 'deleted_by', header: 'Deleted by', render: (c) => <span>{c.deleted_by_name || '—'}</span> },
+          { key: 'deleted_at', header: 'Deleted on', render: (c) => <span>{c.deleted_at ? new Date(c.deleted_at).toLocaleString() : '—'}</span> },
+          {
+            key: 'actions', header: 'Actions', filterable: false,
+            render: (c) => (
+              <span className="tm-bulk-summary" style={{ display: 'flex', gap: 8 }}>
+                {canRestore && <button className="btn btn-sm btn-primary" disabled={busyId === c.id} onClick={() => restoreOne(c.id)}>Restore</button>}
+                {canPurge && <button className="btn btn-sm btn-danger" disabled={busyId === c.id} onClick={() => setConfirmSingle({ id: c.id, key: c.test_case_key })}>Clear permanently</button>}
+              </span>
+            ),
+          },
+        ]}
+        rows={items}
+      />
+      {confirmSingle && (
+        <ConfirmModal
+          title={`Permanently delete ${confirmSingle.key}?`}
+          message={<div><p>This permanently removes the test case and its steps. This action cannot be undone.</p></div>}
+          confirmLabel="Clear permanently"
+          cancelLabel="Cancel"
+          destructive
+          busy={busyId === confirmSingle.id}
+          onConfirm={() => purgeOne(confirmSingle.id)}
+          onCancel={() => setConfirmSingle(null)}
+        />
+      )}
+      {confirmBulkPurge && (
+        <ConfirmModal
+          title={`Permanently delete ${selectedIds.size} test case${selectedIds.size !== 1 ? 's' : ''}?`}
+          message={<div><p>This permanently removes the selected test cases and their steps. This action cannot be undone.</p></div>}
+          confirmLabel={`Clear ${selectedIds.size} permanently`}
+          cancelLabel="Cancel"
+          destructive
+          busy={bulkBusy}
+          onConfirm={purgeSelected}
+          onCancel={() => setConfirmBulkPurge(false)}
+        />
+      )}
+    </>
+  )
+}
+
 export default function TestRepository() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { user } = useAuth()
@@ -2087,11 +2501,25 @@ export default function TestRepository() {
   // "Reviewer" project role, no permissive default while myAccess is still
   // loading (defaults to false, not true, unlike every other flag here).
   const canGiveFinalApproval = hasRole(user, ...CAN_AUTHOR_ROLES) && (myAccess?.can_give_final_approval ?? false)
-  const canDeleteFolder = hasRole(user, ...CAN_AUTHOR_ROLES) && (myAccess?.can_review_repository ?? true)
+  // 2026-08 "Simplified Test Management Review and Approval" requirement --
+  // folder deletion is repository governance not tied to a specific
+  // TestCaseVersion's old/new-workflow status, so it moved off project
+  // membership to the plain QA Lead Group system-role model on the backend
+  // (require_can_manage_repository_governance, deps.py) -- same set
+  // TestCaseModal's own canManageRepoGovernance mirrors for archive/
+  // restore/checkout-override.
+  const canDeleteFolder = hasRole(user, ...QA_LEAD_GROUP_ROLES)
+  // NEW-path Stage 1/Stage 2 authority (see TestCaseModal's identically-named
+  // consts above) -- plain system-role checks, no project membership,
+  // reused here for the bulk recommend/approve eligibility filters below.
+  const canManageRepoGovernance = hasRole(user, ...QA_LEAD_GROUP_ROLES)
+  const canQAGroupNewPath = hasRole(user, 'QA_ENGINEER')
   // Selection is shared workflow infrastructure, not an authoring action.
   // Reviewer-only members need it for bulk recommendation, while Stage 2
   // approvers need it for bulk final approval. Edit/delete controls remain
-  // separately gated by canAuthor below.
+  // separately gated by canAuthor below. QA_ENGINEER/QA_LEAD_GROUP are both
+  // already inside CAN_AUTHOR_ROLES, so canAuthor alone already covers
+  // NEW-path Stage 1/Stage 2 selection eligibility too.
   const canSelectCases = canAuthor || canReview || canGiveFinalApproval
   const [users, setUsers] = useState<UserOut[]>([])
   const [projects, setProjects] = useState<TestProjectOut[]>([])
@@ -2103,7 +2531,7 @@ export default function TestRepository() {
   // aggregates the paginated case list below can no longer provide on its
   // own.
   const [summary, setSummary] = useState<TestCaseSummaryOut | null>(null)
-  const [selectedFolder, setSelectedFolder] = useState<number | typeof UNFILED | ''>('')
+  const [selectedFolder, setSelectedFolder] = useState<number | typeof UNFILED | typeof ARCHIVE_VIEW | typeof RECYCLE_BIN | ''>('')
   const [error, setError] = useState<unknown>(null)
   const [showNewFolder, setShowNewFolder] = useState(false)
   const [showImport, setShowImport] = useState(false)
@@ -2130,6 +2558,10 @@ export default function TestRepository() {
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [showBulkApprove, setShowBulkApprove] = useState(false)
   const [showBulkRecommend, setShowBulkRecommend] = useState(false)
+  const [showBulkReturn, setShowBulkReturn] = useState(false)
+  const [showBulkReject, setShowBulkReject] = useState(false)
+  const [showBulkArchive, setShowBulkArchive] = useState(false)
+  const [showBulkRestore, setShowBulkRestore] = useState(false)
   const [showBulkSubmit, setShowBulkSubmit] = useState(false)
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false)
   const [downloadingTemplate, setDownloadingTemplate] = useState(false)
@@ -2203,16 +2635,35 @@ export default function TestRepository() {
   // params instead of an in-browser .filter() over the whole project's
   // cases). See TestCaseSummaryOut (loaded above) for the folder-tree
   // counts/tag list/stat bar this list can no longer compute on its own.
+  // 2026-08 "Create Recycle bin and Archive folder" requirement -- Recycle
+  // Bin is a genuinely different dataset (its own endpoint, since a
+  // soft-deleted case is excluded from the normal one entirely) so it
+  // switches `path` itself; Archive stays on the normal paginated endpoint
+  // but forces status=Archived project-wide (ignoring whatever real folder
+  // is selected -- "all archive testcases will go to Archive folder" reads
+  // as one flat view of everything archived, not nested per original
+  // folder) and search-only otherwise (no priority/tag scoping, matching
+  // Recycle Bin's own flat-list simplicity).
+  const isRecycleBinView = selectedFolder === RECYCLE_BIN
+  const isArchiveView = selectedFolder === ARCHIVE_VIEW
   const {
     items: cases, page, pageSize, total, totalPages, hasNext, hasPrevious,
     loading: casesLoading, setPage, setPageSize, reload: reloadCases,
   } = usePaginatedList<TestCaseListOut>(
-    projectId ? `/api/test-repository/projects/${projectId}/test-cases` : '',
+    projectId
+      ? isRecycleBinView
+        ? `/api/test-repository/projects/${projectId}/test-cases/recycle-bin`
+        : `/api/test-repository/projects/${projectId}/test-cases`
+      : '',
     {
       search,
-      status: statusFilter ? [statusFilter] : undefined,
-      extra: {
-        folder_id: selectedFolder === '' ? undefined : selectedFolder === UNFILED ? 'unfiled' : String(selectedFolder),
+      status: isRecycleBinView ? undefined
+        : isArchiveView ? ['Archived']
+        : statusFilter === REVIEW_QUEUE_TOKEN ? REVIEW_QUEUE_STATUSES
+        : statusFilter === FINAL_APPROVAL_QUEUE_TOKEN ? FINAL_APPROVAL_QUEUE_STATUSES
+          : statusFilter ? [statusFilter] : undefined,
+      extra: isRecycleBinView ? {} : {
+        folder_id: isArchiveView || selectedFolder === '' ? undefined : selectedFolder === UNFILED ? 'unfiled' : String(selectedFolder),
         priority: priorityFilter || undefined,
         tag: tagFilter || undefined,
       },
@@ -2270,43 +2721,196 @@ export default function TestRepository() {
   const projectIsActive = !!selectedProject?.is_active
   const selectedCount = selectedCaseIds.size
   const selectedCases = cases.filter((testCase) => selectedCaseIds.has(testCase.id))
+  // 2026-08 fix: this originally only checked the two OLD-path in-flight
+  // statuses -- missed the NEW-path pair introduced alongside them
+  // (Recommendation Pending / QA Lead Approval Pending), so a selection
+  // sitting under NEW-path pending approval could still open Bulk update
+  // and edit fields mid-review. Reported directly: "if testcase under
+  // pending approval then bulk update button should not be visible." Now
+  // reuses the same TEST_CASE_PENDING_DECISION_STATUSES constant the
+  // modal's own internal per-row lock and the single-case panel already use,
+  // instead of a separately-maintained two-status list.
   const selectedCasesIncludeWorkflowLock = selectedCases.some(
-    (testCase) => testCase.status === 'In Review' || testCase.status === 'Review Completed',
+    (testCase) => TEST_CASE_PENDING_DECISION_STATUSES.includes(testCase.status),
   )
-  const canBulkUpdateAssignments = canAuthor && selectedCases.length > 0 && selectedCases.every(
+  const canBulkUpdateAssignments = canAuthor && !selectedCasesIncludeWorkflowLock && selectedCases.length > 0 && selectedCases.every(
     (testCase) => testCase.current_draft_author_id === user?.id
       && !['Approved', 'Rejected', 'Archived'].includes(testCase.status),
   )
   const canBulkUpdateTestcaseFields = canAuthor && !selectedCasesIncludeWorkflowLock
   const canOpenBulkUpdate = canBulkUpdateAssignments || canBulkUpdateTestcaseFields
-  // Stage 1 (Reviewer) bulk-recommend only acts on "In Review" rows; Stage 2
-  // (QA Lead) bulk-approve now acts on "Review Completed" rows instead
-  // (previously acted on "In Review" -- see BulkApproveModal invocation below).
+  // Stage 1 (Reviewer) bulk-recommend acts on OLD-path "In Review" rows
+  // (unchanged, still keyed to the individually-assigned pending_with_user_id
+  // -- ORACLE_MIGRATION_2026-07 "new cases only" migration decision); Stage 2
+  // (QA Lead) bulk-approve on OLD-path "Review Completed" rows likewise.
+  // 2026-08 "Simplified Test Management" NEW-path rows have no individual
+  // assignee at all -- group routing is authoritative -- so eligibility there
+  // is a plain QA Group / QA Lead Group role check instead of
+  // pending_with_user_id. A selection spanning both an OLD- and a NEW-path
+  // row is intentionally left in the same eligible-ids array: the backend's
+  // own bulk-recommend/bulk-approve guard rejects a mixed OLD+NEW selection
+  // with an explicit "select one group at a time" error.
   const recommendSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
-    && testCase.status === 'In Review' && testCase.current_draft_author_id !== user?.id
-    && (testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN'))).map((testCase) => testCase.id)
+    && testCase.current_draft_author_id !== user?.id
+    && (
+      (testCase.status === 'In Review' && (testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN')))
+      // 2026-08 GOV-002 gap fix, NEW-path only -- also exclude whoever
+      // submitted this specific draft (see TestCaseModal's identically-named
+      // isBlockedFromNewStage1 for the single-case equivalent). OLD-path
+      // ("In Review" above) intentionally stays author-only, unchanged.
+      || (testCase.status === 'Recommendation Pending' && canQAGroupNewPath
+          && testCase.current_draft_submitted_by_id !== user?.id)
+    )).map((testCase) => testCase.id)
   const finalApproveSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
-    && testCase.status === 'Review Completed' && testCase.current_draft_author_id !== user?.id
-    && (testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN'))).map((testCase) => testCase.id)
+    && testCase.current_draft_author_id !== user?.id
+    && (
+      (testCase.status === 'Review Completed' && (testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN')))
+      // 2026-08 GOV-002 gap fix, NEW-path only -- also exclude whoever
+      // submitted this draft or recorded its Stage 1 decision (see
+      // isBlockedFromNewStage2). OLD-path ("Review Completed" above)
+      // intentionally stays author-only, unchanged.
+      || (testCase.status === 'QA Lead Approval Pending' && canManageRepoGovernance
+          && testCase.current_draft_submitted_by_id !== user?.id
+          && testCase.current_draft_reviewed_by_id !== user?.id)
+    )).map((testCase) => testCase.id)
   const submittableSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
-    && (testCase.status === 'Draft' || testCase.status === 'Returned')).map((testCase) => testCase.id)
+    && ['Draft', 'Returned', 'Returned by QA', 'Returned by QA Lead'].includes(testCase.status)).map((testCase) => testCase.id)
+  // 2026-08 -- bulk Return/Reject, NEW-path only (see backend
+  // bulk_return_test_cases/bulk_reject_test_cases -- OLD-path "In Review"/
+  // "Review Completed" return/reject stays single-case only, unchanged).
+  // Same GOV-002 exclusions as recommendSelectedIds/finalApproveSelectedIds
+  // above -- a selection spanning both stages is intentionally left in one
+  // array; the backend's own guard rejects a mixed-stage selection.
+  const returnRejectSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
+    && testCase.current_draft_author_id !== user?.id
+    && (
+      (testCase.status === 'Recommendation Pending' && canQAGroupNewPath
+        && testCase.current_draft_submitted_by_id !== user?.id)
+      || (testCase.status === 'QA Lead Approval Pending' && canManageRepoGovernance
+        && testCase.current_draft_submitted_by_id !== user?.id
+        && testCase.current_draft_reviewed_by_id !== user?.id)
+    )).map((testCase) => testCase.id)
+  // 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement":
+  // a test case that has ever been approved/archived/rejected is governed
+  // history and can never be hard-deleted (backend delete_test_case/
+  // bulk_delete_test_cases -- see their own docstrings). `current_
+  // approved_version_id` is set the moment a case is ever approved and is
+  // never cleared again (archiving only flips the version's own status, it
+  // doesn't unlink the pointer), so its presence alone reliably captures
+  // "approved or archived." `status === 'Rejected'` catches the common
+  // rejected-and-not-yet-revised case too; a case rejected long ago and
+  // since revised again (current status back to Draft) is a rarer edge the
+  // list view can't detect without a dedicated backend flag -- the
+  // backend's own check (which scans full version history) remains the
+  // authoritative guard for that case, same as every other bulk action here.
+  const governedSelectedIds = selectedCases.filter((testCase) =>
+    !!testCase.current_approved_version_id || testCase.status === 'Rejected').map((testCase) => testCase.id)
+  const deletableSelectedIds = selectedCases.filter((testCase) =>
+    !testCase.current_approved_version_id && testCase.status !== 'Rejected').map((testCase) => testCase.id)
+  // "Archive Selected" -- only a live Approved baseline is archivable (an
+  // already-Archived row has nothing further to do, a Draft/In Review/etc
+  // row has no approved baseline to archive yet).
+  const archivableSelectedIds = canManageRepoGovernance
+    ? selectedCases.filter((testCase) => testCase.status === 'Approved').map((testCase) => testCase.id)
+    : []
+  // "Restore selected" -- the reverse of Archive Selected, same eligibility
+  // gate (QA Lead Group/Admin, canManageRepoGovernance) and only ever
+  // targets rows currently Archived. Naturally empty outside the Archive
+  // view (or an "All test cases" selection filtered to status=Archived),
+  // same as archivableSelectedIds isn't gated to any one view either.
+  const restorableSelectedIds = canManageRepoGovernance
+    ? selectedCases.filter((testCase) => testCase.status === 'Archived').map((testCase) => testCase.id)
+    : []
   // "Visible" now means "on the current page" -- selection/bulk actions are
   // scoped to whatever page is loaded, same tradeoff already made for Test
-  // Executions' own bulk bar (see TestExecution.tsx).
-  const allVisibleSelected = cases.length > 0 && cases.every((testCase) => selectedCaseIds.has(testCase.id))
+  // Executions' own bulk bar (see TestExecution.tsx). Select All itself is
+  // now eligibility-aware (allEligibleSelected/someEligibleSelected, defined
+  // near toggleAllVisible below) rather than selecting every row regardless
+  // of whether the user could actually act on it.
   const selectedFolderRecord = typeof selectedFolder === 'number' ? folders.find((folder) => folder.id === selectedFolder) : undefined
   const currentViewTitle = selectedFolder === ''
     ? 'All test cases'
     : selectedFolder === UNFILED
       ? 'Unfiled test cases'
-      : selectedFolderRecord?.name || 'Selected folder'
+      : selectedFolder === ARCHIVE_VIEW
+        ? 'Archived test cases'
+        : selectedFolder === RECYCLE_BIN
+          ? 'Recycle Bin'
+          : selectedFolderRecord?.name || 'Selected folder'
   const currentViewDescription = selectedFolderRecord
     ? folderPathLabel(folders, selectedFolderRecord)
     : selectedFolder === UNFILED
       ? 'Cases that have not yet been assigned to a repository folder.'
-      : 'Complete repository coverage across every folder and sub-folder.'
+      : selectedFolder === ARCHIVE_VIEW
+        ? 'Every archived test case across the whole project, regardless of its original folder. Restorable by an authorized QA Lead.'
+        : selectedFolder === RECYCLE_BIN
+          ? 'Test cases deleted before ever being approved. Restorable by any author, or permanently cleared by an authorized QA Lead.'
+          : 'Complete repository coverage across every folder and sub-folder.'
+
+  // 2026-08 -- "Bulk Test Case Recommendation - Checkbox Validation
+  // Requirements": a row's checkbox must only ever be selectable when the
+  // logged-in user could actually act on it. Only the four review
+  // checkpoints (In Review/Review Completed OLD-path, Recommendation
+  // Pending/QA Lead Approval Pending NEW-path) carry a real GOV-002/role
+  // gate the way the requirement describes -- every other status (Draft/
+  // Returned/Approved/Archived/Rejected) stays selectable exactly as today
+  // for Submit/Delete/Bulk update, which aren't per-row gated the same way
+  // and would otherwise become unselectable by accident. Mirrors the exact
+  // same predicates already used by recommendSelectedIds/
+  // finalApproveSelectedIds/returnRejectSelectedIds above, just evaluated
+  // per-row instead of against the current selection, so the three stay
+  // consistent by construction.
+  function checkboxEligibility(testCase: TestCaseListOut): { eligible: boolean; reason?: string } {
+    const isAuthor = testCase.current_draft_author_id === user?.id
+    if (testCase.status === 'In Review') {
+      if (isAuthor) return { eligible: false, reason: 'You authored this test case. Another reviewer must record the decision.' }
+      if (!canReview) return { eligible: false, reason: 'You are not eligible to review this test case.' }
+      if (!(testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN'))) {
+        return { eligible: false, reason: 'This test case is currently assigned to another reviewer.' }
+      }
+      return { eligible: true }
+    }
+    if (testCase.status === 'Review Completed') {
+      if (isAuthor) return { eligible: false, reason: 'You authored this test case. Another QA Lead must record the decision.' }
+      if (!canGiveFinalApproval) return { eligible: false, reason: 'You are not eligible to give final approval on this test case.' }
+      if (!(testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN'))) {
+        return { eligible: false, reason: 'This test case is currently assigned to another QA Lead.' }
+      }
+      return { eligible: true }
+    }
+    if (testCase.status === 'Recommendation Pending') {
+      // isAuthor checks current_draft_author_id (who wrote the content),
+      // which is NOT necessarily current_draft_submitted_by_id (who clicked
+      // Submit) -- authoring/checkout is a broad team-tier permission, so
+      // a different QA_ENGINEER can submit someone else's authored draft.
+      // GOV-002 blocks the author either way (backend: "the author of a
+      // draft version may not act on their own work", unconditional on
+      // submitter) -- the reason text below must say "authored", not
+      // "submitted", or it reads as flatly wrong whenever those two differ
+      // (reported: QA 2 authored it, QA 1 submitted it, QA 2 still blocked).
+      if (isAuthor) return { eligible: false, reason: 'You authored this test case. Another QA Group member must record its Stage 1 decision.' }
+      if (!canQAGroupNewPath) return { eligible: false, reason: 'Only QA Group members can act on this test case.' }
+      if (testCase.current_draft_submitted_by_id === user?.id) {
+        return { eligible: false, reason: 'You submitted this test case for review and cannot also record its Stage 1 decision.' }
+      }
+      return { eligible: true }
+    }
+    if (testCase.status === 'QA Lead Approval Pending') {
+      if (isAuthor) return { eligible: false, reason: 'You authored this test case. Another QA Lead Group member must record the decision.' }
+      if (!canManageRepoGovernance) return { eligible: false, reason: 'Already recommended and pending QA Lead approval.' }
+      if (testCase.current_draft_submitted_by_id === user?.id || testCase.current_draft_reviewed_by_id === user?.id) {
+        return { eligible: false, reason: 'You already acted on this test case at an earlier stage and cannot also record its Stage 2 decision.' }
+      }
+      return { eligible: true }
+    }
+    return { eligible: true }
+  }
+  const eligibleOnPageIds = cases.filter((testCase) => checkboxEligibility(testCase).eligible).map((testCase) => testCase.id)
+  const allEligibleSelected = eligibleOnPageIds.length > 0 && eligibleOnPageIds.every((id) => selectedCaseIds.has(id))
+  const someEligibleSelected = eligibleOnPageIds.some((id) => selectedCaseIds.has(id))
 
   function toggleSelected(id: number) {
+    if (!checkboxEligibility(cases.find((testCase) => testCase.id === id) as TestCaseListOut).eligible) return
     setSelectedCaseIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
@@ -2318,17 +2922,41 @@ export default function TestRepository() {
   function toggleAllVisible() {
     setSelectedCaseIds((prev) => {
       const next = new Set(prev)
-      if (allVisibleSelected) cases.forEach((testCase) => next.delete(testCase.id))
-      else cases.forEach((testCase) => next.add(testCase.id))
+      if (allEligibleSelected) eligibleOnPageIds.forEach((id) => next.delete(id))
+      else eligibleOnPageIds.forEach((id) => next.add(id))
       return next
     })
   }
 
+  // "the system must recalculate selection eligibility and clear invalid
+  // selections" when data is refreshed/filtered/paginated/updated -- prunes
+  // any id that's on the current page but no longer eligible (e.g. someone
+  // else just acted on it). Ids selected on a different page are left
+  // untouched, matching this list's existing "selection persists across
+  // pages" behavior.
+  useEffect(() => {
+    setSelectedCaseIds((prev) => {
+      if (prev.size === 0) return prev
+      const eligibleIds = new Set(eligibleOnPageIds)
+      let changed = false
+      const next = new Set(prev)
+      for (const testCase of cases) {
+        if (prev.has(testCase.id) && !eligibleIds.has(testCase.id)) { next.delete(testCase.id); changed = true }
+      }
+      return changed ? next : prev
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cases])
+
   async function bulkDelete() {
-    if (!projectId || selectedCount === 0) return
+    // 2026-08 -- only ever sends deletableSelectedIds (never-governed cases),
+    // never the raw selection -- an Approved/Archived/Rejected case must
+    // never even be attempted for hard delete, let alone silently dropped
+    // from a mixed batch server-side.
+    if (!projectId || deletableSelectedIds.length === 0) return
     setBulkDeleteBusy(true); setError(null)
     try {
-      await api.post(`/api/test-repository/projects/${projectId}/test-cases/bulk-delete`, { ids: Array.from(selectedCaseIds) })
+      await api.post(`/api/test-repository/projects/${projectId}/test-cases/bulk-delete`, { ids: deletableSelectedIds })
       refreshCases()
       setSelectedCaseIds(new Set())
       setShowBulkDelete(false)
@@ -2422,10 +3050,10 @@ export default function TestRepository() {
         </div>
       </div>
       {projectId && !projectIsActive && (
-        <div className="tm-workflow-banner inactive"><span>!</span><div><strong>Project is inactive</strong><p>Repository content remains available for review, but changes are disabled until the project is reactivated.</p></div></div>
+        <div className="tm-workflow-banner inactive"><span>!</span><strong>Project is inactive</strong><InfoTooltip label="About inactive projects" content="Repository content remains available for review, but changes are disabled until the project is reactivated." /></div>
       )}
       {projectId && projectIsActive && (
-        <div className="tm-workflow-banner"><span>✓</span><div><strong>Governed test-case workflow</strong><p>QA Tester creates or imports a Draft → Author submits for review → Reviewer recommends → QA Lead approves → approved testcases become available in Test Cycles.</p></div></div>
+        <div className="tm-workflow-banner"><span>✓</span><strong>Governed test-case workflow</strong><InfoTooltip label="About the governed test-case workflow" content="Author creates or imports a Draft → submits for review → the QA Group recommends → the QA Lead Group gives final approval → approved testcases become available in Test Cycles. No individual reviewer or QA Lead is assigned — either group routes and notifies automatically." /></div>
       )}
       {projectId && (
         <div className={`tm-workspace${repositoryStructureCollapsed ? ' tree-collapsed' : ''}`}>
@@ -2453,6 +3081,18 @@ export default function TestRepository() {
                   <span>◇</span> Unfiled <em>{unfiledCount}</em>
                 </button>
               </li>
+              {/* 2026-08 "Create Recycle bin and Archive folder" requirement --
+                  two pinned pseudo-folders, same treatment as Unfiled above. */}
+              <li>
+                <button className={`link-btn ${selectedFolder === ARCHIVE_VIEW ? 'active' : ''}`} onClick={() => setSelectedFolder(ARCHIVE_VIEW)}>
+                  <span>🗄</span> Archived <em>{summary?.archived_count ?? 0}</em>
+                </button>
+              </li>
+              <li>
+                <button className={`link-btn ${selectedFolder === RECYCLE_BIN ? 'active' : ''}`} onClick={() => setSelectedFolder(RECYCLE_BIN)}>
+                  <span>🗑</span> Recycle Bin <em>{summary?.recycle_bin_count ?? 0}</em>
+                </button>
+              </li>
               <FolderTreeRows
                 nodes={folderTree}
                 selectedFolder={selectedFolder}
@@ -2472,6 +3112,21 @@ export default function TestRepository() {
             {!repositoryStructureCollapsed && canAuthor && projectIsActive && <button className="tm-tree-add" onClick={() => setShowNewFolder(true)}>+ Add folder</button>}
           </aside>
           <section className="tm-main-panel">
+            {isRecycleBinView ? (
+              <RecycleBinPanel
+                projectId={projectId!}
+                items={cases}
+                loading={casesLoading}
+                total={total} totalPages={totalPages} page={page} pageSize={pageSize}
+                hasNext={hasNext} hasPrevious={hasPrevious}
+                onPageChange={goToPage} onPageSizeChange={goToPageSize}
+                search={search} onSearchChange={setSearch}
+                canRestore={canAuthor}
+                canPurge={canManageRepoGovernance}
+                onChanged={refreshCases}
+              />
+            ) : (
+            <>
             <div className="tm-current-view">
               <div>
                 <small>Current view</small>
@@ -2491,20 +3146,20 @@ export default function TestRepository() {
               <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}><option value="">All priorities</option>{TEST_CASE_PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select>
               <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="">All statuses</option>{TEST_CASE_STATUSES.map((s) => <option key={s} value={s}>{TEST_CASE_STATUS_LABELS[s] || s}</option>)}</select>
               <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}><option value="">All tags</option>{availableTags.map((tag) => <option key={tag}>{tag}</option>)}</select>
-              {canReview && (
+              {(canReview || canQAGroupNewPath) && (
                 <button
                   type="button"
-                  className={`btn btn-sm ${statusFilter === 'In Review' ? 'btn-primary' : ''}`}
-                  onClick={() => setStatusFilter(statusFilter === 'In Review' ? '' : 'In Review')}
+                  className={`btn btn-sm ${statusFilter === REVIEW_QUEUE_TOKEN ? 'btn-primary' : ''}`}
+                  onClick={() => setStatusFilter(statusFilter === REVIEW_QUEUE_TOKEN ? '' : REVIEW_QUEUE_TOKEN)}
                 >
                   Review queue ({summary?.in_review_count ?? 0})
                 </button>
               )}
-              {canGiveFinalApproval && (
+              {(canGiveFinalApproval || canManageRepoGovernance) && (
                 <button
                   type="button"
-                  className={`btn btn-sm ${statusFilter === 'Review Completed' ? 'btn-primary' : ''}`}
-                  onClick={() => setStatusFilter(statusFilter === 'Review Completed' ? '' : 'Review Completed')}
+                  className={`btn btn-sm ${statusFilter === FINAL_APPROVAL_QUEUE_TOKEN ? 'btn-primary' : ''}`}
+                  onClick={() => setStatusFilter(statusFilter === FINAL_APPROVAL_QUEUE_TOKEN ? '' : FINAL_APPROVAL_QUEUE_TOKEN)}
                 >
                   Final approval queue ({summary?.review_completed_count ?? 0})
                 </button>
@@ -2513,19 +3168,38 @@ export default function TestRepository() {
             </div>
             <div className="tm-checkout-guide" role="note" aria-label="How test case editing access works">
               <span className="tm-checkout-guide-icon">↔</span>
-              <div>
-                <strong>Safe editing</strong>
-                <p><b>Start editing</b> reserves and opens the test case for you. When finished, use <b>Finish editing</b> to release it for another QA user.</p>
-              </div>
+              <strong>Safe editing</strong>
+              <InfoTooltip label="About safe editing" content={<><b>Start editing</b> reserves and opens the test case for you. When finished, use <b>Finish editing</b> to release it for another QA user.</>} />
             </div>
             {selectedCount > 0 && canSelectCases && projectIsActive && (
               <div className="tm-bulk-bar" role="region" aria-label="Bulk test case actions">
                 <strong>{selectedCount} test case{selectedCount !== 1 ? 's' : ''} selected</strong>
                 {canAuthor && submittableSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkSubmit(true)}>Submit for review ({submittableSelectedIds.length})</button>}
-                {canReview && recommendSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRecommend(true)}>Bulk recommend pending ({recommendSelectedIds.length})</button>}
-                {canGiveFinalApproval && finalApproveSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkApprove(true)}>Bulk approve pending ({finalApproveSelectedIds.length})</button>}
+                {/* 2026-08 fix: recommendSelectedIds/finalApproveSelectedIds already
+                    include NEW-path-eligible rows (see their own comments above), but
+                    these two buttons were still gated on the OLD-path-only canReview/
+                    canGiveFinalApproval flags, matching the "Review queue"/"Final
+                    approval queue" filter buttons above did already -- so a QA Group/
+                    QA Lead Group member with no old-path project access could select
+                    an eligible NEW-path testcase and never see a button to act on it. */}
+                {(canReview || canQAGroupNewPath) && recommendSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRecommend(true)}>Bulk recommend pending ({recommendSelectedIds.length})</button>}
+                {(canGiveFinalApproval || canManageRepoGovernance) && finalApproveSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkApprove(true)}>Bulk approve pending ({finalApproveSelectedIds.length})</button>}
+                {/* 2026-08 -- bulk counterparts to the single-case "Return for Correction"/"Reject" decisions,
+                    NEW-path only (see returnRejectSelectedIds above and bulk_return_test_cases/
+                    bulk_reject_test_cases on the backend). */}
+                {(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkReturn(true)}>Bulk return for correction ({returnRejectSelectedIds.length})</button>}
+                {(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkReject(true)}>Bulk reject ({returnRejectSelectedIds.length})</button>}
                 {canOpenBulkUpdate && <button className="btn btn-sm" onClick={() => setShowBulkUpdate(true)}>Bulk update</button>}
-                {canAuthor && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkDelete(true)}>Bulk delete</button>}
+                {/* 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement": Delete only ever
+                    targets deletableSelectedIds (never-governed cases) -- an Approved/Archived/Rejected case in
+                    the same selection is silently excluded from the delete count/payload rather than blocking
+                    the whole batch, and is instead offered "Archive Selected" alongside it. */}
+                {canAuthor && deletableSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkDelete(true)}>Bulk delete ({deletableSelectedIds.length})</button>}
+                {archivableSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkArchive(true)}>Archive selected ({archivableSelectedIds.length})</button>}
+                {restorableSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRestore(true)}>Restore selected ({restorableSelectedIds.length})</button>}
+                {governedSelectedIds.length > 0 && deletableSelectedIds.length === 0 && archivableSelectedIds.length === 0 && (
+                  <span className="muted small">{governedSelectedIds.length} selected test case{governedSelectedIds.length !== 1 ? 's are' : ' is'} approval-governed history and {governedSelectedIds.length !== 1 ? 'are' : 'is'} not eligible for deletion.</span>
+                )}
                 <button className="btn btn-sm" onClick={() => setSelectedCaseIds(new Set())}>Clear selection</button>
               </div>
             )}
@@ -2536,24 +3210,35 @@ export default function TestRepository() {
               columns={[
                 {
                   key: 'selection',
+                  // Select All only ever selects/deselects the currently-eligible
+                  // rows on this page and shows an indeterminate dash when some
+                  // (but not all) of them are selected -- disabled entirely when
+                  // no row on the page is eligible for anything.
                   header: canSelectCases && projectIsActive ? (
                     <input
                       type="checkbox"
-                      checked={allVisibleSelected}
+                      checked={allEligibleSelected}
+                      disabled={eligibleOnPageIds.length === 0}
+                      ref={(el) => { if (el) el.indeterminate = someEligibleSelected && !allEligibleSelected }}
                       onChange={toggleAllVisible}
-                      aria-label={allVisibleSelected ? 'Deselect all on this page' : 'Select all on this page'}
+                      aria-label={allEligibleSelected ? 'Deselect all eligible test cases on this page' : 'Select all eligible test cases on this page'}
                     />
                   ) : null,
-                  render: (c) => canSelectCases && projectIsActive ? (
-                    <span onClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={selectedCaseIds.has(c.id)}
-                        onChange={() => toggleSelected(c.id)}
-                        aria-label={`Select ${c.test_case_key}`}
-                      />
-                    </span>
-                  ) : null,
+                  render: (c) => {
+                    if (!(canSelectCases && projectIsActive)) return null
+                    const { eligible, reason } = checkboxEligibility(c)
+                    return (
+                      <span onClick={(e) => e.stopPropagation()} title={!eligible ? reason : undefined}>
+                        <input
+                          type="checkbox"
+                          checked={selectedCaseIds.has(c.id)}
+                          disabled={!eligible}
+                          onChange={() => toggleSelected(c.id)}
+                          aria-label={eligible ? `Select ${c.test_case_key}` : `${c.test_case_key} not eligible for selection: ${reason}`}
+                        />
+                      </span>
+                    )
+                  },
                   filterable: false,
                 },
                 { key: 'test_case_key', header: 'Test Case', render: (c) => <span className="tm-test-case-cell"><strong>{openingCaseId === c.id ? 'Opening…' : c.test_case_key}</strong><small>{c.test_scenario || 'Scenario not provided'}{c.module_name ? ` · ${c.module_name}` : ''}</small></span>, filterValue: (c) => `${c.test_case_key} ${c.test_scenario || ''} ${c.module_name || ''}` },
@@ -2563,12 +3248,62 @@ export default function TestRepository() {
                 { key: 'status', header: 'Workflow', render: (c) => {
                   // Prefer the real assignee (APR-006) over the static
                   // status->role fallback map; surface pending_since too so
-                  // SLA aging is visible without opening the record.
-                  const pendingWithLabel = c.pending_with_user_name || TEST_CASE_PENDING_WITH[c.status]
+                  // SLA aging is visible without opening the record. Reported
+                  // directly: "Pending with author, give details who have
+                  // uploaded" (now covered -- pending_with_user_name returns
+                  // the real author for every Returned-family status, NEW-path
+                  // included, see models.TestCaseVersion.pending_with_user_name)
+                  // and "show the group name where pending approval, on click
+                  // of group name, members will be visible" (NEW-path group
+                  // statuses below render a clickable RoleGroupLink instead of
+                  // plain text).
+                  // A never-submitted Draft has no pending_with_user_name
+                  // (nothing's actually pending review yet), so its fallback
+                  // is the bare word "Author" -- swap in the real author's
+                  // name there specifically, same reported request.
+                  const pendingWithLabel = c.pending_with_user_name
+                    || (c.status === 'Draft' ? c.current_draft_author_name : null)
+                    || TEST_CASE_PENDING_WITH[c.status]
+                  const groupRole = TEST_CASE_PENDING_GROUP_ROLES[c.status]
                   return (
                     <span className="tm-workflow-cell">
                       <Badge status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />
-                      <small>{pendingWithLabel ? `Pending with ${pendingWithLabel}` : 'No action pending'}</small>
+                      {groupRole ? (
+                        <span className="tm-workflow-pending-group" onClick={(e) => e.stopPropagation()}>
+                          <small>Pending with</small>
+                          <RoleGroupLink users={users} role={groupRole} label={pendingWithLabel || 'group'} />
+                        </span>
+                      ) : (
+                        <small>{pendingWithLabel ? `Pending with ${pendingWithLabel}` : 'No action pending'}</small>
+                      )}
+                      {/* "along with Pending with details, show submitted by as well" --
+                          current_draft_submitted_by_name is only ever set once the current
+                          draft has actually been submitted, so this stays absent for a
+                          never-submitted Draft (nothing to attribute yet). */}
+                      {c.current_draft_submitted_by_name && (
+                        <small className="muted">Submitted by {c.current_draft_submitted_by_name}</small>
+                      )}
+                      {/* Reported directly: a checkbox disabled because the viewer authored
+                          the draft was a mystery when the row only ever showed who SUBMITTED
+                          it -- author and submitter are frequently different people (authoring
+                          is a broad team-tier permission, anyone on the team can pick up and
+                          submit someone else's draft) and GOV-002 blocks the author regardless
+                          of who submitted. Only shown once actually submitted (mirrors the
+                          "Submitted by" line above) and only when it adds information, i.e.
+                          differs from the submitter -- otherwise it's a redundant restatement. */}
+                      {c.current_draft_submitted_by_name && c.current_draft_author_name
+                        && c.current_draft_author_name !== c.current_draft_submitted_by_name && (
+                        <small className="muted">Authored by {c.current_draft_author_name}</small>
+                      )}
+                      {/* Reported directly: "Add Recommended By once recommended" -- only ever
+                          set once Stage 1 has actually been decided (review_test_case /
+                          bulk_recommend_test_cases both set reviewed_by_id on recommend), so this
+                          is naturally absent while still at "Recommendation Pending" and only
+                          appears once the case has moved on to "QA Lead Approval Pending" (or
+                          beyond, until a fresh draft resets it). */}
+                      {c.current_draft_reviewed_by_name && (
+                        <small className="muted">Recommended by {c.current_draft_reviewed_by_name}</small>
+                      )}
                       {c.pending_since && (
                         <small className="muted" title={`Pending since ${new Date(c.pending_since).toLocaleString()}`}>
                           Since {new Date(c.pending_since).toLocaleDateString()}
@@ -2625,6 +3360,8 @@ export default function TestRepository() {
               ]}
               rows={cases}
             />
+            </>
+            )}
           </section>
         </div>
       )}
@@ -2650,8 +3387,6 @@ export default function TestRepository() {
           projectId={projectId}
           selectedCases={selectedCases}
           folders={folders}
-          users={users}
-          canUpdateAssignments={canBulkUpdateAssignments}
           onClose={() => setShowBulkUpdate(false)}
           onUpdated={() => {
             refreshCases()
@@ -2674,9 +3409,32 @@ export default function TestRepository() {
         <BulkRecommendModal
           project={selectedProject}
           selectedCases={cases.filter((testCase) => recommendSelectedIds.includes(testCase.id))}
-          users={users}
           onClose={() => setShowBulkRecommend(false)}
           onRecommended={() => {
+            refreshCases()
+            setSelectedCaseIds(new Set())
+          }}
+        />
+      )}
+      {showBulkReturn && projectId && selectedProject && projectIsActive && (
+        <BulkDecisionModal
+          action="return"
+          project={selectedProject}
+          selectedCases={cases.filter((testCase) => returnRejectSelectedIds.includes(testCase.id))}
+          onClose={() => setShowBulkReturn(false)}
+          onDone={() => {
+            refreshCases()
+            setSelectedCaseIds(new Set())
+          }}
+        />
+      )}
+      {showBulkReject && projectId && selectedProject && projectIsActive && (
+        <BulkDecisionModal
+          action="reject"
+          project={selectedProject}
+          selectedCases={cases.filter((testCase) => returnRejectSelectedIds.includes(testCase.id))}
+          onClose={() => setShowBulkReject(false)}
+          onDone={() => {
             refreshCases()
             setSelectedCaseIds(new Set())
           }}
@@ -2686,7 +3444,6 @@ export default function TestRepository() {
         <BulkSubmitModal
           project={selectedProject}
           selectedCases={cases.filter((testCase) => submittableSelectedIds.includes(testCase.id))}
-          users={users}
           onClose={() => setShowBulkSubmit(false)}
           onSubmitted={() => {
             refreshCases()
@@ -2694,16 +3451,44 @@ export default function TestRepository() {
           }}
         />
       )}
-      {showBulkDelete && selectedCount > 0 && (
+      {showBulkDelete && deletableSelectedIds.length > 0 && (
         <ConfirmModal
-          title={`Delete ${selectedCount} test case${selectedCount !== 1 ? 's' : ''}?`}
-          message={<div><p>This will permanently delete the selected test cases.</p><p className="muted small">Their steps and linked execution results will also be removed. This action cannot be undone.</p></div>}
-          confirmLabel={`Delete ${selectedCount} test case${selectedCount !== 1 ? 's' : ''}`}
+          title={`Delete ${deletableSelectedIds.length} test case${deletableSelectedIds.length !== 1 ? 's' : ''}?`}
+          message={<div>
+            <p>This will move {deletableSelectedIds.length} test case{deletableSelectedIds.length !== 1 ? 's' : ''} to the Recycle Bin.</p>
+            <p className="muted small">They can be restored from the Recycle Bin, or permanently cleared by an authorized QA Lead.</p>
+            {governedSelectedIds.length > 0 && (
+              <p className="muted small">{governedSelectedIds.length} other selected test case{governedSelectedIds.length !== 1 ? 's are' : ' is'} approval-governed history (approved, archived, or rejected) and will be skipped -- archive {governedSelectedIds.length !== 1 ? 'them' : 'it'} instead.</p>
+            )}
+          </div>}
+          confirmLabel={`Delete ${deletableSelectedIds.length} test case${deletableSelectedIds.length !== 1 ? 's' : ''}`}
           cancelLabel="Keep test cases"
           destructive
           busy={bulkDeleteBusy}
           onConfirm={bulkDelete}
           onCancel={() => setShowBulkDelete(false)}
+        />
+      )}
+      {showBulkArchive && projectId && archivableSelectedIds.length > 0 && (
+        <BulkArchiveModal
+          projectId={projectId}
+          selectedIds={archivableSelectedIds}
+          onClose={() => setShowBulkArchive(false)}
+          onArchived={() => {
+            refreshCases()
+            setSelectedCaseIds(new Set())
+          }}
+        />
+      )}
+      {showBulkRestore && projectId && restorableSelectedIds.length > 0 && (
+        <BulkRestoreFromArchiveModal
+          projectId={projectId}
+          selectedIds={restorableSelectedIds}
+          onClose={() => setShowBulkRestore(false)}
+          onRestored={() => {
+            refreshCases()
+            setSelectedCaseIds(new Set())
+          }}
         />
       )}
       {editingCase && projectId && (
@@ -2718,9 +3503,16 @@ export default function TestRepository() {
           canReview={canReview && projectIsActive}
           canGiveFinalApproval={canGiveFinalApproval && projectIsActive}
           onClose={() => setEditingCase(null)}
-          onSaved={() => {
+          onSaved={(saved) => {
+            // 2026-08 -- reported directly: Save shouldn't close this modal
+            // (every other action here -- checkout, submit, review -- leaves
+            // it open too). Refresh the underlying list in the background,
+            // but keep the modal open against the now-saved record -- this
+            // also matters functionally for a brand-new testcase ('new' ->
+            // real id), since TestCaseModal's own `existing` prop is what
+            // decides POST-vs-PATCH on the next Save.
             refreshCases()
-            setEditingCase(null)
+            setEditingCase(saved)
           }}
           onDeleted={() => { refreshCases(); setEditingCase(null) }}
           onReviewed={() => {

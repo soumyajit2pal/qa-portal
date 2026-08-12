@@ -24,7 +24,7 @@ export interface PaginatedListFilters {
   extra?: Record<string, string | undefined | null>
 }
 
-const DEFAULT_PAGE_SIZE = 25
+const DEFAULT_PAGE_SIZE = 5
 
 export function usePaginatedList<T>(path: string, filters: PaginatedListFilters = {}) {
   const [page, setPage] = useState(1)
