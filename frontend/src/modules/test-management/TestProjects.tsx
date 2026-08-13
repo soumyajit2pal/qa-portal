@@ -4,10 +4,14 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { hasRole } from '../../constants'
-import { ApplicationMasterOut, TestProjectOut, TestCaseOut, TestCycleOut, ApprovalActionOut } from '../../types'
+import { hasRole, QA_LEAD_GROUP_ROLES } from '../../constants'
+import {
+  ApplicationMasterOut, TestProjectOut, TestCaseSummaryOut, TestCycleOut, ApprovalActionOut, DepartmentOut,
+  UserOut, PageOut, TestProjectViewGrantOut,
+} from '../../types'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
+import ConfirmModal from '../../components/ConfirmModal'
 
 // Project Management module -- one Test Project per Application, by
 // explicit product decision (reuses the existing Application Name Master
@@ -17,8 +21,21 @@ import ClearableSearchInput from '../../components/ClearableSearchInput'
 // Execution both start with "pick a Project" before showing anything else.
 const CAN_MANAGE_ROLES = ['QA_ENGINEER', 'QA_LEAD']
 
-function NewProjectModal({ applications, onClose, onCreated }: {
+// SRS PRJ-001/PRJ-005 -- editing a project's own record (name/department/
+// application/description/owner) is restricted to that project's Owner, or
+// system QA_LEAD/Admin -- a QA_ENGINEER who isn't this specific project's
+// owner can no longer edit its details, even though they still manage
+// Projects in general (create, request activation/deactivation). Mirrors
+// backend deps.py::can_manage_project exactly.
+function canEditProjectDetails(user: UserOut | null | undefined, project: TestProjectOut): boolean {
+  return hasRole(user, ...QA_LEAD_GROUP_ROLES) || (hasRole(user, 'QA_ENGINEER') && project.owner_id === user?.id)
+}
+
+function NewProjectModal({ applications, departments, users, currentUserId, onClose, onCreated }: {
   applications: ApplicationMasterOut[]
+  departments: DepartmentOut[]
+  users: UserOut[]
+  currentUserId?: number
   onClose: () => void
   onCreated: (p: TestProjectOut) => void
 }) {
@@ -26,6 +43,7 @@ function NewProjectModal({ applications, onClose, onCreated }: {
   const [name, setName] = useState('')
   const [department, setDepartment] = useState('')
   const [description, setDescription] = useState('')
+  const [ownerId, setOwnerId] = useState<number | ''>(currentUserId ?? '')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
@@ -35,21 +53,23 @@ function NewProjectModal({ applications, onClose, onCreated }: {
     const app = applications.find((a) => a.id === id)
     if (app) {
       setName(app.name)
-      setDepartment(app.department || '')
+      setDepartment(departments.some((item) => item.name === app.department) ? (app.department || '') : '')
     }
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { setError(new Error('Project name cannot be blank')); return }
+    if (!department) { setError(new Error('Select a department')); return }
     setBusy(true)
     setError(null)
     try {
       const created = await api.post<TestProjectOut>('/api/test-projects', {
         name: name.trim(),
         application_master_id: applicationId || null,
-        department: department.trim() || null,
+        department,
         description: description.trim() || null,
+        owner_id: ownerId || null,
       })
       onCreated(created)
     } catch (err) { setError(err) } finally { setBusy(false) }
@@ -74,8 +94,21 @@ function NewProjectModal({ applications, onClose, onCreated }: {
         <Field label="Project Name *">
           <input required value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="Department">
-          <input value={department} onChange={(e) => setDepartment(e.target.value)} />
+        <Field label="Department *">
+          <SearchableSelect disabled={applicationId !== ''} value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select department…"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
+          {applicationId !== '' && <small className="muted">Department is controlled by the selected Application.</small>}
+        </Field>
+        {/* SRS PRJ-001/PRJ-005 -- the owner is auto-added as a project member
+            with role "Owner" and is the only person (besides QA Lead/Admin)
+            who can add/remove other members. Defaults to whoever is creating
+            the project. */}
+        <Field label="Owner">
+          <SearchableSelect
+            value={ownerId === '' ? '' : String(ownerId)}
+            onChange={(v) => setOwnerId(v ? Number(v) : '')}
+            placeholder="-- Select owner --"
+            options={users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))}
+          />
         </Field>
         <Field label="Description">
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -97,9 +130,11 @@ function NewProjectModal({ applications, onClose, onCreated }: {
 // fields/behavior (including auto-filling name/department when an
 // Application is picked), just pre-filled from the existing project and
 // PATCHing instead of POSTing.
-function EditProjectModal({ project, applications, onClose, onUpdated }: {
+function EditProjectModal({ project, applications, departments, users, onClose, onUpdated }: {
   project: TestProjectOut
   applications: ApplicationMasterOut[]
+  departments: DepartmentOut[]
+  users: UserOut[]
   onClose: () => void
   onUpdated: (p: TestProjectOut) => void
 }) {
@@ -107,6 +142,7 @@ function EditProjectModal({ project, applications, onClose, onUpdated }: {
   const [name, setName] = useState(project.name)
   const [department, setDepartment] = useState(project.department || '')
   const [description, setDescription] = useState(project.description || '')
+  const [ownerId, setOwnerId] = useState<number | ''>(project.owner_id ?? '')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
@@ -116,21 +152,23 @@ function EditProjectModal({ project, applications, onClose, onUpdated }: {
     const app = applications.find((a) => a.id === id)
     if (app) {
       setName(app.name)
-      setDepartment(app.department || '')
+      setDepartment(departments.some((item) => item.name === app.department) ? (app.department || '') : '')
     }
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { setError(new Error('Project name cannot be blank')); return }
+    if (!department) { setError(new Error('Select a department')); return }
     setBusy(true)
     setError(null)
     try {
       const updated = await api.patch<TestProjectOut>(`/api/test-projects/${project.id}`, {
         name: name.trim(),
         application_master_id: applicationId || null,
-        department: department.trim() || null,
+        department,
         description: description.trim() || null,
+        owner_id: ownerId || null,
       })
       onUpdated(updated)
     } catch (err) { setError(err) } finally { setBusy(false) }
@@ -153,8 +191,17 @@ function EditProjectModal({ project, applications, onClose, onUpdated }: {
         <Field label="Project Name *">
           <input required value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="Department">
-          <input value={department} onChange={(e) => setDepartment(e.target.value)} />
+        <Field label="Department *">
+          <SearchableSelect disabled={applicationId !== ''} value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select department…"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
+          {applicationId !== '' && <small className="muted">Department is controlled by the selected Application.</small>}
+        </Field>
+        <Field label="Owner">
+          <SearchableSelect
+            value={ownerId === '' ? '' : String(ownerId)}
+            onChange={(v) => setOwnerId(v ? Number(v) : '')}
+            placeholder="-- Select owner --"
+            options={users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))}
+          />
         </Field>
         <Field label="Description">
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
@@ -169,6 +216,197 @@ function EditProjectModal({ project, applications, onClose, onUpdated }: {
   )
 }
 
+// 2026-08 -- reported directly: "one logged in user can [only] show
+// projects which are under that user department only. now add ... view
+// only access to department as well as particular user ... if any project
+// cross departmental, then if i add another department as view only
+// access then they atleast know the status." Grants read-only visibility
+// into THIS project (its Test Execution/Repository/Reports, plus its
+// Defects) to a department or a specific user who isn't otherwise in
+// scope for it -- see backend models.TestProjectViewGrant's own docstring.
+// Gated the same as EditProjectModal (canEditProjectDetails -- Owner, QA
+// Lead Group, or Admin), not a separate permission tier.
+function ManageViewAccessModal({ project, departments, onClose }: {
+  project: TestProjectOut
+  departments: DepartmentOut[]
+  onClose: () => void
+}) {
+  const [grants, setGrants] = useState<TestProjectViewGrantOut[]>([])
+  const [allUsers, setAllUsers] = useState<UserOut[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [grantType, setGrantType] = useState<'department' | 'user'>('department')
+  const [department, setDepartment] = useState('')
+  const [userId, setUserId] = useState('')
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    Promise.all([
+      api.get<TestProjectViewGrantOut[]>(`/api/test-projects/${project.id}/view-access`),
+      // Full active directory, deliberately NOT the QA-only eligible-users
+      // list this page otherwise uses -- the whole point of a view grant is
+      // reaching someone OUTSIDE the project's own department.
+      api.get<UserOut[]>('/api/auth/users'),
+    ]).then(([g, u]) => { setGrants(g); setAllUsers(u); setLoaded(true) }).catch((err) => { setError(err); setLoaded(true) })
+  }, [project.id])
+
+  async function addGrant(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    if (grantType === 'department' && !department) { setError(new Error('Select a department')); return }
+    if (grantType === 'user' && !userId) { setError(new Error('Select a user')); return }
+    setBusy(true)
+    try {
+      const created = await api.post<TestProjectViewGrantOut>(`/api/test-projects/${project.id}/view-access`, {
+        department: grantType === 'department' ? department : null,
+        user_id: grantType === 'user' ? Number(userId) : null,
+      })
+      setGrants((prev) => [...prev, created])
+      setDepartment(''); setUserId('')
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  async function removeGrant(grant: TestProjectViewGrantOut) {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.del(`/api/test-projects/${project.id}/view-access/${grant.id}`)
+      setGrants((prev) => prev.filter((g) => g.id !== grant.id))
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  // A department already granted, or a user already in the project's own
+  // department, can't be granted again (the backend rejects both -- see
+  // create_project_view_grant) -- filtered out of the pickers up front
+  // rather than letting the request round-trip just to show that error.
+  const grantedDepartments = new Set(grants.filter((g) => g.department).map((g) => g.department))
+  const grantedUserIds = new Set(grants.filter((g) => g.user_id != null).map((g) => g.user_id))
+  const departmentOptions = departments.filter((d) => d.name !== project.department && !grantedDepartments.has(d.name))
+  const userOptions = allUsers.filter((u) => u.is_active && !grantedUserIds.has(u.id)
+    && !(u.departments && u.departments.length ? u.departments : (u.department ? [u.department] : [])).includes(project.department || ''))
+
+  return (
+    <Modal title={`View access — ${project.project_key}`} onClose={onClose}>
+      <p className="muted small">
+        Everyone in <strong>{project.department || 'this project\'s department'}</strong> already has full access.
+        Grant read-only visibility (Test Execution, Test Repository, Test Reports, and Defects) to another
+        department or a specific user -- useful when this project is cross-departmental and another team just
+        needs to know its status.
+      </p>
+      {!loaded ? <p className="muted">Loading...</p> : (
+        <div className="tm-view-access-list">
+          {grants.length === 0 && <p className="muted small">No view-only access granted yet.</p>}
+          {grants.map((grant) => (
+            <div key={grant.id} className="tm-view-access-row">
+              <span>
+                {grant.department ? <><strong>{grant.department}</strong> <small className="muted">(department)</small></> : (
+                  <><strong>{grant.user_name || `User #${grant.user_id}`}</strong> <small className="muted">(user)</small></>
+                )}
+              </span>
+              <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={() => removeGrant(grant)}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <form onSubmit={addGrant} style={{ marginTop: 14 }}>
+        <div className="pill-tabs" style={{ marginBottom: 10 }}>
+          <button type="button" className={grantType === 'department' ? 'active' : ''} onClick={() => setGrantType('department')}>Department</button>
+          <button type="button" className={grantType === 'user' ? 'active' : ''} onClick={() => setGrantType('user')}>Particular user</button>
+        </div>
+        {grantType === 'department' ? (
+          <Field label="Department">
+            <SearchableSelect value={department} onChange={setDepartment} placeholder="Select department…" options={departmentOptions.map((d) => ({ value: d.name, label: d.name }))} />
+          </Field>
+        ) : (
+          <Field label="User">
+            <SearchableSelect value={userId} onChange={setUserId} placeholder="Select user…" options={userOptions.map((u) => ({ value: String(u.id), label: `${u.full_name} (${u.department || 'no department'})` }))} />
+          </Field>
+        )}
+        <ErrorText error={error} />
+        <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+          <button className="btn btn-primary" disabled={busy}>{busy ? 'Granting...' : 'Grant view access'}</button>
+          <button type="button" className="btn" onClick={onClose}>Close</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+// PRJ-003 -- archiving is deliberately final-feeling (separate from the
+// two-step activate/deactivate approval flow above): QA Lead/Admin only, an
+// optional reason for the audit trail, and always also forces is_active
+// False on the backend.
+function ArchiveProjectModal({ project, onClose, onDone }: {
+  project: TestProjectOut
+  onClose: () => void
+  onDone: (p: TestProjectOut) => void
+}) {
+  const [reason, setReason] = useState('')
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function submit() {
+    setBusy(true)
+    setError(null)
+    try {
+      const updated = await api.post<TestProjectOut>(`/api/test-projects/${project.id}/archive`, {
+        reason: reason.trim() || null,
+      })
+      onDone(updated)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={`Archive ${project.project_key}?`} onClose={onClose} variant="dialog" preventBackdropClose>
+      <p>
+        Archiving <strong>{project.project_key} · {project.name}</strong> also deactivates it. Existing folders,
+        test cases, cycles, executions, and activity are retained but the project can no longer be used for new
+        test work until it's unarchived.
+      </p>
+      <Field label="Reason (optional)">
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why is this project being archived?" />
+      </Field>
+      <ErrorText error={error} />
+      <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+        <button className="btn btn-danger" disabled={busy} onClick={submit}>{busy ? 'Archiving…' : 'Archive project'}</button>
+        <button className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+      </div>
+    </Modal>
+  )
+}
+
+function UnarchiveProjectModal({ project, onClose, onDone }: {
+  project: TestProjectOut
+  onClose: () => void
+  onDone: (p: TestProjectOut) => void
+}) {
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function submit() {
+    setBusy(true)
+    setError(null)
+    try {
+      const updated = await api.post<TestProjectOut>(`/api/test-projects/${project.id}/unarchive`, {})
+      onDone(updated)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={`Restore ${project.project_key} from archive?`} onClose={onClose} variant="dialog" preventBackdropClose>
+      <p>
+        <strong>{project.project_key} · {project.name}</strong> will come back as Inactive, not Active --
+        reactivating it for new work is still a separate step.
+      </p>
+      <ErrorText error={error} />
+      <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+        <button className="btn btn-primary" disabled={busy} onClick={submit}>{busy ? 'Restoring…' : 'Restore project'}</button>
+        <button className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+      </div>
+    </Modal>
+  )
+}
+
 export default function TestProjects() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -179,9 +417,13 @@ export default function TestProjects() {
   // flip is_active immediately, same as before -- only a QA Engineer's
   // toggle now goes through a request/approve step (see changeProjectStatus
   // and the new Approve/Reject flow below).
-  const canReview = hasRole(user, 'QA_LEAD')
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on this QA Lead
+  // checkpoint, same as Admin -- see ORACLE_MIGRATION_2026-07.md section 59.
+  const canReview = hasRole(user, ...QA_LEAD_GROUP_ROLES)
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [applications, setApplications] = useState<ApplicationMasterOut[]>([])
+  const [departments, setDepartments] = useState<DepartmentOut[]>([])
+  const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [showNew, setShowNew] = useState(false)
   const [summaries, setSummaries] = useState<Record<number, { cases: number; cycles: number }>>({})
@@ -189,8 +431,11 @@ export default function TestProjects() {
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
   const [statusProject, setStatusProject] = useState<TestProjectOut | null>(null)
   const [editProject, setEditProject] = useState<TestProjectOut | null>(null)
+  const [viewAccessProject, setViewAccessProject] = useState<TestProjectOut | null>(null)
+  const [archiveProject, setArchiveProject] = useState<TestProjectOut | null>(null)
+  const [unarchiveProject, setUnarchiveProject] = useState<TestProjectOut | null>(null)
   const [statusBusy, setStatusBusy] = useState(false)
-  const [projectFilter, setProjectFilter] = useState<'active' | 'inactive' | 'all'>('active')
+  const [projectFilter, setProjectFilter] = useState<'active' | 'inactive' | 'archived' | 'all'>('active')
   // Reported directly, alongside the approval workflow above: "Search under
   // project is not working" -- this page never had a search box at all, only
   // the Active/Inactive/All pill-tabs, so typing anywhere did nothing.
@@ -207,17 +452,35 @@ export default function TestProjects() {
 
   const load = useCallback(async () => {
     try {
-      const [p, a] = await Promise.all([
-        api.get<TestProjectOut[]>('/api/test-projects?include_inactive=true'),
+      const [pPage, a, d, u] = await Promise.all([
+        // SRS 7.2 pagination rollout -- /api/test-projects is now wrapped in
+        // Page[T] for API-contract consistency (task #82); page_size=100 +
+        // .items since this gallery still wants the complete list.
+        api.get<PageOut<TestProjectOut>>('/api/test-projects?include_inactive=true&page_size=100'),
         api.get<ApplicationMasterOut[]>('/api/application-names'),
+        api.get<DepartmentOut[]>('/api/departments'),
+        // Test Management-scoped picker -- see constants.
+        // TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS on the backend; do not swap
+        // this back to the app-wide /api/auth/users list.
+        api.get<UserOut[]>('/api/test-projects/eligible-users'),
       ])
-      setProjects(p); setApplications(a)
+      const p = pPage.items
+      setProjects(p); setApplications(a); setDepartments(d); setUsers(u)
       const stats = await Promise.all(p.map(async (project) => {
-        const [cases, cycles] = await Promise.all([
-          api.get<TestCaseOut[]>(`/api/test-repository/projects/${project.id}/test-cases`),
-          api.get<TestCycleOut[]>(`/api/test-execution/projects/${project.id}/cycles`),
+        // SRS 7.2 pagination rollout -- this only ever needed a COUNT, so it
+        // now hits TestCaseSummaryOut (a cheap SQL COUNT) instead of
+        // fetching every test case in the project just to measure
+        // `.length` (which also stopped being a bare array once the list
+        // endpoint itself became paginated -- see routers/test_repository.py).
+        // Cycles has no dedicated summary endpoint (it's a small, bounded
+        // list per project -- see routers/test_execution.py::list_cycles);
+        // Page[T]'s own `.total` (a real COUNT, unaffected by page_size)
+        // stands in for a dedicated summary here.
+        const [caseSummary, cyclesPage] = await Promise.all([
+          api.get<TestCaseSummaryOut>(`/api/test-repository/projects/${project.id}/test-cases/summary`),
+          api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${project.id}/cycles?page_size=25`),
         ])
-        return [project.id, { cases: cases.length, cycles: cycles.length }] as const
+        return [project.id, { cases: caseSummary.total, cycles: cyclesPage.total }] as const
       }))
       setSummaries(Object.fromEntries(stats))
     } catch (err) { setError(err) }
@@ -239,12 +502,16 @@ export default function TestProjects() {
   }, [projects, searchParams, setSearchParams])
 
   const applicationNameById = useMemo(() => new Map(applications.map((a) => [a.id, a.name])), [applications])
-  const activeCount = projects.filter((project) => project.is_active).length
-  const inactiveCount = projects.length - activeCount
+  const archivedCount = projects.filter((project) => project.is_archived).length
+  const activeCount = projects.filter((project) => project.is_active && !project.is_archived).length
+  const inactiveCount = projects.filter((project) => !project.is_active && !project.is_archived).length
   const visibleProjects = useMemo(() => {
-    let rows = projects.filter((project) => (
-      projectFilter === 'all' || (projectFilter === 'active' ? project.is_active : !project.is_active)
-    ))
+    let rows = projects.filter((project) => {
+      if (projectFilter === 'all') return true
+      if (projectFilter === 'archived') return project.is_archived
+      if (project.is_archived) return false
+      return projectFilter === 'active' ? project.is_active : !project.is_active
+    })
     const q = search.trim().toLowerCase()
     if (q) {
       rows = rows.filter((project) => [
@@ -305,7 +572,7 @@ export default function TestProjects() {
           <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Project</button>
         )}
       />
-      <div className="toolbar" style={{ marginBottom: 14 }}>
+      <div className="toolbar tm-project-toolbar" style={{ marginBottom: 14 }}>
         <ClearableSearchInput
           value={search}
           onChange={(e) => setSearch(e.target.value)}
@@ -322,6 +589,9 @@ export default function TestProjects() {
           <button className={projectFilter === 'inactive' ? 'active' : ''} onClick={() => setProjectFilter('inactive')}>
             Inactive <span>{inactiveCount}</span>
           </button>
+          <button className={projectFilter === 'archived' ? 'active' : ''} onClick={() => setProjectFilter('archived')}>
+            Archived <span>{archivedCount}</span>
+          </button>
           <button className={projectFilter === 'all' ? 'active' : ''} onClick={() => setProjectFilter('all')}>
             All <span>{projects.length}</span>
           </button>
@@ -330,14 +600,35 @@ export default function TestProjects() {
       <div className="tm-project-grid">
         {visibleProjects.map((project) => (
           <article className="tm-project-card" key={project.id}>
-            <div className="tm-project-card-head"><span className="tm-project-key">{project.project_key}</span><Badge status={project.is_active ? 'Active' : 'Inactive'} /></div>
+            <div className="tm-project-card-head">
+              <span className="tm-project-key">{project.project_key}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {project.shared_with_you && (
+                  <span className="badge badge-blue" title="The project owner or an authorized project manager shared view access with you or your department.">Shared with you</span>
+                )}
+                {project.view_only && (
+                  <span className="badge badge-gray" title="You can see this project's Test Execution/Repository/Reports/Defects, but only a Department Head, QA Lead, or Admin from its own department can manage it.">View only</span>
+                )}
+                <Badge status={project.is_archived ? 'Archived' : project.is_active ? 'Active' : 'Inactive'} />
+              </span>
+            </div>
             <h3>{project.name}</h3>
-            <p>{project.description || 'Test planning and execution workspace for this application.'}</p>
+            <p>{project.description || 'Test design and execution workspace for this application.'}</p>
             <div className="tm-project-stats">
               <div><strong>{summaries[project.id]?.cases ?? '—'}</strong><span>Test cases</span></div>
               <div><strong>{summaries[project.id]?.cycles ?? '—'}</strong><span>Test cycles</span></div>
               <div><strong>{project.department || '—'}</strong><span>Department</span></div>
+              <div><strong>{project.owner_name || '—'}</strong><span>Owner</span></div>
+              <div><strong>{project.default_reviewer_name || '—'}</strong><span>Default Reviewer</span></div>
+              <div><strong>{project.default_qa_lead_name || '—'}</strong><span>Default CM-QA</span></div>
             </div>
+            {project.is_archived && (
+              <div className="info-banner">
+                <strong>Archived</strong> by {project.archived_by_name || 'a QA Lead'}
+                {project.archived_at && ` on ${new Date(project.archived_at).toLocaleDateString()}`}
+                {project.archived_reason && ` — ${project.archived_reason}`}
+              </div>
+            )}
             {project.pending_is_active != null && (
               <div className="info-banner">
                 <strong>{project.pending_is_active ? 'Reactivation' : 'Deactivation'} requested</strong> by{' '}
@@ -347,39 +638,55 @@ export default function TestProjects() {
             <div className="tm-project-actions">
               <button onClick={() => navigate(`/test-repository?project=${project.id}`)}>Open repository</button>
               <button onClick={() => navigate(`/test-execution?project=${project.id}`)}>View execution</button>
-              <button onClick={() => openActivity(project)}>Activity</button>
-              {canManage && (
-                <button onClick={() => setEditProject(project)}>Edit</button>
-              )}
-              {project.pending_is_active != null ? (
-                canReview && (
-                  <>
-                    <button className="primary" onClick={() => setActivationReview({ project, decision: 'APPROVE' })}>Approve</button>
-                    <button className="danger" onClick={() => setActivationReview({ project, decision: 'REJECT' })}>Reject</button>
-                  </>
-                )
-              ) : canReview ? (
-                <button className={project.is_active ? 'danger' : ''} onClick={() => setStatusProject(project)}>
-                  {project.is_active ? 'Deactivate' : 'Reactivate'}
-                </button>
-              ) : canManage && (
-                <button onClick={() => setStatusProject(project)}>
-                  {project.is_active ? 'Request deactivation' : 'Request reactivation'}
-                </button>
-              )}
+              <details className="tm-project-more">
+                <summary>More <span>⌄</span></summary>
+                <div>
+                  <button onClick={() => openActivity(project)}>Activity</button>
+                  {!project.is_archived && !project.view_only && canEditProjectDetails(user, project) && (
+                    <button onClick={() => setEditProject(project)}>Edit project</button>
+                  )}
+                  {!project.view_only && canEditProjectDetails(user, project) && (
+                    <button onClick={() => setViewAccessProject(project)}>View access…</button>
+                  )}
+                  {!project.is_archived && !project.view_only && (project.pending_is_active != null ? (
+                    canReview && (
+                      <>
+                        <button className="primary" onClick={() => setActivationReview({ project, decision: 'APPROVE' })}>Approve request</button>
+                        <button className="danger" onClick={() => setActivationReview({ project, decision: 'REJECT' })}>Reject request</button>
+                      </>
+                    )
+                  ) : canReview ? (
+                    <button className={project.is_active ? 'danger' : ''} onClick={() => setStatusProject(project)}>
+                      {project.is_active ? 'Deactivate' : 'Reactivate'}
+                    </button>
+                  ) : canManage && (
+                    <button onClick={() => setStatusProject(project)}>
+                      {project.is_active ? 'Request deactivation' : 'Request reactivation'}
+                    </button>
+                  ))}
+                  {!project.view_only && canReview && (
+                    project.is_archived
+                      ? <button onClick={() => setUnarchiveProject(project)}>Unarchive</button>
+                      : <button className="danger" onClick={() => setArchiveProject(project)}>Archive</button>
+                  )}
+                </div>
+              </details>
             </div>
           </article>
         ))}
         {visibleProjects.length === 0 && (
           <div className="tm-empty">
-            <strong>{projectFilter === 'inactive' ? 'No inactive projects' : projectFilter === 'active' ? 'No active projects' : 'No projects yet'}</strong>
-            <span>{projectFilter === 'inactive' ? 'Deactivated projects will appear here.' : 'Create or reactivate a project to begin organizing test cases and execution cycles.'}</span>
+            <strong>{projectFilter === 'inactive' ? 'No inactive projects' : projectFilter === 'active' ? 'No active projects' : projectFilter === 'archived' ? 'No archived projects' : 'No projects yet'}</strong>
+            <span>{projectFilter === 'inactive' ? 'Deactivated projects will appear here.' : projectFilter === 'archived' ? 'Archived projects will appear here.' : 'Create or reactivate a project to begin organizing test cases and execution cycles.'}</span>
           </div>
         )}
       </div>
       {showNew && (
         <NewProjectModal
           applications={applications}
+          departments={departments}
+          users={users}
+          currentUserId={user?.id}
           onClose={() => setShowNew(false)}
           onCreated={(p) => { setProjects((prev) => [p, ...prev]); setShowNew(false) }}
         />
@@ -388,8 +695,31 @@ export default function TestProjects() {
         <EditProjectModal
           project={editProject}
           applications={applications}
+          departments={departments}
+          users={users}
           onClose={() => setEditProject(null)}
           onUpdated={(p) => { setProjects((prev) => prev.map((project) => project.id === p.id ? p : project)); setEditProject(null) }}
+        />
+      )}
+      {viewAccessProject && (
+        <ManageViewAccessModal
+          project={viewAccessProject}
+          departments={departments}
+          onClose={() => setViewAccessProject(null)}
+        />
+      )}
+      {archiveProject && (
+        <ArchiveProjectModal
+          project={archiveProject}
+          onClose={() => setArchiveProject(null)}
+          onDone={(p) => { setProjects((prev) => prev.map((project) => project.id === p.id ? p : project)); setArchiveProject(null) }}
+        />
+      )}
+      {unarchiveProject && (
+        <UnarchiveProjectModal
+          project={unarchiveProject}
+          onClose={() => setUnarchiveProject(null)}
+          onDone={(p) => { setProjects((prev) => prev.map((project) => project.id === p.id ? p : project)); setUnarchiveProject(null) }}
         />
       )}
       {activityProject && (
@@ -405,7 +735,6 @@ export default function TestProjects() {
           onClose={() => setStatusProject(null)}
           variant="dialog"
           preventBackdropClose
-          hideCloseButton
         >
           <p>
             {canReview ? (
@@ -432,7 +761,6 @@ export default function TestProjects() {
           onClose={() => { setActivationReview(null); setReviewComments('') }}
           variant="dialog"
           preventBackdropClose
-          hideCloseButton
         >
           <p>
             {activationReview.project.pending_requested_by_name || 'A QA Engineer'} requested{' '}

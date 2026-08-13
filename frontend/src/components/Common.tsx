@@ -6,6 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   QA_STATUS_LABELS,
@@ -66,6 +67,7 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     Cancelled: "badge-gray",
     Approved: "badge-green",
     Rejected: "badge-red",
+    "Not a Defect": "badge-red",
     Passed: "badge-green",
     Failed: "badge-red",
     "In Progress": "badge-purple",
@@ -130,7 +132,9 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     // Test Management: Test Case lifecycle + Test Execution result (see
     // constants.ts TEST_CASE_STATUSES/TEST_EXECUTION_STATUSES) -- "Pass"/
     // "Fail" here are deliberately distinct keys from the legacy "Passed"/
-    // "Failed" above (different modules, different exact wording).
+    // "Failed" above (different modules, different exact wording). "Active"/
+    // "Deprecated"/"Not Started" are kept for any not-yet-refreshed cached
+    // data from before the current versioned workflow vocabularies.
     Active: "badge-green",
     Deprecated: "badge-gray",
     "Not Executed": "badge-gray",
@@ -140,6 +144,17 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     NA: "badge-gray",
     "Retest Passed": "badge-blue",
     "Not Started": "badge-gray",
+    // 2026-08 "Test Approval Workflow" revamp -- TestCaseVersion/TestCase
+    // status (constants.ts TEST_CASE_STATUSES, 7 values: Draft/In Review/
+    // Review Completed/Returned/Approved/Rejected/Archived). "Returned" and
+    // "Rejected" are already covered by the shared "Legacy / other-module
+    // statuses" entries above (badge-red each) -- not repeated here.
+    "In Review": "badge-yellow",
+    "Review Completed": "badge-yellow",
+    Archived: "badge-gray",
+    // 2026-08 revamp -- TestCycle status (constants.ts TEST_CYCLE_STATUSES:
+    // Draft/Ready/In Progress/Blocked/Completed).
+    Ready: "badge-blue",
   };
   const label = labelOverride ?? ((status && ALL_STATUS_LABELS[status]) || status || "");
   return (
@@ -217,22 +232,30 @@ interface CardProps {
   children?: ReactNode;
   right?: ReactNode;
   style?: React.CSSProperties;
+  className?: string;
 }
 
-export function Card({ title, subtitle, children, right, style }: CardProps) {
+export function InfoTooltip({ content, label = "More information" }: { content: ReactNode; label?: string }) {
   return (
-    <div className="card" style={style}>
-      {(title || right) && (
+    <span className="stat-card-info shared-info-tooltip">
+      <button type="button" aria-label={label}>i</button>
+      <span className="stat-card-tooltip" role="tooltip">{content}</span>
+    </span>
+  );
+}
+
+export function Card({ title, subtitle, children, right, style, className }: CardProps) {
+  return (
+    <div className={`card${className ? ` ${className}` : ""}`} style={style}>
+      {(title || subtitle || right) && (
         <div className="card-head">
           <div>
             {title && <h3>{title}</h3>}
-            {subtitle && (
-              <p className="muted small" style={{ margin: "2px 0 0" }}>
-                {subtitle}
-              </p>
-            )}
           </div>
-          {right}
+          <div className="card-head-actions">
+            {subtitle && <InfoTooltip content={subtitle} label={`About ${typeof title === "string" ? title : "this section"}`} />}
+            {right}
+          </div>
         </div>
       )}
       {children}
@@ -252,15 +275,15 @@ export function MetricCard({
   // Items", which is the same count as the Dashboard's Ageing
   // Distribution donut) had no visible explanation of their scope, so
   // people had to ask what they meant instead of reading it on screen.
-  // Always rendered (not a hover-only tooltip) so it's self-explanatory
-  // at a glance.
+  // Available through the shared information control so metric cards keep
+  // the same compact behaviour throughout the application.
   hint?: ReactNode;
 }) {
   return (
     <div className="metric-card">
+      {hint && <InfoTooltip content={hint} label={`About ${typeof label === "string" ? label : "this metric"}`} />}
       <div className="value">{value ?? 0}</div>
       <div className="label">{label}</div>
-      {hint && <div className="hint">{hint}</div>}
     </div>
   );
 }
@@ -273,14 +296,21 @@ export function BarChart({ data }: { data?: Record<string, number> | null }) {
     <div className="bar-chart">
       {entries.map(([k, v]) => (
         <div className="bar-row" key={k}>
-          <span>{k}</span>
+          <span
+            className="bar-label"
+            title={k.replace(/_/g, " ")}
+          >
+            {k.includes("_")
+              ? k.toLowerCase().split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ")
+              : k}
+          </span>
           <div className="bar-track">
             <div
               className="bar-fill"
               style={{ width: `${(v / max) * 100}%` }}
             />
           </div>
-          <span>{v}</span>
+          <span className="bar-value">{v}</span>
         </div>
       ))}
     </div>
@@ -310,16 +340,6 @@ interface ModalProps {
   // A brief shake on the panel gives feedback that the click did register,
   // rather than the modal just feeling unresponsive.
   preventBackdropClose?: boolean;
-  // Reported directly: "cross button and close duplicate -- wherever on
-  // confirmation modal will be close then cross button should be removed."
-  // The header's own × always just calls onClose -- on a plain confirmation/
-  // acknowledgement pop-up (see ConfirmModal/InfoModal) that's already
-  // exactly what the panel's own Yes/No/Cancel/"Got it" button does, so the
-  // × was a second control doing the identical thing. Set true only by
-  // callers that already render their own unambiguous close action; left
-  // false (× shown) everywhere else, e.g. drawer-style detail/edit panels
-  // with no other single-click way to dismiss them.
-  hideCloseButton?: boolean;
 }
 
 export function Modal({
@@ -329,12 +349,27 @@ export function Modal({
   wide,
   variant = "drawer",
   preventBackdropClose,
-  hideCloseButton,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
+  // Record drawers open in the spacious centered view by default. Users can
+  // restore the compact right-side drawer with the header toggle.
+  const [expanded, setExpanded] = useState(variant === "drawer");
+
+  function handleExplicitClose() {
+    onClose();
+    // Pending Approvals opens a child module only as a host for its detail
+    // drawer. Closing that drawer should return to the queue, not strand the
+    // user on the module list and force another sidebar click.
+    if (variant === "drawer" && new URLSearchParams(window.location.search).get("fromPending") === "1") {
+      window.history.back();
+    }
+  }
 
   function handleBackdropClick() {
-    if (!preventBackdropClose) {
+    // Drawers hold record details and forms, so an outside click must never
+    // dismiss them. They stay open until the user deliberately uses Close.
+    // Centered dialogs retain their existing opt-in backdrop behaviour.
+    if (variant === "dialog" && !preventBackdropClose) {
       onClose();
       return;
     }
@@ -356,11 +391,9 @@ export function Modal({
         >
           <div className="drawer-header">
             <h3>{title}</h3>
-            {!hideCloseButton && (
-              <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
-                ×
-              </button>
-            )}
+            <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close" title="Close">
+              ×
+            </button>
           </div>
           <div className="drawer-body">{children}</div>
         </div>
@@ -368,20 +401,36 @@ export function Modal({
     );
   }
   return (
-    <div className="modal-overlay" onClick={handleBackdropClick}>
+    <div
+      className={`modal-overlay ${expanded ? "modal-overlay-expanded" : ""}`}
+      onClick={handleBackdropClick}
+    >
       <div
-        className={`drawer ${wide ? "drawer-wide" : ""} ${
+        className={`drawer ${wide ? "drawer-wide" : ""} ${expanded ? "drawer-expanded" : ""} ${
           shake ? "modal-shake" : ""
         }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="drawer-header">
           <h3>{title}</h3>
-          {!hideCloseButton && (
-            <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
+          <div className="drawer-header-actions">
+            <button
+              type="button"
+              className="modal-close-btn drawer-expand-btn"
+              onClick={() => setExpanded((value) => !value)}
+              aria-label={expanded ? "Restore drawer" : "Expand drawer"}
+              title={expanded ? "Restore drawer" : "Expand drawer"}
+            >
+              {expanded ? (
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v6H3M15 21v-6h6M3 9l6-6M21 15l-6 6" /></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 21h5v-5M3 8l6-5M21 16l-6 5" /></svg>
+              )}
+            </button>
+            <button type="button" className="modal-close-btn" onClick={handleExplicitClose} aria-label="Close" title="Close">
               ×
             </button>
-          )}
+          </div>
         </div>
         <div className="drawer-body">{children}</div>
       </div>
@@ -389,65 +438,97 @@ export function Modal({
   );
 }
 
-// Read-only display of the acting (logged-in) user's own name + a "Sign"
-// button, used alongside "Approve" on SM/Department Head decision steps.
-// Used to be a free-text input the user had to type their name/employee ID
-// into -- reported directly as something that should just log whatever
-// name is already on the system instead of letting it be typed/edited, so
-// there's no longer any way to sign as someone other than the account
-// that's actually logged in. Approve stays disabled until Sign is clicked.
+export interface ElectronicSignature {
+  signer: string;
+  signedAt: string;
+  signatureId: string;
+  statement: string;
+}
+
+// Deliberate electronic-signature ceremony for approval checkpoints. The
+// identity is locked to the authenticated account; the user must open the
+// dialog, review the signature intent and explicitly consent. The approval
+// API then writes the real actor and authoritative server timestamp to the
+// append-only ApprovalAction log. This is an auditable in-app e-signature,
+// not a PKI/USB-token certificate signature.
 export function SignField({
   userName,
   onSignedChange,
   disabled = false,
 }: {
   userName?: string;
-  onSignedChange: (name: string | null) => void;
+  onSignedChange: (signature: ElectronicSignature | null) => void;
   disabled?: boolean;
 }) {
-  const [signed, setSigned] = useState(false);
+  const [signature, setSignature] = useState<ElectronicSignature | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [consented, setConsented] = useState(false);
+  const signed = !!signature;
+
+  useEffect(() => {
+    setSignature(null);
+    setConsented(false);
+    onSignedChange(null);
+  }, [userName]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function applySignature() {
+    if (!userName || !consented) return;
+    const applied: ElectronicSignature = {
+      signer: userName,
+      signedAt: new Date().toISOString(),
+      signatureId: `ESIG-${globalThis.crypto?.randomUUID?.().toUpperCase() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`.toUpperCase()}`,
+      statement: "I confirm my identity and intend this electronic signature to authorize the approval decision.",
+    };
+    setSignature(applied);
+    onSignedChange(applied);
+    setDialogOpen(false);
+  }
 
   return (
-    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-      <span
-        style={{
-          display: "inline-block",
-          minWidth: 190,
-          padding: "6px 9px",
-          border: "1px solid var(--border)",
-          borderRadius: 7,
-          fontSize: 12.5,
-          background: "var(--panel-soft, #f4f6f8)",
-          color: userName ? "var(--navy)" : "var(--muted)",
-        }}
-      >
-        {userName || "Unknown user"}
+    <div className={`workflow-sign-step${signed ? " signed" : ""}`}>
+      <span className="workflow-step-number">1</span>
+      <span className="workflow-sign-copy">
+        <small>ELECTRONIC SIGNATURE</small>
+        <strong>{signed ? `Signed by ${signature.signer}` : userName || "Unknown user"}</strong>
+        <em>{signed ? `${new Date(signature.signedAt).toLocaleString()} · ${signature.signatureId.slice(0, 18)}…` : "Review and apply your logged-in identity before approving."}</em>
       </span>
       <button
         type="button"
         className={`btn btn-sm ${signed ? "btn-success" : ""}`}
         disabled={disabled || !userName}
-        onClick={() => {
-          setSigned(true);
-          onSignedChange(userName as string);
-        }}
+        onClick={() => { setConsented(false); setDialogOpen(true); }}
       >
-        {signed ? "Signed ✓" : "Sign"}
+        {signed ? "✓ E-signed" : "Add e-signature"}
       </button>
-    </span>
+      {dialogOpen && (
+        <Modal title="Apply electronic signature" onClose={() => setDialogOpen(false)} variant="dialog" preventBackdropClose>
+          <div className="esign-dialog">
+            <div className="esign-security-note"><span>✓</span><div><strong>Authenticated identity</strong><small>Your signature is locked to the currently signed-in account and will be recorded with the approval audit entry.</small></div></div>
+            <div className="esign-preview" aria-label={`Electronic signature preview for ${userName}`}>
+              <small>SIGNATURE PREVIEW</small>
+              <strong>{userName}</strong>
+              <span>QualityShield electronic approval</span>
+            </div>
+            <dl className="esign-details"><div><dt>Signer</dt><dd>{userName}</dd></div><div><dt>Purpose</dt><dd>Authorize this workflow approval</dd></div><div><dt>Audit evidence</dt><dd>Account, role, server timestamp, decision and signature reference</dd></div></dl>
+            <label className="esign-consent"><input type="checkbox" checked={consented} onChange={(event) => setConsented(event.target.checked)} /><span><strong>I agree to sign electronically.</strong><small>I confirm my identity and intend this signature to authorize the approval decision.</small></span></label>
+            <div className="modal-actions esign-actions"><button type="button" className="btn btn-sm" onClick={() => setDialogOpen(false)}>Cancel</button><button type="button" className="btn btn-success btn-sm" disabled={!consented} onClick={applySignature}>Apply signature</button></div>
+          </div>
+        </Modal>
+      )}
+    </div>
   );
 }
 
-// Appends the typed signature to whatever comments were entered, so the
-// signed name travels with the approval into ApprovalAction.comments without
-// needing a new backend column.
+// Carries the signature evidence into the existing append-only workflow log.
+// ApprovalAction.actor_id and created_at remain the authoritative identity
+// and server time; these fields preserve the user's ceremony and intent.
 export function withSignature(
   comments: string,
-  signedBy: string | null
+  signature: ElectronicSignature | null
 ): string {
-  if (!signedBy) return comments;
+  if (!signature) return comments;
   const base = (comments || "").trim();
-  return `${base ? base + " " : ""}[Signed by: ${signedBy}]`;
+  return `${base ? base + " " : ""}[Electronic signature | Signer: ${signature.signer} | Applied: ${signature.signedAt} | Signature ID: ${signature.signatureId} | Intent: ${signature.statement}]`;
 }
 
 interface ApprovalDecisionButtonsProps {
@@ -459,8 +540,8 @@ interface ApprovalDecisionButtonsProps {
   comments: string;
   busy: boolean;
   onApprove: (signedComments: string) => void;
-  onReturn: () => void;
-  onReject: () => void;
+  onReturn: (comments: string) => void;
+  onReject: (comments: string) => void;
   approveLabel?: string;
   returnLabel?: string;
   rejectLabel?: string;
@@ -505,7 +586,7 @@ export function ApprovalDecisionButtons({
   signBlocked = false,
   signBlockedMessage,
 }: ApprovalDecisionButtonsProps) {
-  const [signedBy, setSignedBy] = useState<string | null>(null);
+  const [signature, setSignature] = useState<ElectronicSignature | null>(null);
   // Whether an assignment (QA Lead/Security Lead/Engineer) is still needed
   // before this decision can be confirmed -- see assignModalOpen below. An
   // inline row for this (tried first) sat directly above Sign/Approve/
@@ -515,55 +596,66 @@ export function ApprovalDecisionButtons({
   // directly, twice, with screenshots. A modal sidesteps the problem
   // entirely: it's a dedicated overlay with its own stacking context, so
   // there's nothing underneath for its popover to collide with.
-  const [assignModalOpen, setAssignModalOpen] = useState(false);
+  const [pendingDecision, setPendingDecision] = useState<"approve" | "return" | "reject" | null>(null);
+  const [actionNote, setActionNote] = useState(comments);
 
   function handleApproveClick() {
-    if (extraControl) {
-      setAssignModalOpen(true);
-    } else {
-      onApprove(withSignature(comments, signedBy));
-    }
+    setActionNote(comments);
+    setPendingDecision("approve");
+  }
+
+  function openDecision(decision: "return" | "reject") {
+    setActionNote(comments);
+    setPendingDecision(decision);
+  }
+
+  function confirmDecision() {
+    if (pendingDecision === "approve") onApprove(withSignature(actionNote, signature));
+    if (pendingDecision === "return") onReturn(actionNote);
+    if (pendingDecision === "reject") onReject(actionNote);
+    setPendingDecision(null);
   }
 
   return (
     <>
-      <SignField
-        userName={userName}
-        onSignedChange={setSignedBy}
-        disabled={busy || signBlocked}
-      />
-      <button
-        className="btn btn-success btn-sm"
-        disabled={busy || !signedBy || signBlocked}
-        onClick={handleApproveClick}
-      >
-        {approveLabel}
-      </button>
-      <button className="btn btn-sm" disabled={busy} onClick={onReturn}>
-        {returnLabel}
-      </button>
-      <button
-        className="btn btn-danger btn-sm"
-        disabled={busy}
-        onClick={onReject}
-      >
-        {rejectLabel}
-      </button>
-      {signBlocked && signBlockedMessage && (
-        <span style={{ fontSize: 12.5, color: "#b45309" }}>
-          {signBlockedMessage}
-        </span>
-      )}
-      {assignModalOpen && (
+      <div className="workflow-decision-flow">
+        <SignField userName={userName} onSignedChange={setSignature} disabled={busy || signBlocked} />
+        <div className="workflow-decision-step">
+          <div className="workflow-decision-heading">
+            <span className="workflow-step-number">2</span>
+            <span className="workflow-sign-copy">
+              <small>WORKFLOW DECISION</small>
+              <strong>Choose a decision</strong>
+              <em>Select one outcome for this workflow stage.</em>
+            </span>
+          </div>
+          <div className="workflow-decision-options">
+            <button className="workflow-decision-card approve" disabled={busy || !signature || signBlocked} onClick={handleApproveClick} title={!signature ? "Add your electronic signature first" : approveLabel}>
+              <span className="workflow-decision-icon">✓</span><span><strong>{approveLabel}</strong><small>Accept and move to the next stage</small></span><i>→</i>
+            </button>
+            <button className="workflow-decision-card return" disabled={busy} onClick={() => openDecision("return")}>
+              <span className="workflow-decision-icon">↩</span><span><strong>{returnLabel}</strong><small>Send back for corrections and resubmission</small></span><i>→</i>
+            </button>
+            <button className="workflow-decision-card reject" disabled={busy} onClick={() => openDecision("reject")}>
+              <span className="workflow-decision-icon">×</span><span><strong>{rejectLabel}</strong><small>Stop and close this approval path</small></span><i>→</i>
+            </button>
+          </div>
+        </div>
+        {signBlocked && signBlockedMessage && <div className="workflow-blocked-message"><b>Approval unavailable</b><span>{signBlockedMessage}</span></div>}
+      </div>
+      {pendingDecision && (
         <Modal
-          title={extraControlLabel ? `${extraControlLabel} & ${approveLabel}` : approveLabel}
-          onClose={() => setAssignModalOpen(false)}
+          title={`Confirm ${pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}`}
+          onClose={() => setPendingDecision(null)}
           variant="dialog"
           preventBackdropClose
-          hideCloseButton
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div>
+            <div className={`workflow-confirm-banner ${pendingDecision}`}>
+              <span>{pendingDecision === "approve" ? "✓" : pendingDecision === "return" ? "↩" : "×"}</span>
+              <div><strong>{pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}</strong><small>{pendingDecision === "approve" ? "The request will proceed to its next workflow stage." : pendingDecision === "return" ? "The requester can correct the details and submit again." : "This approval path will be stopped."}</small></div>
+            </div>
+            {pendingDecision === "approve" && extraControl && <div>
               {extraControlLabel && (
                 <label
                   style={{
@@ -578,30 +670,32 @@ export function ApprovalDecisionButtons({
                 </label>
               )}
               {extraControl}
-            </div>
-            {!extraReady && (
+            </div>}
+            {pendingDecision === "approve" && !extraReady && (
               <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
                 Select someone above before confirming {approveLabel.toLowerCase()}.
               </div>
             )}
+            <label className="workflow-note-field">
+              <span>Action note <em>Optional</em></span>
+              <textarea value={actionNote} onChange={(event) => setActionNote(event.target.value)} rows={4} placeholder="Add context for this decision, or continue without a note…" />
+              <small>No note is required. If entered, it will be saved in workflow history.</small>
+            </label>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button
                 type="button"
                 className="btn btn-sm"
-                onClick={() => setAssignModalOpen(false)}
+                onClick={() => setPendingDecision(null)}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="btn btn-success btn-sm"
-                disabled={!extraReady}
-                onClick={() => {
-                  onApprove(withSignature(comments, signedBy));
-                  setAssignModalOpen(false);
-                }}
+                className={`btn btn-sm ${pendingDecision === "reject" ? "btn-danger" : pendingDecision === "approve" ? "btn-success" : "btn-primary"}`}
+                disabled={pendingDecision === "approve" && !extraReady}
+                onClick={confirmDecision}
               >
-                Confirm {approveLabel}
+                Confirm {pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}
               </button>
             </div>
           </div>
@@ -609,6 +703,44 @@ export function ApprovalDecisionButtons({
       )}
     </>
   );
+}
+
+export interface WorkflowDecisionOption {
+  key: string;
+  label: string;
+  description: string;
+  tone?: "approve" | "return" | "reject";
+  icon?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}
+
+// Shared visual treatment for workflow decisions that do not require the
+// identity-signature step (analysis outcomes, requester acceptance, test
+// case review, security verification, etc.).
+export function WorkflowDecisionPanel({
+  title = "Choose a decision",
+  description = "Select one outcome for this workflow stage.",
+  options,
+  busy = false,
+}: {
+  title?: string;
+  description?: string;
+  options: WorkflowDecisionOption[];
+  busy?: boolean;
+}) {
+  return <div className="workflow-decision-step workflow-decision-standalone">
+    <div className="workflow-decision-heading">
+      <span className="workflow-step-number">1</span>
+      <span className="workflow-sign-copy"><small>WORKFLOW DECISION</small><strong>{title}</strong><em>{description}</em></span>
+    </div>
+    <div className="workflow-decision-options">
+      {options.map((option) => <button key={option.key} type="button" className={`workflow-decision-card ${option.tone || "return"}`} disabled={busy || option.disabled} onClick={option.onClick}>
+        <span className="workflow-decision-icon">{option.icon || (option.tone === "approve" ? "✓" : option.tone === "reject" ? "×" : "↩")}</span>
+        <span><strong>{option.label}</strong><small>{option.description}</small></span><i>→</i>
+      </button>)}
+    </div>
+  </div>;
 }
 
 export function Field({
@@ -852,7 +984,7 @@ export function ErrorText({ error, title = "Action could not be completed", guid
   if (!error || !visible) return null;
   const message = error instanceof Error ? error.message : String(error);
   return (
-    <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose hideCloseButton>
+    <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose>
       <div className="action-error-dialog" role="alert">
         <div className="action-error-dialog-icon">!</div>
         <div>
@@ -889,6 +1021,28 @@ export interface TableColumn<T> {
   filterValue?: (row: T) => string;
 }
 
+// SRS 7.2 (PAG-001..010) -- when a list is server-paginated (see
+// hooks/usePaginatedList.ts), `rows` holds only the CURRENT page's items,
+// not the whole dataset, so Table can no longer do its own client-side
+// filtering/slicing over `rows` -- there's nothing left in the browser to
+// filter beyond what the server already sent. Passing this prop switches
+// Table into that mode. Column filters remain available so the filtering
+// experience is consistent throughout the application; because `rows` is
+// the current API page, those value filters refine the current page while
+// each module's search/status/department controls continue to query the full
+// dataset. The footer makes that scope explicit whenever a filter is active.
+export interface TableServerPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+  onPageChange: (page: number) => void;
+  onPageSizeChange?: (pageSize: number) => void;
+  loading?: boolean;
+}
+
 interface TableProps<T> {
   columns: TableColumn<T>[];
   rows: T[];
@@ -899,16 +1053,27 @@ interface TableProps<T> {
   // items only per page" requirement. Left as an overridable prop (rather
   // than a hardcoded constant) purely as an escape hatch for some future
   // call site that genuinely needs a different page size, not because any
-  // current one does.
+  // current one does. Ignored when `server` is set -- `server.pageSize`
+  // governs instead.
   pageSize?: number;
+  // Optional stable identifier for pages containing multiple similar tables.
+  // When omitted, the route and column keys form the preference key.
+  tableId?: string;
+  // See TableServerPagination above. Omitted (the default): Table behaves
+  // exactly as before, filtering/paginating `rows` entirely client-side.
+  server?: TableServerPagination;
 }
+
+const SERVER_PAGE_SIZE_OPTIONS = [5, 10, 25, 50, 100];
 
 export function Table<T extends Record<string, any>>({
   columns,
   rows,
   rowKey,
   onRowClick,
-  pageSize = 10,
+  pageSize = 5,
+  tableId,
+  server,
 }: TableProps<T>) {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
@@ -930,8 +1095,115 @@ export function Table<T extends Record<string, any>>({
   const [popoverPos, setPopoverPos] = useState<{
     top: number;
     left: number;
+    width: number;
   } | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const columnsPanelRef = useRef<HTMLDivElement>(null);
+  const columnsTriggerRef = useRef<HTMLDivElement>(null);
+  const [columnsOpen, setColumnsOpen] = useState(false);
+  const [columnsPanelPosition, setColumnsPanelPosition] = useState({ top: 0, right: 12 });
+  // Only columns deliberately configured by each screen belong in its table.
+  // Raw API response fields are intentionally not auto-discovered: doing so
+  // exposed internal IDs/metadata and made everyday tables unnecessarily wide.
+  const availableColumns = columns;
+  const preferenceKey = useMemo(() => {
+    const route = typeof window === "undefined" ? "table" : window.location.pathname;
+    return `qap-visible-columns:v2:${tableId || `${route}:${columns.map((c) => c.key).join("|")}`}`;
+  }, [columns, tableId]);
+  const [hiddenColumnKeys, setHiddenColumnKeys] = useState<string[]>([]);
+  const [hasColumnPreference, setHasColumnPreference] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(preferenceKey);
+      const parsed = saved ? JSON.parse(saved) : [];
+      setHiddenColumnKeys(Array.isArray(parsed) ? parsed.filter((key) => typeof key === "string") : []);
+      setHasColumnPreference(saved !== null);
+    } catch {
+      setHiddenColumnKeys([]);
+      setHasColumnPreference(false);
+    }
+  }, [preferenceKey]);
+
+  const visibleColumns = useMemo(() => {
+    const available = new Set(availableColumns.map((column) => column.key));
+    // With no saved choice, show the screen's curated default column set.
+    const defaultHidden: string[] = [];
+    const hidden = new Set(
+      (hasColumnPreference ? hiddenColumnKeys : defaultHidden).filter((key) => available.has(key))
+    );
+    const selected = availableColumns.filter((column) => !hidden.has(column.key));
+    return selected.length > 0 ? selected : availableColumns.slice(0, 1);
+  }, [availableColumns, hasColumnPreference, hiddenColumnKeys]);
+
+  function setColumnVisible(key: string, visible: boolean) {
+    setHiddenColumnKeys((current) => {
+      const defaultHidden: string[] = [];
+      const startingHidden = hasColumnPreference ? current : defaultHidden;
+      const next = visible
+        ? startingHidden.filter((item) => item !== key)
+        : Array.from(new Set([...startingHidden, key]));
+      // A useful table must always retain at least one visible column.
+      if (availableColumns.every((column) => next.includes(column.key))) return current;
+      try {
+        window.localStorage.setItem(preferenceKey, JSON.stringify(next));
+      } catch {
+        // Storage can be unavailable in private/restricted browser contexts.
+      }
+      setHasColumnPreference(true);
+      if (!visible) {
+        setFilters((existing) => {
+          const updated = { ...existing };
+          delete updated[key];
+          return updated;
+        });
+        setOpenFilterKey((open) => (open === key ? null : open));
+      }
+      return next;
+    });
+  }
+
+  function showAllColumns() {
+    setHiddenColumnKeys([]);
+    setHasColumnPreference(true);
+    try {
+      window.localStorage.setItem(preferenceKey, "[]");
+    } catch {
+      // See storage note above.
+    }
+  }
+
+  useEffect(() => {
+    if (!columnsOpen) return;
+    function closeColumns(e: MouseEvent) {
+      const target = e.target as Node;
+      if (
+        !columnsPanelRef.current?.contains(target) &&
+        !columnsTriggerRef.current?.contains(target)
+      )
+        setColumnsOpen(false);
+    }
+    function closeOnEscape(e: KeyboardEvent) {
+      if (e.key === "Escape") setColumnsOpen(false);
+    }
+    document.addEventListener("mousedown", closeColumns);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeColumns);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [columnsOpen]);
+
+  function toggleColumnsPanel() {
+    if (!columnsOpen && columnsTriggerRef.current) {
+      const rect = columnsTriggerRef.current.getBoundingClientRect();
+      setColumnsPanelPosition({
+        top: Math.min(rect.bottom + 6, window.innerHeight - 180),
+        right: Math.max(12, window.innerWidth - rect.right),
+      });
+    }
+    setColumnsOpen((open) => !open);
+  }
 
   useEffect(() => {
     if (!openFilterKey) return;
@@ -967,14 +1239,34 @@ export function Table<T extends Record<string, any>>({
       return;
     }
     const rect = e.currentTarget.getBoundingClientRect();
-    setPopoverPos({ top: rect.bottom + 6, left: rect.left });
+    const viewportGap = 10;
+    const popoverGap = 6;
+    const width = Math.min(300, window.innerWidth - viewportGap * 2);
+    const estimatedHeight = 54;
+    const left = Math.min(
+      Math.max(viewportGap, rect.left),
+      window.innerWidth - width - viewportGap
+    );
+    const opensAbove = rect.bottom + popoverGap + estimatedHeight > window.innerHeight - viewportGap;
+    const top = opensAbove
+      ? Math.max(viewportGap, rect.top - estimatedHeight - popoverGap)
+      : rect.bottom + popoverGap;
+    setPopoverPos({ top, left, width });
     setOpenFilterKey(key);
   }
 
   function textFor(col: TableColumn<T>, row: T): string {
     if (col.filterValue) return col.filterValue(row);
     const v = (row as any)[col.key];
-    return v === null || v === undefined ? "" : String(v);
+    if (v === null || v === undefined) return "";
+    if (typeof v === "object") {
+      try {
+        return JSON.stringify(v);
+      } catch {
+        return String(v);
+      }
+    }
+    return String(v);
   }
 
   const activeFilters = Object.entries(filters).filter(
@@ -985,15 +1277,13 @@ export function Table<T extends Record<string, any>>({
     if (activeFilters.length === 0) return rows;
     return rows.filter((row) =>
       activeFilters.every(([key, value]) => {
-        const col = columns.find((c) => c.key === key);
+        const col = availableColumns.find((c) => c.key === key);
         if (!col) return true;
-        return textFor(col, row)
-          .toLowerCase()
-          .includes(value.trim().toLowerCase());
+        return textFor(col, row).trim().toLowerCase() === value.trim().toLowerCase();
       })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, filters, columns]);
+  }, [rows, filters, availableColumns, server]);
 
   // Reset to page 1 whenever the filtered set changes shape (a new filter
   // typed, or the underlying row count changes, e.g. fresh data loaded) --
@@ -1003,20 +1293,23 @@ export function Table<T extends Record<string, any>>({
   // pass a freshly-computed array (e.g. `rows={items.slice(0, 8)}`) on every
   // render, and resetting on identity rather than content would snap back
   // to page 1 on any unrelated parent re-render, not just an actual data
-  // change.
+  // change. Not relevant in server mode -- the caller (usePaginatedList)
+  // already resets its own `page` state when a filter changes.
   useEffect(() => {
+    if (server) return;
     setPage(1);
-  }, [filters, rows.length]);
+  }, [filters, rows.length, server]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const totalPages = server ? Math.max(1, server.totalPages) : Math.max(1, Math.ceil(filteredRows.length / pageSize));
   // Clamp separately from the reset above -- covers the case where `page`
   // was already >1 and filteredRows.length shrinks for a reason that didn't
   // go through the filters/rows reset (e.g. pageSize itself changing).
-  const currentPage = Math.min(page, totalPages);
+  const currentPage = server ? server.page : Math.min(page, totalPages);
+  const effectivePageSize = server ? server.pageSize : pageSize;
   const pagedRows = useMemo(
     () =>
-      filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [filteredRows, currentPage, pageSize]
+      server ? filteredRows : filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [server, rows, filteredRows, currentPage, pageSize]
   );
 
   function clearFilters() {
@@ -1025,11 +1318,61 @@ export function Table<T extends Record<string, any>>({
   }
 
   return (
-    <div className="table-wrap">
+    <div className="table-shell">
+      <div className="table-column-controls" ref={columnsTriggerRef}>
+        <button
+          type="button"
+          className="table-columns-trigger"
+          onClick={toggleColumnsPanel}
+          aria-expanded={columnsOpen}
+        >
+          Columns <span>{visibleColumns.length}/{availableColumns.length}</span>
+        </button>
+        {columnsOpen && createPortal(
+          <div
+            className="table-columns-panel"
+            ref={columnsPanelRef}
+            style={{
+              top: columnsPanelPosition.top,
+              right: columnsPanelPosition.right,
+              bottom: 12,
+            }}
+          >
+            <div className="table-columns-heading">
+              <div>
+                <strong>Choose visible columns</strong>
+                <small>Saved only for your view</small>
+              </div>
+              <button type="button" onClick={showAllColumns} disabled={visibleColumns.length === availableColumns.length}>
+                Show all
+              </button>
+            </div>
+            <div className="table-columns-list">
+              {availableColumns.map((column) => {
+                const visible = visibleColumns.some((item) => item.key === column.key);
+                const lastVisible = visible && visibleColumns.length === 1;
+                return (
+                  <label key={column.key} title={lastVisible ? "At least one column must remain visible" : undefined}>
+                    <input
+                      type="checkbox"
+                      checked={visible}
+                      disabled={lastVisible}
+                      onChange={(event) => setColumnVisible(column.key, event.target.checked)}
+                    />
+                    <span>{typeof column.header === "string" ? column.header : column.key}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>,
+          document.body
+        )}
+      </div>
+      <div className="table-wrap">
       <table>
         <thead>
           <tr>
-            {columns.map((c) => (
+            {visibleColumns.map((c) => (
               <th key={c.key}>
                 <div className="th-cell">
                   <span>{c.header}</span>
@@ -1055,7 +1398,7 @@ export function Table<T extends Record<string, any>>({
         <tbody>
           {filteredRows.length === 0 && (
             <tr>
-              <td colSpan={columns.length}>
+              <td colSpan={visibleColumns.length}>
                 <div className="empty-state">
                   <IconFolder width={26} height={26} />
                   <span className="msg">
@@ -1082,17 +1425,67 @@ export function Table<T extends Record<string, any>>({
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               className={onRowClick ? "row-clickable" : undefined}
             >
-              {columns.map((c) => (
+              {visibleColumns.map((c) => (
                 <td key={c.key}>
-                  {c.render ? c.render(row) : (row as any)[c.key]}
+                  {c.render ? c.render(row) : textFor(c, row)}
                 </td>
               ))}
             </tr>
           ))}
         </tbody>
       </table>
-      {filteredRows.length > 0 &&
-        (activeFilters.length > 0 || totalPages > 1) && (
+      {server
+        ? (server.total > 0 && (server.totalPages > 1 || server.onPageSizeChange)) && (
+          <div className="table-footer">
+            <div className="table-footer-filters">
+              {server.loading && <span>Loading…</span>}
+              {!server.loading && activeFilters.length > 0 && (
+                <>
+                  <span>Showing {filteredRows.length} of {rows.length} rows on this page</span>
+                  <button type="button" onClick={clearFilters}>Clear filters</button>
+                </>
+              )}
+            </div>
+            <div className="table-pagination">
+              <span>
+                {(server.page - 1) * server.pageSize + 1}–
+                {Math.min(server.page * server.pageSize, server.total)} of{" "}
+                {server.total}
+              </span>
+              {server.onPageSizeChange && (
+                <select
+                  className="table-page-size"
+                  value={server.pageSize}
+                  onChange={(e) => server.onPageSizeChange!(Number(e.target.value))}
+                  aria-label="Rows per page"
+                >
+                  {SERVER_PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>{size} / page</option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                disabled={!server.hasPrevious || server.loading}
+                onClick={() => server.onPageChange(server.page - 1)}
+              >
+                ‹ Prev
+              </button>
+              <span>
+                Page {server.page} of {server.totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={!server.hasNext || server.loading}
+                onClick={() => server.onPageChange(server.page + 1)}
+              >
+                Next ›
+              </button>
+            </div>
+          </div>
+        )
+        : filteredRows.length > 0 &&
+          (activeFilters.length > 0 || totalPages > 1) && (
           <div className="table-footer">
             <div className="table-footer-filters">
               {activeFilters.length > 0 && (
@@ -1109,8 +1502,8 @@ export function Table<T extends Record<string, any>>({
             {totalPages > 1 && (
               <div className="table-pagination">
                 <span>
-                  {(currentPage - 1) * pageSize + 1}–
-                  {Math.min(currentPage * pageSize, filteredRows.length)} of{" "}
+                  {(currentPage - 1) * effectivePageSize + 1}–
+                  {Math.min(currentPage * effectivePageSize, filteredRows.length)} of{" "}
                   {filteredRows.length}
                 </span>
                 <button
@@ -1137,24 +1530,31 @@ export function Table<T extends Record<string, any>>({
       {openFilterKey &&
         popoverPos &&
         (() => {
-          const col = columns.find((c) => c.key === openFilterKey);
+          const col = availableColumns.find((c) => c.key === openFilterKey);
           if (!col) return null;
+          const values = Array.from(
+            new Set(rows.map((row) => textFor(col, row).trim()).filter(Boolean))
+          ).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
           return (
             <div
               className="th-filter-popover"
               ref={popoverRef}
-              style={{ top: popoverPos.top, left: popoverPos.left }}
+              style={{ top: popoverPos.top, left: popoverPos.left, width: popoverPos.width }}
               onClick={(e) => e.stopPropagation()}
             >
-              <input
+              <select
                 autoFocus
                 className="table-filter-input"
-                placeholder="Filter..."
                 value={filters[col.key] || ""}
                 onChange={(e) =>
                   setFilters((f) => ({ ...f, [col.key]: e.target.value }))
                 }
-              />
+              >
+                <option value="">All values</option>
+                {values.map((value) => (
+                  <option key={value} value={value}>{value}</option>
+                ))}
+              </select>
               {filters[col.key] && (
                 <button
                   type="button"
@@ -1167,6 +1567,7 @@ export function Table<T extends Record<string, any>>({
             </div>
           );
         })()}
+      </div>
     </div>
   );
 }
@@ -1364,7 +1765,6 @@ export function RequestDocuments({
           onClose={() => setPendingDelete(null)}
           variant="dialog"
           preventBackdropClose
-          hideCloseButton
         >
           <div style={{ fontSize: 13.5 }}>
             Delete <strong>{pendingDelete.file_name}</strong>? This cannot be undone.
@@ -1488,7 +1888,7 @@ export function ChecklistEvidenceDeleteModal({
   onCancel: () => void;
 }) {
   return (
-    <Modal title="Delete checklist evidence?" onClose={onCancel} variant="dialog" preventBackdropClose hideCloseButton>
+    <Modal title="Delete checklist evidence?" onClose={onCancel} variant="dialog" preventBackdropClose>
       <p>Delete <strong>{fileName}</strong>{itemLabel ? ` ${itemLabel}` : ""}? This cannot be undone.</p>
       <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
         <button type="button" className="btn btn-danger" disabled={busy} onClick={onConfirm}>

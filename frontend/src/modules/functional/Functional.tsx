@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
 import { useAuth } from "../../context/AuthContext";
 import {
@@ -22,15 +22,20 @@ import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
 import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
 import JiraActivity from "../../components/JiraActivity";
+import ClearableSearchInput from "../../components/ClearableSearchInput";
+import RoleGroupLink from "../../components/RoleGroupLink";
 import {
   QA_STATUSES,
   QA_STATUS_LABELS,
   QA_PENDING_WITH,
+  QA_EXECUTION_GROUP_ROLE,
+  TESTER_REASSIGNABLE_STATUSES,
   PRIORITIES,
   RISK_RATINGS,
-  ENVIRONMENTS,
+  DEPLOYMENT_ENVIRONMENTS,
   CHANGE_TYPES,
   hasRole,
+  hasDepartment,
   validTargetPromotionOptions,
   validEnvironmentPromotion,
   canManageReadinessEvidence,
@@ -38,11 +43,14 @@ import {
 } from "../../constants";
 import {
   FunctionalOut,
+  FunctionalListOut,
   UserOut,
   ChecklistItemOut,
   ApprovalActionOut,
   SignOffOut,
+  EligibleTestCycleOut,
 } from "../../types";
+import { usePaginatedList } from "../../hooks/usePaginatedList";
 // Reused as-is from the Governance module -- the app is now a single
 // consolidated Vite app (see README "Frontend architecture"), so importing
 // across module folders is a plain relative import, no remote/federation
@@ -113,7 +121,7 @@ function FunctionalFormModal({
   // canManageReadinessEvidence's isOwner param) rather than assuming the
   // status alone means this particular viewer may attach/remove evidence.
   const isRequesterModal = editing.requester_id === user?.id || isAdmin;
-  const sameDeptModal = !!user?.department && user.department === editing.department;
+  const sameDeptModal = hasDepartment(user, editing.department);
   const canSMDecideModal = hasRole(user, "SM") && editing.status === "SM_APPROVAL_PENDING" && sameDeptModal;
   const canDeptHeadDecideModal =
     hasRole(user, "DEPARTMENT_HEAD_CM", "DEPARTMENT_HEAD_AGM") &&
@@ -183,9 +191,9 @@ function FunctionalFormModal({
       )}
       <form onSubmit={submit}>
         <div className="form-section">
-          <div className="form-section-title">
+          {/* <div className="form-section-title">
             Identity{!isAdmin ? " (Admin-only)" : ""}
-          </div>
+          </div> */}
           <div className="form-row">
             <Field label="Application Name">
               <input
@@ -274,7 +282,7 @@ function FunctionalFormModal({
                   }
                 }}
               >
-                {ENVIRONMENTS.filter((e_) => e_ !== "Dev").map((o) => (
+                {DEPLOYMENT_ENVIRONMENTS.map((o) => (
                   <option key={o} value={o}>
                     {o}
                   </option>
@@ -406,6 +414,161 @@ const LIFECYCLE_STAGES = [
   "Closed",
 ];
 
+// Reported directly: "sm approval not completed but still QA Lead assigned"
+// -- the "Assigned Group" field/column used to hardcode "QA Lead"
+// unconditionally, regardless of the request's actual current status, so it
+// showed "QA Lead" even while a request was still sitting at
+// SM_APPROVAL_PENDING (or earlier). This maps the real backend status (see
+// routers/functional.py's own status transitions -- SM_APPROVAL_PENDING is
+// gated by Role.SM, DEPARTMENT_HEAD_APPROVAL_PENDING by
+// Role.DEPARTMENT_HEAD_CM/AGM, everything from QA_LEAD_ASSIGNED through
+// QA_COMPLETED by Role.QA_LEAD) to whichever group is genuinely holding the
+// request right now. Returns null for every requester-owned/terminal/
+// Sign-off-phase status (Draft, Submitted, any RETURNED_BY_*/*_REJECTED,
+// QA Sign-off phase, Requester Verification, Closed, Cancelled) -- those
+// aren't sitting with a review group at all, so the field shows "—" instead
+// of a misleading group.
+// Derived from QA_PENDING_WITH (constants.ts) -- the same table that already
+// drives the list's "Pending With" column and is itself kept in exact sync
+// with dashboard.py's STAGE_TEAM/backend require_roles() gates -- rather
+// than re-deriving its own status list, so this can never drift out of sync
+// with "Pending With" or silently miss a status. Only labels that name an
+// actual role-holding group get a RoleGroupLink; "Requester" (an individual,
+// not a group) and "--" (terminal/dead-end) both resolve to null, which
+// callers render as "--".
+function assignedGroupFor(
+  status: string,
+  applicationMasterStatus?: string | null,
+  department?: string | null,
+): { role: string | string[]; label: string; department?: string | null } | null {
+  // Reported directly: while the request's own status is still
+  // SM_APPROVAL_PENDING but its Application Name is a brand-new entry
+  // awaiting the Application Owner (see applicationNameAwareStatusLabel in
+  // Common.tsx, which overrides the Status badge the same way), the actual
+  // work is sitting with the Application Owner, not the SM yet -- checked
+  // first, ahead of the normal QA_PENDING_WITH-derived mapping below, since
+  // this is a sub-state of SM_APPROVAL_PENDING rather than its own status
+  // value. `department` is passed through here (and nowhere else in this
+  // function) because Application Owner is a department-scoped role
+  // enforced server-side (require_same_department in
+  // decide_app_owner_name) -- RoleGroupLink filters its member list to it
+  // when provided.
+  if (applicationNameAwareStatusLabel(status, applicationMasterStatus)) {
+    return { role: "APPLICATION_OWNER", label: "Application Owner", department };
+  }
+  const pendingWith = QA_PENDING_WITH[status];
+  // Reported directly: "SM mapping should be based on department level. but
+  // SM group details showing those are from different department." SM and
+  // Department Head are BOTH department-scoped roles enforced server-side
+  // (require_same_department in sm_decision/department_head_decision,
+  // functional.py) exactly like Application Owner above -- `department` was
+  // missing here, so RoleGroupLink showed every SM/Department Head in the
+  // system instead of just the ones who could actually act on this request.
+  if (pendingWith === "SM") return { role: "SM", label: "SM", department };
+  if (pendingWith === "Department Head") {
+    return { role: ["DEPARTMENT_HEAD_CM", "DEPARTMENT_HEAD_AGM"], label: "Department Head", department };
+  }
+  // Reported directly: this "QA Lead group members" list should only show
+  // literal QA_LEAD role holders -- Chief Manager - QA / AGM - QA act on
+  // this work via their own separate Executive bypass (isAssignedQALead
+  // below), not by being members of the QA Lead group, so they're
+  // deliberately excluded from this roster even though they can still open
+  // the request and act on it directly.
+  if (pendingWith === "QA Lead") return { role: "QA_LEAD", label: "QA Lead" };
+  // "QA" covers TESTER_ASSIGNED/TEST_DESIGN/EXECUTION_IN_PROGRESS/RETESTING --
+  // limited to QA_ENGINEER only (reported directly) -- "Assigned Tester(s)"
+  // elsewhere on the page names the specific individual, this names the
+  // execution-team group accountable for the stage; QA_LEAD has its own
+  // separate group above instead of also appearing here.
+  if (pendingWith === "QA") return { role: QA_EXECUTION_GROUP_ROLE, label: "QA" };
+  return null;
+}
+
+function StartExecutionModal({ req, busy, onCancel, onStart }: {
+  req: FunctionalOut;
+  busy: boolean;
+  onCancel: () => void;
+  onStart: (cycleId: number | null) => void;
+}) {
+  const [answer, setAnswer] = useState<"yes" | "no" | null>(null);
+  const [cycles, setCycles] = useState<EligibleTestCycleOut[]>([]);
+  const [selectedCycleId, setSelectedCycleId] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const linkedCycle = req.linked_test_cycles?.[0];
+
+  useEffect(() => {
+    if (answer !== "yes") return;
+    setLoading(true);
+    setError(null);
+    api.get<EligibleTestCycleOut[]>(`/api/functional-requests/${req.id}/eligible-test-cycles`)
+      .then(setCycles).catch(setError).finally(() => setLoading(false));
+  }, [answer, req.id]);
+
+  const query = search.trim().toLowerCase();
+  const visibleCycles = cycles.filter((cycle) => !query ||
+    cycle.cycle_key.toLowerCase().includes(query) ||
+    cycle.name.toLowerCase().includes(query) ||
+    cycle.project_key.toLowerCase().includes(query) ||
+    cycle.project_name.toLowerCase().includes(query));
+
+  return <Modal
+    title="Start Functional Test Execution"
+    onClose={onCancel}
+    wide={!linkedCycle}
+    variant={linkedCycle ? "dialog" : "drawer"}
+    preventBackdropClose={!!linkedCycle}
+  >
+    {linkedCycle ? <>
+      <div className="execution-cycle-existing">
+        <span className="execution-cycle-existing-icon">✓</span>
+        <div>
+          <strong>
+            Test Cycle <Link to={`/test-execution?project=${linkedCycle.project_id}&cycle=${linkedCycle.id}`}>{linkedCycle.cycle_key}</Link> is already linked to this request.
+          </strong>
+          <p>Do you want to start execution?</p>
+          <small>{linkedCycle.name} · {linkedCycle.status}</small>
+        </div>
+      </div>
+      <div className="execution-cycle-actions">
+        <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+        <button type="button" className="btn btn-primary" disabled={busy} onClick={() => onStart(null)}>{busy ? "Starting…" : "Start Execution"}</button>
+      </div>
+    </> : <>
+    <div className="execution-cycle-question">
+      <strong>No test cycle is currently linked to this request.</strong>
+      <p>Do you want to link a test cycle before starting execution?</p>
+      <div className="execution-cycle-answer">
+        <button type="button" className={`btn ${answer === "yes" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("yes"); setSelectedCycleId(null); }}>Yes, Link Test Cycle</button>
+        <button type="button" className={`btn ${answer === "no" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("no"); setSelectedCycleId(null); }}>No, Start Without Linking</button>
+      </div>
+    </div>
+
+    {answer === "yes" && <div className="execution-cycle-picker">
+      <ClearableSearchInput value={search} onChange={(event) => setSearch(event.target.value)} onClear={() => setSearch("")} placeholder="Search cycle name, ID or project…" clearLabel="Clear test cycle search" />
+      {loading && <p className="muted">Loading eligible test cycles…</p>}
+      {!loading && cycles.length === 0 && !error && <div className="execution-cycle-empty"><strong>No eligible test cycles found</strong><span>Only unlinked Not Started or In Progress cycles from an active project for this application can be selected.</span></div>}
+      {!loading && cycles.length > 0 && visibleCycles.length === 0 && <p className="muted">No test cycles match your search.</p>}
+      <div className="execution-cycle-list">
+        {visibleCycles.map((cycle) => <button type="button" key={cycle.id} className={selectedCycleId === cycle.id ? "selected" : ""} onClick={() => setSelectedCycleId(cycle.id)}>
+          <span><strong>{cycle.name}</strong><small>{cycle.cycle_key} · {cycle.project_key} — {cycle.project_name}</small></span>
+          <Badge status={cycle.status} />
+        </button>)}
+      </div>
+      <ErrorText error={error} />
+    </div>}
+
+    {answer === "no" && <div className="execution-cycle-advice">Test execution can start without a cycle. Linking test cases and a cycle is recommended for traceability and reporting.</div>}
+
+    <div className="execution-cycle-actions">
+      <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+      <button type="button" className="btn btn-primary" disabled={busy || answer === null || (answer === "yes" && selectedCycleId === null)} onClick={() => onStart(answer === "yes" ? selectedCycleId : null)}>{busy ? "Starting…" : "Start Execution"}</button>
+    </div>
+    </>}
+  </Modal>;
+}
+
 // Reported directly: while an Application Name is still with the
 // Application Owner -- the first of the two approval tiers a name goes
 // through, see ApplicationNameBanner -- this request's own `status` is
@@ -420,22 +583,60 @@ const LIFECYCLE_STAGES = [
 // the normal stage list the moment the name clears that tier (or was never
 // gated by one at all, e.g. an older request with no ApplicationMaster row).
 function LifecyclePreview({
-  activeIndex,
+  status,
+  history,
   applicationOwnerPending,
 }: {
-  activeIndex: number;
+  status?: string;
+  history: ApprovalActionOut[];
   applicationOwnerPending?: boolean;
 }) {
-  const showAppOwnerStage = !!applicationOwnerPending && activeIndex === 1;
-  const stages = showAppOwnerStage
-    ? [LIFECYCLE_STAGES[0], "Application Owner", ...LIFECYCLE_STAGES.slice(1)]
-    : LIFECYCLE_STAGES;
-  const effectiveActiveIndex = showAppOwnerStage ? 1 : activeIndex;
+  let stages = [...LIFECYCLE_STAGES];
+  let effectiveActiveIndex = lifecycleStageIndex(status);
+
+  // A return is a branch back to the requester, not continued forward
+  // progress at the reviewer who returned it. Keep the stages genuinely
+  // reached before the decision, then show where the request is now.
+  if (status === "RETURNED_BY_SM" || status === "SM_REJECTED") {
+    stages = ["Draft", "SM Approval", "Requester Action", "Dept. Head Approval", "QA Activity", "Sign-off", "Closed"];
+    effectiveActiveIndex = 2;
+  } else if (status === "RETURNED_BY_DEPARTMENT_HEAD") {
+    stages = ["Draft", "SM Approval", "Dept. Head Approval", "Requester Action", "QA Activity", "Sign-off", "Closed"];
+    effectiveActiveIndex = 3;
+  } else if (status === "RETURNED_BY_QA_LEAD") {
+    stages = ["Draft", "SM Approval", "Dept. Head Approval", "QA Activity", "Requester Action", "Sign-off", "Closed"];
+    effectiveActiveIndex = 4;
+  }
+
+  const latestRejection = [...history].reverse().find((item) =>
+    String(item.decision || "").toLowerCase() === "rejected"
+  );
+  const rejectionStep = latestRejection?.step_name || "";
+  const terminalAfterRejection = status === "CLOSED" && !!latestRejection;
+
+  // Rejection/early closure is a terminal branch. Do not paint QA Activity
+  // and Sign-off as completed when the request never entered those stages.
+  if (status === "DEPARTMENT_HEAD_REJECTED" || (terminalAfterRejection && rejectionStep.includes("Department Head"))) {
+    stages = ["Draft", "SM Approval", "Dept. Head Approval", "Closed"];
+    effectiveActiveIndex = 3;
+  } else if (terminalAfterRejection && rejectionStep.includes("SM Approval")) {
+    stages = ["Draft", "SM Approval", "Closed"];
+    effectiveActiveIndex = 2;
+  } else if (status === "CANCELLED") {
+    stages = ["Draft", "Closed"];
+    effectiveActiveIndex = 1;
+  }
+
+  const showAppOwnerStage = !!applicationOwnerPending && status === "SM_APPROVAL_PENDING";
+  if (showAppOwnerStage) {
+    stages = [LIFECYCLE_STAGES[0], "Application Owner", ...LIFECYCLE_STAGES.slice(1)];
+    effectiveActiveIndex = 1;
+  }
   return (
     <div className="stepper" style={{ margin: "4px 0 18px" }}>
       {stages.map((label, i) => (
         <React.Fragment key={label}>
-          <div className={`step ${i <= effectiveActiveIndex ? "filled" : ""}`}>
+          <div className={`step ${i <= effectiveActiveIndex ? "filled" : ""} ${i === effectiveActiveIndex ? "current" : ""}`}>
             <div className="circle">{i + 1}</div>
             <div className="step-label">{label}</div>
           </div>
@@ -517,6 +718,11 @@ function FunctionalDetail({
   const [comments, setComments] = useState("");
   const [selectedQALead, setSelectedQALead] = useState("");
   const [selectedTesters, setSelectedTesters] = useState<string[]>([]);
+  // 2026-08 Reassignment CR -- a reason is mandatory when this is a genuine
+  // reassignment (not the very first tester assignment); the backend
+  // enforces this too (reassignment.require_reason), this is just the UI
+  // half. Reset whenever the request itself changes, same as selectedTesters.
+  const [reassignReason, setReassignReason] = useState("");
   // Whether the "require Department Head re-approval on return" popup (see
   // canReadinessDecide below) is open -- reported directly: an always-visible
   // checkbox next to "Readiness Failed" was easy to miss/forget before
@@ -527,6 +733,8 @@ function FunctionalDetail({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [editingDetails, setEditingDetails] = useState(false);
   const [showSignoffModal, setShowSignoffModal] = useState(false);
+  const [showStartExecution, setShowStartExecution] = useState(false);
+  const [executionNotice, setExecutionNotice] = useState("");
   const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments(
     "/api/functional-requests",
     req.id
@@ -585,6 +793,45 @@ function FunctionalDetail({
     await act("request-signoff", { signoff_id: cert.id });
   }
 
+  async function startExecution(cycleId: number | null) {
+    setError(null);
+    setBusyAction("start-execution");
+    try {
+      const updated = await api.post<FunctionalOut>(
+        `/api/functional-requests/${req.id}/start-execution`,
+        { link_test_cycle: cycleId !== null, test_cycle_id: cycleId }
+      );
+      onChanged(updated);
+      setShowStartExecution(false);
+      setExecutionNotice(cycleId !== null
+        ? "Test cycle linked successfully. Test execution has started."
+        : req.linked_test_cycles?.length
+          ? `Test Cycle ${req.linked_test_cycles[0].cycle_key} was already linked. Test execution has started.`
+          : "Execution has started without a linked test cycle. Linking a test cycle is recommended for traceability and reporting.");
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function unlinkTestCycle(cycle: FunctionalOut["linked_test_cycles"][number]) {
+    if (!window.confirm(`Unlink ${cycle.cycle_key} - ${cycle.name} from ${req.request_id}? Test cases and execution results will not be deleted.`)) return;
+    setError(null);
+    setBusyAction(`unlink-cycle-${cycle.id}`);
+    try {
+      const updated = await api.del<FunctionalOut>(`/api/functional-requests/${req.id}/test-cycles/${cycle.id}`);
+      onChanged(updated);
+      setExecutionNotice(`Test cycle ${cycle.cycle_key} was unlinked successfully. Existing test cases and execution results were preserved.`);
+      await load();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function toggleChecklistItem(item: ChecklistItemOut) {
     setError(null);
     try {
@@ -598,10 +845,10 @@ function FunctionalDetail({
   }
 
   const qaLeads = users.filter((u) =>
-    u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes("QA_LEAD")
+    u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes("QA_LEAD")
   );
   const testers = users.filter((u) =>
-    u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes("QA_ENGINEER")
+    u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes("QA_ENGINEER")
   );
 
   const isAdmin = hasRole(user, "ADMIN");
@@ -609,9 +856,13 @@ function FunctionalDetail({
   const isRequesterVerifier = isRequester || hasRole(user, "APPLICATION_OWNER");
 
   const status = req.status;
-  const sameDept = !!user?.department && user.department === req.department;
-  const isQALead = hasRole(user, "QA_LEAD");
-  const isAssignedQALead = isAdmin || (isQALead && req.qa_lead_id === user?.id);
+  const sameDept = hasDepartment(user, req.department);
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+  // gated action, same as Admin, without being listed as "QA Lead group"
+  // members anywhere (display-only concern, kept to literal QA_LEAD --
+  // see assignedGroupFor below). ORACLE_MIGRATION_2026-07.md section 59.
+  const isQALead = hasRole(user, "QA_LEAD", "CHIEF_MANAGER_QA", "AGM_QA");
+  const isAssignedQALead = isAdmin || isQALead;
   const assignedTesterIds = new Set(
     (req.assigned_tester_ids || "").split(",").filter(Boolean).map(Number)
   );
@@ -723,30 +974,99 @@ function FunctionalDetail({
     isAssignedQALead && status === "READINESS_VERIFICATION";
   const canBeginPlanning =
     isAssignedQALead && status === "QA_ACTIVITY_INITIATED";
-  const canAssignTester = isAssignedQALead && status === "PLANNING";
+  // 2026-08 -- reported directly: "once assigned there are no other option
+  // to reassign the tester or modify the tester. give qa lead to reassign as
+  // well as the current assign people can reasign to another qa member."
+  // Widened from "QA Lead group only, only while status === PLANNING" to:
+  // the QA Lead group OR any currently-assigned tester, at any point across
+  // TESTER_REASSIGNABLE_STATUSES (Planning through Retesting). The backend
+  // (functional.py's assign_tester) enforces the exact same window/authors
+  // -- this only decides whether the button renders.
+  const isInitialTesterAssignment = status === "PLANNING";
+  // 2026-08 Reassignment CR, reported directly: "Reassignment shall be
+  // permitted to: the current assignee, the Department Head of the
+  // department to which the current assignee belongs, or Admin users." --
+  // then, reported directly again: QA_LEAD is required to keep reassignment
+  // rights too, restoring parity with isAssignedQALead (which already gates
+  // the first assignment). Mirrors functional.py's
+  // _require_can_reassign_tester exactly.
+  const isQADepartmentHead =
+    isAdmin || (hasRole(user, "CHIEF_MANAGER_QA", "AGM_QA") && hasDepartment(user, QA_DEPARTMENT));
+  const canReassignTester = isAssignedTester || isQADepartmentHead || hasRole(user, "QA_LEAD");
+  const canAssignTester =
+    (isInitialTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignTester) &&
+    TESTER_REASSIGNABLE_STATUSES.includes(status);
+  const currentTesterIds = (req.assigned_tester_ids || "").split(",").filter(Boolean).map(Number).sort((a, b) => a - b);
+  const nextTesterIds = selectedTesters.map(Number).sort((a, b) => a - b);
+  const testerAssignmentChanged = currentTesterIds.length !== nextTesterIds.length || currentTesterIds.some((id, index) => id !== nextTesterIds[index]);
+  // Pre-fill the picker with the currently-assigned tester(s) when this is a
+  // reassignment (not the first-ever assignment) -- so reassigning defaults
+  // to "hand off from the current roster" rather than starting blank. Only
+  // runs once per loaded request (keyed on id + the assignment string
+  // itself), so it won't stomp on in-progress edits to the picker.
+  useEffect(() => {
+    if (canAssignTester && !isInitialTesterAssignment) {
+      setSelectedTesters((req.assigned_tester_ids || "").split(",").filter(Boolean));
+    }
+    // req.assigned_tester_ids only actually changes once a reassignment has
+    // saved and reloaded, so clearing the reason field here (rather than
+    // optimistically after the act() call, which resolves the same whether
+    // the request succeeded or failed) only clears it on genuine success.
+    setReassignReason("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req.id, req.assigned_tester_ids, isInitialTesterAssignment]);
   const canStartTestDesign =
     isAssignedTester && status === "TESTER_ASSIGNED";
   const canStartExecution =
     isAssignedTester && status === "TEST_DESIGN";
+  // Workflow change (reported directly: "raise defect, start retest
+  // currently not required as everything is linked with test cycle") --
+  // once a Test Cycle is linked, defects are raised/tracked/retested via
+  // Test Execution + the Defects module against that cycle, not this
+  // request's own manual Defect Raised/Waiting For Fix/Retesting states.
+  // The backend enforces this too (see functional.py's
+  // _require_no_linked_cycle_for_manual_defect_flow) -- this just keeps the
+  // button from ever being offered in that case. Still shown for a request
+  // started without linking a cycle (link_test_cycle=false at Start
+  // Execution remains supported), where it's the only defect-tracking path.
+  const hasLinkedCycle = (req.linked_test_cycles?.length ?? 0) > 0;
+  const openLinkedCycles = (req.linked_test_cycles || []).filter(
+    (cycle) => cycle.status !== "Completed"
+  );
   const canRaiseDefect =
     isAssignedTester &&
-    status === "EXECUTION_IN_PROGRESS";
+    status === "EXECUTION_IN_PROGRESS" &&
+    !hasLinkedCycle;
   const canMarkWaitingForFix =
     isAssignedTester && status === "DEFECT_RAISED";
   const canStartRetest =
     isAssignedTester && status === "WAITING_FOR_FIX";
+  // Mark QA Complete now also requires every linked Test Cycle to have
+  // actually reached Completed -- see functional.py::complete_qa's matching
+  // gate. A request with no linked cycle has nothing to wait on.
   const canCompleteQA =
     isAssignedTester &&
     ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(
       status
-    );
-  // Matches the backend's own role gate on POST /{id}/request-signoff and
-  // POST /api/signoffs (both require_roles(Role.QA_LEAD, Role.QA_ENGINEER))
-  // -- whichever of them actually ran QA through to completion should be
-  // able to raise the certificate, not just the QA Lead.
-  const canRequestSignoff =
+    ) &&
+    openLinkedCycles.length === 0;
+  const completeQABlockedByCycle =
     isAssignedTester &&
-    (hasRole(user, "ADMIN") || user?.department === QA_DEPARTMENT) &&
+    ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(status) &&
+    openLinkedCycles.length > 0;
+  // 2026-08 -- reported directly: "'Request Sign Off' button is not
+  // enable[d] for QA lead ... if tester [is] no[t] available then at least
+  // [o]n behalf of QA he can raise the request." Previously this only
+  // checked isAssignedTester, so a QA Lead (not also the assigned tester)
+  // never saw the button even though whoever ran QA through to completion
+  // should be able to raise the certificate -- widened to match the
+  // backend's now-fixed "QA Lead group OR current tester" gate on both
+  // POST /{id}/request-signoff (functional.py) and POST /api/signoffs
+  // (signoff.py), so the QA Lead can raise it themselves when a tester
+  // isn't available to.
+  const canRequestSignoff =
+    (isAssignedTester || isAssignedQALead) &&
+    (hasRole(user, "ADMIN") || hasDepartment(user, QA_DEPARTMENT)) &&
     status === "QA_COMPLETED";
   // "Confirm Sign-off" (a manual QA Lead click) removed -- the linked
   // certificate reaching ISSUED now auto-advances this request straight to
@@ -809,7 +1129,8 @@ function FunctionalDetail({
       {tab === "overview" && (
         <div>
           <LifecyclePreview
-            activeIndex={lifecycleStageIndex(req.status)}
+            status={req.status}
+            history={history}
             applicationOwnerPending={req.application_master_status === "PENDING_APP_OWNER"}
           />
 
@@ -897,8 +1218,11 @@ function FunctionalDetail({
             <DetailField label="Department Head">
               {userName(users, req.department_head_id) || "—"}
             </DetailField>
-            <DetailField label="Assigned QA Lead">
-              {userName(users, req.qa_lead_id) || "Not assigned"}
+            <DetailField label="Assigned Group">
+              {(() => {
+                const assigned = assignedGroupFor(req.status, req.application_master_status, req.department);
+                return assigned ? <RoleGroupLink users={users} role={assigned.role} label={assigned.label} department={assigned.department} /> : "—";
+              })()}
             </DetailField>
             <DetailField label="Assigned Tester(s)">
               {req.assigned_tester_ids
@@ -909,6 +1233,18 @@ function FunctionalDetail({
                 : "—"}
             </DetailField>
           </DetailSection>
+
+          {req.linked_test_cycles?.length > 0 && (
+            <DetailSection title="Linked Test Cycle">
+              {req.linked_test_cycles.map((cycle) => (
+                <DetailField key={cycle.id} label={cycle.cycle_key}>
+                  <Link className="linked-cycle-link" to={`/test-execution?project=${cycle.project_id}&cycle=${cycle.id}`}><strong>{cycle.name}</strong></Link> · {cycle.status}
+                  {(cycle.start_date || cycle.end_date) && <span className="muted small"> · {cycle.start_date || "—"} to {cycle.end_date || "—"}</span>}
+                  {(isAssignedTester || isAssignedQALead) && <button type="button" className="btn btn-sm" style={{ marginLeft: 8 }} disabled={!!busyAction} onClick={() => unlinkTestCycle(cycle)}>{busyAction === `unlink-cycle-${cycle.id}` ? "Unlinking…" : "Unlink"}</button>}
+                </DetailField>
+              ))}
+            </DetailSection>
+          )}
 
           {req.qa_request && (
             <p className="muted small">
@@ -945,6 +1281,29 @@ function FunctionalDetail({
             )}
 
           <div className="section-title">Workflow Actions</div>
+          {executionNotice && <div className={`execution-start-notice ${req.linked_test_cycles?.length ? "linked" : "unlinked"}`} role="status"><strong>{executionNotice.includes("was unlinked") ? "Test cycle unlinked" : req.linked_test_cycles?.length ? "Execution started" : "Execution started without a cycle"}</strong><span>{executionNotice}</span></div>}
+          {completeQABlockedByCycle && (
+            <div
+              style={{
+                marginTop: 8,
+                marginBottom: 8,
+                background: "#fffaeb",
+                border: "1px solid #fde68a",
+                borderRadius: 10,
+                padding: "10px 14px",
+                color: "#92400e",
+                fontSize: 13,
+              }}
+            >
+              <strong>Mark QA Complete is locked</strong> — every linked Test
+              Cycle must reach Completed first. Still open:{" "}
+              {openLinkedCycles
+                .map((cycle) => `${cycle.cycle_key} (${cycle.status})`)
+                .join(", ")}
+              . Raise and retest defects from Test Execution / the Defects
+              module against the linked cycle.
+            </div>
+          )}
           <div className="actions-panel">
             <div
               style={{
@@ -1012,11 +1371,11 @@ function FunctionalDetail({
                       comments: signed,
                     })
                   }
-                  onReturn={() =>
-                    act("sm-decision", { decision: "Returned", comments })
+                  onReturn={(actionNote) =>
+                    act("sm-decision", { decision: "Returned", comments: actionNote })
                   }
-                  onReject={() =>
-                    act("sm-decision", { decision: "Rejected", comments })
+                  onReject={(actionNote) =>
+                    act("sm-decision", { decision: "Rejected", comments: actionNote })
                   }
                 />
               )}
@@ -1034,35 +1393,25 @@ function FunctionalDetail({
                       ? "Mandatory Readiness checklist item(s) are not self-declared ready -- see the notice above."
                       : undefined
                   }
-                  extraControlLabel="Assign IT-QA QA Lead"
-                  extraControl={
-                    <UserAssignSelect
-                      value={selectedQALead}
-                      onChange={setSelectedQALead}
-                      users={qaLeads}
-                      placeholder="Select QA Lead..."
-                      disabled={!!busyAction}
-                      style={{ minWidth: 260 }}
-                    />
-                  }
-                  extraReady={!!selectedQALead}
+                  extraControlLabel="Assign to group"
+                  extraControl={<RoleGroupLink users={users} role="QA_LEAD" label="QA Lead" />}
+                  extraReady
                   onApprove={(signed) =>
                     act("department-head-decision", {
                       decision: "Approved",
                       comments: signed,
-                      qa_lead_id: Number(selectedQALead),
                     })
                   }
-                  onReturn={() =>
+                  onReturn={(actionNote) =>
                     act("department-head-decision", {
                       decision: "Returned",
-                      comments,
+                      comments: actionNote,
                     })
                   }
-                  onReject={() =>
+                  onReject={(actionNote) =>
                     act("department-head-decision", {
                       decision: "Rejected",
-                      comments,
+                      comments: actionNote,
                     })
                   }
                 />
@@ -1079,6 +1428,19 @@ function FunctionalDetail({
               )}
               {canReadinessDecide && (
                 <>
+                  <div className="form-field" style={{ width: "100%" }}>
+                    <label htmlFor="readiness-earlier-behaviour">
+                      What was the behaviour earlier? <small className="muted">(optional)</small>
+                    </label>
+                    <textarea
+                      id="readiness-earlier-behaviour"
+                      rows={3}
+                      value={comments}
+                      onChange={(e) => setComments(e.target.value)}
+                      placeholder="Describe what the application's behaviour was before this QA cycle, for the tester's reference…"
+                      disabled={!!busyAction}
+                    />
+                  </div>
                   <button
                     className="btn btn-success btn-sm"
                     disabled={!!busyAction}
@@ -1141,20 +1503,41 @@ function FunctionalDetail({
                     value={selectedTesters}
                     onChange={setSelectedTesters}
                     users={testers}
-                    placeholder="Assign Tester(s)..."
+                    placeholder={
+                      isInitialTesterAssignment
+                        ? "Assign Tester(s)..."
+                        : "Reassign Tester(s)..."
+                    }
                     disabled={!!busyAction}
                     style={{ minWidth: 260 }}
                   />
+                  {!isInitialTesterAssignment && (
+                    <input
+                      className="reassign-reason-input"
+                      style={{ minWidth: 220 }}
+                      placeholder="Reason for reassignment *"
+                      value={reassignReason}
+                      onChange={(e) => setReassignReason(e.target.value)}
+                      disabled={!!busyAction}
+                    />
+                  )}
                   <button
                     className="btn btn-primary btn-sm"
-                    disabled={selectedTesters.length === 0 || !!busyAction}
+                    disabled={
+                      selectedTesters.length === 0 ||
+                      !!busyAction ||
+                      (!isInitialTesterAssignment && (!testerAssignmentChanged || !reassignReason.trim()))
+                    }
                     onClick={() =>
                       act("assign-tester", {
                         tester_ids: selectedTesters.map(Number),
+                        ...(isInitialTesterAssignment ? {} : { reason: reassignReason.trim() }),
                       })
                     }
                   >
-                    Assign Tester(s)
+                    {isInitialTesterAssignment
+                      ? "Assign Tester(s)"
+                      : "Reassign Tester(s)"}
                   </button>
                 </>
               )}
@@ -1171,7 +1554,7 @@ function FunctionalDetail({
                 <button
                   className="btn btn-primary btn-sm"
                   disabled={!!busyAction}
-                  onClick={() => act("start-execution")}
+                  onClick={() => { setExecutionNotice(""); setShowStartExecution(true); }}
                 >
                   Start Execution
                 </button>
@@ -1275,27 +1658,6 @@ function FunctionalDetail({
                   </span>
                 )}
             </div>
-            {(canSMDecide ||
-              canDepartmentHeadDecide ||
-              canReadinessDecide ||
-              canRaiseDefect ||
-              canMarkWaitingForFix ||
-              canStartRetest ||
-              canCompleteQA ||
-              canRequesterDecide) && (
-              <input
-                placeholder="Action note (optional — attached to the next workflow action)"
-                value={comments}
-                onChange={(e) => setComments(e.target.value)}
-                style={{
-                  marginTop: 8,
-                  width: "100%",
-                  padding: 8,
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                }}
-              />
-            )}
           </div>
 
           {editingDetails && (
@@ -1427,36 +1789,46 @@ function FunctionalDetail({
         title="Readiness cannot be passed"
         guidance="Review the Readiness Checklist, complete the listed verification items, and then try “Readiness Passed” again."
       />
+      {showStartExecution && <StartExecutionModal req={req} busy={busyAction === "start-execution"} onCancel={() => setShowStartExecution(false)} onStart={startExecution} />}
     </Modal>
   );
 }
 
 export default function Functional() {
-  const [requests, setRequests] = useState<FunctionalOut[]>([]);
   const [users, setUsers] = useState<UserOut[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
+  // FunctionalListOut shape; opening a request fetches the full
+  // FunctionalOut record fresh via GET /api/functional-requests/{id} before
+  // FunctionalDetail (which needs every field) is shown.
   const [selected, setSelected] = useState<FunctionalOut | null>(null);
+  const [openingId, setOpeningId] = useState<number | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const load = useCallback(async () => {
-    try {
-      const [reqs, us] = await Promise.all([
-        api.get<FunctionalOut[]>("/api/functional-requests"),
-        api.get<UserOut[]>("/api/auth/users"),
-      ]);
-      setRequests(
-        statusFilter ? reqs.filter((r) => r.status === statusFilter) : reqs
-      );
-      setUsers(us);
-    } catch (err) {
-      setError(err);
-    }
-  }, [statusFilter]);
+  const {
+    items: requests, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<FunctionalListOut>("/api/functional-requests", {
+    status: statusFilter ? [statusFilter] : undefined,
+  });
 
   useEffect(() => {
-    load();
-  }, [load]);
+    api.get<UserOut[]>("/api/auth/users").then(setUsers).catch(setError);
+  }, []);
+
+  const openRequest = useCallback(async (idOrRow: number | FunctionalListOut) => {
+    const id = typeof idOrRow === "number" ? idOrRow : idOrRow.id;
+    setOpeningId(id);
+    try {
+      const full = await api.get<FunctionalOut>(`/api/functional-requests/${id}`);
+      setSelected(full);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setOpeningId(null);
+    }
+  }, []);
 
   // Deep-link support: the gateway QA Request's "Linked Requests" table
   // opens a specific request here via `?open=<request_id>`, e.g. navigating
@@ -1468,7 +1840,7 @@ export default function Functional() {
     const openId = searchParams.get("open");
     if (!openId || requests.length === 0) return;
     const match = requests.find((r) => r.request_id === openId);
-    if (match) setSelected(match);
+    if (match) openRequest(match.id);
     setSearchParams(
       (p) => {
         p.delete("open");
@@ -1476,19 +1848,19 @@ export default function Functional() {
       },
       { replace: true }
     );
-  }, [requests, searchParams, setSearchParams]);
+  }, [requests, searchParams, setSearchParams, openRequest]);
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
         title="Functional QA Requests"
-        count={requests.length}
+        count={total}
         subtitle="Combined Functional Testing, Regression Testing, Sanity Testing and UAT Support workflow --
                    raised via a QA Request (include any of these in its request types), then tracked here
                    through Department Head approval, readiness verification, execution and sign-off."
       />
-      <div className="toolbar">
+      {/* <div className="toolbar">
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
@@ -1500,14 +1872,22 @@ export default function Functional() {
             </option>
           ))}
         </select>
-      </div>
+      </div> */}
 
       <Card>
         <Table
           rowKey="id"
-          onRowClick={(r) => setSelected(r)}
+          onRowClick={(r) => openRequest(r)}
+          server={{
+            page, pageSize, total, totalPages, hasNext, hasPrevious,
+            onPageChange: setPage, onPageSizeChange: setPageSize, loading,
+          }}
           columns={[
-            { key: "request_id", header: "Request ID" },
+            {
+              key: "request_id",
+              header: "Request ID",
+              render: (r) => (openingId === r.id ? "Opening…" : r.request_id),
+            },
             {
               key: "application_name",
               header: "Application",
@@ -1526,9 +1906,9 @@ export default function Functional() {
             },
             {
               key: "qa_lead_id",
-              header: "Assigned QA Lead",
-              render: (r) => userName(users, r.qa_lead_id) || "Not assigned",
-              filterValue: (r) => userName(users, r.qa_lead_id) || "",
+              header: "Assigned Group",
+              render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || "—",
+              filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || "",
             },
             {
               key: "priority",
@@ -1574,7 +1954,7 @@ export default function Functional() {
           onClose={() => setSelected(null)}
           onChanged={(updated) => {
             setSelected(updated);
-            load();
+            reload();
           }}
         />
       )}

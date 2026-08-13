@@ -1,17 +1,15 @@
-import datetime
 import json
 import os
 import shutil
 import uuid
 from typing import Optional, List
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import models, schemas, pagination
 from .. import documents as doc_store
 from .. import application_names as app_names
 from ..database import get_db
@@ -30,12 +28,6 @@ from ..pdf_export import build_request_detail_pdf
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
 
-# All uploaded documents live under backend/app/uploads/<request_id>/<filename>,
-# e.g. app/uploads/TQA-REQ-01/BRD_v2.pdf
-UPLOAD_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
-os.makedirs(UPLOAD_ROOT, exist_ok=True)
-
-
 def _log(db: Session, entity_id: int, step: str, user: models.User, decision: str, comments: Optional[str]):
     db.add(models.ApprovalAction(
         entity_type="QA_REQUEST", entity_id=entity_id, step_name=step,
@@ -50,11 +42,55 @@ def _storage_key(req: "models.QARequest") -> str:
     checklist evidence and general supporting documents -- can be attached
     while still Draft, so this can't simply wait for it. Falls back to a
     stable DRAFT-<id> key (the numeric PK is always present) in that case.
-    Files uploaded before raising just keep living under that folder
-    afterward -- there is no rename/migration once request_id shows up,
-    since each document's exact path is already recorded in its own
-    stored_path column and never re-derived from this key again."""
+    When a business request_id is assigned, _promote_draft_upload_folder
+    moves this folder and updates every tracked stored_path."""
     return req.request_id or f"DRAFT-{req.id}"
+
+
+def _promote_draft_upload_folder(db: Session, req: "models.QARequest") -> None:
+    """Move all tracked uploads from DRAFT-<pk> into the real request folder.
+
+    This is idempotent and moves rather than copies, so a raised request has
+    exactly one top-level upload folder. Both gateway supporting documents
+    and staged checklist evidence are updated together.
+    """
+    if not req.request_id:
+        return
+    upload_root = doc_store.get_upload_root()
+    draft_key = f"DRAFT-{req.id}"
+    prefix = draft_key + os.sep
+
+    gateway_documents = db.query(models.QARequestDocument).filter_by(qa_request_id=req.id).all()
+    evidence_documents = (db.query(models.RequestDocument)
+                          .filter(models.RequestDocument.stored_path.like(f"{draft_key}/%"))).all()
+    for document in [*gateway_documents, *evidence_documents]:
+        normalized = os.path.normpath(document.stored_path)
+        if not normalized.startswith(prefix):
+            continue
+        suffix = normalized[len(prefix):]
+        source = doc_store.resolve_upload_path(normalized)
+        destination = os.path.join(upload_root, req.request_id, suffix)
+        if os.path.isfile(source):
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            if os.path.exists(destination):
+                stem, ext = os.path.splitext(destination)
+                destination = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
+            shutil.move(source, destination)
+        document.stored_path = os.path.relpath(destination, upload_root)
+
+    draft_root = os.path.join(upload_root, draft_key)
+    if os.path.isdir(draft_root):
+        for root, _, files in os.walk(draft_root, topdown=False):
+            if ".DS_Store" in files:
+                try:
+                    os.remove(os.path.join(root, ".DS_Store"))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(root)
+            except OSError:
+                # Preserve any untracked file instead of deleting it.
+                pass
 
 
 _GATEWAY_PRIVATE_STATUSES = (GatewayStatus.DRAFT, GatewayStatus.CANCELLED)
@@ -191,6 +227,7 @@ def _finalize_child_requests(db: Session, obj: "models.QARequest", requester: mo
     -- Submitted" audit entries logged by _raise_child_to_sm for each child
     must still be attributed to the person who actually requested the work,
     not the approver who happened to unblock it."""
+    _promote_draft_upload_folder(db, obj)
     request_types = obj.request_types.split(",") if obj.request_types else []
     (checked_items, sast_components, dast_components, performance_details, performance_checked_items,
      classification_details, sast_checked_items, dast_checked_items) = _unstash_draft_details(obj.draft_child_details)
@@ -269,17 +306,30 @@ def _unstash_draft_details(raw: Optional[str]):
     )
 
 
-@router.get("", response_model=List[schemas.QARequestOut])
-def list_requests(status_filter: Optional[str] = None, department: Optional[str] = None,
-                   application_name: Optional[str] = None, search: Optional[str] = None,
+@router.get("", response_model=pagination.Page[schemas.QARequestListOut])
+def list_requests(params: pagination.PageParams = Depends(),
+                   application_name: Optional[str] = None,
+                   requester_id: Optional[int] = None,
                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """SRS 7.2 (PAG-001..009) -- server-side paginated, database-filtered
+    list. `application_name` stays as its own module-specific param (an
+    exact "starts narrowing this one field" filter some callers rely on,
+    e.g. NewRequestModal's own duplicate-application lookups) alongside the
+    PAG-001 standard `search`/`status`/`department` params carried on
+    `params`. `requester_id` is likewise module-specific (this table's
+    `requester_id` is a real column, not something PAG-001's generic filters
+    cover) -- added so Dashboard.tsx's "My Requests" tab can ask the
+    database for "requests I raised" directly instead of fetching a
+    department-wide page and filtering client-side, which silently dropped
+    a user's own older requests once their department's total volume for a
+    request type crossed the page_size=100 ceiling (reported directly)."""
     q = db.query(models.QARequest)
-    if status_filter:
-        q = q.filter(models.QARequest.status == status_filter)
-    if department:
-        q = q.filter(models.QARequest.department == department)
+    q = pagination.apply_status_filter(q, params, models.QARequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
     if application_name:
         q = q.filter(models.QARequest.application_name.ilike(f"%{application_name}%"))
+    if requester_id is not None:
+        q = q.filter(models.QARequest.requester_id == requester_id)
     # Reported directly: "In dashboard, every-where show data from which
     # department user belong to only" -- then, immediately after, extended to
     # "QA Requests, Functional Requests, SAST, DAST, Suppression, Performance
@@ -290,20 +340,16 @@ def list_requests(status_filter: Optional[str] = None, department: Optional[str]
     # dashboard_department_scope's own docstring in deps.py for exactly which
     # roles this does and doesn't apply to (the QA/Security/Executive-COE
     # roles stay unrestricted; every other role, Admin and Department Head
-    # included, is confined to their own department).
+    # included, is confined to their own department). Applied before
+    # pagination.paginate() below so PAG-009's "the total count shall
+    # include only records the current user is authorized to access" holds.
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.QARequest.department == scope)
-    if search:
-        # Broad "requests or IDs" search (topbar search box and the
-        # QA Requests list's own search field) -- matches Request ID,
-        # Application Name, or Epic Number, not just application name.
-        like = f"%{search}%"
-        q = q.filter(or_(
-            models.QARequest.request_id.ilike(like),
-            models.QARequest.application_name.ilike(like),
-            models.QARequest.epic_number.ilike(like),
-        ))
+        q = q.filter(models.QARequest.department.in_(scope))
+    # Broad "requests or IDs" search (topbar search box and the QA Requests
+    # list's own search field) -- matches Request ID, Application Name, or
+    # Epic Number, not just application name.
+    q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.application_name, models.QARequest.epic_number)
     if not current_user.has_role(Role.ADMIN):
         # Draft and Cancelled gateways are both scratch work that was never
         # actually raised (Cancelled is only ever reached FROM Draft -- see
@@ -314,7 +360,15 @@ def list_requests(status_filter: Optional[str] = None, department: Optional[str]
             models.QARequest.status.notin_(_GATEWAY_PRIVATE_STATUSES),
             models.QARequest.requester_id == current_user.id,
         ))
-    return q.order_by(models.QARequest.created_at.desc()).all()
+    q = pagination.apply_sort(q, params, sortable={
+        "created_at": models.QARequest.created_at,
+        "updated_at": models.QARequest.updated_at,
+        "application_name": models.QARequest.application_name,
+        "status": models.QARequest.status,
+        "target_release_date": models.QARequest.target_release_date,
+    }, default_column=models.QARequest.created_at, id_column=models.QARequest.id)
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
 
 
 @router.get("/{req_id}", response_model=schemas.QARequestOut)
@@ -565,6 +619,28 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         _raise_child_to_sm(db, performance, "PERFORMANCE", qa_request, current_user)
 
 
+def _resolve_requester_department(current_user: models.User, requested: Optional[str]) -> Optional[str]:
+    """2026-08 "one user can be on multiple departments" CR, follow-up:
+    department was previously locked server-side to the requester's own
+    profile department, full stop -- now that a requester may have more than
+    one, the frontend dropdown lets them pick which of THEIR OWN departments
+    a request belongs to, defaulting to their primary (first-assigned) one.
+    Still never trusts the client blindly: `requested` (if sent at all) must
+    be one of `current_user.departments`, or this raises -- picking an
+    arbitrary department outside the requester's own set stays impossible,
+    exactly as before this change, just widened from "must equal the one
+    department on file" to "must be one of the several on file."""
+    if requested is None:
+        return current_user.primary_department
+    if not current_user.has_department(requested):
+        raise HTTPException(
+            400,
+            f"'{requested}' is not one of your assigned departments "
+            f"({', '.join(current_user.departments) or 'none'}).",
+        )
+    return requested
+
+
 @router.post("", response_model=schemas.QARequestOut)
 def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
@@ -575,9 +651,10 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     ID-bearing child requests once POST /{id}/submit actually raises this
     gateway record -- see _sync_linked_child_requests / submit_request."""
     data = payload.model_dump()
-    # Department is always sourced from the requester's own user profile, not
-    # from client input -- ignore whatever the payload sent.
-    data["department"] = current_user.department
+    # Department is restricted to the requester's OWN department(s) -- see
+    # _resolve_requester_department's own docstring; defaults to their
+    # primary (first-assigned) one when the client doesn't send a choice.
+    data["department"] = _resolve_requester_department(current_user, payload.department)
     request_types = data.pop("request_types", [])
     checked_items = set(data.pop("checked_items", []) or [])
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself
@@ -667,8 +744,13 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     # means updating the still-Draft gateway fields and its stashed
     # draft_child_details, never touching/creating any child request.
     data = payload.model_dump(exclude_unset=True)
-    # Department tracks the requester's own profile, not something edited per-request.
-    data.pop("department", None)
+    # Department is restricted to the requester's OWN department(s) -- same
+    # rule and helper as create_request; only actually re-validated/written
+    # when the client sent a department at all (exclude_unset=True means a
+    # plain re-save of an unrelated field leaves it untouched, same pattern
+    # as application_name_in below).
+    if "department" in data:
+        data["department"] = _resolve_requester_department(current_user, data["department"])
     request_types = data.pop("request_types", None)
     checked_items = data.pop("checked_items", None)
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself
@@ -946,6 +1028,11 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
                 "-- Performance testing is not performed in Dev or SIT.",
             )
 
+    # The real business ID now exists and validation has succeeded. Promote
+    # all Draft uploads before either raising immediately or waiting at the
+    # Application Owner checkpoint, preventing split DRAFT/TQA folders.
+    _promote_draft_upload_folder(db, obj)
+
     if obj.application_master_status == "PENDING_APP_OWNER":
         # Brand-new "Other" name, still awaiting the first approval tier --
         # stop here. draft_child_details is intentionally left in place;
@@ -1049,7 +1136,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         subtitle="QA Request (Gateway) — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
 
     )
     return StreamingResponse(
@@ -1207,7 +1294,8 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
         raise HTTPException(400, "Documents cannot be uploaded to a cancelled request")
 
     storage_key = _storage_key(req)
-    request_dir = os.path.join(UPLOAD_ROOT, storage_key)
+    upload_root = doc_store.get_upload_root()
+    request_dir = os.path.join(upload_root, storage_key)
     os.makedirs(request_dir, exist_ok=True)
 
     created = []
@@ -1250,7 +1338,7 @@ def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
     doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
     if not doc:
         raise HTTPException(404, "Document not found")
-    full_path = os.path.join(UPLOAD_ROOT, doc.stored_path)
+    full_path = doc_store.resolve_upload_path(doc.stored_path)
     if not os.path.exists(full_path):
         raise HTTPException(404, "File is missing on disk")
     return FileResponse(full_path, filename=doc.file_name,
@@ -1261,7 +1349,7 @@ def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
 def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                      current_user: models.User = Depends(get_current_user)):
     # Own document table/UPLOAD_ROOT layout (UPLOAD_ROOT/<request_id>/<filename>,
-    # not documents.py's UPLOAD_ROOT/<module>/<folder>/<filename>), so this
+    # not documents.py's UPLOAD_ROOT/<folder>/<module>/<filename>), so this
     # can't call doc_store.delete_document() -- only reuses doc_store's
     # can_delete_document() for the permission check, which is duck-typed
     # (just needs .uploaded_by_id) and applies here unchanged.
@@ -1270,7 +1358,7 @@ def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Document not found")
     if not doc_store.can_delete_document(doc, current_user):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it")
-    full_path = os.path.join(UPLOAD_ROOT, doc.stored_path)
+    full_path = doc_store.resolve_upload_path(doc.stored_path)
     if os.path.exists(full_path):
         os.remove(full_path)
     db.delete(doc)

@@ -2,11 +2,11 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RequestDocuments } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole } from '../../constants'
-import { SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut } from '../../types'
+import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole, hasDepartment } from '../../constants'
+import { SASTListOut, DASTListOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -109,15 +109,22 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
   const { user } = useAuth()
   const [form, setForm] = useState<SuppressionForm>(EMPTY_FORM)
   const [selectedRef, setSelectedRef] = useState<CombinedSecurityRequest | null>(null)
-  const [sastRequests, setSastRequests] = useState<SASTOut[]>([])
-  const [dastRequests, setDastRequests] = useState<DASTOut[]>([])
+  const [sastRequests, setSastRequests] = useState<SASTListOut[]>([])
+  const [dastRequests, setDastRequests] = useState<DASTListOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   function set<K extends keyof SuppressionForm>(k: K, v: SuppressionForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   useEffect(() => {
-    Promise.all([api.get<SASTOut[]>('/api/sast-requests'), api.get<DASTOut[]>('/api/dast-requests')])
-      .then(([sast, dast]) => { setSastRequests(sast); setDastRequests(dast) })
+    // Picker candidates only -- fetches the lightweight PAG-005 list shape,
+    // large page_size since this is a client-side-filtered autosuggest, not
+    // a paginated table (see inScope/hasReachedScanning/isNotYetCompleted
+    // below).
+    Promise.all([
+      api.get<PageOut<SASTListOut>>('/api/sast-requests?page_size=100'),
+      api.get<PageOut<DASTListOut>>('/api/dast-requests?page_size=100'),
+    ])
+      .then(([sast, dast]) => { setSastRequests(sast.items); setDastRequests(dast.items) })
       .catch(() => { /* autosuggest is a convenience -- fields stay manually editable if this fails */ })
   }, [])
 
@@ -127,16 +134,16 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
   // same-department scoping already used for SM/Department Head decisions
   // elsewhere in the app). An Admin isn't scoped -- they can see everything,
   // same as their override elsewhere.
-  function inScope(r: SASTOut | DASTOut): boolean {
+  function inScope(r: SASTListOut | DASTListOut): boolean {
     if (hasRole(user, 'ADMIN')) return true
-    return r.requester_id === user?.id || (!!user?.department && r.department === user.department)
+    return r.requester_id === user?.id || hasDepartment(user, r.department)
   }
 
   // A suppression is a decision about a *finding* -- there's nothing to
   // suppress yet while the linked request hasn't even started scanning, so
   // it's excluded from the picker entirely (mirrors the backend's
   // _require_linked_request check in routers/suppression.py).
-  function hasReachedScanning(r: SASTOut | DASTOut): boolean {
+  function hasReachedScanning(r: SASTListOut | DASTListOut): boolean {
     return !SAST_DAST_PRE_SCANNING_STATUSES.includes(r.status)
   }
 
@@ -144,7 +151,7 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
   // declared Security Complete (or later), it's finalized, so a new
   // suppression can no longer be raised against it either (same backend
   // check, mirrored here so it never even shows up as a choice).
-  function isNotYetCompleted(r: SASTOut | DASTOut): boolean {
+  function isNotYetCompleted(r: SASTListOut | DASTListOut): boolean {
     return !SAST_DAST_COMPLETED_STATUSES.includes(r.status)
   }
 
@@ -158,7 +165,12 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
 
   function selectRequest(r: CombinedSecurityRequest) {
     setSelectedRef(r)
-    const label = r._kind === 'SAST' ? (r as SASTOut).application_name : (r as DASTOut).targets?.[0]?.application_url
+    // Both SAST and DAST list rows carry application_name (delegated from
+    // the QA Request gateway) -- previously DAST used targets[0].application_url
+    // instead, but targets isn't part of the lightweight PAG-005 list schema
+    // (see DASTListOut), and application_name is already what DAST.tsx's own
+    // list table displays for the same row, so this is consistent.
+    const label = r.application_name
     setForm((f) => ({
       ...f,
       scan_type: r._kind,
@@ -312,7 +324,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
   // SM/Department Head approvals are department-scoped -- see the comment in
   // QARequests.tsx. Security Team verification is NOT department-scoped
   // (it's the QA/security side receiving the request).
-  const sameDept = !!user?.department && user.department === sup.department
+  const sameDept = hasDepartment(user, sup.department)
 
   const canSubmit = isRequester && status === 'Draft'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status)
@@ -375,9 +387,6 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
           <p style={{ marginTop: 14 }}><strong>Risk Assessment:</strong> {sup.risk_assessment || '—'}</p>
 
           <div className="section-title">Workflow Actions</div>
-          <Field label="Action note (optional)">
-            <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
-          </Field>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/suppressions/${sup.id}/export`, `${sup.suppression_id}.pdf`)}>
               Export PDF
@@ -391,8 +400,8 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
                 busy={busy}
                 approveLabel="Approve (assign to Dept Head)"
                 onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
-                onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+                onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canDeptHeadDecide && (
@@ -402,19 +411,16 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
                 busy={busy}
                 approveLabel="Approve (Department Head)"
                 onApprove={(signed) => act('dept-head-decision', { decision: 'Approved', comments: signed })}
-                onReturn={() => act('dept-head-decision', { decision: 'Returned', comments })}
-                onReject={() => act('dept-head-decision', { decision: 'Rejected', comments })}
+                onReturn={(actionNote) => act('dept-head-decision', { decision: 'Returned', comments: actionNote })}
+                onReject={(actionNote) => act('dept-head-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canSecurityDecide && (
-              <>
-                <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('security-team-decision', { decision: 'Accepted', comments })}>Accept (mark Done)</button>
-                <button className="btn btn-sm" disabled={busy}
-                        onClick={() => setShowReapprovalConfirm(true)}>
-                  Return to Requester
-                </button>
-                <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('security-team-decision', { decision: 'Rejected', comments })}>Reject</button>
-              </>
+              <WorkflowDecisionPanel busy={busy} title="Security verification decision" options={[
+                { key: 'accept', label: 'Accept & mark done', description: 'Complete the suppression workflow', tone: 'approve', onClick: () => act('security-team-decision', { decision: 'Accepted', comments }) },
+                { key: 'return', label: 'Return to Requester', description: 'Send back for corrections and resubmission', tone: 'return', onClick: () => setShowReapprovalConfirm(true) },
+                { key: 'reject', label: 'Reject', description: 'Stop and close this approval path', tone: 'reject', onClick: () => act('security-team-decision', { decision: 'Rejected', comments }) },
+              ]} />
             )}
             {showReapprovalConfirm && (
               <ConfirmModal

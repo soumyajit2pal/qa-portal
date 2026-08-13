@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import get_current_user, dashboard_department_scope, resolve_entity_department
 from .. import documents as doc_store
@@ -51,6 +51,9 @@ def _resolve_request_ref(db: Session, entity_type: str, entity_id: int) -> Optio
     if entity_type == "SIGNOFF":
         obj = db.query(models.QASignOff).get(entity_id)
         return obj.certificate_id if obj else None
+    if entity_type == "DEFECT":
+        obj = db.query(models.Defect).get(entity_id)
+        return obj.defect_key if obj else None
     return None
 
 
@@ -63,11 +66,11 @@ def _to_out(db: Session, row: models.ApprovalAction) -> dict:
     }
 
 
-@router.get("", response_model=List[schemas.ApprovalActionOut])
-def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] = None,
-                    db: Session = Depends(get_db),
-                    current_user: models.User = Depends(get_current_user)):
-    """Module 7: cross-entity approval/audit feed (QA_REQUEST, TEST_CASE, SAST_DAST, SUPPRESSION, SIGNOFF).
+def _filtered_approval_rows(db: Session, current_user: models.User, entity_type: Optional[str],
+                            entity_id: Optional[int] = None) -> List[models.ApprovalAction]:
+    """Shared by `list_approvals` and `list_approval_history` (see each of
+    their own docstrings for why there are two endpoints over the same
+    underlying feed).
 
     Reported bug: this feed has no role gate on its own (any logged-in user
     can open Approval Workflow Log) and was returning every row completely
@@ -87,7 +90,14 @@ def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] =
     Approvals.tsx) showing every department; reported directly that this
     page should also be department-scoped like everything else, so the flag
     was removed and this now always applies the same restriction, whichever
-    page calls it."""
+    page calls it.
+
+    Department scoping can't be pushed into the SQL query itself:
+    ApprovalAction's entity_type is heterogeneous (QA_REQUEST/SAST/DAST/.../
+    DEFECT, each resolved via resolve_entity_department's own per-row
+    lookup against a different table, not one joinable column) -- so this
+    stays a pull-2000-then-filter-in-Python shape rather than a real SQL
+    WHERE clause."""
     q = db.query(models.ApprovalAction)
     if entity_type:
         q = q.filter(models.ApprovalAction.entity_type == entity_type)
@@ -108,9 +118,69 @@ def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] =
                 rows = [r for r in rows if not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
     scope = dashboard_department_scope(current_user)
     if scope:
-        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) == scope]
-    rows = rows[:500]
-    return [_to_out(db, r) for r in rows]
+        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]
+    return rows[:500]
+
+
+@router.get("", response_model=List[schemas.ApprovalActionOut])
+def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] = None,
+                    db: Session = Depends(get_db),
+                    current_user: models.User = Depends(get_current_user)):
+    """Module 7: cross-entity approval/audit feed (QA_REQUEST, TEST_CASE, SAST_DAST, SUPPRESSION, SIGNOFF).
+
+    Left as a bare array (not wrapped in Page[T]) -- unlike
+    `list_approval_history` below, this endpoint's ~13 call sites across the
+    app (Defects.tsx, TestRepository.tsx, TestProjects.tsx, TestExecution.tsx,
+    JiraActivity's own per-entity feed, Dashboard.tsx's Recent Activity
+    widget) all pass an explicit `entity_type`+`entity_id` pair and expect a
+    bare array back. Each of those feeds is inherently bounded -- one
+    record's own approval history never grows past what that one record
+    could ever accumulate -- so PAG-001..010 pagination doesn't apply to
+    them; see list_approval_history's own docstring for the one consumer
+    (the standalone, no-entity_id Approval Workflow Log) that genuinely
+    browses this feed page by page and was migrated instead."""
+    return [_to_out(db, r) for r in _filtered_approval_rows(db, current_user, entity_type, entity_id)]
+
+
+@router.get("/history", response_model=pagination.Page[schemas.ApprovalActionOut])
+def list_approval_history(entity_type: Optional[str] = None, params: pagination.PageParams = Depends(),
+                          db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """SRS 7.2 pagination rollout -- backs modules/governance/Approvals.tsx's
+    "Approval Workflow Log," the one screen that genuinely paginates through
+    this feed rather than reading one entity's own bounded history (see
+    `list_approvals`' own docstring for why every other consumer was left
+    on the plain, unpaginated endpoint). No `entity_id` filter here --
+    Approvals.tsx only ever filters by entity_type, matching its existing
+    UI (a single "entity type" dropdown, no per-record drill-down).
+
+    `total`/`total_pages` reflect `_filtered_approval_rows`' existing
+    500-row ceiling, not a true unbounded count of this app's entire audit
+    history -- a known, pre-existing limitation (the same 500-row cap
+    `list_approvals` already applied before this endpoint existed) carried
+    forward rather than introduced by this change. Fixing that properly
+    would mean denormalizing a `department` column onto ApprovalAction
+    itself so scoping could run in SQL instead of Python -- out of scope
+    for this pagination rollout."""
+    rows = _filtered_approval_rows(db, current_user, entity_type)
+    if params.search:
+        needle = params.search.casefold()
+        filtered = []
+        for row in rows:
+            request_ref = _resolve_request_ref(db, row.entity_type, row.entity_id)
+            searchable = (
+                row.entity_type, request_ref, f"#{row.entity_id}", row.step_name,
+                row.decision, row.actor_name, row.actor_role, row.comments,
+                row.previous_state, row.new_state,
+            )
+            if any(needle in str(value or "").casefold() for value in searchable):
+                filtered.append(row)
+        rows = filtered
+    total = len(rows)
+    start = (params.page - 1) * params.page_size
+    page_rows = rows[start:start + params.page_size]
+    total_pages = max(1, -(-total // params.page_size)) if params.page_size else 1
+    result = pagination.PaginationResult(items=[_to_out(db, r) for r in page_rows], total=total, total_pages=total_pages)
+    return pagination.to_page_response(result, params)
 
 
 _COMMENT_ENTITY_MODELS = {
@@ -124,6 +194,7 @@ _COMMENT_ENTITY_MODELS = {
     "TEST_PROJECT": models.TestProject,
     "TEST_CASE": models.TestCase,
     "TEST_CYCLE": models.TestCycle,
+    "DEFECT": models.Defect,
 }
 
 _COMMENT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}

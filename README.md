@@ -260,6 +260,15 @@ Point `DATABASE_URL` at your Oracle instance via an env var or `.env` file next 
 host-installed Oracle from inside Docker on Mac/Windows; on Linux use the host's real IP or
 `--add-host`).
 
+The backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`) and
+a `redis` service is included and wired up by default (`REDIS_URL`) -- required for cache
+correctness (dashboard summary + reference-data caching, see `backend/app/cache.py`) and for the
+one-time startup migration/notification-sweep to run once per deployment instead of once per
+worker (see `backend/app/main.py`'s startup-lock comment) whenever more than one worker is
+running. The app still runs fine without Redis reachable -- caching and the startup lock both
+degrade to a no-op/permissive fallback -- but then each of the 4 workers keeps its own cache and
+the startup sweep can run up to 4 times.
+
 ### Verification status
 
 This project was authored and Docker/Compose files written in a sandboxed environment with
@@ -292,8 +301,10 @@ create an LDAP user up front. The first time someone logs in with a username the
 recognize, it attempts an LDAP bind with the credentials they supplied; if that succeeds, a
 local `User` row is created automatically (`login_type=LDAP`, profile fields best-effort filled
 from the directory's `displayName`/`mail`/`department` attributes) and the person is logged in
-immediately with the default, lowest-privilege role (`DEFAULT_LDAP_PROVISION_ROLE` in
-`app/constants.py`, currently Requester). That new account is flagged `needs_role_review=True`
+initially with the temporary default role (`DEFAULT_LDAP_PROVISION_ROLE` in
+`app/constants.py`, currently Requester). At the mandatory first-login department confirmation,
+users selecting **COE - Quality Assurance** receive **QA Engineer** as their default role;
+users selecting any other department remain **Requester**. That new account is still flagged `needs_role_review=True`
 so it shows up at the top of the Admin section's user table with a "Needs Review" badge — an
 admin then assigns the role the person actually needs, which clears the flag. If the
 credentials don't authenticate against LDAP, the login simply fails with the same
@@ -317,8 +328,13 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
 
 ## Production notes
 
-- Replace `Base.metadata.create_all()` (used for convenience here) with **Alembic**
-  migrations before going to production, so Oracle schema changes are versioned.
+- Apply versioned Oracle schema changes with **Alembic** before starting API
+  containers; see `backend/MIGRATIONS.md`.
+- Configure `TRUSTED_PROXY_CIDRS` with only the actual load-balancer, ingress or
+  reverse-proxy networks. Login and action audit records will then store the
+  original client from `X-Forwarded-For` instead of the proxy's address. The
+  supplied nginx configuration already forwards `X-Real-IP` and
+  `X-Forwarded-For`.
 - Add MFA at the identity-provider layer for LDAP/AD-backed logins, per the non-functional
   requirements (5.1) — this app only performs the LDAP bind, not step-up/MFA.
 - Supporting documents are uploaded (multiple files per request, every module) and stored on

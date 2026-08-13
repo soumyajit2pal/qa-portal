@@ -8,95 +8,68 @@ class Role:
     BUSINESS_ANALYST = "BUSINESS_ANALYST"       # Upload Finalised CR / User Stories
     QA_ENGINEER = "QA_ENGINEER"                 # Execute Testing
     QA_LEAD = "QA_LEAD"                         # Review & approve
-    # Split from a single DEPARTMENT_HEAD_COE role (2026-08) into two roles
-    # that carry IDENTICAL authority everywhere -- the same split rationale
-    # as DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM above: every former
-    # require_roles(Role.DEPARTMENT_HEAD_COE) / has_role(Role.DEPARTMENT_HEAD_COE)
-    # call site now checks both, OR'd together, so either can approve at the
-    # Executive COE / QA Sign-off checkpoint. Purely so approval logs can show
-    # the approver's exact position (CM vs AGM) -- see
-    # ORACLE_MIGRATION_2026-07.md for the migration section.
-    DEPARTMENT_HEAD_COE_CM = "DEPARTMENT_HEAD_COE_CM"    # QA Sign-off -- Executive COE, CM
-    DEPARTMENT_HEAD_COE_AGM = "DEPARTMENT_HEAD_COE_AGM"  # QA Sign-off -- Executive COE, AGM
+    # 2026-08: consolidated with the former CHEIF_MANAGER_COE/AGM_COE roles
+    # (reported directly -- "no ther pair is required, creating lots of
+    # confusion"). Those two are retired; every place that used to check for
+    # them now checks CHIEF_MANAGER_QA/AGM_QA instead -- see the
+    # role-consolidation data-fix script (backend/scripts/) for the one-time
+    # migration of existing UserRole rows. Also corrects the "CHEIF" ->
+    # "CHIEF" spelling that was baked into the constant's own value, not just
+    # its label.
+    CHIEF_MANAGER_QA = "CHIEF_MANAGER_QA"       # QA executive management role (formerly CHEIF_MANAGER_QA / CHEIF_MANAGER_COE)
+    AGM_QA = "AGM_QA"                           # QA executive management role (formerly also covered AGM_COE)
     SECURITY_ANALYST = "SECURITY_ANALYST"       # SAST/DAST Management
     APPLICATION_OWNER = "APPLICATION_OWNER"     # Approval Authority
-    # Split from a single DEPARTMENT_HEAD role (2026-08) into two roles that
-    # carry IDENTICAL authority everywhere -- every former
-    # require_roles(Role.DEPARTMENT_HEAD) / has_role(Role.DEPARTMENT_HEAD)
-    # call site now checks both, OR'd together, so either can approve at any
-    # existing Department Head checkpoint. The only reason for the split is
-    # so approval logs/activity history can show the approver's exact
-    # position (CM vs AGM) instead of a generic "Department Head" label --
-    # see ORACLE_MIGRATION_2026-07.md for the migration section.
     DEPARTMENT_HEAD_CM = "DEPARTMENT_HEAD_CM"   # QA Request + Suppression Approval (business dept head, CM)
     DEPARTMENT_HEAD_AGM = "DEPARTMENT_HEAD_AGM"  # QA Request + Suppression Approval (business dept head, AGM)
     ADMIN = "ADMIN"                             # Configuration & Access
-    # New checkpoint role sitting between the requester and Department Head on
-    # every workflow (QA Request, SAST/DAST, Suppression) -- added per request.
-    # Label is deliberately left as the literal "SM" (not expanded to a guessed
-    # full name like "Senior Manager"/"Section Manager") since that's what was
-    # specified; rename ROLE_LABELS[Role.SM] below if you want a fuller label.
     SM = "SM"
-    # Reported directly: a super-access role, assignable ONLY by a System
-    # Admin (see ALL_ROLES vs. DEPARTMENT_ADMIN_ASSIGNABLE_ROLES/
-    # QA_ADMIN_ASSIGNABLE_ROLES below -- deliberately absent from both, so
-    # neither kind of local admin can ever assign or even see it -- enforced
-    # server-side in update_local_admin_user, not just by the assignable
-    # list), and "not visible to noone except admin" -- see
-    # CONFIDENTIAL_ROLES below and routers/auth.py's _redact_confidential_roles,
-    # which strips this role out of any user's `roles` list before it's ever
-    # sent to a non-Admin viewer (the general active-users picker used
-    # throughout the app, and the Department Coordinator / local-admin
-    # roster), and _require_own_department_target, which additionally hides
-    # -- not just relabels -- any user holding it from local admins entirely,
-    # the same treatment ADMIN accounts already get there. A user holding
-    # this role sees data across every department, same as the QA/Security/
-    # Executive-COE roles (see deps.DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES),
-    # regardless of their own department mapping.
     SCALE_6_PLUS = "SCALE_6_PLUS"
 
 ALL_ROLES = [
     Role.REQUESTER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD,
-    Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM, Role.SECURITY_ANALYST,
+    Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.SECURITY_ANALYST,
     Role.APPLICATION_OWNER, Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM, Role.SM, Role.ADMIN,
     Role.SCALE_6_PLUS,
 ]
 
-# Roles that must never be exposed to a non-Admin viewer -- see Role.SCALE_6_PLUS's
-# own comment above. A set rather than a single constant so a future addition
-# doesn't require touching every call site that checks this.
 CONFIDENTIAL_ROLES = {Role.SCALE_6_PLUS}
-
-# "Local admin" -- a Department Head or an Executive COE may assign
-# working-level roles to users within their own department (see
-# routers/auth.py's /local-admin/users endpoints), so role assignment for
-# day-to-day working roles no longer has to funnel through a System Admin
-# for every single department. Split into two disjoint sets (2026-08, per
-# request) rather than one shared list, because the two kinds of local admin
-# oversee different teams and shouldn't be able to hand out roles for the
-# other's team:
-#   - a business Department Head (DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM)
-#     manages everyone else on their team, so gets DEPARTMENT_ADMIN_ASSIGNABLE_ROLES;
-#   - an Executive COE (DEPARTMENT_HEAD_COE_CM/DEPARTMENT_HEAD_COE_AGM) is the
-#     QA department's own local admin, so gets QA_ADMIN_ASSIGNABLE_ROLES --
-#     scoped to the QA department the same way a business Department Head is
-#     scoped to their own department (see _require_own_department_target /
-#     _local_admin_assignable_roles in routers/auth.py), since QA staff are
-#     mapped to department QA_DEPARTMENT ("IT - QA") same as everyone else.
-# Both sets deliberately exclude ADMIN and every DEPARTMENT_HEAD_*/
-# DEPARTMENT_HEAD_COE_* role (neither kind of local admin may mint peer
-# department heads or Executive COE approvers themselves -- that stays an
-# Admin-only action via the regular PATCH /api/auth/users/{id}). Any role a
-# target user already holds outside whichever set applies to the acting
-# local admin (including the OTHER set -- e.g. a business Department Head
-# must not be able to strip someone's QA_LEAD role just because it wasn't in
-# their own submitted list) is left untouched -- see
-# update_local_admin_user's role-merge logic.
 DEPARTMENT_ADMIN_ASSIGNABLE_ROLES = [
     Role.REQUESTER, Role.BUSINESS_ANALYST, Role.APPLICATION_OWNER, Role.SM,
 ]
 QA_ADMIN_ASSIGNABLE_ROLES = [
     Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
+]
+
+# 2026-08 -- reported directly: "other than QA team, for others there
+# should not be any option to open any defects" -- then corrected, same day:
+# "defect can be raised by requster, business analyst application owner too
+# so defect management tool should be available for them as well." This
+# constant (originally named QA_TEAM_ROLES, QA-only) is now every role with
+# a legitimate reason to be in the Defect Management module at all: QA team
+# proper (QA_ENGINEER/QA_LEAD plus the Executive bypass CHIEF_MANAGER_QA/
+# AGM_QA, and SECURITY_ANALYST for defects arising from SAST/DAST work) PLUS
+# every role defects.py's own CREATE_ROLES already lets report/link a
+# defect (REQUESTER, BUSINESS_ANALYST, APPLICATION_OWNER -- CREATE_ROLES
+# itself doesn't separately list AGM_QA, but it's added here for the same
+# Executive-bypass reason CHIEF_MANAGER_QA is). Excludes only roles with no
+# stake in defects at all: SM, Department Head (CM/AGM), SCALE_6_PLUS. This
+# briefly gated the Defect Management *register* (list/dashboard/export in
+# routers/defects.py), the batch Fail/Blocked-executions picker
+# (routers/test_execution.py), and the frontend nav/page (constants.ts's own
+# mirror) -- then, further reported directly: "currently Defect management
+# is not available to everyone. make this visible to everyone based on
+# department filter." That role gate is now retired everywhere it applied;
+# browsing the register is open to any authenticated user, scoped purely by
+# department (defects.py's own _scoped_defects), same as every other
+# module's list endpoint. Kept defined (unreferenced) purely as a record of
+# the role set that combination briefly meant, not for any active check --
+# CREATE_ROLES (who may actually report/link a defect) is unaffected by any
+# of this and still enforced separately.
+DEFECT_MANAGEMENT_ROLES = [
+    Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+    Role.SECURITY_ANALYST, Role.REQUESTER, Role.BUSINESS_ANALYST,
+    Role.APPLICATION_OWNER,
 ]
 
 # ---- Login / authentication type (Admin section: Module 9 - Configuration & Access) ----
@@ -123,8 +96,8 @@ ROLE_LABELS = {
     Role.BUSINESS_ANALYST: "Business Analyst",
     Role.QA_ENGINEER: "QA Engineer (QA)",
     Role.QA_LEAD: "QA Lead",
-    Role.DEPARTMENT_HEAD_COE_CM: "Chief Manager - COE",
-    Role.DEPARTMENT_HEAD_COE_AGM: "Assistant General Manager - COE",
+    Role.CHIEF_MANAGER_QA: "Chief Manager - QA",
+    Role.AGM_QA: "Assistant General Manager - QA",
     Role.SECURITY_ANALYST: "Security Analyst (QA)",
     Role.APPLICATION_OWNER: "Application Owner",
     Role.DEPARTMENT_HEAD_CM: "Chief Manager - Department",
@@ -159,7 +132,7 @@ SEED_DEPARTMENTS = [
 "GOVERNMENT SCHEMES",
 "HRM",
 "IT - Software",
-"IT - QA",
+"COE - Quality Assurance",
 "Inspection and Audit",
 "Integrated Risk Management",
 "Legal Services",
@@ -182,13 +155,29 @@ SEED_DEPARTMENTS = [
 
 # Central department that owns the QA Sign-off Certificate workflow. Its
 # linked testing request may belong to any business department, but the
-# certificate itself is raised and approved entirely inside IT - QA.
-QA_DEPARTMENT = "IT - QA"
+# certificate itself is raised and approved entirely inside COE - Quality Assurance.
+QA_DEPARTMENT = "COE - Quality Assurance"
+
+# Reported directly: "everywhere in test management whenever asking for
+# users/members just show only users from COE - Quality Assurance, and make as list, so that in
+# future if I want to add any other team like TCS-QA along with COE - Quality Assurance that
+# can work, rather than long code change" -- single source of truth for
+# which department(s) are eligible to appear in every Test Management user
+# picker (Project owner/members, default Reviewer/QA Lead, per-item
+# Reviewer/QA Lead reassignment, Cycle owner) and to pass the runner /
+# assignment-manager department checks in routers/test_execution.py
+# (_runner_or_404, _require_qa_assignment_manager). Everything that used to
+# hardcode `== QA_DEPARTMENT` / `!= QA_DEPARTMENT` for Test Management now
+# reads this list instead -- bringing on another team (e.g. a "TCS-QA"
+# vendor team) later is a one-line append here, not a hunt through every
+# individual check. Starts as just the one department, same effective
+# behavior as before this change.
+TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS = [QA_DEPARTMENT]
 
 # ---- Module 1: QA Request (gateway) / Functional Testing Request ----
 REQUEST_TYPES = [
     "Functional Testing", "Sanity Testing", "Regression Testing", "UAT Support",
-    "Performance Testing", "SAST", "DAST", "Others",
+    "Performance Testing", "SAST", "DAST",
 ]
 
 # The QA Request is a pure intake/gateway record (see models.QARequest / the
@@ -281,6 +270,23 @@ QA_REQUEST_STATUSES = [
     QAStatus.REQUESTER_VERIFICATION, QAStatus.CLOSED, QAStatus.CANCELLED,
 ]
 
+# 2026-08 -- reported directly: "once assigned there are no other option to
+# reassign the tester or modify the tester." routers/functional.py::
+# assign_tester originally only accepted status PLANNING (the very first
+# assignment) -- every status after that permanently locked in whoever was
+# picked, with no way for the QA Lead to swap testers mid-flight or for an
+# overloaded tester to hand their own assignment off to a colleague. Every
+# status where a tester assignment is still "live" -- the original PLANNING
+# assignment through the defect-fix-retest cycle, right up to QA_COMPLETED
+# (after which QA work is done and Sign-off takes over) -- is fair game for
+# reassignment now. See assign_tester's own comment for the permission side
+# (QA Lead group, OR any currently-assigned tester, may call it).
+TESTER_REASSIGNABLE_STATUSES = [
+    QAStatus.PLANNING, QAStatus.TESTER_ASSIGNED, QAStatus.TEST_DESIGN,
+    QAStatus.EXECUTION_IN_PROGRESS, QAStatus.DEFECT_RAISED,
+    QAStatus.WAITING_FOR_FIX, QAStatus.RETESTING,
+]
+
 # Statuses from which the Functional Testing Request's own descriptive
 # fields (currently just priority/risk_rating -- see models.FunctionalRequest
 # and PUT /api/functional-requests/{id}) can still be edited -- same
@@ -369,24 +375,6 @@ QA_REQUEST_STATUS_LABELS = {
     QAStatus.CANCELLED: "Cancelled",
 }
 
-# Shipped defaults for the "Ready for Testing" readiness checklist -- no
-# longer read directly anywhere in the app. This whole checklist is
-# Admin-configurable now (Admin > Readiness Checklist Configuration, see
-# checklist_config.py and models.ChecklistTemplateItem); this list is only
-# ever consulted by checklist_config.py itself, to bootstrap that table the
-# first time it's read with zero rows for this module, and again if an
-# Admin ever chooses "Restore Defaults". Edit the live configuration instead
-# of this list to actually change what gets seeded onto a new request.
-#
-# Used to also include "SAST readiness"/"DAST readiness" as two conditionally-
-# mandatory items (see the removed CONDITIONAL_CHECKLIST_ITEMS/
-# checklist_item_is_mandatory()) whenever SAST/DAST were also selected on the
-# same QA Request -- removed now that SAST and DAST each have their own
-# dedicated "Security Readiness" checklist (DEFAULT_SAST_CHECKLIST_ITEMS/
-# DEFAULT_DAST_CHECKLIST_ITEMS below), which is the correct place for that
-# concern to live rather than a single unqualified checkbox sitting on
-# Functional's own checklist. The first three items below ship mandatory;
-# the rest are self-declared/QA-verified for visibility only.
 DEFAULT_CHECKLIST_ITEMS = [
     ("BRD / FRS / User Stories approved", "Business / BA",  True),
     ("Scope finalized & change freeze", "Business / IT", True),
@@ -412,23 +400,23 @@ ENVIRONMENTS = ["Dev", "SIT", "UAT", "Pre-Production", "Production"]
 # client-side), so it's not part of this ordering at all.
 ENVIRONMENT_PIPELINE_ORDER = ["SIT", "UAT", "Pre-Production", "Production"]
 
-# Reported directly: DAST scans and Performance tests are never run against
-# Dev or SIT -- both are restricted to UAT and later. Simply
-# ENVIRONMENT_PIPELINE_ORDER without its first entry (SIT); Dev was never in
-# that list to begin with. Used by DastStep.tsx/PerformanceStep.tsx's own
-# Environment pickers (each restricted to exactly this list, no blank/"Dev"/
-# "SIT" option) and enforced again server-side in
+# DAST scans and Performance tests are restricted to UAT and Pre-Production;
+# Production is intentionally unavailable alongside Dev and SIT. Used by the
+# DastStep.tsx/PerformanceStep.tsx pickers and enforced again server-side in
 # routers/qa_requests.py::submit_request as a defense-in-depth check before
 # either child request is ever created.
-POST_SIT_ENVIRONMENTS = ENVIRONMENT_PIPELINE_ORDER[1:]
+POST_SIT_ENVIRONMENTS = ["UAT", "Pre-Production"]
 
 
 def validate_environment_promotion(environment: str, target_promotion_environment: str) -> None:
     """Raises ValueError if `target_promotion_environment` is not strictly
     later than `environment` in ENVIRONMENT_PIPELINE_ORDER. Callers (see
-    routers/qa_requests.py::create_request/edit_request and
-    routers/functional.py::update_functional -- the only 3 write paths for
-    these two fields) are expected to catch ValueError and re-raise as a 400
+    routers/qa_requests.py::create_request/edit_request,
+    routers/functional.py::update_functional, and -- 2026-08, reported
+    directly ("Environment Tested / Target Promotion Environment should be
+    linked like qa request form have") -- routers/signoff.py::
+    create_signoff/update_signoff, reusing this same helper rather than a
+    duplicate one) are expected to catch ValueError and re-raise as a 400
     HTTPException; kept framework-agnostic here so it isn't tied to FastAPI.
     Silently passes if either value isn't a recognised pipeline stage (e.g.
     blank/None on a still-in-progress Draft) -- this is a business-rule
@@ -524,6 +512,28 @@ SAST_DAST_PRE_SCANNING_STATUSES = [
 # and Closed are both strictly later than Security Complete in
 # SAST_DAST_STATUSES, so they're included here too.
 SAST_DAST_COMPLETED_STATUSES = ["SECURITY_COMPLETE", "REPORT_READY", "CLOSED"]
+# 2026-08 Reassignment CR, reported directly: "Everywhere the system
+# provides an Assign option ... it must also provide a Reassign option."
+# Previously Assign Security Analyst was single-shot, PLANNING-only --
+# unlike Functional/Performance tester assignment, there was no way to
+# change the analyst afterward at all. Mirrors TESTER_REASSIGNABLE_STATUSES/
+# PERFORMANCE_TESTER_REASSIGNABLE_STATUSES' own window: the original
+# PLANNING assignment through the last status where scan work is still
+# "live" (SECURITY_COMPLETE) -- Report Ready/Closed are past the point
+# where a different analyst taking over means anything.
+SAST_DAST_ANALYST_REASSIGNABLE_STATUSES = [
+    "PLANNING", "CONFIGURATION", "SCANNING", "FINDING_VALIDATION", "REMEDIATION",
+    "ASSIGNED_TO_REQUESTER", "WAITING_FOR_FIX", "ASSIGNED_TO_LEAD", "RESCAN",
+    "SECURITY_COMPLETE",
+]
+# 2026-08 Reassignment CR, same rollout -- defects had NO way at all to
+# change the assignee once assigned (routers/defects.py's TRANSITIONS only
+# reaches "Assigned" from New/Reopened/Deferred, so a defect already In
+# Progress/Resolved/Retest/Reopened/Deferred was stuck with its original
+# assignee). Every status where obj.assignee_id is actually populated and
+# the defect is still active -- excludes New (nothing to reassign yet) and
+# the terminal Rejected/Duplicate/Closed states.
+DEFECT_REASSIGNABLE_STATUSES = ["Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred"]
 # Terminal states -- used to decide whether a SAST/DAST request still counts
 # as "outstanding" for dashboard/ageing purposes (see routers/dashboard.py's
 # 3W view). SM_REJECTED is deliberately NOT here -- reported directly, it's
@@ -614,8 +624,8 @@ DEFAULT_DAST_CHECKLIST_ITEMS = [
 # Auto-created from a QA Request when "Performance Testing" is one of its
 # request types, same pattern as SAST/DAST. Independent lifecycle
 # after the common Draft/SM/Department Head prefix: readiness pending (the
-# Department Head assigns an IT-QA QA Lead) -> Readiness -> Feasibility ->
-# Planning (the QA Lead assigns IT-QA QA Testers) -> Environment Setup -> Script
+# Department Head assigns a COE - Quality Assurance QA Lead) -> Readiness -> Feasibility ->
+# Planning (the QA Lead assigns COE - Quality Assurance QA Testers) -> Environment Setup -> Script
 # Development -> Baseline -> Load Test Execution -> Result Analysis ->
 # Defect/Fix/Retest -> Report -> Sign-off -> Requester Verification -> Closed.
 PERFORMANCE_STATUSES = [
@@ -662,6 +672,13 @@ PERFORMANCE_STAGE_ORDER = [
     "READINESS", "FEASIBILITY", "PLANNING", "ENVIRONMENT_SETUP", "SCRIPT_DEVELOPMENT",
     "BASELINE", "LOAD_TEST_EXECUTION", "RESULT_ANALYSIS", "DEFECT_FIX_RETEST", "REPORT",
 ]
+
+# Same "no way to reassign once assigned" gap and fix as functional.py's
+# TESTER_REASSIGNABLE_STATUSES above, mirrored for Performance's own
+# assign_tester (routers/performance.py) -- every stage from the original
+# PLANNING assignment through REPORT (the last stage before Sign-off) still
+# has a "live" tester assignment worth being able to correct.
+PERFORMANCE_TESTER_REASSIGNABLE_STATUSES = PERFORMANCE_STAGE_ORDER[PERFORMANCE_STAGE_ORDER.index("PLANNING"):]
 
 # Request type checkboxes shown on the Performance Testing page of the QA
 # Request form (Annexure VIII, item 3) -- distinct from the top-level
@@ -753,7 +770,7 @@ APPLICATION_MASTER_STATUS_LABELS = {
     # Reported directly, with this exact wording: "the request status shall
     # be displayed as 'Application Owner Approval Pending.'"
     "PENDING_APP_OWNER": "Application Owner Approval Pending",
-    "PENDING_SM": "Pending SM Approval",  # legacy-only, see above
+    "PENDING_SM": "Pending SM Approval",
     "APPROVED": "Approved",
     "REJECTED": "Rejected",
 }
@@ -814,14 +831,14 @@ SIGNOFF_TESTING_TYPES = ["Functional", "SAST", "DAST"]
 RISK_TIERS = ["Tier 1 (Critical)", "Tier 2 (High)", "Tier 3 (Medium)", "Tier 4 (Low)"]
 
 # QASignOff's own approval chain -- QA Engineer raises the certificate, a QA
-# Lead approves it, then Executive COE gives the final approval that
+# Lead approves it, then Executive  gives the final approval that
 # issues it. Replaces the old, much simpler Draft/Issued-only flow (a QA Lead
 # alone could draft and immediately sign/issue) -- existing rows sitting at
 # the old "Draft"/"Issued" string values need a one-time data migration, see
 # ORACLE_MIGRATION_2026-07.md.
 SIGNOFF_STATUSES = [
     "DRAFT", "SUBMITTED", "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
-    "DEPT_HEAD_COE_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "DEPT_HEAD_COE_REJECTED",
+    "DEPT_HEAD_QA_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "DEPT_HEAD_COE_REJECTED",
     "ISSUED",
 ]
 # SM_REJECTED ("Rejected by QA Lead" here -- see SIGNOFF_STATUS_LABELS)
@@ -843,9 +860,9 @@ SIGNOFF_STATUS_LABELS = {
     "SM_APPROVAL_PENDING": "QA Lead Approval Pending",
     "RETURNED_BY_SM": "Returned by QA Lead",
     "SM_REJECTED": "Rejected by QA Lead",
-    "DEPT_HEAD_COE_APPROVAL_PENDING": "Executive COE Approval Pending",
-    "RETURNED_BY_DEPT_HEAD_COE": "Returned by Executive COE",
-    "DEPT_HEAD_COE_REJECTED": "Rejected by Executive COE",
+    "DEPT_HEAD_QA_APPROVAL_PENDING": "Executive Approval Pending",
+    "RETURNED_BY_DEPT_HEAD_COE": "Returned by Executive",
+    "DEPT_HEAD_COE_REJECTED": "Rejected by Executive",
     "ISSUED": "Issued",
 }
 
@@ -854,20 +871,86 @@ SIGNOFF_STATUS_LABELS = {
 # models.TestProject for the full rationale. Test Type/Priority/execution
 # Status values below match the attached xlsx upload template exactly
 # (routers/test_repository.py's import parser reads these same strings).
+#
+# 2026-08 "Test Management Revamp" SRS -- replaced the old 3-state Active/
+# Draft/Deprecated testcase lifecycle with the SRS's explicit 5-state
+# version-review workflow (Appendix A "Status Definitions"), and the old
+# 3-state, never-actually-enforced Not Started/In Progress/Completed cycle
+# status with the controlled five-state lifecycle. See models.py's
+# own "Module 10" header comment and TestCaseVersion/TestCycle docstrings for
+# the full architecture -- content moved into immutable TestCaseVersion rows,
+# TestCase itself now an identity + mirror of whichever version is "current"
+# for display/list-view backward compatibility (same mirror-column pattern
+# already established by TestExecution/TestExecutionRun below).
 TEST_CASE_TYPES = [
     "Functional Positive", "Functional Negative", "Regression", "Sanity",
     "Integration", "Security", "Performance", "UAT", "Other",
 ]
-# Test case's own lifecycle state -- distinct from any execution result
-# (see models.TestCase.status docstring).
-TEST_CASE_STATUSES = ["Active", "Draft", "Deprecated"]
+# Version-level review lifecycle -- SRS section 6.5 "Testcase Review
+# Workflow" / Appendix A. Also written onto TestCase.status as a mirror of
+# whichever version (draft-if-any, else approved) is currently "live" for
+# that identity, exactly as before for Draft/Active -- see
+# models.TestCase.status docstring.
+#
+# 2026-08 "Test Approval Workflow" refactor (Test_Approval_Workflow_
+# Requirements.docx, sections 3/6) -- the single-stage review became a
+# strict two-stage chain (Author -> Reviewer -> QA Lead), requiring two new
+# statuses and one rename:
+#   "Rework Required" -> "Returned" (exact wording used throughout the spec;
+#     mechanically identical to the old value -- author-editable in place,
+#     resubmit moves back to "In Review". test_management_migration.py
+#     renames any existing row.)
+#   "Review Completed" (NEW) -- a Reviewer has recommended approval; sits
+#     between "In Review" and "Approved", waiting on QA Lead final action.
+#     Reviewer-tier alone cannot move a version past this point.
+#   "Rejected" (NEW, terminal) -- QA Lead's reject decision. Cannot be
+#     executed, added to a cycle, or edited in place (routers/
+#     test_repository.py::update_test_case spins a fresh Draft off a
+#     Rejected version's content instead, the same way it already does for
+#     Approved -- the Rejected version itself stays frozen/immutable in
+#     history for traceability, same as Approved/Archived).
+TEST_CASE_STATUSES = ["Draft", "In Review", "Review Completed", "Returned", "Approved", "Rejected", "Archived"]
+# 2026-08 "Simplified Test Management Review and Approval" requirement --
+# reported directly as a full SRS: project-level member management (Project
+# Lead/Reviewer/Approver/Viewer) is removed, and Stage 1/Stage 2 route to
+# the QA Group (QA_ENGINEER) / QA Lead Group (QA_LEAD/CHIEF_MANAGER_QA/
+# AGM_QA) system roles instead of an individually-assigned reviewer/QA Lead.
+# Confirmed via AskUserQuestion: applies to the whole module (not just
+# test-case approval), and only test cases still in Draft (not yet
+# submitted) when this shipped -- or newly created after -- follow this new
+# vocabulary; anything already sitting at "In Review"/"Review Completed"/
+# "Returned" keeps running the pre-existing individually-routed logic
+# unchanged until it reaches a terminal state (see routers/test_repository.py
+# ::_submit_draft/review_test_case for exactly how the two paths are told
+# apart). These four are additive, not replacements -- both vocabularies
+# stay valid simultaneously during the transition.
+TEST_CASE_NEW_STATUSES = [
+    "Recommendation Pending", "QA Lead Approval Pending", "Returned by QA", "Returned by QA Lead",
+]
+TEST_CASE_STATUSES = TEST_CASE_STATUSES + TEST_CASE_NEW_STATUSES
+# Statuses a TestCaseVersion can never be edited in place while sitting in
+# -- pending-decision statuses are frozen until that decision is made;
+# Rejected is permanently frozen (see above). Used by update_test_case.
+TEST_CASE_PENDING_DECISION_STATUSES = [
+    "In Review", "Review Completed", "Recommendation Pending", "QA Lead Approval Pending",
+]
+TEST_CASE_TERMINAL_STATUSES = ["Rejected"]
+# Alias kept for clarity at call sites that specifically mean "a
+# TestCaseVersion's own status" rather than "TestCase's mirrored status" --
+# same list, both names intentionally point at the one vocabulary so a
+# version and its identity's mirror can never drift into different value
+# sets.
+TEST_CASE_VERSION_STATUSES = TEST_CASE_STATUSES
 # Reuses the same Critical/High/Medium/Low vocabulary as PRIORITIES above
 # (kept as its own alias rather than importing PRIORITIES directly at every
 # call site, so this module's own statuses/labels read as a self-contained
 # block -- same convention SEVERITIES already follows for SAST/DAST).
 TEST_CASE_PRIORITIES = PRIORITIES
 
-TEST_CYCLE_STATUSES = ["Not Started", "In Progress", "Completed"]
+# Controlled five-state Test Cycle workflow. Completed is terminal and makes
+# the cycle read-only; every transition is validated in test_execution.py.
+TEST_CYCLE_STATUSES = ["Draft", "Ready", "In Progress", "Blocked", "Completed"]
+TEST_CYCLE_LOCKED_STATUSES = ["Blocked", "Completed"]
 
 # Exact wording from the xlsx template's "Status (Pass/Fail/Blocked/NA/Retest
 # Passed)" column, plus "Not Executed" as this app's own default for a test
@@ -877,6 +960,26 @@ TEST_EXECUTION_STATUSES = ["Not Executed", "Pass", "Fail", "Blocked", "NA", "Ret
 # Terminal in the sense of "this run is done, no further action expected" --
 # used to decide whether a test case still counts as pending within a cycle.
 TEST_EXECUTION_TERMINAL_STATUSES = ["Pass", "Fail", "NA", "Retest Passed"]
+# SRS DEF-001: a defect may only be linked against the LATEST attempt, and
+# only when that attempt's own result is one of these two.
+TEST_EXECUTION_DEFECT_ELIGIBLE_STATUSES = ["Fail", "Blocked"]
+
+# SRS section 4 "Roles and Governance" -- project-scoped roles, deliberately
+# separate from the app-wide Role enum (GOV-001: "project membership" grants
+# scoped repository/cycle/report access without granting any broader system
+# role). A user can hold a different TestProjectMember role on each project
+# they're a member of.
+# Reported directly: "QA lead, system QA lead keep as Keep lead, but project
+# qa lead rename to something else to proper understand" -- "QA Lead" here
+# used to be spelled identically to the app-wide Role.QA_LEAD (a completely
+# different mechanism: this is one person's role on ONE project; that's a
+# system-wide role active everywhere), which read as the same thing and
+# wasn't. Renamed to "Project Lead" everywhere this project-scoped value is
+# used -- see deps.py's role->capability sets and
+# test_execution.py::_require_scope_change_permission for the enforcement,
+# and test_management_migration.py::_migrate_project_lead_role_name for the
+# one-time rename of any row already saved under the old "QA Lead" spelling.
+TEST_PROJECT_ROLES = ["Owner", "Project Lead", "Author", "Tester", "Reviewer", "Viewer"]
 
 # ---- Module 11: Export ----
 EXPORT_FORMATS = ["xlsx", "pdf", "csv"]

@@ -6,41 +6,42 @@ import { hasRole, ROLE_LABELS, DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIG
 import { UserOut } from '../../types'
 import { RoleChipSelect } from './Admin'
 
-// "Local admin" -- lets a Department Head (business departments) or an
-// Executive COE (the QA department) assign working-level roles and
-// activate/deactivate accounts for users already mapped to their own
-// department, without going through a System Admin for every routine role
-// change. Deliberately much narrower than Admin.tsx: no user creation, no
-// password resets, no department reassignment, no touching ADMIN/
-// DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/DEPARTMENT_HEAD_COE_CM/
-// DEPARTMENT_HEAD_COE_AGM on anyone -- see routers/auth.py's local-admin
-// endpoints for the matching server-side guard rails (this page is a
-// convenience UI; the real enforcement is there). The two role-pairs each
-// carry identical authority within their own kind (CM vs AGM, split only so
-// approval logs show the exact position of the approver) -- but the two
-// KINDS assign a different role subset each: a business Department Head
-// gets DEPARTMENT_ADMIN_ASSIGNABLE_ROLES (Requester/Other, Business
-// Analyst, Application Owner, SM), while an Executive COE gets
-// QA_ADMIN_ASSIGNABLE_ROLES (QA Engineer, QA Lead, Security Analyst) --
-// see assignableRoles below.
+// "Local admin" -- lets a Department Head (business departments) or a QA
+// Executive (the QA department, CHIEF_MANAGER_QA/AGM_QA -- the "Executive
+// Group," 2026-08) assign working-level roles and activate/deactivate
+// accounts for users already mapped to their own department, without going
+// through a System Admin for every routine role change. Deliberately much
+// narrower than Admin.tsx: no user creation, no password resets, no
+// department reassignment, no touching ADMIN/DEPARTMENT_HEAD_CM/
+// DEPARTMENT_HEAD_AGM/CHIEF_MANAGER_QA/AGM_QA on anyone -- see
+// routers/auth.py's local-admin endpoints for the matching server-side
+// guard rails (this page is a convenience UI; the real enforcement is
+// there). The two KINDS of local admin assign a different role subset
+// each: a business Department Head gets DEPARTMENT_ADMIN_ASSIGNABLE_ROLES
+// (Requester/Other, Business Analyst, Application Owner, SM), while a QA
+// Executive gets QA_ADMIN_ASSIGNABLE_ROLES (QA Engineer, QA Lead, Security
+// Analyst) -- see assignableRoles below.
 export default function DepartmentAdmin() {
   const { user } = useAuth()
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
 
+  // SRS 7.2 pagination rollout -- deliberately left unpaginated (see
+  // routers/auth.py::list_local_admin_users' own docstring). This roster is
+  // scoped to one department's own headcount, not an org-wide directory.
   const load = useCallback(async () => {
     try { setUsers(await api.get<UserOut[]>('/api/auth/local-admin/users')) } catch (err) { setError(err) }
   }, [])
   useEffect(() => { load() }, [load])
 
-  const isQAAdmin = hasRole(user, 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')
+  const isQAAdmin = hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA')
   const isDeptAdmin = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM')
 
   if (!isQAAdmin && !isDeptAdmin) {
     return (
       <Card title="Access Restricted">
-        <p className="muted">The Department Coordinator section is only available to Department Head or Executive COE accounts.</p>
+        <p className="muted">The Department Coordinator section is only available to Department Head or Executive accounts.</p>
       </Card>
     )
   }
@@ -73,7 +74,7 @@ export default function DepartmentAdmin() {
         title="Department Coordinator" count={users.length}
         subtitle={
           `Assign ${isQAAdmin ? 'QA team' : 'working-level'} roles and activate/deactivate accounts mapped to ` +
-          `${user?.department || 'your department'} -- Administrator, Department Head, and Executive COE access ` +
+          `${(user?.departments && user.departments.length ? user.departments.join(', ') : user?.department) || 'your department'} -- Administrator, Department Head, and Executive access ` +
           'still require a System Admin, as does any account marked "Managed by Admin Only" (won\'t appear below).'
         }
       />
@@ -93,8 +94,8 @@ export default function DepartmentAdmin() {
             { key: 'roles', header: 'Role(s)', render: (u) => {
               // A user can also hold a role outside THIS local admin's own
               // authority -- most commonly DEPARTMENT_HEAD_CM/
-              // DEPARTMENT_HEAD_AGM/DEPARTMENT_HEAD_COE_CM/
-              // DEPARTMENT_HEAD_COE_AGM on someone who wears two hats, but
+              // DEPARTMENT_HEAD_AGM/CHIEF_MANAGER_QA/AGM_QA on someone who
+              // wears two hats, but
               // also the OTHER kind of local admin's own role subset (e.g. a
               // business Department Head viewing someone who also holds
               // QA_LEAD) -- PATCH /local-admin/users/{id} already preserves

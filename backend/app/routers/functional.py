@@ -1,19 +1,19 @@
-import datetime
 import os
 from typing import Optional, List
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy import or_
+from sqlalchemy.orm import Session, joinedload
 
-from .. import models, schemas
+from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
+from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
+from .. import reassignment
 
 router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
 
@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
 # lifecycle that used to live directly on the QA Request itself:
 #
 #   Draft -> Submit -> same-department SM Approval -> same-department
-#   Department Head Approval (assigns an IT-QA QA Lead) -> that lead starts
+#   Department Head Approval (assigns a COE - Quality Assurance QA Lead) -> that lead starts
 #   Readiness Verification -> QA Activity (Planning -> Tester
 #   Assignment -> Test Design -> Execution, with a Defect -> Waiting For Fix
 #   -> Retesting -> Regression Testing cycle) -> QA Completed -> QA Sign-off
@@ -58,14 +58,22 @@ def _get_or_404(db: Session, req_id: int) -> "models.FunctionalRequest":
 
 def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> models.User:
     user = db.query(models.User).get(user_id) if user_id else None
-    if not user or not user.is_active or not user.has_role(role) or user.department != QA_DEPARTMENT:
+    if not user or not user.is_active or not user.has_role(role) or not user.has_department(QA_DEPARTMENT):
         raise HTTPException(400, f"{label} must be an active {role.replace('_', ' ').title()} from {QA_DEPARTMENT}")
     return user
 
 
 def _require_assigned_qa_lead(obj: "models.FunctionalRequest", user: models.User) -> None:
-    if not user.has_role(Role.ADMIN) and obj.qa_lead_id != user.id:
-        raise HTTPException(403, "Only the QA Lead assigned by the Department Head can perform this action")
+    # Reported directly: "AGM QA / Chief Manager QA does not need to assign
+    # QA lead separately as they [a]re the executive[s], ... they have super
+    # power" -- CHIEF_MANAGER_QA/AGM_QA get a blanket Executive bypass on
+    # every QA-Lead-gated action, same as has_role()'s own ADMIN bypass,
+    # WITHOUT being listed as "QA Lead group" members anywhere in the UI
+    # (see ORACLE_MIGRATION_2026-07.md section 59 -- that's a display-only
+    # concern, kept to literal QA_LEAD; this is the separate action-
+    # authorization check).
+    if not user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        raise HTTPException(403, "Only a member of the QA Lead group can perform this action")
 
 
 def _assigned_tester_ids(obj: "models.FunctionalRequest") -> set[int]:
@@ -74,22 +82,103 @@ def _assigned_tester_ids(obj: "models.FunctionalRequest") -> set[int]:
 
 def _require_assigned_tester(obj: "models.FunctionalRequest", user: models.User) -> None:
     if not user.has_role(Role.ADMIN) and user.id not in _assigned_tester_ids(obj):
-        raise HTTPException(403, "Only an IT-QA QA Tester assigned by the QA Lead can perform this action")
+        raise HTTPException(403, "Only a COE - Quality Assurance QA Tester assigned by the QA Lead can perform this action")
 
 
-@router.get("", response_model=List[schemas.FunctionalOut])
-def list_functional(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.FunctionalRequest)
-    # Reported directly, then extended to "everywhere" (see list_requests'
-    # matching comment in routers/qa_requests.py) -- applied unconditionally.
-    # department is a delegated property (see models.FunctionalRequest.
-    # department), not a real column, so this needs a join to the parent
-    # QARequest rather than a plain .filter().
+# 2026-08 -- reported directly, see TESTER_REASSIGNABLE_STATUSES' own
+# comment on constants.py: reassigning is now open to the QA Lead group at
+# any point (not just the very first PLANNING assignment), AND to whoever
+# is currently assigned -- "the current assign[ed] people can reassign to
+# another qa member" -- so an overloaded tester can hand their own slot off
+# to a colleague without needing to go back to the QA Lead first. A user
+# with no roles in common with either group (e.g. a QA Engineer who was
+# never assigned to THIS request) is still blocked -- being a QA Engineer
+# generally isn't enough, only actually being on this request's own
+# assigned_tester_ids is.
+def _require_assigned_qa_lead_or_current_tester(obj: "models.FunctionalRequest", user: models.User,
+                                                 action: str = "reassign the tester(s) on this request") -> None:
+    if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        return
+    if user.id in _assigned_tester_ids(obj):
+        return
+    raise HTTPException(403, f"Only the QA Lead group or a currently assigned tester can {action}")
+
+
+# 2026-08 Reassignment CR, reported directly: "Reassignment shall be
+# permitted to: the current assignee, the Department Head of the department
+# to which the current assignee belongs, or Admin users." Deliberately
+# narrower than _require_assigned_qa_lead_or_current_tester above (which
+# still gates the FIRST assignment, unchanged) -- QA_LEAD on its own is not
+# a Department Head per the CR's own clarification table (COE - Quality
+# Assurance's Department Head is specifically AGM_QA/CHIEF_MANAGER_QA), so a
+# QA Lead who isn't also currently assigned can no longer reassign someone
+# else's slot once the first assignment has happened. See assign_tester's
+# `is_initial_assignment` branch for where each gate applies.
+def _require_can_reassign_tester(obj: "models.FunctionalRequest", user: models.User) -> None:
+    if user.has_role(Role.ADMIN):
+        return
+    if user.id in _assigned_tester_ids(obj):
+        return
+    if user.has_department(QA_DEPARTMENT) and user.has_role(*reassignment.department_head_roles(QA_DEPARTMENT)):
+        return
+    # 2026-08 -- reported directly: QA_LEAD is required to keep reassignment
+    # rights here too, not just CHIEF_MANAGER_QA/AGM_QA. The CR's own
+    # eligibility list (current assignee / Department Head / Admin) would
+    # otherwise narrow existing behavior -- a plain QA_LEAD could previously
+    # reassign any tester on any request, same as the initial-assignment gate
+    # (_require_assigned_qa_lead_or_current_tester) already allows.
+    if user.has_role(Role.QA_LEAD):
+        return
+    raise HTTPException(
+        403,
+        "Only a currently assigned tester, a QA Lead, the QA Department Head (Chief Manager QA / AGM QA), "
+        "or an Administrator can reassign the tester(s) on this request",
+    )
+
+
+@router.get("", response_model=pagination.Page[schemas.FunctionalListOut])
+def list_functional(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+                     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # department/application_name/epic_number/application_master_status are
+    # all delegated (read-only) properties resolved through the `qa_request`
+    # relationship (see models.FunctionalRequest), not real columns -- every
+    # filter that touches them needs the same join dashboard_department_scope
+    # already required, and every row needs qa_request (+ its own
+    # application_master) eager-loaded so FunctionalListOut's read of those
+    # properties doesn't turn into a lazy-load-per-row N+1 (PAG-007/DBP-005).
+    # isouter=True (not an inner join): qa_request_id is nullable (standalone
+    # creation is disabled now, see create_functional above, but older rows
+    # from before that -- if any -- would otherwise silently vanish from
+    # every list view under an inner join).
+    q = db.query(models.FunctionalRequest).join(
+        models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id, isouter=True
+    ).options(
+        joinedload(models.FunctionalRequest.qa_request).joinedload(models.QARequest.application_master)
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.join(models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
-    return q.order_by(models.FunctionalRequest.created_at.desc()).all()
+        q = q.filter(models.QARequest.department.in_(scope))
+    q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_status_filter(q, params, models.FunctionalRequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    # Module-specific, same reasoning/reported issue as qa_requests.py's own
+    # requester_id addition -- lets Dashboard.tsx's "My Requests" tab filter
+    # server-side instead of over a department-wide, page_size=100-capped
+    # fetch that could silently omit a user's own older requests.
+    if requester_id is not None:
+        q = q.filter(models.FunctionalRequest.requester_id == requester_id)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "created_at": models.FunctionalRequest.created_at,
+            "updated_at": models.FunctionalRequest.updated_at,
+            "status": models.FunctionalRequest.status,
+            "application_name": models.QARequest.application_name,
+        },
+        default_column=models.FunctionalRequest.created_at, id_column=models.FunctionalRequest.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
 
 
 @router.get("/{req_id}", response_model=schemas.FunctionalOut)
@@ -335,7 +424,7 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 @router.post("/{req_id}/department-head-decision", response_model=schemas.FunctionalOut)
 def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisionIn, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
-    """Department Head reviews the request and assigns an IT-QA QA Lead."""
+    """Department Head reviews the request and assigns a COE - Quality Assurance QA Lead."""
     obj = _get_or_404(db, req_id)
     require_same_department(current_user, obj.department)
     require_not_requester(current_user, obj.requester_id)
@@ -345,8 +434,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
     obj.department_head_id = current_user.id
 
     if payload.decision == "Approved":
-        qa_lead = _it_qa_user(db, payload.qa_lead_id, Role.QA_LEAD, "qa_lead_id")
-        obj.qa_lead_id = qa_lead.id
+        obj.qa_lead_id = None
         obj.status = QAStatus.QA_LEAD_ASSIGNED
     elif payload.decision == "Returned":
         obj.status = QAStatus.RETURNED_BY_DEPARTMENT_HEAD
@@ -364,7 +452,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
 # ---- QA Lead: Readiness Verification ----
 @router.post("/{req_id}/start-readiness-verification", response_model=schemas.FunctionalOut)
 def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.QA_LEAD_ASSIGNED, "Start readiness verification")
     _require_assigned_qa_lead(obj, current_user)
@@ -377,7 +465,7 @@ def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/readiness-decision", response_model=schemas.FunctionalOut)
 def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                        current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.READINESS_VERIFICATION, "Readiness decision")
     _require_assigned_qa_lead(obj, current_user)
@@ -428,7 +516,7 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
 # ---- QA Activity: Planning -> Tester Assignment -> Test Design -> Execution ----
 @router.post("/{req_id}/begin-planning", response_model=schemas.FunctionalOut)
 def begin_planning(req_id: int, db: Session = Depends(get_db),
-                    current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                    current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.QA_ACTIVITY_INITIATED, "Begin planning")
     _require_assigned_qa_lead(obj, current_user)
@@ -441,23 +529,64 @@ def begin_planning(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/assign-tester", response_model=schemas.FunctionalOut)
 def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = Depends(get_db),
-                   current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                   current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.QA_ENGINEER))):
+    """2026-08 -- reported directly: "once assigned there are no other
+    option to reassign the tester or modify the tester." Previously only
+    ever callable while status was exactly PLANNING (the very first
+    assignment) by the QA Lead group -- see TESTER_REASSIGNABLE_STATUSES'
+    own comment on constants.py. Now callable through the whole active-
+    testing range, by either the QA Lead group OR any currently-assigned
+    tester on this request (self-handoff to another QA member, see
+    _require_assigned_qa_lead_or_current_tester above). Reassigning after
+    the initial PLANNING->TESTER_ASSIGNED transition deliberately does NOT
+    touch `status` -- a request already at, say, EXECUTION_IN_PROGRESS must
+    stay there after a tester swap, not regress back to "Tester Assigned"
+    and lose track of where the work actually is.
+
+    2026-08 Reassignment CR -- once this is a genuine reassignment (status
+    already past PLANNING), eligibility narrows to
+    _require_can_reassign_tester (current tester / QA Department Head /
+    Admin) and a reason becomes mandatory; the newly-added tester(s) are
+    notified, and a dedicated "Reassigned" audit row (with previous/new
+    names and the reason) is written alongside the existing history log
+    entry below."""
     obj = _get_or_404(db, req_id)
-    _require(obj, QAStatus.PLANNING, "Assign tester")
-    _require_assigned_qa_lead(obj, current_user)
+    _require(obj, TESTER_REASSIGNABLE_STATUSES, "Assign tester")
+    is_initial_assignment = obj.status == QAStatus.PLANNING
+    previous_ids = _assigned_tester_ids(obj)
+    if is_initial_assignment:
+        _require_assigned_qa_lead_or_current_tester(obj, current_user)
+    else:
+        _require_can_reassign_tester(obj, current_user)
+        reassignment.require_reason(payload.reason)
     if not payload.tester_ids:
         raise HTTPException(400, "At least one tester_id is required")
     unique_ids = list(dict.fromkeys(payload.tester_ids))
     testers = [_it_qa_user(db, tester_id, Role.QA_ENGINEER, f"tester_id {tester_id}") for tester_id in unique_ids]
     obj.assigned_tester_ids = ",".join(str(i) for i in unique_ids)
-    obj.status = QAStatus.TESTER_ASSIGNED
+    if is_initial_assignment:
+        obj.status = QAStatus.TESTER_ASSIGNED
     # Resolve to full names for the history log -- previously logged the raw
     # numeric ids (e.g. "Assigned tester user ids: [3]"), which meant nothing
     # to anyone reading the History tab. Falls back to "user #<id>" for any
     # id that doesn't resolve (e.g. a since-deleted account).
     name_by_id = {u.id: u.full_name for u in testers}
     tester_names = [name_by_id[i] for i in unique_ids]
-    _log(db, obj.id, "Planning", current_user, "Tester Assigned", f"Assigned tester(s): {', '.join(tester_names)}")
+    decision = "Tester Assigned" if is_initial_assignment else "Tester Reassigned"
+    step = "Planning" if is_initial_assignment else QA_REQUEST_STATUS_LABELS.get(obj.status, obj.status)
+    _log(db, obj.id, step, current_user, decision, f"Assigned tester(s): {', '.join(tester_names)}")
+    if not is_initial_assignment:
+        previous_users = db.query(models.User).filter(models.User.id.in_(previous_ids)).all() if previous_ids else []
+        previous_label = ", ".join(u.full_name for u in previous_users) if previous_users else "Unassigned"
+        reassignment.record_reassignment(
+            db, "FUNCTIONAL_REQUEST", obj.id, current_user,
+            previous_label, ", ".join(tester_names), payload.reason,
+        )
+        for new_id in set(unique_ids) - previous_ids:
+            reassignment.notify_new_assignee(
+                db, new_id, "FUNCTIONAL_REQUEST", obj.id, obj.request_id,
+                f"You have been assigned as tester on {obj.request_id}.", current_user.id,
+            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -477,25 +606,146 @@ def start_test_design(req_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/{req_id}/start-execution", response_model=schemas.FunctionalOut)
-def start_execution(req_id: int, db: Session = Depends(get_db),
+def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
+                     db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.TEST_DESIGN, "Start execution")
     _require_assigned_tester(obj, current_user)
+    # A link can be created from either side of the relationship. Resolve it
+    # before evaluating this request so starting from Functional never asks
+    # for (or creates) a second link when Test Lifecycle already linked one.
+    existing_link = (db.query(models.TestCycleChildRequestLink)
+                     .filter_by(child_type="Functional", child_id=obj.id)
+                     .order_by(models.TestCycleChildRequestLink.id.asc())
+                     .first())
+    cycle = existing_link.cycle if existing_link else None
+    if payload.link_test_cycle:
+        if payload.test_cycle_id is None:
+            raise HTTPException(400, "Select a test cycle before starting execution")
+        selected_cycle = (db.query(models.TestCycle)
+                          .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+                          .filter(models.TestCycle.id == payload.test_cycle_id,
+                                  models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
+                          models.TestCycle.status == "In Progress")
+                          .first())
+        if not selected_cycle:
+            raise HTTPException(400, "The selected test cycle is no longer active or eligible")
+        if existing_link and existing_link.cycle_id != selected_cycle.id:
+            raise HTTPException(400, f"Test cycle {cycle.cycle_key} is already linked to this request")
+        cycle = selected_cycle
+        application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
+        if (application_master_id and cycle.project.application_master_id is not None
+                and cycle.project.application_master_id != application_master_id):
+            raise HTTPException(400, "The selected test cycle is not relevant to this request's application")
+        cycle_link = db.query(models.TestCycleChildRequestLink).filter_by(cycle_id=cycle.id).first()
+        if cycle_link:
+            if cycle_link.child_type != "Functional" or cycle_link.child_id != obj.id:
+                raise HTTPException(400, "This test cycle is already linked to another request")
+        else:
+            db.add(models.TestCycleChildRequestLink(
+                cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
+            ))
     obj.status = QAStatus.EXECUTION_IN_PROGRESS
-    _log(db, obj.id, "Test Design", current_user, "Execution Started", None)
+    _log(
+        db, obj.id, "Test Design", current_user, "Execution Started",
+        f"Linked test cycle {cycle.cycle_key} - {cycle.name}" if cycle else "Started without a linked test cycle",
+    )
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.get("/{req_id}/eligible-test-cycles", response_model=List[schemas.EligibleTestCycleOut])
+def eligible_test_cycles(req_id: int, db: Session = Depends(get_db),
+                         current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+    obj = _get_or_404(db, req_id)
+    _require(obj, QAStatus.TEST_DESIGN, "List eligible test cycles")
+    _require_assigned_tester(obj, current_user)
+    query = (db.query(models.TestCycle)
+             .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+             .outerjoin(models.TestCycleChildRequestLink, models.TestCycleChildRequestLink.cycle_id == models.TestCycle.id)
+             .filter(models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
+                     models.TestCycle.status == "In Progress",
+                     models.TestCycleChildRequestLink.id.is_(None)))
+    application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
+    if application_master_id:
+        # Older Test Projects and projects created without an Application
+        # Master mapping have NULL here. They are still valid candidates;
+        # only projects explicitly mapped to a different application are
+        # irrelevant and excluded.
+        query = query.filter(or_(
+            models.TestProject.application_master_id == application_master_id,
+            models.TestProject.application_master_id.is_(None),
+        ))
+    cycles = query.order_by(models.TestCycle.created_at.desc()).all()
+    return [{
+        "id": cycle.id, "cycle_key": cycle.cycle_key, "project_id": cycle.project_id,
+        "project_key": cycle.project.project_key, "project_name": cycle.project.name,
+        "name": cycle.name, "status": cycle.status, "start_date": cycle.start_date,
+        "end_date": cycle.end_date,
+    } for cycle in cycles]
+
+
+@router.delete("/{req_id}/test-cycles/{cycle_id}", response_model=schemas.FunctionalOut)
+def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
+                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+    obj = _get_or_404(db, req_id)
+    can_manage = (current_user.has_role(Role.ADMIN) or obj.qa_lead_id == current_user.id
+                  or current_user.id in _assigned_tester_ids(obj))
+    if not can_manage:
+        raise HTTPException(403, "Only the assigned QA Lead or Tester can unlink this test cycle")
+    link = db.query(models.TestCycleChildRequestLink).filter_by(
+        cycle_id=cycle_id, child_type="Functional", child_id=obj.id,
+    ).first()
+    if not link:
+        raise HTTPException(404, "This test cycle is not linked to the Functional Testing request")
+    if link.cycle.status in ("Blocked", "Completed"):
+        raise HTTPException(400, f"This Test Cycle is {link.cycle.status} and its request link cannot be changed")
+    cycle_key = link.cycle.cycle_key
+    cycle_name = link.cycle.name
+    db.delete(link)
+    _log(db, obj.id, "Test Execution", current_user, "Test Cycle Unlinked",
+         f"Unlinked test cycle {cycle_key} - {cycle_name}")
+    db.add(models.ApprovalAction(
+        entity_type="TEST_CYCLE", entity_id=cycle_id, step_name="Request Link",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision="Functional Request Unlinked", comments=f"Unlinked {obj.request_id}",
+    ))
     db.commit()
     db.refresh(obj)
     return obj
 
 
 # ---- Defect -> Fix -> Retest -> Regression cycle ----
+# Workflow change (reported directly: "raise defect, start retest currently
+# not required as everything is linked with test cycle"): once a Test Cycle
+# is linked to this request (see start_execution's link_test_cycle option),
+# defects are raised, tracked, and retested through Test Execution + the
+# Defects module -- both scoped to that Test Cycle -- instead of this
+# request's own manual Defect Raised -> Waiting For Fix -> Retesting states.
+# This whole 3-endpoint sub-flow (raise_defect/mark_waiting_for_fix/
+# start_retesting) is therefore now reachable only for a request that was
+# started WITHOUT linking a cycle (still a supported path -- see
+# eligible_test_cycles/start_execution's own link_test_cycle=False branch),
+# where it remains the only defect-tracking mechanism available. See
+# complete_qa below for the matching linked-cycle-completion gate.
+def _require_no_linked_cycle_for_manual_defect_flow(obj: "models.FunctionalRequest", action: str) -> None:
+    if obj.linked_test_cycles:
+        raise HTTPException(
+            400,
+            f"'{action}' is not used once a Test Cycle is linked -- raise, fix, and retest defects from "
+            "Test Execution / the Defects module against the linked Test Cycle instead.",
+        )
+
+
 @router.post("/{req_id}/raise-defect", response_model=schemas.FunctionalOut)
 def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.EXECUTION_IN_PROGRESS, "Raise defect")
     _require_assigned_tester(obj, current_user)
+    _require_no_linked_cycle_for_manual_defect_flow(obj, "Raise Defect")
     obj.status = QAStatus.DEFECT_RAISED
     _log(db, obj.id, "Execution In Progress", current_user, "Defect Raised", payload.comments)
     db.commit()
@@ -545,6 +795,24 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING], "Complete QA")
     _require_assigned_tester(obj, current_user)
 
+    # Workflow change (reported directly): once execution is tracked through
+    # a linked Test Cycle, that cycle's own lifecycle is the real record of
+    # whether testing actually finished -- QA Complete can no longer jump
+    # ahead of it. Every linked cycle must reach "Completed" first. A
+    # request that was started without linking a cycle (link_test_cycle=
+    # False at Start Execution) has nothing to wait on and keeps today's
+    # behavior unchanged. See raise_defect's matching comment above for why
+    # the Defect Raised/Waiting For Fix/Retesting states are no longer part
+    # of this path once a cycle is linked.
+    open_cycles = [cycle for cycle in obj.linked_test_cycles if cycle.status != "Completed"]
+    if open_cycles:
+        names = ", ".join(f"{cycle.cycle_key} ({cycle.status})" for cycle in open_cycles)
+        raise HTTPException(
+            400,
+            f"Mark QA Complete requires every linked Test Cycle to reach Completed first. "
+            f"Still open: {names}",
+        )
+
     obj.status = QAStatus.QA_COMPLETED
     _log(db, obj.id, "Execution", current_user, "QA Completed", payload.comments)
     db.commit()
@@ -559,7 +827,16 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.QA_COMPLETED, "Request sign-off")
-    _require_assigned_tester(obj, current_user)
+    # 2026-08 -- reported directly: "'Request Sign Off' button is not
+    # enable[d] for QA lead ... if tester [is] no[t] available then at
+    # least [o]n behalf of QA he can raise the request." Previously this
+    # called _require_assigned_tester, which only ever let the literal
+    # assigned tester (or Admin) through -- the route's own
+    # require_roles(QA_LEAD, QA_ENGINEER) above never actually reached a
+    # QA Lead in practice. Now the QA Lead group can always raise sign-off
+    # on a request they own, same "QA Lead group OR current tester" shape
+    # as tester reassignment.
+    _require_assigned_qa_lead_or_current_tester(obj, current_user, "request sign-off on this request")
     # The frontend now creates the QA Sign-off Certificate (POST /api/signoffs)
     # right before calling this, via SignOff.tsx's NewSignOffModal opened from
     # this request's own "Request Sign-off" button -- link it immediately
@@ -579,7 +856,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
 
 @router.post("/{req_id}/confirm-signoff", response_model=schemas.FunctionalOut)
 def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """Confirms the QA Sign-off certificate (optionally linking a Module 8 QASignOff
     record created via /api/signoffs) and hands the request to the requester for
     final verification.
@@ -638,7 +915,7 @@ def get_checklist(req_id: int, db: Session = Depends(get_db), current_user: mode
 @router.put("/{req_id}/checklist/{item_id}", response_model=schemas.ChecklistItemOut)
 def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistItemUpdate,
                            db: Session = Depends(get_db),
-                           current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                           current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     item = db.query(models.ReadinessChecklistItem).filter_by(id=item_id, functional_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")
@@ -664,7 +941,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistI
     if payload.is_complete:
         item.approved_by_id = current_user.id
         import datetime
-        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        item.approved_at = models.now()
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -700,7 +977,7 @@ def acknowledge_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_d
         raise HTTPException(404, "Walkthrough session not found")
     import datetime
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj
@@ -779,7 +1056,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         subtitle="Functional QA Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -815,9 +1092,9 @@ def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) ->
                   QAStatus.REQUESTER_VERIFICATION):
         return obj.requester_id == user.id
     if status == QAStatus.SM_APPROVAL_PENDING:
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     # Every QA-activity/post-approval/terminal status -- locked for everyone
     # but Admin until the request is returned to the requester above.
     return False
@@ -851,9 +1128,9 @@ def _can_edit_details(obj: "models.FunctionalRequest", user: models.User) -> boo
                   QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD):
         return obj.requester_id == user.id
     if status == QAStatus.SM_APPROVAL_PENDING:
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     return False
 
 

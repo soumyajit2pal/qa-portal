@@ -1,14 +1,12 @@
-import datetime
 import io
 from typing import List, Optional
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 import openpyxl
 
-from .. import models, schemas
+from .. import cache, models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department
 from ..constants import Role, GatewayStatus
@@ -22,6 +20,16 @@ from ..constants import Role, GatewayStatus
 from .qa_requests import _finalize_child_requests
 
 router = APIRouter(prefix="/api/application-names", tags=["application-names"])
+
+# CAC-001..007 -- same rationale as departments.py: this is the QA Request
+# wizard's Application Name dropdown, read very frequently and changed only
+# when a name clears approval or an Admin bulk-seeds a batch.
+_APPROVED_NAMES_CACHE_KEY = "refdata:application-names:approved:v1"
+_APPROVED_NAMES_CACHE_TTL = 300
+
+
+def _invalidate_approved_names_cache() -> None:
+    cache.delete(_APPROVED_NAMES_CACHE_KEY)
 
 
 def _log_application_name_decision(db: Session, obj: "models.ApplicationMaster", tier_label: str,
@@ -120,7 +128,7 @@ def _approve_pending_application_name(db: Session, obj: "models.ApplicationMaste
     since decide_app_owner_name already does so unconditionally after this
     runs (for both Approve and Reject) and bulk-seeding wants its own
     distinct comment text on that activity entry."""
-    now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    now = models.now()
     obj.app_owner_decided_by_id = current_user.id
     obj.app_owner_decided_at = now
     obj.app_owner_comments = comments
@@ -140,9 +148,49 @@ def list_application_names(db: Session = Depends(get_db), current_user: models.U
     Application Name dropdown (see frontend QARequests/steps/DetailsStep.tsx).
     Anyone logged in can see the full approved list; there's nothing
     sensitive about a standardised application name."""
-    return (db.query(models.ApplicationMaster)
+    cached = cache.get_json(_APPROVED_NAMES_CACHE_KEY)
+    if cached is not None:
+        return cached
+    rows = (db.query(models.ApplicationMaster)
             .filter(models.ApplicationMaster.status == "APPROVED")
             .order_by(models.ApplicationMaster.name).all())
+    result = [schemas.ApplicationMasterOut.model_validate(row).model_dump(mode="json") for row in rows]
+    cache.set_json(_APPROVED_NAMES_CACHE_KEY, result, _APPROVED_NAMES_CACHE_TTL)
+    return result
+
+
+@router.patch("/{app_id}/department", response_model=schemas.ApplicationMasterOut)
+def update_application_department(
+    app_id: int,
+    payload: schemas.ApplicationMasterDepartmentUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    """Assign an existing application master to an active system department.
+
+    Linked Test Projects carry a denormalised department value for filtering,
+    so keep those rows synchronized with the application master update.
+    """
+    obj = db.query(models.ApplicationMaster).get(app_id)
+    if not obj:
+        raise HTTPException(404, "Application not found")
+    department = payload.department.strip()
+    if not department:
+        raise HTTPException(400, "Department is required")
+    active_department = (db.query(models.Department)
+                         .filter(models.Department.name == department,
+                                 models.Department.is_active == True)  # noqa: E712 - Oracle boolean column
+                         .first())
+    if not active_department:
+        raise HTTPException(400, "Select an active department from the system department list")
+    obj.department = active_department.name
+    (db.query(models.TestProject)
+       .filter(models.TestProject.application_master_id == obj.id)
+       .update({models.TestProject.department: active_department.name}, synchronize_session=False))
+    db.commit()
+    db.refresh(obj)
+    _invalidate_approved_names_cache()
+    return obj
 
 
 @router.get("/pending-app-owner", response_model=List[schemas.ApplicationMasterOut])
@@ -159,7 +207,7 @@ def list_pending_app_owner_names(db: Session = Depends(get_db),
     department's."""
     q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
     if not current_user.has_role(Role.ADMIN):
-        q = q.filter(models.ApplicationMaster.department == current_user.department)
+        q = q.filter(models.ApplicationMaster.department.in_(current_user.departments))
     return q.order_by(models.ApplicationMaster.created_at).all()
 
 
@@ -177,7 +225,7 @@ def list_pending_application_names(db: Session = Depends(get_db),
     applied here as a filter instead of a hard error)."""
     q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_SM")
     if not current_user.has_role(Role.ADMIN):
-        q = q.filter(models.ApplicationMaster.department == current_user.department)
+        q = q.filter(models.ApplicationMaster.department.in_(current_user.departments))
     return q.order_by(models.ApplicationMaster.created_at).all()
 
 
@@ -242,7 +290,7 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
         # helper -- see its own docstring.
         _approve_pending_application_name(db, obj, current_user, payload.comments)
     else:
-        now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        now = models.now()
         obj.app_owner_decided_by_id = current_user.id
         obj.app_owner_decided_at = now
         obj.app_owner_comments = payload.comments
@@ -280,6 +328,7 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
     _log_application_name_decision(db, obj, "Application Owner", payload.decision, current_user, payload.comments)
     db.commit()
     db.refresh(obj)
+    _invalidate_approved_names_cache()
     return obj
 
 
@@ -319,7 +368,7 @@ def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecis
         raise HTTPException(400, "decision must be one of: Approved, Rejected")
     obj.status = "APPROVED" if payload.decision == "Approved" else "REJECTED"
     obj.decided_by_id = current_user.id
-    obj.decided_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.decided_at = models.now()
     obj.comments = payload.comments
     if obj.status == "REJECTED":
         reason = f"Application Name '{obj.name}' was rejected by SM"
@@ -336,6 +385,7 @@ def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecis
     _log_application_name_decision(db, obj, "SM", payload.decision, current_user, payload.comments)
     db.commit()
     db.refresh(obj)
+    _invalidate_approved_names_cache()
     return obj
 
 
@@ -486,6 +536,8 @@ async def bulk_seed_application_names(file: UploadFile = File(...), db: Session 
         created += 1
 
     db.commit()
+    if created or approved_existing:
+        _invalidate_approved_names_cache()
     failure_reason = None
     if created == 0 and approved_existing == 0:
         failure_reason = errors[0] if errors else (

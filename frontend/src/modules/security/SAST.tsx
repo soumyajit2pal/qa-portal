@@ -6,8 +6,10 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisi
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { SASTOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import RoleGroupLink from '../../components/RoleGroupLink'
+import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
+import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 // One "SAST component" = one repository, with its own branch/commit/tech
 // stack/build number -- the "+" adds a whole new one of these (not just
@@ -63,7 +65,7 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   // canDeptHeadDecide -- this modal only opens via that same gate, but the
   // checklist evidence controls inside it need their own explicit check.
   const isRequesterModal = editing.requester_id === user?.id || isAdmin
-  const sameDeptModal = !!user?.department && user.department === editing.department
+  const sameDeptModal = hasDepartment(user, editing.department)
   const canSMDecideModal = hasRole(user, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
   const canDeptHeadDecideModal = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
   const canManageEvidenceModal = isAdmin || (
@@ -130,7 +132,7 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
       )}
       <form onSubmit={submit}>
         <div className="form-section">
-          <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div>
+          {/* <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div> */}
           <div className="form-row">
             <Field label="Application Name *"><input required disabled={!isAdmin} value={form.application_name} onChange={(e) => set('application_name', e.target.value)} /></Field>
             <Field label="Epic Number *"><input required disabled={!isAdmin} value={form.epic_number} onChange={(e) => set('epic_number', e.target.value)} /></Field>
@@ -235,6 +237,62 @@ const SAST_COMPONENT_COLUMNS: TableColumn<SASTComponentOut>[] = [
   { key: 'build_number', header: 'Build Number', render: (c) => c.build_number || '—' },
 ]
 
+// Reported directly (same bug as Functional's "Assigned Group"): this used
+// to hardcode "QA Lead" unconditionally regardless of the request's actual
+// status. Maps the real backend status (see routers/sast_dast.py's shared
+// status-transition helpers -- SM_APPROVAL_PENDING gated by Role.SM,
+// DEPARTMENT_HEAD_APPROVAL_PENDING by Role.DEPARTMENT_HEAD_CM/AGM,
+// SECURITY_LEAD_ASSIGNED/SECURITY_READINESS/PLANNING by Role.QA_LEAD, and
+// -- unlike Functional -- everything from CONFIGURATION through
+// REPORT_READY by Role.SECURITY_ANALYST, not QA Lead) to whichever group is
+// genuinely holding the request right now. Returns null for every
+// requester-owned/terminal status.
+// Derived from SAST_DAST_PENDING_WITH (constants.ts) -- the same table that
+// already drives the list's "Pending With" column and is itself kept in
+// exact sync with sast_dast.py's require_roles()/_require_assigned_security_analyst()
+// gates -- rather than re-deriving its own status list. This also fixes a
+// bug in an earlier draft of this helper, which had put WAITING_FOR_FIX
+// under Security Analyst: per PENDING_WITH's own comment, that stage is
+// "Requester" -- the analyst has handed the finding back for a fix and is
+// not the one blocking progress, even though an analyst/admin may also
+// click "Mark Fixed" (see sast_dast.py::_mark_fixed).
+function assignedGroupFor(
+  status: string,
+  applicationMasterStatus?: string | null,
+  department?: string | null,
+): { role: string | string[]; label: string; department?: string | null } | null {
+  // Reported directly (Application Owner group link): while status is still
+  // SM_APPROVAL_PENDING but the Application Name is awaiting the
+  // Application Owner (applicationNameAwareStatusLabel, same as the Status
+  // badge override), the work is with the Application Owner, not the SM --
+  // checked first since this is a sub-state of SM_APPROVAL_PENDING, not its
+  // own status value. `department` scopes RoleGroupLink's member list, since
+  // Application Owner is department-enforced server-side (require_same_department
+  // in decide_app_owner_name).
+  if (applicationNameAwareStatusLabel(status, applicationMasterStatus)) {
+    return { role: 'APPLICATION_OWNER', label: 'Application Owner', department }
+  }
+  const pendingWith = SAST_DAST_PENDING_WITH[status]
+  // Reported directly: "SM mapping should be based on department level. but
+  // SM group details showing those are from different department." SM and
+  // Department Head are BOTH department-scoped roles enforced server-side
+  // (require_same_department, sast_dast.py) exactly like Application Owner
+  // above -- `department` was missing here, so RoleGroupLink showed every
+  // SM/Department Head in the system instead of just the ones who could
+  // actually act on this request.
+  if (pendingWith === 'SM') return { role: 'SM', label: 'SM', department }
+  if (pendingWith === 'Department Head') {
+    return { role: ['DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM'], label: 'Department Head', department }
+  }
+  // Reported directly: this "QA Lead group members" list should only show
+  // literal QA_LEAD role holders -- Chief Manager - QA / AGM - QA act on
+  // this work via their own separate Executive bypass (isAssignedQALead
+  // below), not by being members of the QA Lead group.
+  if (pendingWith === 'QA Lead') return { role: 'QA_LEAD', label: 'QA Lead' }
+  if (pendingWith === 'Security Analyst') return { role: 'SECURITY_ANALYST', label: 'Security Analyst' }
+  return null
+}
+
 function SASTDetail({ req, onClose, onChanged, users }: {
   req: SASTOut; onClose: () => void; onChanged: (s: SASTOut) => void; users: UserOut[]
 }) {
@@ -246,6 +304,11 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const [comments, setComments] = useState('')
   const [selectedQALead, setSelectedQALead] = useState('')
   const [selectedAnalyst, setSelectedAnalyst] = useState('')
+  // 2026-08 Reassignment CR -- mandatory only when this is a genuine
+  // reassignment (status already past the initial PLANNING assignment);
+  // backend enforces this too (reassignment.require_reason). Reset once the
+  // assignment actually changes (i.e. on success).
+  const [reassignAnalystReason, setReassignAnalystReason] = useState('')
   // Whether the "require Department Head re-approval on return" popup (see
   // canReadinessDecide below) is open -- an always-visible checkbox next to
   // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
@@ -269,6 +332,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   }, [req.id])
 
   useEffect(() => { load() }, [load])
+  useEffect(() => { setReassignAnalystReason('') }, [req.id, req.security_analyst_id])
 
   async function toggleChecklistItem(item: ChecklistItemOut) {
     setError(null)
@@ -304,33 +368,39 @@ function SASTDetail({ req, onClose, onChanged, users }: {
     }
     if (!noFindings) setTab('findings')
   }
+  // Previously re-fetched the ENTIRE /api/sast-requests list just to find
+  // this one row by id and discard the rest -- besides the obvious waste,
+  // now that that endpoint is paginated (PAG-001..010) it would silently
+  // break too: this request's row might not even be on the default first
+  // page. A direct GET of the single record is both the fix and the
+  // simplification (PAG-006's own "detail endpoint" pattern).
   async function addFinding(e: React.FormEvent) {
     e.preventDefault()
     try {
       await api.post(`/api/sast-requests/${req.id}/findings`, finding)
-      const fresh = await api.get<SASTOut[]>('/api/sast-requests')
-      const updated = fresh.find((r) => r.id === req.id)
-      if (updated) onChanged(updated)
+      onChanged(await api.get<SASTOut>(`/api/sast-requests/${req.id}`))
       setFinding({ issue_id: '', severity: 'Medium', description: '' })
     } catch (err) { setError(err) }
   }
   async function resolveFinding(findingId: number) {
     try {
       await api.post(`/api/sast-requests/${req.id}/findings/${findingId}/resolve`, {})
-      const fresh = await api.get<SASTOut[]>('/api/sast-requests')
-      const updated = fresh.find((r) => r.id === req.id)
-      if (updated) onChanged(updated)
+      onChanged(await api.get<SASTOut>(`/api/sast-requests/${req.id}`))
     } catch (err) { setError(err) }
   }
 
   const isAdmin = hasRole(user, 'ADMIN')
   const isRequester = req.requester_id === user?.id || isAdmin
   const status = req.status
-  const sameDept = !!user?.department && user.department === req.department
-  const isAssignedQALead = isAdmin || (hasRole(user, 'QA_LEAD') && req.security_lead_id === user?.id)
+  const sameDept = hasDepartment(user, req.department)
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+  // gated action, same as Admin, without being listed as "QA Lead group"
+  // members (display-only concern, see assignedGroupFor above). See
+  // ORACLE_MIGRATION_2026-07.md section 59.
+  const isAssignedQALead = isAdmin || hasRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   const isAssignedAnalyst = isAdmin || (hasRole(user, 'SECURITY_ANALYST') && req.security_analyst_id === user?.id)
-  const qaLeads = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('QA_LEAD'))
-  const securityAnalysts = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('SECURITY_ANALYST'))
+  const qaLeads = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_LEAD'))
+  const securityAnalysts = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('SECURITY_ANALYST'))
 
   // Edit access mirrors the backend's own _can_edit_details exactly (see
   // update_sast): the requester (or admin) may edit while it's Draft or
@@ -411,7 +481,23 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // distinct from pendingChecklistItems above, which gates Security
   // Readiness's own independent verification instead.
   const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
-  const canAssignSecurityAnalyst = isAssignedQALead && status === 'PLANNING'
+  const isInitialAnalystAssignment = status === 'PLANNING'
+  // 2026-08 Reassignment CR, reported directly: "Everywhere the system
+  // provides an Assign option ... it must also provide a Reassign option.
+  // Reassignment shall be permitted to: the current assignee, the
+  // Department Head of the department to which the current assignee
+  // belongs, or Admin users." Previously Assign Security Analyst was
+  // single-shot (QA Lead group, PLANNING only, no self-handoff). Now
+  // reassignable through the rest of the active-scan window too -- see
+  // SAST_DAST_ANALYST_REASSIGNABLE_STATUSES. Then, reported directly again:
+  // QA_LEAD is required to keep reassignment rights too, restoring parity
+  // with isAssignedQALead (which already gates the first assignment).
+  // Mirrors sast_dast.py's _require_can_reassign_security_analyst exactly.
+  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
+  const canReassignSecurityAnalyst = isAssignedAnalyst || isQADepartmentHead || hasRole(user, 'QA_LEAD')
+  const canAssignSecurityAnalyst =
+    (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&
+    SAST_DAST_ANALYST_REASSIGNABLE_STATUSES.includes(status)
   const canStartScan = isAssignedAnalyst && status === 'CONFIGURATION'
   // Findings can be logged while still scanning, and -- this is the bit that
   // was missing -- after Complete Scan answers "findings identified", which
@@ -508,7 +594,12 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
           <DetailSection title="People">
             <DetailField label="Requester">{userName(users, req.requester_id) || '—'}</DetailField>
-            <DetailField label="Assigned QA Lead">{userName(users, req.security_lead_id) || 'Not assigned'}</DetailField>
+            <DetailField label="Assigned Group">
+              {(() => {
+                const assigned = assignedGroupFor(req.status, req.application_master_status, req.department)
+                return assigned ? <RoleGroupLink users={users} role={assigned.role} label={assigned.label} department={assigned.department} /> : '—'
+              })()}
+            </DetailField>
             <DetailField label="Assigned Security Analyst">{userName(users, req.security_analyst_id) || 'Not assigned'}</DetailField>
           </DetailSection>
 
@@ -535,9 +626,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
           <div className="section-title">Workflow Actions</div>
           <div className="actions-panel">
-            <Field label="Action note (optional)">
-              <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
-            </Field>
             <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
               <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/sast-requests/${req.id}/export`, `${req.request_id}.pdf`)}>
                 Export PDF
@@ -583,8 +671,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                       : undefined
                   }
                   onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                  onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
-                  onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+                  onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                  onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
                 />
               )}
               {canDeptHeadDecide && (
@@ -600,21 +688,12 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                       ? 'Mandatory Security Readiness checklist item(s) are not self-declared ready -- see the notice above.'
                       : undefined
                   }
-                  extraControlLabel="Assign IT-QA QA Lead"
-                  extraControl={
-                    <UserAssignSelect
-                      value={selectedQALead}
-                      onChange={setSelectedQALead}
-                      users={qaLeads}
-                      placeholder="Select QA Lead..."
-                      disabled={busy}
-                      style={{ minWidth: 260 }}
-                    />
-                  }
-                  extraReady={!!selectedQALead}
-                  onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed, qa_lead_id: Number(selectedQALead) })}
-                  onReturn={() => act('department-head-decision', { decision: 'Returned', comments })}
-                  onReject={() => act('department-head-decision', { decision: 'Rejected', comments })}
+                  extraControlLabel="Assign to group"
+                  extraControl={<RoleGroupLink users={users} role="QA_LEAD" label="QA Lead" />}
+                  extraReady
+                  onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed })}
+                  onReturn={(actionNote) => act('department-head-decision', { decision: 'Returned', comments: actionNote })}
+                  onReject={(actionNote) => act('department-head-decision', { decision: 'Rejected', comments: actionNote })}
                 />
               )}
               {canStartReadiness && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-readiness')}>Start Security Readiness</button>}
@@ -659,16 +738,29 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                     value={selectedAnalyst}
                     onChange={setSelectedAnalyst}
                     users={securityAnalysts}
-                    placeholder="Select Security Analyst..."
+                    placeholder={isInitialAnalystAssignment ? 'Select Security Analyst...' : 'Reassign Security Analyst...'}
                     disabled={busy}
                     style={{ minWidth: 260 }}
                   />
+                  {!isInitialAnalystAssignment && (
+                    <input
+                      className="reassign-reason-input"
+                      style={{ minWidth: 220 }}
+                      placeholder="Reason for reassignment *"
+                      value={reassignAnalystReason}
+                      onChange={(e) => setReassignAnalystReason(e.target.value)}
+                      disabled={busy}
+                    />
+                  )}
                   <button
                     className="btn btn-primary btn-sm"
-                    disabled={busy || !selectedAnalyst}
-                    onClick={() => act('assign-security-analyst', { security_analyst_id: Number(selectedAnalyst) })}
+                    disabled={busy || !selectedAnalyst || (!isInitialAnalystAssignment && (Number(selectedAnalyst) === req.security_analyst_id || !reassignAnalystReason.trim()))}
+                    onClick={() => act('assign-security-analyst', {
+                      security_analyst_id: Number(selectedAnalyst),
+                      ...(isInitialAnalystAssignment ? {} : { reason: reassignAnalystReason.trim() }),
+                    })}
                   >
-                    Assign Security Analyst
+                    {isInitialAnalystAssignment ? 'Assign Security Analyst' : 'Reassign Security Analyst'}
                   </button>
                 </>
               )}
@@ -811,21 +903,34 @@ function userName(users: UserOut[], id?: number | null): string | null {
 }
 
 export default function SAST() {
-  const [rows, setRows] = useState<SASTOut[]>([])
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight SASTListOut
+  // shape; opening a request fetches the full SASTOut record fresh via
+  // GET /api/sast-requests/{id} before SASTDetail (which needs every field)
+  // is shown.
   const [selected, setSelected] = useState<SASTOut | null>(null)
+  const [openingId, setOpeningId] = useState<number | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
-  const load = useCallback(async () => {
-    try { setRows(await api.get<SASTOut[]>('/api/sast-requests')) } catch (err) { setError(err) }
-  }, [])
-  useEffect(() => { load() }, [load])
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<SASTListOut>('/api/sast-requests', {})
+
   useEffect(() => {
     // Full user list -- not just security analysts -- so both the Security
     // Lead assignment dropdown and the "Requester" field on the detail view
     // can resolve names from a single fetch.
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
+  }, [])
+
+  const openRequest = useCallback(async (idOrRow: number | SASTListOut) => {
+    const id = typeof idOrRow === 'number' ? idOrRow : idOrRow.id
+    setOpeningId(id)
+    try {
+      setSelected(await api.get<SASTOut>(`/api/sast-requests/${id}`))
+    } catch (err) { setError(err) } finally { setOpeningId(null) }
   }, [])
 
   // Deep-link support -- see the matching effect in Functional.tsx for the
@@ -835,28 +940,34 @@ export default function SAST() {
     const openId = searchParams.get('open')
     if (!openId || rows.length === 0) return
     const match = rows.find((r) => r.request_id === openId)
-    if (match) setSelected(match)
+    if (match) openRequest(match.id)
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams])
+  }, [rows, searchParams, setSearchParams, openRequest])
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="SAST Requests" count={rows.length}
+        title="SAST Requests" count={total}
         subtitle="Static Application Security Testing requests, from submission through findings and report sign-off. Raised via a QA Request (include SAST in its request types) -- not created standalone here."
       />
       <Card>
-        <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
-          { key: 'request_id', header: 'Request ID' },
+        <Table rowKey="id" onRowClick={(r) => openRequest(r)}
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
+          columns={[
+          {
+            key: 'request_id',
+            header: 'Request ID',
+            render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
+          },
           { key: 'application_name', header: 'Application' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
-          { key: 'security_lead_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.security_lead_id) || 'Not assigned', filterValue: (r) => userName(users, r.security_lead_id) || '' },
+          { key: 'security_lead_id', header: 'Assigned Group', render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '—', filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '—'), filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '') },
-          { key: 'findings', header: 'Findings', render: (r) => r.findings.length, filterValue: (r) => String(r.findings.length) },
+          { key: 'findings', header: 'Findings', render: (r) => r.findings_count, filterValue: (r) => String(r.findings_count) },
           { key: 'source', header: 'Source', render: (r) => (
             r.qa_request ? (
               <span className="badge badge-blue" title="Auto-created from a QA Request">
@@ -870,7 +981,7 @@ export default function SAST() {
       </Card>
       {selected && (
         <SASTDetail
-          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }}
+          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); reload() }}
           users={users}
         />
       )}

@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { api } from '../../api'
-import { Card, ErrorText, PageHeader } from '../../components/Common'
+import { Card, ErrorText, PageHeader, Table } from '../../components/Common'
 import { REPORTS } from '../../constants'
 
 const GROUPS = ['Operational', 'Security', 'Management']
@@ -26,24 +26,27 @@ export default function Reports() {
       />
       {GROUPS.map((group) => (
         <Card key={group} title={`${group} Reports`}>
-          <table>
-            <thead><tr><th>Report</th><th>Export</th></tr></thead>
-            <tbody>
-              {REPORTS.filter((r) => r.group === group).map((r) => (
-                <tr key={r.key}>
-                  <td>{r.label}</td>
-                  <td style={{ display: 'flex', gap: 8 }}>
+          <Table
+            tableId={`reports-${group.toLowerCase()}`}
+            rowKey="key"
+            rows={REPORTS.filter((r) => r.group === group)}
+            columns={[
+              { key: 'label', header: 'Report' },
+              {
+                key: 'export', header: 'Export', filterable: false,
+                render: (r) => (
+                  <div style={{ display: 'flex', gap: 8 }}>
                     {['xlsx', 'pdf', 'csv'].map((fmt) => (
                       <button key={fmt} className="btn btn-sm" disabled={busyKey === `${r.key}-${fmt}`}
                               onClick={() => download(r.key, fmt)}>
                         {busyKey === `${r.key}-${fmt}` ? '...' : fmt.toUpperCase()}
                       </button>
                     ))}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </div>
+                ),
+              },
+            ]}
+          />
         </Card>
       ))}
     </div>

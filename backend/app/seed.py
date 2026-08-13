@@ -19,20 +19,21 @@ DEMO_USERS = [
     ("requester1", "Requester 1", Role.REQUESTER, "IT - Software"),
     ("requester2", "Requester 2", Role.REQUESTER, "IT - Software"),
     ("ba1", "BA 1", Role.BUSINESS_ANALYST, "IT - Software"),
-    ("qa1", "QA 1", Role.QA_ENGINEER, "IT - QA"),
-    ("qa2", "QA 2", Role.QA_ENGINEER, "IT - QA"),
-    ("qalead1", "QA Lead 1", Role.QA_LEAD, "IT - QA"),
-    ("cm1", "Dep head CM 1", Role.DEPARTMENT_HEAD_COE_CM, "IT - QA"),
-    ("agm1", "Dep head COE 1", Role.DEPARTMENT_HEAD_COE_AGM, "IT - QA"),
-    ("security1", "SA 1", Role.SECURITY_ANALYST, "IT - QA"),
+    ("qa1", "QA 1", Role.QA_ENGINEER, "COE - Quality Assurance"),
+    ("qa2", "QA 2", Role.QA_ENGINEER, "COE - Quality Assurance"),
+    # 2026-08: consolidated from 3 seed users (CHEIF_MANAGER_COE/
+    # CHEIF_MANAGER_QA/AGM_COE) down to these 2 -- see constants.py::Role's
+    # own comment on the role consolidation.
+    ("cheifmanagerqa1", "Chief Manager QA", Role.CHIEF_MANAGER_QA, "COE - Quality Assurance"),
+    ("agm1", "AGM QA 1", Role.AGM_QA, "COE - Quality Assurance"),
     ("appowner1", "App Owner 1", Role.APPLICATION_OWNER, "IT - Software"),
-    ("depthead1", "Department Head 1", Role.DEPARTMENT_HEAD_CM, "IT - Software"),
-    ("depthead2", "Department Head 2", Role.DEPARTMENT_HEAD_AGM, "IT - Software"),
+    ("depthead1", "Department Head CM 1", Role.DEPARTMENT_HEAD_CM, "IT - Software"),
+    ("depthead2", "Department Head AGM 1", Role.DEPARTMENT_HEAD_AGM, "IT - Software"),
     # New SM checkpoint role (sits between Requester and Department Head on
     # QA Request / SAST-DAST / Suppression workflows).
     ("sm1", "SM 1", Role.SM, "IT - Software"),
     ("sm2", "SM 2", Role.SM, "IT - Software"),
-    ("admin", "Administrator", Role.ADMIN, "IT - QA"),
+    ("admin", "Administrator", Role.ADMIN, "COE - Quality Assurance"),
 ]
 
 LEGACY_DEMO_NAMES = {
@@ -83,6 +84,14 @@ def run():
             db.add(models.User(
                 username=username, full_name=full_name, department=dept,
                 role_assignments=[models.UserRole(role=role)],
+                # 2026-08 "one user can be on multiple departments" CR --
+                # every demo user still gets exactly one department, seeded
+                # through the new department_assignments relationship (not
+                # just the legacy `department` column above) so seeded
+                # accounts behave identically to ones created through
+                # Admin.tsx post-migration, rather than relying on the
+                # User.departments property's own legacy-column fallback.
+                department_assignments=[models.UserDepartment(department=dept)] if dept else [],
                 email=f"{username}@bankofmaharashtra.bank.in",
                 login_type=LoginType.STANDARD,
                 hashed_password=hash_password(DEMO_PASSWORD),

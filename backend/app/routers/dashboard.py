@@ -2,14 +2,16 @@ import datetime
 from collections import Counter
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import models, cache
 from ..database import get_db
 from ..deps import get_current_user, dashboard_department_scope
 from ..constants import (
     Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
-    QA_DEPARTMENT,
+    QA_DEPARTMENT, QA_REQUEST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
+    SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
 )
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
@@ -35,8 +37,11 @@ def _join_qa_department(query, model, scope):
     everywhere else in the app."""
     if not scope:
         return query
+    # 2026-08 "one user can be on multiple departments" CR -- scope is now a
+    # list of departments (dashboard_department_scope's own docstring), so
+    # this is an `.in_()` membership filter, not `==`.
     return query.join(models.QARequest, model.qa_request_id == models.QARequest.id) \
-                .filter(models.QARequest.department == scope)
+                .filter(models.QARequest.department.in_(scope))
 
 
 def _date_bounds(date_from: str | None, date_to: str | None):
@@ -101,13 +106,13 @@ TESTER_WORKLOAD_STATUSES = [
 # 100% occupied. Lighter lifecycle stages consume a fraction of a slot. This
 # makes the dashboard an explainable capacity aid for QA Leads instead of a
 # relative "busiest person = 100%" chart whose meaning changes every day.
-TESTER_CAPACITY_POINTS = 3.0
+TESTER_CAPACITY_POINTS = 8.0
 FUNCTIONAL_TESTER_LOAD = {
     QAStatus.TESTER_ASSIGNED: 0.50,
     QAStatus.TEST_DESIGN: 1.00,
     QAStatus.EXECUTION_IN_PROGRESS: 1.00,
     QAStatus.DEFECT_RAISED: 0.50,
-    QAStatus.WAITING_FOR_FIX: 0.25,
+    QAStatus.WAITING_FOR_FIX: 0.00,
     QAStatus.RETESTING: 0.75,
     QAStatus.QA_COMPLETED: 0.15,
     QAStatus.QA_SIGNOFF_PENDING: 0.10,
@@ -130,9 +135,9 @@ SECURITY_ANALYST_LOAD = {
     "SCANNING": 1.00,
     "FINDING_VALIDATION": 0.75,
     "REMEDIATION": 0.50,
-    "ASSIGNED_TO_REQUESTER": 0.25,
-    "WAITING_FOR_FIX": 0.25,
-    "ASSIGNED_TO_LEAD": 0.50,
+    "ASSIGNED_TO_REQUESTER": 0.10,
+    "WAITING_FOR_FIX": 0.00,
+    "ASSIGNED_TO_LEAD": 0.10,
     "RESCAN": 0.75,
     "SECURITY_COMPLETE": 0.15,
     "REPORT_READY": 0.10,
@@ -182,7 +187,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     or overloaded. Shared requests divide their load across assigned testers."""
     qa_team_roles = {
         Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
-        Role.DEPARTMENT_HEAD_COE_CM, Role.DEPARTMENT_HEAD_COE_AGM,
+        Role.CHIEF_MANAGER_QA, Role.AGM_QA,
     }
     if not qa_team_roles.intersection(current_user.roles):
         raise HTTPException(403, "QA tester workload is restricted to the QA team")
@@ -190,17 +195,20 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
                   .join(models.UserRole, models.UserRole.user_id == models.User.id)
                   .filter(models.User.is_active == True,  # noqa: E712
                           models.UserRole.role.in_([Role.QA_ENGINEER, Role.SECURITY_ANALYST]),
-                          models.User.department == QA_DEPARTMENT)
+                          models.User.department_assignments.any(
+                              models.UserDepartment.department == QA_DEPARTMENT
+                          ))
                   .distinct().order_by(models.User.full_name).all())
-    functional_requests = (_in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at,
-                                      date_from, date_to)
+    # Period filters apply only to completed-work history below. Capacity is
+    # a current-state view, so an active assignment must never disappear just
+    # because its request was raised before the selected reporting window.
+    functional_requests = (db.query(models.FunctionalRequest)
                            .filter(models.FunctionalRequest.status.in_(TESTER_WORKLOAD_STATUSES)).all())
-    performance_requests = (_in_period(db.query(models.PerformanceRequest), models.PerformanceRequest.created_at,
-                                       date_from, date_to)
+    performance_requests = (db.query(models.PerformanceRequest)
                             .filter(models.PerformanceRequest.status.in_(PERFORMANCE_TESTER_WORKLOAD_STATUSES)).all())
-    sast_requests = (_in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to)
+    sast_requests = (db.query(models.SASTRequest)
                      .filter(models.SASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all())
-    dast_requests = (_in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to)
+    dast_requests = (db.query(models.DASTRequest)
                      .filter(models.DASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all())
 
     def role_label(user) -> str:
@@ -215,7 +223,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
         return {
             "tester_id": user_id,
             "tester_name": user.full_name if user else f"User #{user_id}",
-            "department": (user.department if user else None) or "—",
+            "department": (", ".join(user.departments) if user and user.departments else None) or "—",
             "role_label": role_label(user),
             "status_counts": {status: 0 for status in TESTER_WORKLOAD_STATUSES},
             "source_counts": {"Functional": 0, "Performance": 0, "SAST": 0, "DAST": 0},
@@ -225,6 +233,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
             "active_count": 0,
             "waiting_count": 0,
             "near_complete_count": 0,
+            "assignments": [],
         }
 
     rows = {
@@ -241,6 +250,15 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
         row["source_counts"][source] += 1
         row["total_pending"] += 1
         row["occupied_points"] += float(load) / max(1, shared_by)
+        row["assignments"].append({
+            "request_id": request.request_id,
+            "request_pk": request.id,
+            "source": source,
+            "application_name": request.application_name or "—",
+            "status": request.status,
+            "updated_at": request.updated_at or request.created_at,
+            "is_current": True,
+        })
         if request.status in _QUEUED_TESTER_STATUSES:
             row["queued_count"] += 1
         elif request.status in _WAITING_TESTER_STATUSES:
@@ -271,7 +289,38 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     add_security_requests(sast_requests, "SAST")
     add_security_requests(dast_requests, "DAST")
 
+    # Historical ledger: assignment columns remain on completed child
+    # requests, so they provide a durable "worked on" record in addition to
+    # the active-capacity figures above. Keep these out of occupancy totals.
+    completed_sources = [
+        (models.FunctionalRequest, "Functional", QA_REQUEST_TERMINAL_STATUSES, "assigned_tester_ids"),
+        (models.PerformanceRequest, "Performance", PERFORMANCE_TERMINAL_STATUSES, "assigned_tester_ids"),
+        (models.SASTRequest, "SAST", SAST_DAST_TERMINAL_STATUSES, "security_analyst_id"),
+        (models.DASTRequest, "DAST", SAST_DAST_TERMINAL_STATUSES, "security_analyst_id"),
+    ]
+    for model, source, terminal_statuses, assignment_field in completed_sources:
+        completed = (_in_period(db.query(model), model.updated_at, date_from, date_to)
+                     .filter(model.status.in_(terminal_statuses)).all())
+        for request in completed:
+            raw_assignment = getattr(request, assignment_field)
+            assigned_ids = ([raw_assignment] if assignment_field == "security_analyst_id" and raw_assignment
+                            else _assigned_user_ids(raw_assignment))
+            for tester_id in assigned_ids:
+                if tester_id not in rows:
+                    user = db.query(models.User).get(tester_id)
+                    rows[tester_id] = empty_row(tester_id, user)
+                rows[tester_id]["assignments"].append({
+                    "request_id": request.request_id,
+                    "request_pk": request.id,
+                    "source": source,
+                    "application_name": request.application_name or "—",
+                    "status": request.status,
+                    "updated_at": request.updated_at or request.created_at,
+                    "is_current": False,
+                })
+
     for row in rows.values():
+        row["assignments"].sort(key=lambda item: item["updated_at"] or datetime.datetime.min, reverse=True)
         row["occupied_points"] = round(row["occupied_points"], 2)
         row["occupancy_percent"] = round(row["occupied_points"] / TESTER_CAPACITY_POINTS * 100)
         row["available_percent"] = max(0, 100 - row["occupancy_percent"])
@@ -297,15 +346,16 @@ def _age_days(dt) -> int:
         return 0
     if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
         dt = datetime.datetime(dt.year, dt.month, dt.day)
-    if dt.tzinfo is None:
-        # `updated_at`/`created_at` are plain `Column(DateTime)` (no
-        # timezone=True), so Oracle round-trips them as naive datetimes even
-        # though `models.now()` writes them as IST wall-clock time -- treat a
-        # naive value as already being in IST rather than comparing it
-        # against a UTC-derived "now" (which raised "can't subtract
-        # offset-naive and offset-aware datetimes").
-        dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
-    now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    # `updated_at`/`created_at` are plain `Column(DateTime)` (no
+    # timezone=True), so Oracle round-trips them as naive datetimes even
+    # though `models.now()` writes them as IST wall-clock time -- models.
+    # as_aware() treats a naive value as already being in IST rather than
+    # comparing it against a UTC-derived "now" (which raised "can't
+    # subtract offset-naive and offset-aware datetimes"). Shared helper --
+    # see its own docstring for the full story and every other call site
+    # that needed the same fix.
+    dt = models.as_aware(dt)
+    now = models.now()
     return (now - dt).days
 
 
@@ -366,7 +416,7 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
         db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to
     ).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
     if scope:
-        _pending_suppressions_q = _pending_suppressions_q.filter(models.SuppressionRequest.department == scope)
+        _pending_suppressions_q = _pending_suppressions_q.filter(models.SuppressionRequest.department.in_(scope))
     pending_approvals = (
         len([r for r in requests if r.status in PENDING_APPROVAL_STATUSES])
         + _join_qa_department(_in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).filter(
@@ -389,6 +439,114 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
             "risk_distribution": risk_counts,
         },
     }
+
+
+# DSH-001..004 -- (type, created_at column, status column, terminal-status
+# list) for each of the 4 child request types CommandCentre's own
+# "Active requests (org-wide)" stat card counts -- mirrors
+# frontend/src/Dashboard.tsx's TERMINAL_STATUSES_BY_TYPE/isActiveRequest
+# exactly (a request is "active" if its status isn't DRAFT and isn't in its
+# own type's terminal list). The QA Request gateway itself is deliberately
+# excluded, same as Dashboard.tsx's own unifiedRequests -- it's an intake
+# wrapper, not an additional testing work item, and including it would
+# inflate this count by one per parent.
+_ACTIVE_REQUEST_MODELS = [
+    (models.FunctionalRequest, QA_REQUEST_TERMINAL_STATUSES),
+    (models.SASTRequest, SAST_DAST_TERMINAL_STATUSES),
+    (models.DASTRequest, SAST_DAST_TERMINAL_STATUSES),
+    (models.PerformanceRequest, PERFORMANCE_TERMINAL_STATUSES),
+]
+
+
+@router.get("/summary")
+def dashboard_summary(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """DSH-001..004 -- consolidates the handful of derived numbers
+    CommandCentre used to compute in the browser (see Dashboard.tsx's own
+    comment on the fetch this replaces) by pulling all 5 request types'
+    "complete" lists (page_size=100 -- not even reliably complete past 100
+    of a single type) just to run a few `.filter().length` calls over them.
+    `project-wise`/`3w` above already cover the rest of CommandCentre's
+    stats via their own dedicated endpoints; this fills the remaining gap
+    (the "Active requests" stat card, the "critical pending" tag on the
+    approvals card, the "nearing release" footline, and the QA Lifecycle
+    Health stepper) with real SQL `COUNT`/`GROUP BY`, never a full-row
+    fetch.
+
+    `active_requests_count`/`child_requests_total` respect `date_from`/
+    `date_to` (created_at-scoped, mirroring project-wise/3w's own
+    convention). `nearing_release_count`/`critical_pending_count`/
+    `functional_status_counts` deliberately do not -- matching
+    CommandCentre's own pre-existing behavior, where those three were never
+    range-filtered client-side either.
+
+    DSH-005/006 -- read-through Redis cache, 60s TTL, keyed by department
+    scope + the two date params (this summary's only real inputs) so one
+    department's cached response is never served to another. See
+    `cache.py`'s own module docstring for why this degrades to "just
+    compute it every time" rather than erroring when Redis isn't
+    configured/reachable -- `cache.get_json`/`set_json` never raise."""
+    scope = dashboard_department_scope(current_user)
+    # 2026-08 CR -- scope is now a list; join it into a stable, readable cache
+    # key segment (sorted so department order never produces a cache miss).
+    cache_key = f"dashboard:summary:v1:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    child_requests_total = 0
+    active_requests_count = 0
+    for model, terminal_statuses in _ACTIVE_REQUEST_MODELS:
+        q = _join_qa_department(_in_period(db.query(model), model.created_at, date_from, date_to), model, scope)
+        child_requests_total += q.count()
+        active_requests_count += q.filter(model.status.notin_(list(terminal_statuses) + ["DRAFT"])).count()
+
+    # Not range-filtered -- see docstring above. target_release_date is a
+    # plain Date column (no time component), so this compares against
+    # today's date rather than the full now() datetime `_date_bounds` uses
+    # elsewhere in this file.
+    today = models.now().date()
+    nearing_release_q = db.query(models.QARequest).filter(
+        models.QARequest.target_release_date.isnot(None),
+        models.QARequest.target_release_date >= today,
+        models.QARequest.target_release_date <= today + datetime.timedelta(days=14),
+    )
+    if scope:
+        nearing_release_q = nearing_release_q.filter(models.QARequest.department.in_(scope))
+    nearing_release_count = nearing_release_q.count()
+
+    critical_pending_q = db.query(models.FunctionalRequest).filter(
+        models.FunctionalRequest.status.in_([
+            QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, QAStatus.READINESS_VERIFICATION,
+            QAStatus.QA_SIGNOFF_PENDING, QAStatus.REQUESTER_VERIFICATION,
+        ]),
+        models.FunctionalRequest.priority == "Critical",
+    )
+    critical_pending_q = _join_qa_department(critical_pending_q, models.FunctionalRequest, scope)
+    critical_pending_count = critical_pending_q.count()
+
+    # QA Lifecycle Health (LifecycleStepper) only ever reads each row's own
+    # `status` -- a GROUP BY count dict feeds its existing client-side
+    # stage-bucketing (STATUS_STAGE_INDEX in Dashboard.tsx) exactly as well
+    # as full rows would, without fetching them. Kept as raw per-status
+    # counts (not pre-bucketed into the 6 lifecycle stages here) so the
+    # stage grouping stays defined in exactly one place -- Dashboard.tsx's
+    # own STATUS_STAGE_INDEX -- instead of two copies that could drift.
+    functional_status_q = _join_qa_department(db.query(models.FunctionalRequest), models.FunctionalRequest, scope)
+    functional_status_counts = dict(
+        functional_status_q.with_entities(models.FunctionalRequest.status, func.count(models.FunctionalRequest.id))
+        .group_by(models.FunctionalRequest.status).all()
+    )
+
+    result = {
+        "child_requests_total": child_requests_total,
+        "active_requests_count": active_requests_count,
+        "nearing_release_count": nearing_release_count,
+        "critical_pending_count": critical_pending_count,
+        "functional_status_counts": functional_status_counts,
+    }
+    cache.set_json(cache_key, result, ttl_seconds=60)
+    return result
 
 
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------
@@ -447,7 +605,7 @@ def suppression_dashboard(date_from: str | None = Query(None), date_to: str | No
     # creation time, see its own column comment in models.py) -- unlike
     # Functional/SAST/DAST/Performance, no join needed here.
     if scope:
-        q = q.filter(models.SuppressionRequest.department == scope)
+        q = q.filter(models.SuppressionRequest.department.in_(scope))
     sups = q.all()
     open_sups = [s for s in sups if s.status not in SUPPRESSION_TERMINAL_STATUSES]
     # A suppression request can cover several findings (models.SuppressionItem)
@@ -515,6 +673,36 @@ STAGE_TEAM = {
     QAStatus.REQUESTER_VERIFICATION: "Requester",
 }
 
+# "Pending At" is the readable current workflow stage; "Pending With" is
+# the role that must perform the next action. These are deliberately separate
+# from responsible_team, which is the owning business department in 3W.
+SAST_DAST_PENDING_WITH = {
+    "DRAFT": "Requester", "SUBMITTED": "SM", "SM_APPROVAL_PENDING": "SM",
+    "RETURNED_BY_SM": "Requester", "SM_REJECTED": "Requester",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
+    "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
+    "SECURITY_LEAD_ASSIGNED": "QA Lead", "SECURITY_READINESS": "QA Lead",
+    "RETURNED_BY_SECURITY_LEAD": "Requester", "PLANNING": "QA Lead",
+    "CONFIGURATION": "Security Analyst", "SCANNING": "Security Analyst",
+    "FINDING_VALIDATION": "Security Analyst", "REMEDIATION": "Security Analyst",
+    "ASSIGNED_TO_REQUESTER": "Requester", "WAITING_FOR_FIX": "Requester",
+    "ASSIGNED_TO_LEAD": "Security Analyst", "RESCAN": "Security Analyst",
+    "SECURITY_COMPLETE": "Security Analyst", "REPORT_READY": "Security Analyst",
+}
+PERFORMANCE_PENDING_WITH = {
+    "DRAFT": "Requester", "SUBMITTED": "SM", "SM_APPROVAL_PENDING": "SM",
+    "RETURNED_BY_SM": "Requester", "SM_REJECTED": "Requester",
+    "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
+    "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
+    "ENGINEER_ASSIGNED": "QA Lead", "RETURNED_BY_ENGINEER": "Requester",
+    "READINESS": "QA Lead", "FEASIBILITY": "QA Lead", "PLANNING": "QA Lead",
+    "ENVIRONMENT_SETUP": "QA", "SCRIPT_DEVELOPMENT": "QA", "BASELINE": "QA",
+    "LOAD_TEST_EXECUTION": "QA", "RESULT_ANALYSIS": "QA Lead",
+    "DEFECT_FIX_RETEST": "Requester", "REPORT": "QA Lead",
+    "SIGNOFF_PENDING": "QA Lead", "SIGNED_OFF": "Requester",
+    "REQUESTER_VERIFICATION": "Requester",
+}
+
 
 @router.get("/3w")
 def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -534,7 +722,8 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         items.append({
             "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
             "application_name": r.application_name, "pending_stage": STAGE_LABELS.get(r.status, r.status),
-            "responsible_team": STAGE_TEAM.get(r.status, "QA"), "owner": r.application_owner,
+            "responsible_team": r.department or "Unassigned Department",
+            "pending_with": STAGE_TEAM.get(r.status, "QA"), "owner": r.application_owner,
             "department": r.department,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": r.priority, "status": r.status, "source": "Functional Testing Request",
@@ -547,8 +736,10 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
-            "application_name": r.application_name, "pending_stage": f"SAST - {r.status}",
-            "responsible_team": "Security", "owner": None,
+            "application_name": r.application_name,
+            "pending_stage": f"SAST - {SAST_DAST_STATUS_LABELS.get(r.status, r.status)}",
+            "responsible_team": r.department or "Unassigned Department",
+            "pending_with": SAST_DAST_PENDING_WITH.get(r.status, "Security Analyst"), "owner": None,
             "department": r.department,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": r.risk_category, "status": r.status, "source": "SAST Request",
@@ -560,12 +751,32 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             models.DASTRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
-            "project_id": r.request_id, "epic_number": r.application_url,
-            "application_name": r.application_url, "pending_stage": f"DAST - {r.status}",
-            "responsible_team": "Security", "owner": None,
+            "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
+            "application_name": r.application_name or r.application_url,
+            "pending_stage": f"DAST - {SAST_DAST_STATUS_LABELS.get(r.status, r.status)}",
+            "responsible_team": r.department or "Unassigned Department",
+            "pending_with": SAST_DAST_PENDING_WITH.get(r.status, "Security Analyst"), "owner": None,
             "department": r.department,
             "pending_since": r.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": r.risk_category, "status": r.status, "source": "DAST Request",
+        })
+
+    for r in _join_qa_department(
+            _in_period(db.query(models.PerformanceRequest), models.PerformanceRequest.updated_at, date_from, date_to)
+            .filter(models.PerformanceRequest.status.notin_(PERFORMANCE_TERMINAL_STATUSES)),
+            models.PerformanceRequest, scope).all():
+        age = _age_days(r.updated_at)
+        items.append({
+            "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
+            "application_name": r.application_name,
+            "pending_stage": f"Performance - {PERFORMANCE_STATUS_LABELS.get(r.status, r.status)}",
+            "responsible_team": r.department or "Unassigned Department",
+            "pending_with": PERFORMANCE_PENDING_WITH.get(r.status, "QA Lead"),
+            "owner": r.application_owner, "department": r.department,
+            "pending_since": r.updated_at, "ageing_days": age,
+            "ageing_bucket": _ageing_bucket(age),
+            "priority": r.priority or r.risk_category, "status": r.status,
+            "source": "Performance Request",
         })
 
     _SUPPRESSION_STAGE_TEAM = {
@@ -578,14 +789,15 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     _suppression_q = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to).filter(
         models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
     if scope:
-        _suppression_q = _suppression_q.filter(models.SuppressionRequest.department == scope)
+        _suppression_q = _suppression_q.filter(models.SuppressionRequest.department.in_(scope))
     for s in _suppression_q.all():
         age = _age_days(s.updated_at)
         team = _SUPPRESSION_STAGE_TEAM.get(s.status, "Requester")
         items.append({
             "project_id": s.suppression_id, "epic_number": s.application_name,
             "application_name": s.application_name, "pending_stage": s.status,
-            "responsible_team": team, "owner": None,
+            "responsible_team": s.department or "Unassigned Department",
+            "pending_with": team, "owner": None,
             "department": s.department,
             "pending_since": s.updated_at, "ageing_days": age, "ageing_bucket": _ageing_bucket(age),
             "priority": _worst_severity(s.items), "status": s.status, "source": "Suppression Request",
@@ -614,7 +826,7 @@ def three_w_project_detail(project_id: str, db: Session = Depends(get_db),
     if not req:
         return {"detail": "Project not found"}
     scope = dashboard_department_scope(current_user)
-    if scope and req.department != scope:
+    if scope and req.department not in scope:
         # Same department scoping as the 3W list above (see
         # dashboard_department_scope) -- without this, a scoped user could
         # still drill into an out-of-department project's own lifecycle/audit

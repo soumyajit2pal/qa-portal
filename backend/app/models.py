@@ -4,9 +4,9 @@ from typing import List
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, UniqueConstraint, text
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index, UniqueConstraint, text, and_
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, foreign
 from .database import Base
 from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES
 
@@ -21,6 +21,39 @@ def pk_column():
 
 def now():
     return datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+
+
+def as_aware(dt):
+    """Reported directly (traceback): "TypeError: can't compare offset-naive
+    and offset-aware datetimes" in test_reports.py::project_portfolio,
+    comparing a TestCycle.created_at read back from the database against a
+    now()-derived value.
+
+    Every `created_at`/`submitted_at`/`reviewed_at`/etc. column in this app
+    is a plain `Column(DateTime)` (no `timezone=True`) written via now()
+    above, which returns a timezone-AWARE IST datetime -- but on Oracle
+    (and most other backends) a plain DateTime column round-trips values as
+    NAIVE on read, silently dropping the tzinfo the row was written with.
+    So any later `now() - some_row.created_at` or `some_row.created_at <
+    some_now_derived_value` mixes an aware value with a naive one and raises
+    exactly this TypeError -- not on every request, only once live data
+    actually exists to compare against, which is why this can slip past
+    py_compile/tsc and even a fresh empty database.
+
+    dashboard.py's own `_age_days` helper hit this same error previously and
+    fixed it by treating a naive value as already being in IST rather than
+    comparing it against a UTC-derived now (see that function's own
+    comment) -- this is that exact fix, extracted so every other call site
+    doing now()-based datetime math (test_reports.py, notifications.py's
+    business-day sweep, and any future one) shares one implementation
+    instead of re-deriving it -- and re-risking forgetting it -- each time.
+    Returns None unchanged; an already-aware value is returned unchanged
+    too (nothing here assumes every caller's value is naive)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+    return dt
 
 
 # Every system-generated, user-facing business ID uses one consistent shape:
@@ -44,6 +77,7 @@ BUSINESS_ID_PREFIXES = {
     "TEST_PROJECT": "TQA-PROJ",
     "TEST_CYCLE": "TQA-CYCLE",
     "TEST_CASE": "TQA-TC",
+    "DEFECT": "DEF",
 }
 _BUSINESS_ID_PREFIX_SET = frozenset(BUSINESS_ID_PREFIXES.values())
 _LIFETIME_COUNTER_SCOPE = datetime.date(1900, 1, 1)
@@ -103,12 +137,35 @@ def gen_id_default(prefix):
     return _default
 
 
+def gen_defect_id(db):
+    """Issue the governed Defect Management ID: TQA-DEF-NNNNN, same
+    "TQA-{MODULE}-{NN...}" convention as every other business ID in this app
+    (see the header comment above BUSINESS_ID_PREFIXES) -- a global,
+    monotonically increasing counter via _claim_business_seq, never reset
+    per year. Docstring/body previously disagreed (this said "DEF-YYYY-
+    NNNNN" and computed an unused `year` local that was never actually
+    incorporated into the returned string) -- fixed to describe what this
+    actually returns rather than an abandoned year-scoped format."""
+    n = _claim_business_seq(BUSINESS_ID_PREFIXES["DEFECT"], db)
+    return f"TQA-DEF-{n:05d}"
+
+
 class User(Base):
     __tablename__ = "qap_users"
     id = pk_column()
     username = Column(String(64), unique=True, nullable=False)
     full_name = Column(String(150), nullable=False)
     email = Column(String(150))
+    # 2026-08 "one user can be on multiple departments" CR -- a user's real
+    # department membership now lives in department_assignments (many-to-many
+    # via UserDepartment, same pattern as role_assignments/UserRole below).
+    # This column is kept, but is no longer the source of truth: every write
+    # path now also keeps it in sync with the FIRST-assigned department (see
+    # `departments`/`primary_department` below, and _sync_primary_department
+    # in routers/auth.py) purely so any legacy code/report that still queries
+    # this raw column directly keeps working with a sane "primary department"
+    # value instead of silently going stale or NULL. New code should use
+    # `.departments` (the full list) or `.has_department(...)` instead.
     department = Column(String(150))
     login_type = Column(String(16), nullable=False, default=LoginType.STANDARD)
     # Nullable because LDAP-type accounts authenticate against the directory
@@ -132,7 +189,7 @@ class User(Base):
     # Set by a System Admin only (PATCH /api/auth/users/{id} -- Admin.tsx's
     # "Users & Access" page; never exposed on the narrower local-admin
     # endpoints below). When True, this user is hidden from every Department
-    # Head / Executive COE's local-admin roster (see
+    # Head / Executive 's local-admin roster (see
     # routers/auth.py::list_local_admin_users) and can't be targeted by
     # PATCH /api/auth/local-admin/users/{id} even by ID (see
     # _require_own_department_target) -- same treatment "ADMIN" accounts
@@ -150,6 +207,17 @@ class User(Base):
     # permission checks treat a user's assigned roles as active at once (no
     # role-switcher): see has_role() below and deps.py::require_roles.
     role_assignments = relationship("UserRole", back_populates="user", cascade="all,delete-orphan")
+    # 2026-08 "one user can be on multiple departments" CR, reported
+    # directly. A user can now belong to more than one department at once
+    # (e.g. a shared/cross-functional QA + Security Analyst account) --
+    # mirrors role_assignments/UserRole above exactly, same join-table
+    # pattern. `order_by` keeps `.departments`/`primary_department` stable
+    # and predictable (insertion order = the order departments were
+    # assigned), which matters for `primary_department` below.
+    department_assignments = relationship(
+        "UserDepartment", back_populates="user", cascade="all,delete-orphan",
+        order_by="UserDepartment.id",
+    )
 
     @property
     def roles(self) -> List[str]:
@@ -168,6 +236,37 @@ class User(Base):
         codes = set(self.roles)
         return "ADMIN" in codes or bool(codes & set(roles))
 
+    @property
+    def departments(self) -> List[str]:
+        """Every department this user currently belongs to. Falls back to the
+        legacy `department` column for any account that predates the
+        department_assignments rollout and hasn't been touched since (e.g. a
+        row seeded before this migration ran) -- keeps has_department() and
+        every caller of `.departments` working immediately, with no separate
+        backfill step required."""
+        assigned = [da.department for da in self.department_assignments]
+        if assigned:
+            return assigned
+        return [self.department] if self.department else []
+
+    @property
+    def primary_department(self) -> "str | None":
+        """The FIRST department this user was ever assigned -- used only as a
+        default/prefill for the handful of places that need exactly one
+        department (e.g. a new QA Request's own department field). Never
+        used for eligibility/access checks -- those should always check
+        against the full `.departments` list via has_department()."""
+        departments = self.departments
+        return departments[0] if departments else None
+
+    def has_department(self, *departments: str) -> bool:
+        """True if this user belongs to at least one of the given
+        departments. The multi-department equivalent of the old
+        `user.department == X` / `user.department in (...)` checks scattered
+        across the app -- every one of those was rewritten to call this
+        instead of comparing the single legacy column directly."""
+        return bool(set(self.departments) & set(d for d in departments if d))
+
 
 class UserRole(Base):
     """Join table backing User.roles -- one row per (user, role) pair."""
@@ -180,6 +279,24 @@ class UserRole(Base):
     user = relationship("User", back_populates="role_assignments")
 
 
+class UserDepartment(Base):
+    """Join table backing User.departments -- one row per (user, department)
+    pair, exact mirror of UserRole above. `department` is a free-text string
+    (not a FK to qap_departments.id) for the same reason the legacy
+    User.department column was: it's validated against active Department
+    rows at write time (routers/auth.py::_validate_department) rather than
+    DB-enforced, matching how every other "department" field in this app
+    (QARequest.department, TestProject.department, etc.) already works."""
+    __tablename__ = "qap_user_departments"
+    __table_args__ = (UniqueConstraint("user_id", "department", name="uq_qap_user_departments"),)
+    id = pk_column()
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False)
+    department = Column(String(150), nullable=False)
+    created_at = Column(DateTime, default=now)
+
+    user = relationship("User", back_populates="department_assignments")
+
+
 class Department(Base):
     """DB-backed department list (Admin section) -- replaces the old hardcoded
     constants.DEPARTMENTS list so an admin can add/deactivate departments at
@@ -190,6 +307,15 @@ class Department(Base):
     name = Column(String(150), unique=True, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=now)
+
+
+class SystemSetting(Base):
+    """Admin-managed server settings that must persist across deployments."""
+    __tablename__ = "qap_system_settings"
+    id = pk_column()
+    key = Column(String(100), unique=True, nullable=False)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=now, onupdate=now)
 
 
 class ApplicationMaster(Base):
@@ -465,7 +591,11 @@ class FunctionalRequest(Base):
     __tablename__ = "qap_functional_requests"
     id = pk_column()
     request_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["FUNCTIONAL"]))
-    status = Column(String(32), default=QAStatus.DRAFT, index=True)
+    # IDX-002/IDX-005: no longer index=True on its own -- superseded by the
+    # composite ix_qap_func_status_created below (same leading column, plus
+    # created_at), see the "Performance optimization indexes" block near the
+    # end of this file for the full rationale.
+    status = Column(String(32), default=QAStatus.DRAFT)
     # Set (independently of `status`) when the QA Lead fails Readiness
     # Verification with "require re-approval" ticked. `status` is always set
     # to RETURNED_BY_QA_LEAD in that case -- who actually returned it -- never
@@ -489,7 +619,7 @@ class FunctionalRequest(Base):
     risk_rating = Column(String(16))
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     department_head_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # who performed Department Head Approval
-    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # IT-QA QA Lead assigned by Department Head
+    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # COE - Quality Assurance QA Lead assigned by Department Head
     assigned_tester_ids = Column(String(255))     # comma-separated QA Engineer user ids (Tester Assigned step)
     signoff_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)    # linked QA Sign-off certificate
     # Set when auto-created from a QA Request gateway (always, for new rows --
@@ -504,6 +634,18 @@ class FunctionalRequest(Base):
     qa_request = relationship("QARequest", back_populates="linked_functional_requests")
     checklist_items = relationship("ReadinessChecklistItem", back_populates="functional_request", cascade="all,delete-orphan")
     walkthroughs = relationship("WalkthroughSession", back_populates="functional_request", cascade="all,delete-orphan")
+    test_cycle_links = relationship(
+        "TestCycleChildRequestLink",
+        primaryjoin=lambda: and_(
+            FunctionalRequest.id == foreign(TestCycleChildRequestLink.child_id),
+            TestCycleChildRequestLink.child_type == "Functional",
+        ),
+        viewonly=True,
+    )
+
+    @property
+    def linked_test_cycles(self):
+        return [link.cycle for link in self.test_cycle_links if link.cycle]
 
     # Delegated (read-only) lookups from the parent gateway QA Request --
     # see the class docstring above for why these aren't duplicated columns.
@@ -678,8 +820,8 @@ class SASTRequest(Base):
     # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # IT-QA QA Lead assigned by the requester's Department Head for readiness,
-    # followed by the IT-QA Security Analyst selected by that lead.
+    # COE - Quality Assurance QA Lead assigned by the requester's Department Head for readiness,
+    # followed by the COE - Quality Assurance Security Analyst selected by that lead.
     security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     report_path = Column(String(255))
@@ -762,6 +904,14 @@ class SASTRequest(Base):
     @property
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
+
+    # PAG-005 -- the paginated list view (SASTListOut) shows a findings
+    # count, not the full findings list; routers/sast_dast.py's list_sast
+    # eager-loads `findings` via selectinload so reading this property
+    # doesn't turn into a lazy-load-per-row.
+    @property
+    def findings_count(self):
+        return len(self.findings)
 
 
 class SASTComponent(Base):
@@ -865,8 +1015,8 @@ class DASTRequest(Base):
     # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned IT-QA QA Lead
-    security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned IT-QA Security Analyst
+    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned COE - Quality Assurance QA Lead
+    security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned COE - Quality Assurance Security Analyst
     report_path = Column(String(255))
     # Set when this DAST request was auto-created because a QA Request's
     # request_types included "DAST"; null for standalone DAST requests
@@ -967,6 +1117,11 @@ class DASTRequest(Base):
     @property
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
+
+    # See SASTRequest.findings_count above -- same idea, for DAST.
+    @property
+    def findings_count(self):
+        return len(self.findings)
 
 
 class DASTTarget(Base):
@@ -1077,10 +1232,10 @@ class PerformanceRequest(Base):
     # that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # Existing column now represents the IT-QA QA Lead assigned by the
+    # Existing column now represents the COE - Quality Assurance QA Lead assigned by the
     # requester's Department Head. Execution testers are tracked separately.
     engineer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    assigned_tester_ids = Column(String(255))  # comma-separated IT-QA QA Engineer ids
+    assigned_tester_ids = Column(String(255))  # comma-separated COE - Quality Assurance QA Engineer ids
     report_path = Column(String(255))
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
     created_at = Column(DateTime, default=now)
@@ -1327,7 +1482,11 @@ class ApprovalAction(Base):
     """
     __tablename__ = "qap_approval_actions"
     id = pk_column()
-    entity_type = Column(String(32), index=True)
+    # entity_type no longer index=True on its own -- superseded by the
+    # composite ix_qap_appract_entity_created below (same leading column,
+    # plus entity_id and created_at). entity_id's own single-column index is
+    # kept -- see that block's comment for why.
+    entity_type = Column(String(32))
     entity_id = Column(Integer, index=True)
     step_name = Column(String(64))
     actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
@@ -1342,12 +1501,61 @@ class ApprovalAction(Base):
     decision = Column(String(64))
     comments = Column(Text)
     created_at = Column(DateTime, default=now)
+    # APR-005 "Every decision shall record actor, delegated role, timestamp,
+    # previous state, new state and comment." Optional/additive -- every
+    # existing caller across this app (QA_REQUEST/SAST_DAST/SUPPRESSION/
+    # SIGNOFF/etc.) already records actor/timestamp/comment via the columns
+    # above and `decision` already names the transition in practice (e.g.
+    # "Approved & Activated"); these two are populated specifically by the
+    # 2026-08 "Test Approval Workflow" refactor's TEST_CASE review actions
+    # (routers/test_repository.py::_case_workflow_action) to close the
+    # literal state-machine traceability requirement for that one entity
+    # type, without changing every other module's own call sites. NULL
+    # elsewhere is expected, not a data-quality gap. "Delegated role" is
+    # deliberately not modeled -- delegation (APR-012) was explicitly
+    # descoped for this pass (see ORACLE_MIGRATION_2026-07.md).
+    previous_state = Column(String(30), nullable=True)
+    new_state = Column(String(30), nullable=True)
 
     actor = relationship("User", foreign_keys=[actor_id])
 
     @property
     def actor_name(self):
         return self.actor.full_name if self.actor else None
+
+
+class Notification(Base):
+    """2026-08 "Test Approval Workflow" refactor, section 10 -- in-app
+    notifications (Test_Approval_Workflow_Requirements.docx). No email/SMTP
+    infrastructure exists anywhere in this app, so this is delivered purely
+    in-app: a per-recipient row created on every workflow event in the
+    spec's table (submit/return/recommend/approve/reject), plus reminder/
+    escalation rows created by a startup sweep (see
+    routers/notifications.py::sweep_overdue_approvals) once a pending item
+    has sat past the Admin-configured day thresholds (system_settings.py's
+    test_approval_reminder_days/test_approval_escalation_days keys, default
+    2/5 business days). Read-only append model from the recipient's side --
+    the only mutation allowed is setting read_at on your own row."""
+    __tablename__ = "qap_notifications"
+    id = pk_column()
+    recipient_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False, index=True)
+    event_type = Column(String(40), nullable=False)
+    entity_type = Column(String(32), index=True)
+    entity_id = Column(Integer, index=True)
+    entity_key = Column(String(40))
+    message = Column(Text, nullable=False)
+    # Who triggered it -- NULL for a system-generated reminder/escalation
+    # row (the sweep has no human actor).
+    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+    read_at = Column(DateTime, nullable=True)
+
+    recipient = relationship("User", foreign_keys=[recipient_id])
+    created_by = relationship("User", foreign_keys=[created_by_id])
+
+    @property
+    def created_by_name(self):
+        return self.created_by.full_name if self.created_by else None
 
 
 class AuditLog(Base):
@@ -1364,7 +1572,9 @@ class AuditLog(Base):
     event_type = Column(String(40), nullable=False, index=True)
     action = Column(String(80), nullable=False, index=True)
     outcome = Column(String(20), nullable=False, index=True)
-    actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    # No longer index=True on its own -- superseded by the composite
+    # ix_qap_audit_actor_created below (same leading column, plus created_at).
+    actor_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     actor_username = Column(String(150), nullable=True, index=True)
     actor_name = Column(String(150), nullable=True)
     actor_roles = Column(String(500), nullable=True)
@@ -1398,11 +1608,15 @@ class RequestDocument(Base):
     `module` string (FUNCTIONAL / SAST / DAST / PERFORMANCE /
     SUPPRESSION / SIGNOFF / COMMENT_IMAGE / TEST_EXEC_IMAGE), so
     (module, request_id) is always unambiguous.
-    Files are stored on disk under backend/app/uploads/<module>/<request's
-    own request_id string>/<filename> -- see UPLOAD_ROOT in documents.py."""
+    Files are stored on disk under backend/app/uploads/<request's own
+    request_id string>/<module>/<filename> -- see UPLOAD_ROOT in documents.py."""
     __tablename__ = "qap_module_documents"
     id = pk_column()
-    module = Column(String(20), nullable=False, index=True)
+    # module no longer index=True on its own -- superseded by the composite
+    # ix_qap_moddocs_req_uploaded below (same leading column, plus
+    # request_id and uploaded_at). request_id's own single-column index is
+    # kept -- see that block's comment for why.
+    module = Column(String(20), nullable=False)
     request_id = Column(Integer, nullable=False, index=True)
     file_name = Column(String(255), nullable=False)
     stored_path = Column(String(500), nullable=False)   # relative to UPLOAD_ROOT
@@ -1441,8 +1655,8 @@ class QASignOff(Base):
     open_defect_summary = Column(Text)
     residual_risk_notes = Column(Text)
 
-    # IT - QA Engineer raises the certificate -> IT - QA Lead approves it ->
-    # Executive COE gives the final approval that issues it -- see
+    # COE - Quality Assurance Engineer raises the certificate -> COE - Quality Assurance Lead approves it ->
+    # Executive  gives the final approval that issues it -- see
     # constants.SIGNOFF_STATUSES. Replaces the old, much simpler Draft/Issued
     # flow (a QA Lead alone could draft and immediately sign/issue); existing
     # rows at the old "Draft"/"Issued" string values need a one-time data
@@ -1450,7 +1664,7 @@ class QASignOff(Base):
     status = Column(String(32), default="DRAFT")
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)   # Requested By (QA Team)
     reviewed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Approved By (QA Lead)
-    approved_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Approved By (Executive COE)
+    approved_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # Approved By (Executive )
     # Vestigial -- left in place (unused going forward) rather than dropped,
     # same convention as qap_requests.priority/risk_rating (see section 30 of
     # the migration notes). issued_by_id used to mean "TQA Lead - CM QA who
@@ -1462,6 +1676,21 @@ class QASignOff(Base):
 
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
+
+    # Business/request department used for cross-department visibility and
+    # filtering. `department` above remains the QA approval owner (COE - Quality Assurance),
+    # while this view-only relationship resolves the Functional Request whose
+    # business ID was recorded in testing_request_id.
+    source_functional_request = relationship(
+        "FunctionalRequest",
+        primaryjoin=lambda: QASignOff.testing_request_id == foreign(FunctionalRequest.request_id),
+        viewonly=True,
+        uselist=False,
+    )
+
+    @property
+    def request_department(self):
+        return self.source_functional_request.department if self.source_functional_request else None
 
 
 # ---------------------------------------------------------------------------
@@ -1482,6 +1711,39 @@ class QASignOff(Base):
 # columns (not read live off ApplicationMaster) since a Project's own name
 # may reasonably diverge from the master list over time (e.g. renamed) and
 # should not silently change history on every existing Test Case/Cycle.
+#
+# 2026-08 "Test Management Revamp" (uploaded SRS: "Test Management Revamp --
+# Business Requirements and Software Requirements Specification"). Full
+# document delivered end-to-end per that spec's own phase breakdown (section
+# 14.2): Foundation (immutable versions + pinned cycle items), Governance
+# (review workflow + project membership), cycle lifecycle,
+# Experience/Reporting (frontend), Hardening (validation,
+# concurrency, audit). See test_management_migration.py for the one-time
+# migration of every pre-existing row into the new versioned structures --
+# this app has no Alembic (confirmed choice: kept create_all()-based schema
+# management rather than introducing a migration tool for this revamp), so
+# most changes below are additive, while explicitly retired schema is removed
+# by that migration. Pre-revamp columns that
+# are superseded are kept as backward-compatible MIRRORS of the new
+# versioned data (exact same pattern already established by
+# TestExecution/TestExecutionRun below -- TestExecution's own columns mirror
+# only the latest TestExecutionRun so old readers keep working unchanged;
+# TestCase's own content columns now work the same way, mirroring whichever
+# TestCaseVersion is "current" for that identity).
+#
+# Core architectural change (SRS section 1, "principal traceability risk"):
+# a Test Cycle's execution slot (TestExecution, which already served as the
+# de-facto "cycle item" join row -- see its own docstring) used to reference
+# TestCase live, so editing/re-approving a testcase after it had been added
+# to a cycle silently changed what a historical cycle displayed. Every
+# testcase's actual content now lives in immutable TestCaseVersion rows
+# (VER-001/VER-006); TestCase itself becomes an identity record pointing at
+# whichever version is currently approved and/or in draft
+# (current_approved_version_id/current_draft_version_id); and each
+# TestExecution now pins the exact TestCaseVersion selected at the moment it
+# was added to a cycle (pinned_version_id, CYC-004) -- so a closed cycle's
+# reporting is reproducible forever regardless of what happens to the
+# testcase afterward.
 # ---------------------------------------------------------------------------
 class TestProject(Base):
     __tablename__ = "qap_test_projects"
@@ -1492,6 +1754,14 @@ class TestProject(Base):
     department = Column(String(150))
     description = Column(Text)
     is_active = Column(Boolean, default=True)
+    # SRS PRJ-001 "owner" -- the one person routers/test_projects.py treats
+    # as authorized to add/remove members (PRJ-005) without needing the
+    # app-wide QA_LEAD role; QA_LEAD/Admin always bypass this check too, same
+    # pattern as every other owner-vs-role gate in this router. Nullable so
+    # a project can never fail to save if this is momentarily unset;
+    # test_management_migration.py backfills it from created_by_id for
+    # every pre-revamp project on first startup after this column exists.
+    owner_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
     # Reported directly: "Project Activation, deactivation should need
@@ -1505,17 +1775,155 @@ class TestProject(Base):
     pending_is_active = Column(Boolean, nullable=True)
     pending_requested_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     pending_requested_at = Column(DateTime, nullable=True)
+    # SRS PRJ-003 "Projects shall support Active, Inactive and Archived
+    # states. Inactive and Archived projects shall reject new authoring and
+    # execution." -- Archived is deliberately layered on top of the existing
+    # is_active boolean rather than replacing it with a 3-way enum column
+    # (additive-only constraint for this revamp): archiving always also
+    # forces is_active False in the same action (see routers/
+    # test_projects.py::archive_test_project), so every existing
+    # `if not project.is_active` authoring/execution gate throughout the
+    # codebase already rejects an Archived project with zero further
+    # changes. is_archived is the one extra bit that distinguishes "plainly
+    # Inactive, can be reactivated any time" from "Archived, a more
+    # deliberate retirement" for the UI and for reporting.
+    is_archived = Column(Boolean, default=False)
+    archived_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+    archived_reason = Column(Text, nullable=True)
+    # APR-001, 2026-08 "Test Approval Workflow" refactor -- project-level
+    # default Author/Reviewer/QA Lead assignment. Author isn't stored here
+    # since it's inherently per-version (TestCaseVersion.author_id, whoever
+    # created/last materially edited it); these two are the ones a project
+    # needs a *default person* for, copied onto each TestCaseVersion at
+    # submission time and reassignable per item afterward -- see
+    # TestCaseVersion.assigned_reviewer_id/assigned_qa_lead_id.
+    default_reviewer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    default_qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
 
     application_master = relationship("ApplicationMaster", foreign_keys=[application_master_id])
+    owner = relationship("User", foreign_keys=[owner_id])
     created_by = relationship("User", foreign_keys=[created_by_id])
     pending_requested_by = relationship("User", foreign_keys=[pending_requested_by_id])
+    archived_by = relationship("User", foreign_keys=[archived_by_id])
+    default_reviewer = relationship("User", foreign_keys=[default_reviewer_id])
+    default_qa_lead = relationship("User", foreign_keys=[default_qa_lead_id])
     folders = relationship("TestFolder", back_populates="project", cascade="all,delete-orphan")
     test_cases = relationship("TestCase", back_populates="project", cascade="all,delete-orphan")
     cycles = relationship("TestCycle", back_populates="project", cascade="all,delete-orphan")
+    members = relationship("TestProjectMember", back_populates="project", cascade="all,delete-orphan")
+    view_grants = relationship("TestProjectViewGrant", back_populates="project", cascade="all,delete-orphan")
+
+    @property
+    def owner_name(self):
+        return self.owner.full_name if self.owner else None
 
     @property
     def pending_requested_by_name(self):
         return self.pending_requested_by.full_name if self.pending_requested_by else None
+
+    @property
+    def archived_by_name(self):
+        return self.archived_by.full_name if self.archived_by else None
+
+    @property
+    def default_reviewer_name(self):
+        return self.default_reviewer.full_name if self.default_reviewer else None
+
+    @property
+    def default_qa_lead_name(self):
+        return self.default_qa_lead.full_name if self.default_qa_lead else None
+
+
+class TestProjectMember(Base):
+    """SRS PRJ-005/GOV-001 -- project-scoped membership, deliberately
+    separate from the app-wide Role enum: a project owner can add a member
+    with a project-level role (see constants.TEST_PROJECT_ROLES) without
+    granting that person any broader system role. Repository/cycle/report
+    access is meant to be constrained by this membership (plus the existing
+    department scope every other module already enforces), not just by
+    holding QA_ENGINEER/QA_LEAD generally -- see routers/test_projects.py's
+    own membership endpoints for how this is enforced."""
+    __tablename__ = "qap_test_project_members"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_qap_tpm_project_user"),)
+    id = pk_column()
+    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False, index=True)
+    project_role = Column(String(30), nullable=False, default="Tester")
+    added_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    added_at = Column(DateTime, default=now)
+
+    project = relationship("TestProject", back_populates="members")
+    user = relationship("User", foreign_keys=[user_id])
+    added_by = relationship("User", foreign_keys=[added_by_id])
+
+    @property
+    def user_name(self):
+        return self.user.full_name if self.user else None
+
+    @property
+    def user_email(self):
+        return self.user.username if self.user else None
+
+    @property
+    def added_by_name(self):
+        return self.added_by.full_name if self.added_by else None
+
+
+class TestProjectViewGrant(Base):
+    """2026-08 -- reported directly: "one logged in user can [only] show
+    projects which are under that user department only. now add one
+    functionality to add view only access to department as well as
+    particular user ... it will help if any project cross departmental."
+    Grants read-only visibility into ONE specific Test Project (its Test
+    Execution/Repository/Reports, plus -- per the same requirement's
+    follow-up decision -- its linked Defects) to a department or user who
+    isn't otherwise in scope for it via TestProject.department. Deliberately
+    per-project, not a blanket department-to-department grant, matching "if
+    ANY PROJECT is cross departmental" -- most projects never need this;
+    it's an exception for the specific ones that do.
+
+    Exactly one of `department`/`user_id` is set per row (enforced in
+    routers/test_projects.py, not at the DB level -- same
+    application-layer-only convention as this app's other "must be exactly
+    one of" rules, e.g. auth.py's department/departments payload
+    resolution). A department grant covers every current AND future member
+    of that department (checked live against User.departments at read time,
+    same as every other department-scoped check in this app); a user grant
+    covers that one account regardless of their own department(s).
+
+    This is READ-ONLY by design -- it only ever widens which projects a
+    scoped user's LIST/aggregate queries include (see
+    deps.py::viewable_project_ids), never any create/edit/execute
+    permission, all of which stay gated by this app's existing role-based
+    checks (QA_ENGINEER/QA_LEAD/etc.) exactly as before. A grant recipient
+    who happens to also hold one of those roles is not, by virtue of this
+    grant alone, able to mutate the granted project -- same as how holding
+    those roles alone was never sufficient without also being in-department
+    prior to this feature."""
+    __tablename__ = "qap_test_project_view_grants"
+    __table_args__ = (
+        UniqueConstraint("project_id", "department", name="uq_qap_tpvg_project_department"),
+        UniqueConstraint("project_id", "user_id", name="uq_qap_tpvg_project_user"),
+    )
+    id = pk_column()
+    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
+    department = Column(String(150), nullable=True)
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    granted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    project = relationship("TestProject", foreign_keys=[project_id])
+    user = relationship("User", foreign_keys=[user_id])
+    granted_by = relationship("User", foreign_keys=[granted_by_id])
+
+    @property
+    def user_name(self):
+        return self.user.full_name if self.user else None
+
+    @property
+    def granted_by_name(self):
+        return self.granted_by.full_name if self.granted_by else None
 
 
 class TestFolder(Base):
@@ -1543,15 +1951,33 @@ class TestFolder(Base):
 
 
 class TestCase(Base):
-    """A single reusable test case in the Test Repository. Columns mirror the
-    fixed xlsx upload template plus CR traceability (Test Case ID, Epic ID, CR Number, Feature ID,
-    User Story ID, Test Type, Module Name, Test Scenario, Pre-Condition,
-    Test Case Description, Priority) -- see routers/test_repository.py's
-    import_test_cases for the parser. Steps (with their own Expected Result)
-    live in the separate TestStep table below, one row per step. Note this
-    table holds the test case *definition* only -- Actual Result/Status/
-    Test Run Artifacts/Defect ID from the template are execution-time facts
-    and are not stored until an approved definition is used in a Test Cycle."""
+    """A single reusable test case's *permanent identity* in the Test
+    Repository (SRS TC-001) -- project-scoped, independent of any one
+    version. Columns mirror the fixed xlsx upload template plus CR
+    traceability (Test Case ID, Epic ID, CR Number, Feature ID, User Story
+    ID, Test Type, Module Name, Test Scenario, Pre-Condition, Test Case
+    Description, Priority) -- see routers/test_repository.py's
+    import_test_cases for the parser.
+
+    2026-08 revamp: actual definition content, steps, and review status now
+    live in immutable TestCaseVersion/TestCaseVersionStep rows below (SRS
+    VER-001) -- this class's own content columns
+    (epic_id/cr_number/.../priority/status/version_major/version_minor) are
+    now a MIRROR of whichever version is "current" for display/list-view
+    backward compatibility, exactly the same pattern TestExecution already
+    uses to mirror its latest TestExecutionRun. "Current" means: the draft
+    version if one exists (current_draft_version_id), else the approved
+    version (current_approved_version_id) -- see
+    routers/test_repository.py's _sync_case_mirror for exactly when/how this
+    mirror is refreshed. Folder placement and tags stay at this identity
+    level (not per-version) -- SRS section 16 "Tag versioning" leaves this
+    an open decision; identity-level was chosen here since a testcase
+    doesn't usually need different tags/folder per revision, and it avoids
+    every version-approval also having to re-decide where the case lives.
+    Steps in the legacy TestStep table below are no longer written to by
+    new code (kept only so any pre-revamp row that was never migrated still
+    has somewhere to read from) -- see TestCaseVersionStep for the real,
+    version-scoped steps used by everything going forward."""
     __tablename__ = "qap_test_cases"
     id = pk_column()
     test_case_key = Column(String(60), unique=True, nullable=False)
@@ -1567,17 +1993,38 @@ class TestCase(Base):
     pre_condition = Column(Text)
     description = Column(Text)
     priority = Column(String(16))
-    # Approval lifecycle: Draft = Pending QA Lead Review, Active = Approved
-    # for Test Cycles, Deprecated = retained for history but unavailable for
-    # new execution. The API, not a client edit form, controls transitions.
-    status = Column(String(20), default="Active")
-    # Version: starts at 1.0 on first creation. The major stays fixed at 1
-    # (reserved for future breaking-change semantics); the minor increments
-    # by 1 each time a case is modified after having been Active at least
-    # once and is then re-approved by a QA Lead (see review_test_case /
-    # bulk_approve_test_cases in routers/test_repository.py).
+    # Mirror of the current version's own status -- see constants.
+    # TEST_CASE_STATUSES (Draft/In Review/Review Completed/Returned/
+    # Approved/Rejected/Archived, 2026-08 "Test Approval Workflow" refactor,
+    # plus TEST_CASE_NEW_STATUSES -- Recommendation Pending/QA Lead Approval
+    # Pending/Returned by QA/Returned by QA Lead -- added by the 2026-08
+    # "Simplified Test Management Review and Approval" requirement). The
+    # API, not a client edit form, controls transitions -- see
+    # routers/test_repository.py's review workflow. "QA Lead Approval
+    # Pending" is the longest value at 24 chars -- ORA-12899 (String(20) was
+    # too narrow for it, hit in production; String(30) leaves headroom for
+    # future values). Widening an EXISTING Oracle column needs a manual
+    # ALTER TABLE -- create_all() never alters existing columns -- see
+    # scripts/2026-08_widen_test_case_status_columns.sql.
+    status = Column(String(30), default="Draft")
+    # Mirror of the current version's own version_major/version_minor.
+    # Major represents a materially changed intent, minor a compatible
+    # refinement (SRS VER-004); both live authoritatively on
+    # TestCaseVersion now -- see that class's own docstring for the
+    # increment policy.
     version_major = Column(Integer, nullable=False, default=1)
     version_minor = Column(Integer, nullable=False, default=0)
+    # SRS VER-002 "identify one current approved version while allowing a
+    # separate draft revision" -- at most one of each may be set at a time;
+    # both may be set together (an approved baseline with a newer draft
+    # revision in progress), or only current_draft_version_id (brand new
+    # testcase, never yet approved), or only current_approved_version_id (no
+    # revision currently in progress). post_update=True on both breaks the
+    # circular INSERT dependency with TestCaseVersion.test_case_id below (a
+    # version can't be inserted until its TestCase exists, but TestCase's
+    # pointer to that version is only known after the version is inserted).
+    current_approved_version_id = Column(Integer, ForeignKey("qap_test_case_versions.id"), nullable=True)
+    current_draft_version_id = Column(Integer, ForeignKey("qap_test_case_versions.id"), nullable=True)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
@@ -1593,14 +2040,55 @@ class TestCase(Base):
     # deliberately NOT gated by this lock.
     checked_out_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     checked_out_at = Column(DateTime, nullable=True)
+    # 2026-08 "Recycle Bin" requirement -- delete_test_case/
+    # bulk_delete_test_cases (governed cases -- ever Approved/Archived/
+    # Rejected -- were already, and remain, permanently blocked from this
+    # entirely; only a still-pre-approval case can ever reach here) now soft-
+    # delete instead of a real `db.delete()`: this flag set True, the row
+    # otherwise untouched and excluded from every normal list/summary query,
+    # recoverable via restore_test_case_from_recycle_bin until an authorized
+    # QA Lead Group member permanently purges it (purge_test_case/
+    # bulk_purge_test_cases -- the only code path that still issues a real
+    # `db.delete()`). New columns on an EXISTING production table --
+    # `create_all()` never alters existing columns, so this requires the
+    # companion manual `ALTER TABLE`, see
+    # scripts/2026-08_add_test_case_recycle_bin_columns.sql.
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    deleted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_reason = Column(String(1000), nullable=True)
+    tag_rows = relationship("TestCaseTag", back_populates="test_case", cascade="all,delete-orphan")
+
+    @property
+    def tags(self):
+        return [row.tag for row in self.tag_rows]
+
+    # PAG-005 -- the list endpoint serializes TestCaseListOut, which carries
+    # this count instead of the full `steps` array (each step's text/
+    # expected_result is only ever needed once a case is actually opened).
+    # `self.steps` (the legacy TestStep mirror, kept in sync with the
+    # current version's real TestCaseVersionStep rows by every write path --
+    # see routers/test_repository.py's _replace_draft_steps and friends) is
+    # already what TestCaseOut.steps itself reads, so this stays consistent
+    # with whatever count the full detail view would show.
+    @property
+    def steps_count(self):
+        return len(self.steps)
 
     project = relationship("TestProject", back_populates="test_cases")
     folder = relationship("TestFolder")
     created_by = relationship("User", foreign_keys=[created_by_id])
     checked_out_by = relationship("User", foreign_keys=[checked_out_by_id])
+    deleted_by = relationship("User", foreign_keys=[deleted_by_id])
     steps = relationship("TestStep", back_populates="test_case", cascade="all,delete-orphan",
-                          order_by="TestStep.step_no")
+                         order_by="TestStep.step_no")
     executions = relationship("TestExecution", back_populates="test_case", cascade="all,delete-orphan")
+    versions = relationship("TestCaseVersion", back_populates="test_case", cascade="all,delete-orphan",
+                             foreign_keys="TestCaseVersion.test_case_id", order_by="TestCaseVersion.id")
+    current_approved_version = relationship("TestCaseVersion", foreign_keys=[current_approved_version_id],
+                                             post_update=True)
+    current_draft_version = relationship("TestCaseVersion", foreign_keys=[current_draft_version_id],
+                                          post_update=True)
 
     @property
     def folder_name(self):
@@ -1615,11 +2103,125 @@ class TestCase(Base):
         return self.checked_out_by.full_name if self.checked_out_by else None
 
     @property
+    def deleted_by_name(self):
+        return self.deleted_by.full_name if self.deleted_by else None
+
+    @property
+    def current_draft_author_id(self):
+        """Author of the version currently moving through review.
+
+        Exposed on TestCaseOut so the UI can suppress maker-checker actions
+        for the author before the backend's GOV-002 check is reached.
+        """
+        return self.current_draft_version.author_id if self.current_draft_version else None
+
+    # 2026-08 "Simplified Test Management" GOV-002 gap fix -- the author
+    # isn't the only person a NEW-path stage can block from acting again:
+    # whoever SUBMITTED the draft (draft.submitted_by_id, which may be a
+    # different QA_ENGINEER than the content's author -- authoring/checkout
+    # is a broad team-tier permission, not locked to one person) is blocked
+    # from recording that same draft's Stage 1 decision, and whoever
+    # recorded Stage 1 (draft.reviewed_by_id) is blocked from also recording
+    # Stage 2. Exposed here, same reasoning as current_draft_author_id
+    # above, so the UI can suppress the button before the backend's own
+    # (authoritative) check in review_test_case/bulk_recommend_test_cases/
+    # bulk_approve_test_cases is reached.
+    @property
+    def current_draft_submitted_by_id(self):
+        return self.current_draft_version.submitted_by_id if self.current_draft_version else None
+
+    @property
+    def current_draft_reviewed_by_id(self):
+        return self.current_draft_version.reviewed_by_id if self.current_draft_version else None
+
+    # Reported directly: "Pending with author, give details who have
+    # uploaded" -- pending_with_user_name is intentionally None for a
+    # never-submitted Draft (nothing is actually pending review yet, see
+    # that property's own docstring above), so the Workflow column's
+    # fallback previously showed the bare, name-less word "Author" with no
+    # way to tell WHICH author still needs to submit it. Exposed here so the
+    # UI can show the real name in that one fallback case specifically.
+    @property
+    def current_draft_author_name(self):
+        return self.current_draft_version.author_name if self.current_draft_version else None
+
+    # Reported directly, alongside the "Pending with" author-name fix above:
+    # "along with Pending with details, show submitted by as well" -- the
+    # Workflow column previously only ever showed WHO the item is pending
+    # WITH (a group, or an author on Returned), never WHO submitted it into
+    # its current pending state. Exposed here the same way as
+    # current_draft_author_name so the frontend doesn't need a second
+    # round-trip.
+    @property
+    def current_draft_submitted_by_name(self):
+        return self.current_draft_version.submitted_by_name if self.current_draft_version else None
+
+    # Reported directly: "Add Recommended By once recommended" -- once a
+    # NEW-path draft clears Stage 1 (status moves to "QA Lead Approval
+    # Pending"), draft.reviewed_by_id records who made that recommend
+    # decision (see review_test_case/bulk_recommend_test_cases, which both
+    # set it). Exposed the same way as current_draft_submitted_by_name so
+    # the Workflow column can show "Recommended by" alongside "Submitted
+    # by" without a second round-trip. None before Stage 1 has actually
+    # been decided (nothing to attribute yet) -- same "only show once it's
+    # true" shape as submitted_by_name for a never-submitted Draft.
+    @property
+    def current_draft_reviewed_by_name(self):
+        return self.current_draft_version.reviewed_by_name if self.current_draft_version else None
+
+    @property
     def version(self):
         return f"{self.version_major}.{self.version_minor}"
 
+    # APR-006 "The current assignee, pending action and elapsed time shall
+    # be visible on the test-case details page." Bridges through whichever
+    # version is current for display -- see TestCaseVersion.
+    # pending_with_user_id/name for the actual per-stage logic. None once
+    # there's no draft in progress (Approved with nothing pending, or a
+    # brand-new case that's still an un-submitted Draft with only an author
+    # pending, not yet routed to anyone).
+    @property
+    def pending_with_user_id(self):
+        return self.current_draft_version.pending_with_user_id if self.current_draft_version else None
+
+    @property
+    def pending_with_user_name(self):
+        return self.current_draft_version.pending_with_user_name if self.current_draft_version else None
+
+    @property
+    def pending_since(self):
+        """Elapsed-time basis for APR-006 -- whichever timestamp started the
+        CURRENT pending stage: submitted_at while In Review, reviewed_at
+        (the Reviewer's recommend timestamp) while Review Completed, and
+        reviewed_at/qa_lead_decided_at (whichever is set) while Returned."""
+        draft = self.current_draft_version
+        if not draft:
+            return None
+        if draft.status == "In Review":
+            return draft.submitted_at
+        if draft.status == "Review Completed":
+            return draft.reviewed_at
+        if draft.status == "Returned":
+            return draft.qa_lead_decided_at or draft.reviewed_at
+        return None
+
+
+class TestCaseTag(Base):
+    """Reusable labels attached to test cases for repository filtering."""
+    __tablename__ = "qap_test_case_tags"
+    __table_args__ = (UniqueConstraint("test_case_id", "tag", name="uq_qap_test_case_tag"),)
+    id = pk_column()
+    test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False, index=True)
+    tag = Column(String(80), nullable=False, index=True)
+    test_case = relationship("TestCase", back_populates="tag_rows")
+
 
 class TestStep(Base):
+    """Legacy, pre-revamp step storage -- kept only for backward
+    compatibility (see TestCase's own docstring). No code path written
+    after the 2026-08 revamp writes to this table; new/edited testcases use
+    TestCaseVersionStep below instead, scoped to an immutable version rather
+    than the mutable identity."""
     __tablename__ = "qap_test_steps"
     id = pk_column()
     test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False)
@@ -1630,27 +2232,277 @@ class TestStep(Base):
     test_case = relationship("TestCase", back_populates="steps")
 
 
+class TestCaseVersion(Base):
+    """SRS VER-001..006 -- an immutable snapshot of one TestCase's full
+    definition at one version number. Created the moment a draft is first
+    saved (status Draft) and NEVER modified in place again once it has ever
+    been submitted for review -- editing after that point (VER-003) always
+    creates a brand-new TestCaseVersion row rather than touching this one,
+    which is exactly what makes historical cycle reporting reproducible
+    (AC-01/AC-02): a TestExecution's pinned_version_id always points at one
+    specific, permanently-frozen row here, so nothing that happens to the
+    testcase afterward can retroactively change what an already-pinned
+    cycle item displays.
+
+    Numbering (VER-004): version_major stays fixed unless a QA Lead
+    explicitly elects a major bump with justification (materially changed
+    intent); version_minor auto-increments by default (compatible
+    refinement). See routers/test_repository.py's _next_version_numbers for
+    the exact policy, and review_comments/submit_note for where the
+    justification is recorded.
+
+    Review lifecycle, 2026-08 "Test Approval Workflow" refactor (Test_
+    Approval_Workflow_Requirements.docx sections 3/6) -- a strict two-stage
+    chain, Author -> Reviewer -> QA Lead:
+      Draft -> In Review (Author submits) -> Review Completed (Reviewer
+      recommends) -> Approved (QA Lead approves & activates) -> a later edit
+      spins off a NEW Draft version while this one remains the approved
+      baseline (TestCase.current_approved_version_id keeps pointing here)
+      until the new draft is itself approved.
+      Correction path: In Review (Reviewer) or Review Completed (QA Lead)
+      -> Returned (mandatory comment at either stage) -> Draft-like editing
+      -> In Review again.
+      Termination path: Review Completed -> Rejected (QA Lead only,
+      mandatory comment) -- terminal; cannot be executed, added to a cycle,
+      or edited in place. routers/test_repository.py::update_test_case
+      spins a fresh Draft off a Rejected version's content instead (same
+      mechanic as editing an Approved baseline) -- the Rejected version
+      itself stays frozen/immutable in history for traceability, same as
+      Approved/Archived.
+      Archived is a terminal state reachable from Approved (case-level
+      archive, applied to whichever version was the approved baseline at
+      that time) -- unrelated to Rejected, which is reachable only from
+      Review Completed and never from Approved.
+    reviewed_by_id/reviewed_at/review_comments below record the REVIEWER's
+    stage-1 decision (recommend or return); qa_lead_decided_by_id/
+    qa_lead_decided_at/qa_lead_decision_comments record the QA LEAD's
+    stage-2 decision (approve, return, or reject) -- kept as separate field
+    triples so both stages' last-known outcome stay independently visible
+    without one overwriting the other (the full turn-by-turn history is the
+    separately append-only ApprovalAction table; these are convenience
+    summary fields for APR-006's "current assignee, pending action, elapsed
+    time" display)."""
+    __tablename__ = "qap_test_case_versions"
+    __table_args__ = (UniqueConstraint("test_case_id", "version_major", "version_minor",
+                                        name="uq_qap_tcv_case_version"),)
+    id = pk_column()
+    test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False, index=True)
+    version_major = Column(Integer, nullable=False, default=1)
+    version_minor = Column(Integer, nullable=False, default=0)
+    # See TestCase.status above for the full status vocabulary and the
+    # ORA-12899/String(30) note -- this is the authoritative copy; TestCase's
+    # own status is just a mirror of whichever version is current.
+    status = Column(String(30), nullable=False, default="Draft")
+    # Immutable content snapshot -- see TestCase's own former column
+    # docstrings for what each of these means; identical shape, just scoped
+    # to one frozen version instead of the mutable identity.
+    epic_id = Column(String(60))
+    cr_number = Column(String(64))
+    feature_id = Column(String(60))
+    user_story_id = Column(String(60))
+    test_type = Column(String(60))
+    module_name = Column(String(150))
+    test_scenario = Column(String(255))
+    pre_condition = Column(Text)
+    description = Column(Text)
+    priority = Column(String(16))
+    author_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+    # REV-001: submission releases checkout and records author/timestamp/
+    # optional note.
+    submitted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    submit_note = Column(Text, nullable=True)
+    # REV-002 -- the REVIEWER's stage-1 decision (recommend or return).
+    reviewed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    review_comments = Column(Text, nullable=True)
+    # REV-003 -- the QA LEAD's stage-2 final decision (approve & activate,
+    # return, or reject). Separate from reviewed_* above so a version that
+    # passed through both stages keeps both outcomes independently visible.
+    qa_lead_decided_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    qa_lead_decided_at = Column(DateTime, nullable=True)
+    qa_lead_decision_comments = Column(Text, nullable=True)
+    # APR-001 -- project-level default Reviewer/QA Lead (TestProject.
+    # default_reviewer_id/default_qa_lead_id) copied here at submission
+    # time, with optional per-item reassignment afterward (see
+    # routers/test_repository.py::reassign_test_case_approvers). Drives
+    # APR-006's "current assignee" and APR-007's personal Pending Approval
+    # filtering and identifies the user who owns each stage decision.
+    # Project-role authorization remains a prerequisite, while the selected
+    # assignee is the stage-specific decision maker (Admin retains oversight).
+    assigned_reviewer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    assigned_qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    # Section 10 reminder/escalation sweep bookkeeping -- set once a
+    # reminder/escalation Notification has been created for whichever stage
+    # this version is CURRENTLY pending in, so the sweep never double-fires
+    # for the same wait. Reset to NULL every time the version moves to a
+    # new pending stage (see _submit_draft/review_test_case), so each stage
+    # gets its own fresh reminder/escalation window.
+    reminder_sent_at = Column(DateTime, nullable=True)
+    escalated_at = Column(DateTime, nullable=True)
+    # TC-005 "record the source testcase/version" on clone, and reused for
+    # VER-005 version-compare's own ancestry display.
+    source_version_id = Column(Integer, ForeignKey("qap_test_case_versions.id"), nullable=True)
+
+    test_case = relationship("TestCase", back_populates="versions", foreign_keys=[test_case_id])
+    author = relationship("User", foreign_keys=[author_id])
+    submitted_by = relationship("User", foreign_keys=[submitted_by_id])
+    reviewed_by = relationship("User", foreign_keys=[reviewed_by_id])
+    qa_lead_decided_by = relationship("User", foreign_keys=[qa_lead_decided_by_id])
+    assigned_reviewer = relationship("User", foreign_keys=[assigned_reviewer_id])
+    assigned_qa_lead = relationship("User", foreign_keys=[assigned_qa_lead_id])
+    source_version = relationship("TestCaseVersion", remote_side=[id], foreign_keys=[source_version_id])
+    steps = relationship("TestCaseVersionStep", back_populates="version", cascade="all,delete-orphan",
+                          order_by="TestCaseVersionStep.step_no")
+
+    @property
+    def version(self):
+        return f"{self.version_major}.{self.version_minor}"
+
+    @property
+    def author_name(self):
+        return self.author.full_name if self.author else None
+
+    @property
+    def submitted_by_name(self):
+        return self.submitted_by.full_name if self.submitted_by else None
+
+    @property
+    def reviewed_by_name(self):
+        return self.reviewed_by.full_name if self.reviewed_by else None
+
+    @property
+    def qa_lead_decided_by_name(self):
+        return self.qa_lead_decided_by.full_name if self.qa_lead_decided_by else None
+
+    @property
+    def assigned_reviewer_name(self):
+        return self.assigned_reviewer.full_name if self.assigned_reviewer else None
+
+    @property
+    def assigned_qa_lead_name(self):
+        return self.assigned_qa_lead.full_name if self.assigned_qa_lead else None
+
+    # APR-006 "current assignee" -- whichever role's action is currently
+    # pending, per this version's own status. None once terminal
+    # (Approved/Rejected/Archived) or while still an unsubmitted Draft.
+    # 2026-08 "Simplified Test Management Review and Approval" requirement --
+    # extended to the 4 NEW-path statuses (constants.TEST_CASE_NEW_STATUSES):
+    # "Recommendation Pending"/"QA Lead Approval Pending" have no individual
+    # assignee (group routing is authoritative), so pending_with_user_id
+    # stays None for those -- the frontend falls back to
+    # constants.ts::TEST_CASE_PENDING_WITH's group label, rendered as a
+    # clickable RoleGroupLink (QA Group/QA Lead Group) rather than a plain
+    # string, same UX as pending_with_user_id being a real person elsewhere.
+    # "Returned by QA"/"Returned by QA Lead" DO have a real pending person
+    # (the author, same as OLD "Returned") -- reported directly: "Pending
+    # with author, give details who have uploaded" was previously blank for
+    # these two NEW-path Returned statuses (only literal OLD "Returned" was
+    # handled), which fell back to the generic unclickable "Author" label
+    # with no actual name.
+    @property
+    def pending_with_user_id(self):
+        if self.status == "In Review":
+            return self.assigned_reviewer_id
+        if self.status == "Review Completed":
+            return self.assigned_qa_lead_id
+        if self.status in ("Returned", "Returned by QA", "Returned by QA Lead"):
+            return self.author_id
+        return None
+
+    @property
+    def pending_with_user_name(self):
+        if self.status == "In Review":
+            return "QA Reviewer Group"
+        if self.status == "Review Completed":
+            return "CM QA / AGM QA"
+        if self.status == "Recommendation Pending":
+            return "QA Group"
+        if self.status == "QA Lead Approval Pending":
+            return "QA Lead Group"
+        if self.status in ("Returned", "Returned by QA", "Returned by QA Lead"):
+            return self.author_name
+        return None
+
+
+class TestCaseVersionStep(Base):
+    """Ordered steps for one immutable TestCaseVersion -- see that class's
+    own docstring. Replaces TestStep as the real, version-scoped step
+    storage going forward."""
+    __tablename__ = "qap_test_case_version_steps"
+    __table_args__ = (UniqueConstraint("version_id", "step_no", name="uq_qap_tcvs_version_step"),)
+    id = pk_column()
+    version_id = Column(Integer, ForeignKey("qap_test_case_versions.id"), nullable=False, index=True)
+    step_no = Column(Integer, nullable=False)
+    step_text = Column(Text)
+    expected_result = Column(Text)
+
+    version = relationship("TestCaseVersion", back_populates="steps")
+
+
 class TestCycle(Base):
     """Test Execution module -- a named run (e.g. 'Sprint 12 Regression',
     'CR-XX UAT Cycle 1') under a Project. Test cases are explicitly added to
     a cycle (creating a Not-Executed TestExecution row each) and then run
     against it -- the same case can be added to several different cycles
-    over time, each getting its own independent execution history."""
+    over time, each getting its own independent execution history.
+
+    `status` follows the controlled Draft -> Ready -> In Progress workflow,
+    with In Progress -> Blocked -> In Progress and In Progress -> Completed.
+    Completed is terminal. Every transition is validated and recorded by
+    routers/test_execution.py instead of accepting arbitrary free text."""
     __tablename__ = "qap_test_cycles"
     id = pk_column()
     cycle_key = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["TEST_CYCLE"]))
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
     name = Column(String(150), nullable=False)
     description = Column(Text)
-    status = Column(String(20), default="Not Started")
+    status = Column(String(20), default="Draft")
     start_date = Column(Date, nullable=True)
     end_date = Column(Date, nullable=True)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
+    # SRS LNK-003 "Linked cycles shall identify type so Smoke, Functional,
+    # Regression and Retest results are distinguishable" -- free-text by
+    # design (same latitude TestCase.test_type already has), not a fixed
+    # enum, since a project may want its own cycle-type vocabulary.
+    cycle_type = Column(String(30), nullable=True)
+    environment = Column(String(60), nullable=True)
+    build = Column(String(100), nullable=True)
+    owner_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
 
     project = relationship("TestProject", back_populates="cycles")
     created_by = relationship("User", foreign_keys=[created_by_id])
+    owner = relationship("User", foreign_keys=[owner_id])
     executions = relationship("TestExecution", back_populates="cycle", cascade="all,delete-orphan")
+    child_request_link = relationship("TestCycleChildRequestLink", back_populates="cycle", cascade="all,delete-orphan", uselist=False)
+
+    @property
+    def linked_request_id(self):
+        return self.child_request_link.child_id if self.child_request_link else None
+
+    @property
+    def linked_request_key(self):
+        return self.child_request_link.child_key if self.child_request_link else None
+
+    @property
+    def linked_request_type(self):
+        return self.child_request_link.child_type if self.child_request_link else None
+
+    @property
+    def owner_name(self):
+        return self.owner.full_name if self.owner else None
+
+class TestCycleChildRequestLink(Base):
+    """Optional Functional/SAST/DAST/Performance child association."""
+    __tablename__ = "qap_test_cycle_child_links"
+    id = pk_column()
+    cycle_id = Column(Integer, ForeignKey("qap_test_cycles.id"), nullable=False, unique=True)
+    child_type = Column(String(20), nullable=False)
+    child_id = Column(Integer, nullable=False, index=True)
+    child_key = Column(String(40), nullable=False, index=True)
+    cycle = relationship("TestCycle", back_populates="child_request_link")
 
 
 class TestExecution(Base):
@@ -1667,12 +2519,28 @@ class TestExecution(Base):
     routers/test_execution.py's _record_attempt/_migrate_legacy_result_if_needed.
     Field names mirror the xlsx template's own execution-time columns
     (Actual Result, Status, Test Run Artifacts, Defect ID) so the same shape
-    is used whether a result was typed in the UI or came in via Excel import."""
+    is used whether a result was typed in the UI or came in via Excel import.
+
+    2026-08 revamp (SRS CYC-004/CYC-006, the "principal traceability risk"
+    fix): pinned_version_id is the exact TestCaseVersion selected at the
+    moment this slot was added to the cycle -- once at least one
+    TestExecutionRun exists against this slot, pinned_version_id is
+    permanently frozen (CYC-006 "Executed items shall remain pinned");
+    before any attempt exists, an authorized user may explicitly upgrade it
+    to a newer approved version (routers/test_execution.py's
+    upgrade_execution_version). This is what makes a closed cycle's
+    reporting reproducible regardless of what happens to the testcase
+    afterward -- see TestCaseVersion's own docstring. run_version supports
+    SRS EXE-007 "optimistic concurrency" -- incremented every time a new
+    attempt is recorded; a client that read this slot before a concurrent
+    save must refresh rather than blindly overwrite (see
+    routers/test_execution.py's _record_attempt)."""
     __tablename__ = "qap_test_executions"
     __table_args__ = (UniqueConstraint("cycle_id", "test_case_id", name="uq_qap_test_exec_cycle_case"),)
     id = pk_column()
     cycle_id = Column(Integer, ForeignKey("qap_test_cycles.id"), nullable=False)
     test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False)
+    pinned_version_id = Column(Integer, ForeignKey("qap_test_case_versions.id"), nullable=True)
     status = Column(String(20), default="Not Executed")
     actual_result = Column(Text)
     test_run_artifacts = Column(String(255))
@@ -1683,14 +2551,40 @@ class TestExecution(Base):
     executed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     executed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=now)
+    run_version = Column(Integer, nullable=False, default=0)
+    # 2026-08 "Remove from cycle" permission requirement, Scenario 1:
+    # "tester add testcase in lifecycle, but not executed it, just added ...
+    # system should allow to remove from lifecycle as there are no test
+    # execution history." Resolution (asked directly): whoever added a
+    # testcase to a cycle may remove their OWN addition themselves, but only
+    # while it still has zero execution history -- self-correcting a same-
+    # person, zero-consequence mistake, without needing a QA Lead. Nullable
+    # since it didn't exist before this column was added -- an existing slot
+    # created before this ships simply falls back to "QA Lead Group/Admin
+    # only" (see routers/test_execution.py's _execution_removal_block_reason),
+    # same as if nobody in particular were recorded as the adder.
+    added_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
 
     cycle = relationship("TestCycle", back_populates="executions")
     test_case = relationship("TestCase", back_populates="executions")
+    pinned_version = relationship("TestCaseVersion", foreign_keys=[pinned_version_id])
     assigned_to = relationship("User", foreign_keys=[assigned_to_id])
     assigned_by = relationship("User", foreign_keys=[assigned_by_id])
     executed_by = relationship("User", foreign_keys=[executed_by_id])
+    added_by = relationship("User", foreign_keys=[added_by_id])
     runs = relationship("TestExecutionRun", back_populates="execution",
                          cascade="all,delete-orphan", order_by="TestExecutionRun.attempt_no")
+    # Every governed Defect (defects.py) linked to this specific execution
+    # slot via Defect.execution_id. Used to lock/gate status changes -- see
+    # routers/test_execution.py's _execution_status_gate. One-directional
+    # viewonly relationship (same pattern as FunctionalRequest.
+    # test_cycle_links above) rather than a back_populates pair --
+    # Defect.execution_id is the only column actually written to.
+    linked_defects = relationship(
+        "Defect",
+        primaryjoin=lambda: TestExecution.id == foreign(Defect.execution_id),
+        viewonly=True,
+    )
 
     @property
     def assigned_to_name(self):
@@ -1705,8 +2599,27 @@ class TestExecution(Base):
         return self.executed_by.full_name if self.executed_by else None
 
     @property
+    def added_by_name(self):
+        return self.added_by.full_name if self.added_by else None
+
+    @property
     def run_count(self):
         return len(self.runs)
+
+    @property
+    def pinned_version_label(self):
+        return self.pinned_version.version if self.pinned_version else None
+
+    @property
+    def is_pinned_stale(self):
+        """True when the testcase's current approved version has moved on
+        from what this slot pinned -- surfaces SRS "Version impact" report
+        (cycles on old versions) and the upgrade-available affordance in the
+        UI. Deliberately never used to silently change pinned_version_id."""
+        if not self.pinned_version_id or not self.test_case:
+            return False
+        current = self.test_case.current_approved_version_id
+        return bool(current) and current != self.pinned_version_id
 
 
 class TestExecutionRun(Base):
@@ -1769,3 +2682,234 @@ class TestRunDefect(Base):
     @property
     def linked_by_name(self):
         return self.linked_by.full_name if self.linked_by else None
+
+
+class Defect(Base):
+    """Governed defect with request/cycle/testcase/execution traceability."""
+    __tablename__ = "qap_defects"
+    id = pk_column()
+    defect_key = Column(String(40), unique=True, nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    status = Column(String(20), nullable=False, default="New", index=True)
+    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=False, index=True)
+    # These three links are optional at creation time. A governed defect can
+    # be opened first, then attached to a Failed/Blocked execution later.
+    cycle_id = Column(Integer, ForeignKey("qap_test_cycles.id"), nullable=True, index=True)
+    primary_test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=True, index=True)
+    execution_id = Column(Integer, ForeignKey("qap_test_executions.id"), nullable=True, index=True)
+    application_name = Column(String(150), nullable=False)
+    module_feature = Column(String(150), nullable=False)
+    environment = Column(String(60), nullable=False)
+    severity = Column(String(20), nullable=False, index=True)
+    priority = Column(String(20), nullable=False, index=True)
+    steps_to_reproduce = Column(Text, nullable=False)
+    expected_result = Column(Text, nullable=False)
+    actual_result = Column(Text, nullable=False)
+    reporter_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False, index=True)
+    reported_at = Column(DateTime, default=now, nullable=False)
+    # No longer index=True on its own -- superseded by the composite
+    # ix_qap_defects_assignee_upd below (same leading column, plus status
+    # and updated_at) -- "my assigned defects, newest first" is exactly the
+    # Defect Management module's own personal-queue view.
+    assignee_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    assigned_team = Column(String(150), nullable=True)
+    assigned_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    assigned_at = Column(DateTime, nullable=True)
+    assignment_remarks = Column(Text, nullable=True)
+    retest_tester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    device_details = Column(String(255), nullable=True)
+    build_version = Column(String(100), nullable=True)
+    api_endpoint = Column(String(500), nullable=True)
+    request_response_details = Column(Text, nullable=True)
+    log_details = Column(Text, nullable=True)
+    related_cr_number = Column(String(64), nullable=True)
+    external_defect_id = Column(String(100), nullable=True)
+    remarks = Column(Text, nullable=True)
+    labels = Column(String(500), nullable=True)
+    resolution_type = Column(String(60), nullable=True)
+    resolution_summary = Column(Text, nullable=True)
+    root_cause = Column(Text, nullable=True)
+    fix_details = Column(Text, nullable=True)
+    fixed_build_version = Column(String(100), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    retest_result = Column(String(20), nullable=True)
+    retest_at = Column(DateTime, nullable=True)
+    tested_build_version = Column(String(100), nullable=True)
+    retest_actual_result = Column(Text, nullable=True)
+    retest_remarks = Column(Text, nullable=True)
+    reopen_reason = Column(Text, nullable=True)
+    reopen_count = Column(Integer, nullable=False, default=0)
+    deferral_reason = Column(Text, nullable=True)
+    deferral_approved_by = Column(String(150), nullable=True)
+    target_release = Column(String(100), nullable=True)
+    expected_resolution_date = Column(Date, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    duplicate_of_id = Column(Integer, ForeignKey("qap_defects.id"), nullable=True)
+    # 2026-08 -- reported directly: "implement not a defect cycle, which is
+    # missing as per defect cycle standard." A new terminal status, "Not a
+    # Defect" (routers/defects.py's STATUSES/TRANSITIONS), reachable only
+    # from "New" -- same triage-time slot as Rejected/Duplicate, distinct
+    # from Rejected (which can mean duplicate/invalid/won't-fix) in that the
+    # reported behavior was investigated and found to be expected/working as
+    # designed, not an application defect at all. Mirrors rejection_reason's
+    # own pattern exactly (a single required free-text reason, no FK like
+    # Duplicate's duplicate_of_id needs). New column on an EXISTING Oracle
+    # table -- create_all() never alters existing columns (additive-only,
+    # no-Alembic convention, see database.py's own docstring) -- see
+    # backend/scripts/2026-08_add_defect_not_a_defect_column.sql, which
+    # STILL NEEDS TO BE RUN BY HAND against the live Oracle schema before
+    # this code is deployed.
+    not_a_defect_reason = Column(Text, nullable=True)
+    closure_remarks = Column(Text, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=now, nullable=False)
+    updated_at = Column(DateTime, default=now, onupdate=now, nullable=False)
+
+    qa_request = relationship("QARequest", foreign_keys=[qa_request_id])
+    cycle = relationship("TestCycle", foreign_keys=[cycle_id])
+    primary_test_case = relationship("TestCase", foreign_keys=[primary_test_case_id])
+    execution = relationship("TestExecution", foreign_keys=[execution_id])
+    reporter = relationship("User", foreign_keys=[reporter_id])
+    assignee = relationship("User", foreign_keys=[assignee_id])
+    assigned_by = relationship("User", foreign_keys=[assigned_by_id])
+    retest_tester = relationship("User", foreign_keys=[retest_tester_id])
+    duplicate_of = relationship("Defect", remote_side=[id], foreign_keys=[duplicate_of_id])
+    test_case_links = relationship("DefectTestCaseLink", back_populates="defect", cascade="all,delete-orphan")
+
+    @property
+    def reporter_name(self):
+        return self.reporter.full_name if self.reporter else None
+
+    @property
+    def assignee_name(self):
+        return self.assignee.full_name if self.assignee else None
+
+    @property
+    def assigned_by_name(self):
+        return self.assigned_by.full_name if self.assigned_by else None
+
+    @property
+    def qa_request_key(self):
+        return self.qa_request.request_id if self.qa_request else None
+
+    @property
+    def cycle_key(self):
+        return self.cycle.cycle_key if self.cycle else None
+
+    @property
+    def project_id(self):
+        return self.cycle.project_id if self.cycle else None
+
+    # 2026-08 -- reported directly: "During assigning defect, department
+    # should be auto populated based on linked request or Failed / Blocked
+    # Test Execution." The linked Test Cycle's own Project.department is
+    # the "which team actually owns the failing area" signal -- more
+    # specific than the QA Request's own department, which the frontend
+    # already offers as a fallback default (see Defects.tsx's TransitionModal
+    # -- requestDepartment). None whenever no execution/cycle is linked
+    # (e.g. a defect opened standalone, not from a Failed/Blocked execution).
+    @property
+    def project_department(self):
+        return self.cycle.project.department if self.cycle and self.cycle.project else None
+
+    @property
+    def test_case_key(self):
+        return self.primary_test_case.test_case_key if self.primary_test_case else None
+
+    @property
+    def duplicate_of_key(self):
+        return self.duplicate_of.defect_key if self.duplicate_of else None
+
+    @property
+    def linked_test_case_ids(self):
+        return [link.test_case_id for link in self.test_case_links]
+
+    @property
+    def linked_test_case_keys(self):
+        return [link.test_case.test_case_key for link in self.test_case_links if link.test_case]
+
+
+class DefectTestCaseLink(Base):
+    __tablename__ = "qap_defect_case_links"
+    __table_args__ = (UniqueConstraint("defect_id", "test_case_id", name="uq_qap_def_case"),)
+    id = pk_column()
+    defect_id = Column(Integer, ForeignKey("qap_defects.id"), nullable=False, index=True)
+    test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False, index=True)
+    defect = relationship("Defect", back_populates="test_case_links")
+    test_case = relationship("TestCase")
+
+
+# ---------------------------------------------------------------------------
+# Performance optimization indexes (IDX-001..007)
+# ---------------------------------------------------------------------------
+# Composite indexes for the query patterns every paginated list endpoint
+# actually runs: filter by department/status (RBAC scoping + PAG-001's
+# `status` param), sorted newest-first (PAG-004's stable `created_at DESC,
+# id DESC`). Grouped here at module end, rather than scattered as
+# `__table_args__` on each class, so the whole set (and the redundant
+# single-column indexes removed alongside them -- see the comment left on
+# each affected column above) can be reviewed together against IDX-005
+# ("shall not create redundant indexes whose leading columns are already
+# adequately covered by another index").
+#
+# Every name is verified <= 30 bytes (Oracle's hard identifier limit --
+# this project has hit ORA-00972 from a too-long identifier before, see
+# ORACLE_MIGRATION_2026-07.md's own note on it).
+#
+# IMPORTANT -- this app has no Alembic/migration tool (see database.py's
+# module docstring): schema changes are additive-only via
+# `Base.metadata.create_all()`, which only emits DDL for tables that don't
+# exist yet. A brand-new deployment gets these indexes automatically; an
+# EXISTING Oracle schema needs them added by hand -- see
+# backend/scripts/2026-08_add_performance_indexes.sql for the equivalent
+# manual `CREATE INDEX` statements (same convention already used for new
+# columns needing manual `ALTER TABLE`).
+Index("ix_qap_req_dept_status_created", QARequest.department, QARequest.status, QARequest.created_at)
+Index("ix_qap_func_status_created", FunctionalRequest.status, FunctionalRequest.created_at)
+Index("ix_qap_sast_status_created", SASTRequest.status, SASTRequest.created_at)
+Index("ix_qap_dast_status_created", DASTRequest.status, DASTRequest.created_at)
+Index("ix_qap_perf_status_created", PerformanceRequest.status, PerformanceRequest.created_at)
+Index("ix_qap_appract_entity_created", ApprovalAction.entity_type, ApprovalAction.entity_id, ApprovalAction.created_at)
+Index("ix_qap_tc_proj_folder_created", TestCase.project_id, TestCase.folder_id, TestCase.created_at)
+# 2026-08 -- added after the IDX-001..007 pass above, alongside the Recycle
+# Bin feature's is_deleted column (models.py's own comment on that column).
+# Every list/summary query in test_repository.py filters
+# `project_id == X AND is_deleted == True/False` together (list_test_cases,
+# get_test_case_summary x3, list_all_test_cases_for_project,
+# _selected_project_cases, list_recycle_bin) -- is_deleted itself was never
+# indexed at all, so every one of those queries index-range-scans by
+# project_id via ix_qap_tc_proj_folder_created above and then falls back to
+# a table-access-by-rowid to evaluate is_deleted on each candidate row. This
+# composite serves the actual filter pair directly instead. Not a dup of
+# ix_qap_tc_proj_folder_created under IDX-005 -- different second column
+# (is_deleted vs folder_id), so it covers a distinct filter combination
+# rather than a subset of it.
+Index("ix_qap_tc_proj_deleted_created", TestCase.project_id, TestCase.is_deleted, TestCase.created_at)
+Index("ix_qap_cyc_proj_status_created", TestCycle.project_id, TestCycle.status, TestCycle.created_at)
+Index("ix_qap_readiness_func_req", ReadinessChecklistItem.functional_request_id)
+Index("ix_qap_moddocs_req_uploaded", RequestDocument.module, RequestDocument.request_id, RequestDocument.uploaded_at)
+Index("ix_qap_audit_actor_created", AuditLog.actor_id, AuditLog.created_at)
+Index("ix_qap_audit_target", AuditLog.target_type, AuditLog.target_id)
+Index("ix_qap_defects_assignee_upd", Defect.assignee_id, Defect.status, Defect.updated_at)
+
+# Deliberately NOT added, with reasons (IDX-005/IDX-006 diligence):
+#   - TestExecution(cycle_id, test_case_id): already exactly covered by the
+#     UniqueConstraint("cycle_id", "test_case_id", name="uq_qap_test_exec_
+#     cycle_case") on TestExecution above -- Oracle backs a unique
+#     constraint with a unique index on precisely those columns in that
+#     order, so a second, non-unique index on the same leading columns
+#     would be purely redundant.
+#   - "Pending Approval: approver, status, entity type" (IDX-002's own
+#     table) -- there is no dedicated PendingApproval table with an
+#     `approver` column in this schema; every pending-approval screen
+#     queries the underlying module tables (QARequest/FunctionalRequest/
+#     SASTRequest/DASTRequest/PerformanceRequest/TestCase review state)
+#     directly by status/role, which the composites above already cover.
+#   - "Assignment: assignee, status, updated date" beyond Defect -- the only
+#     other assignment-shaped column in the schema is TestExecution.
+#     assigned_to_id, which already has its own index=True and no
+#     corresponding `status`/`updated_at` pair on that same row (status
+#     lives on the row already, but there's no separate "assignment updated"
+#     timestamp distinct from the row's own created_at) to usefully compose
+#     with -- revisit if/when that module gains one.

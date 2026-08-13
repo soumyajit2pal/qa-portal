@@ -11,6 +11,40 @@ interface RequestOptions {
   isBlob?: boolean
 }
 
+const REQUEST_TIMEOUT_MS = 30_000
+const GET_CACHE_TTL_MS = 8_000
+const RETRYABLE_STATUSES = new Set([502, 503, 504])
+const inFlightGets = new Map<string, Promise<unknown>>()
+const completedGets = new Map<string, { value: unknown; expiresAt: number }>()
+let cacheGeneration = 0
+const activityListeners = new Set<(pending: number) => void>()
+const mutationListeners = new Set<(path: string) => void>()
+let pendingRequests = 0
+
+function updateActivity(change: number) {
+  pendingRequests = Math.max(0, pendingRequests + change)
+  activityListeners.forEach((listener) => listener(pendingRequests))
+}
+
+/** Subscribe to all API activity. Returns an unsubscribe function. */
+export function subscribeToApiActivity(listener: (pending: number) => void): () => void {
+  activityListeners.add(listener)
+  listener(pendingRequests)
+  return () => activityListeners.delete(listener)
+}
+
+/** Subscribe to successful data-changing requests. */
+export function subscribeToApiMutations(listener: (path: string) => void): () => void {
+  mutationListeners.add(listener)
+  return () => mutationListeners.delete(listener)
+}
+
+class HttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+  }
+}
+
 function formatBackendReason(detail: unknown): string {
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail)) {
@@ -34,7 +68,7 @@ function formatBackendReason(detail: unknown): string {
   return String(detail || '')
 }
 
-async function request<T = any>(path: string, opts: RequestOptions = {}): Promise<T> {
+async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T> {
   const { method = 'GET', body, formEncoded = false, isBlob = false } = opts
   const headers: Record<string, string> = {}
   const token = getToken()
@@ -48,7 +82,19 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
     payload = body as BodyInit
   }
 
-  const res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload })
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('The server took too long to respond. Please try again.')
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
+  }
 
   if (!res.ok) {
     let detail: unknown = res.statusText || `Request failed (${res.status})`
@@ -66,12 +112,72 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
         }
       }
     } catch (e) { /* ignore */ }
-    throw new Error(formatBackendReason(detail) || res.statusText || `Request failed (${res.status})`)
+    throw new HttpError(formatBackendReason(detail) || res.statusText || `Request failed (${res.status})`, res.status)
   }
 
   if (isBlob) return (res.blob() as unknown) as Promise<T>
   if (res.status === 204) return null as unknown as T
   return res.json() as Promise<T>
+}
+
+async function request<T = any>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const method = opts.method || 'GET'
+  const key = method === 'GET' ? `${getToken() || ''}:${path}:${opts.isBlob ? 'blob' : 'json'}` : ''
+  // Briefly reuse successful JSON reads across components and route changes.
+  // Mutations clear this cache below, so saved data is never hidden behind a
+  // stale entry. Blob/download responses are deliberately excluded.
+  const cached = key && !opts.isBlob ? completedGets.get(key) : undefined
+  if (cached && cached.expiresAt > Date.now()) return cached.value as T
+  if (cached) completedGets.delete(key)
+  const existing = key ? inFlightGets.get(key) : undefined
+  if (existing) return existing as Promise<T>
+
+  if (method !== 'GET') {
+    cacheGeneration += 1
+    completedGets.clear()
+    // A mutation can make every currently-running read stale. Do not let a
+    // follow-up refresh attach itself to a GET that started before the save.
+    // The old promises may still finish for their original callers, but new
+    // reads must go to the server and observe the mutation.
+    inFlightGets.clear()
+  }
+  const requestGeneration = cacheGeneration
+
+  let operation!: Promise<T>
+  operation = (async () => {
+    updateActivity(1)
+    try {
+      try {
+        const result = await executeRequest<T>(path, opts)
+        if (method !== 'GET') mutationListeners.forEach((listener) => listener(path))
+        if (key && !opts.isBlob && requestGeneration === cacheGeneration) {
+          completedGets.set(key, { value: result, expiresAt: Date.now() + GET_CACHE_TTL_MS })
+        }
+        return result
+      } catch (error) {
+        // A single safe retry handles brief proxy/backend restarts. Mutations
+        // are never retried because doing so could submit data twice.
+        const retryable = method === 'GET' &&
+          (!(error instanceof HttpError) || RETRYABLE_STATUSES.has(error.status))
+        if (!retryable) throw error
+        await new Promise((resolve) => window.setTimeout(resolve, 350))
+        const result = await executeRequest<T>(path, opts)
+        if (method !== 'GET') mutationListeners.forEach((listener) => listener(path))
+        if (key && !opts.isBlob && requestGeneration === cacheGeneration) {
+          completedGets.set(key, { value: result, expiresAt: Date.now() + GET_CACHE_TTL_MS })
+        }
+        return result
+      }
+    } finally {
+      updateActivity(-1)
+      // Do not let an older request remove a newer request stored under the
+      // same key after a mutation invalidated the in-flight map.
+      if (key && inFlightGets.get(key) === operation) inFlightGets.delete(key)
+    }
+  })()
+
+  if (key) inFlightGets.set(key, operation)
+  return operation
 }
 
 // Triggers a same-origin download for a Blob response (report exports,
@@ -161,6 +267,9 @@ export const api = {
 }
 
 export function setToken(token: string | null | undefined): void {
+  cacheGeneration += 1
+  completedGets.clear()
+  inFlightGets.clear()
   if (token) localStorage.setItem('qa_portal_token', token)
   else localStorage.removeItem('qa_portal_token')
 }

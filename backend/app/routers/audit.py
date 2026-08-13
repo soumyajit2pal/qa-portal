@@ -2,12 +2,12 @@ import csv
 import io
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import models, schemas, pagination
 from ..constants import Role
 from ..database import get_db
 from ..deps import require_roles
@@ -16,8 +16,8 @@ from ..deps import require_roles
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 AUDIT_ROLES = (
     Role.ADMIN,
-    Role.DEPARTMENT_HEAD_COE_CM,
-    Role.DEPARTMENT_HEAD_COE_AGM,
+    Role.CHIEF_MANAGER_QA,
+    Role.AGM_QA,
 )
 
 
@@ -55,44 +55,66 @@ def _filtered_query(
     return query
 
 
-@router.get("", response_model=schemas.AuditLogPage)
+@router.get("", response_model=pagination.Page[schemas.AuditLogOut])
 def list_audit_logs(
     event_type: Optional[str] = None,
     outcome: Optional[str] = None,
     search: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=10, le=200),
+    params: pagination.PageParams = Depends(),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_roles(*AUDIT_ROLES)),
 ):
+    """SRS 7.2 pagination rollout -- this endpoint already did real SQL
+    `OFFSET`/`LIMIT` pagination before this change (unlike most of the
+    endpoints elsewhere in this rollout, which started as unrestricted
+    `.all()` fetches), just via its own hand-rolled `page`/`page_size`
+    params (default 5, range 5-200) and a bespoke `{rows, total, page,
+    page_size, summary}` envelope instead of the shared `pagination.py`
+    contract every other list endpoint now follows. Migrated here purely
+    for consistency -- standard `page_size` of 5/10/25/50/100, the same
+    `Page[T]` envelope, and `AuditLog.tsx`'s own hand-rolled Previous/Next
+    footer replaced with the shared `<Table server={{...}}>` pager used
+    everywhere else. `search`/`event_type`/`outcome`/`date_from`/`date_to`
+    stay outside `PageParams` (module-specific filters, not PAG-001's
+    generic set); `event_type`+`outcome` in particular don't map onto
+    `apply_status_filter`'s single-column IN-filter shape since they're two
+    independent dimensions, not one. See `audit_summary` below for the
+    failed/authentication/access_management counts this list can no longer
+    compute from just the current page."""
+    try:
+        query = _filtered_query(db, event_type, outcome, search, date_from, date_to)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date filter. Use ISO date/time format.")
+    query = query.order_by(models.AuditLog.created_at.desc(), models.AuditLog.id.desc())
+    result = pagination.paginate(query, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/summary", response_model=schemas.AuditSummary)
+def audit_summary(
+    event_type: Optional[str] = None,
+    outcome: Optional[str] = None,
+    search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(*AUDIT_ROLES)),
+):
+    """Same filters as `list_audit_logs`, so the summary strip always
+    reflects the currently active filter set (matching what the old
+    single-response `{rows, total, summary}` shape did) -- three indexed
+    `COUNT`s, never a full-row fetch."""
     try:
         query = _filtered_query(db, event_type, outcome, search, date_from, date_to)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date filter. Use ISO date/time format.")
     total = query.count()
-    rows = (
-        query.order_by(models.AuditLog.created_at.desc(), models.AuditLog.id.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
-    )
     failed = query.filter(models.AuditLog.outcome == "FAILED").count()
     authentication = query.filter(models.AuditLog.event_type == "AUTHENTICATION").count()
     access_management = query.filter(models.AuditLog.event_type == "ACCESS_MANAGEMENT").count()
-    return {
-        "rows": rows,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "summary": {
-            "total": total,
-            "failed": failed,
-            "authentication": authentication,
-            "access_management": access_management,
-        },
-    }
+    return {"total": total, "failed": failed, "authentication": authentication, "access_management": access_management}
 
 
 @router.get("/export")

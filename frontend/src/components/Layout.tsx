@@ -1,9 +1,8 @@
-import React, { useEffect, useState, useCallback, useRef, ReactNode } from 'react'
+import React, { useEffect, useState, useRef, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS, hasRole, canSeeQaDepartmentOnlyData } from '../constants'
-import { api } from '../api'
-import { UserOut, PendingApprovalItem } from '../types'
+import { ROLE_LABELS, hasRole, hasDepartment, QA_DEPARTMENT } from '../constants'
+import { UserOut } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
   IconCertificate, IconApprove, IconChart, IconSearch, IconWorkflow,
@@ -11,28 +10,12 @@ import {
   IconHelp,
 } from './Icons'
 import ClearableSearchInput from './ClearableSearchInput'
-
-// Reported directly: "lots of api calling, sometime same api calling
-// multiple time, also i see api is getting late." Root cause: this used to
-// carry a count for every nav item (qaRequests/functional/sast/dast/
-// performance/suppression/signoff/pendingReview), each requiring its own
-// full-list (or, for pendingReview, whole-user-table) fetch -- but the nav
-// item render below only ever displays a badge for Pending Approvals (see
-// its own comment there); every other count was computed and thrown away
-// unused. Worse, all of it re-ran on EVERY route change (see loadCounts'
-// own useEffect dependency on location.pathname), so navigating around the
-// app repeatedly re-fetched 7 full request lists plus (for Admins) the
-// entire user table, none of which anything on screen ever used. Trimmed
-// to just the one count that's actually rendered.
-interface NavCounts {
-  pendingApprovals: number
-}
+import NotificationBell from './NotificationBell'
 
 interface NavItem {
   to: string
   label: string
   icon: React.ComponentType<React.SVGProps<SVGSVGElement>>
-  count?: number
 }
 
 interface NavGroup {
@@ -44,7 +27,7 @@ interface NavGroup {
 // Governance / Administration) rather than one long flat list -- with 8+
 // destinations a flat list stops reading as a hierarchy, so grouping gives
 // the sidebar a clearer information architecture.
-function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
+function navGroups(user: UserOut | null): NavGroup[] {
   const groups: NavGroup[] = [
     {
       label: 'Overview',
@@ -84,22 +67,34 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
         { to: '/test-projects', label: 'Projects', icon: IconApps },
         { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
         { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
+        // 2026-08 -- was role-gated for a while (QA team plus whoever could
+        // raise a defect), then reported directly: "currently Defect
+        // management is not available to everyone. make this visible to
+        // everyone based on department filter." Nav item now shown
+        // unconditionally, same as every other Test Management item above --
+        // the backend's own department scoping (routers/defects.py's
+        // _scoped_defects) is what actually restricts what a scoped user
+        // sees once there, not this nav check.
+        { to: '/defects', label: 'Defect Management', icon: IconTarget },
+        // SRS EXE-002 "My Executions" -- the signed-in user's own actionable
+        // items across every authorized project, one cross-project view
+        // instead of hunting through each project's own Test Execution page.
+        ...(hasDepartment(user, QA_DEPARTMENT)
+          ? [{ to: '/my-executions', label: 'My Executions', icon: IconCheckCircle }]
+          : []),
+        // SRS section 11 -- the 5 reporting views (repository health, cycle
+        // progress, defect quality, version impact, project portfolio).
+        { to: '/test-reports', label: 'Test Reports', icon: IconChart },
       ],
     },
     {
       label: 'Governance',
       items: [
-        // Reported directly: "Hide QA Sign Off except IT-QA" -- every
-        // certificate's own department is hardcoded to QA_DEPARTMENT ("IT -
-        // QA") at creation (see routers/signoff.py::create_signoff), and the
-        // list endpoint now scopes to that (see ORACLE_MIGRATION_2026-07.md
-        // section 201), so anyone outside canSeeQaDepartmentOnlyData would
-        // only ever land on a guaranteed-empty page -- hidden here instead.
-        ...(canSeeQaDepartmentOnlyData(user) ? [{ to: '/signoff', label: 'QA Sign-off', icon: IconCertificate }] : []),
-        { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell, count: counts.pendingApprovals },
+        { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate },
+        { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
-        ...(hasRole(user, 'ADMIN', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')
+        ...(hasRole(user, 'ADMIN', 'CHIEF_MANAGER_QA', 'AGM_QA')
           ? [{ to: '/audit-log', label: 'Audit Log', icon: IconSearch }]
           : []),
       ],
@@ -120,7 +115,7 @@ function navGroups(counts: NavCounts, user: UserOut | null): NavGroup[] {
     adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers })
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
   }
-  if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM')) {
+  if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'CHIEF_MANAGER_QA', 'AGM_QA')) {
     adminItems.push({ to: '/department-admin', label: 'Department Coordinator', icon: IconUsers })
   }
   if (adminItems.length > 0) {
@@ -142,8 +137,10 @@ const ID_PREFIX_ROUTES: { prefix: string; path: string }[] = [
   { prefix: 'TQA-SUP', path: '/suppression' },
   { prefix: 'TQA-SIGN', path: '/signoff' },
   { prefix: 'TQA-PROJ', path: '/test-projects' },
+  { prefix: 'TQA-PLAN', path: '/test-projects' },
   { prefix: 'TQA-TC', path: '/test-repository' },
   { prefix: 'TQA-CYCLE', path: '/test-execution' },
+  { prefix: 'DEF-', path: '/defects' },
   { prefix: 'SUP', path: '/suppression' },
   { prefix: 'QA-CERT', path: '/signoff' },
 ]
@@ -159,36 +156,10 @@ function initials(name?: string | null): string {
   return ((parts[0]?.[0] || '') + (parts[1]?.[0] || '')).toUpperCase()
 }
 
-// Reported directly (follow-up, after the fix above): "still there are some
-// calls are multiple times" -- confirmed while "just navigating around
-// generally", not tied to one page. Root cause: every route in App.tsx
-// independently wraps its own `<Protected><Page /></Protected>` (there's no
-// single shared parent/layout route with an <Outlet/>), so this whole
-// Layout component -- and everything in it, including the pending-approvals
-// badge fetch above -- actually UNMOUNTS AND REMOUNTS on every single
-// navigation, not just re-runs one effect. Restructuring routing to share
-// one persistent Layout instance is the "real" fix but a much larger,
-// riskier change; this is a smaller, safe mitigation in the meantime: a
-// module-level (outside React, so it survives remounts) cache of the last
-// fetched count, reused as long as it's still fresh, so rapidly clicking
-// between pages doesn't keep re-hitting the endpoint on every single click
-// the way a fresh useState always reset to 0 and refetched. Still refreshes
-// automatically after PENDING_APPROVALS_CACHE_MS, so the badge doesn't go
-// stale for someone who stays on one page a while.
-const PENDING_APPROVALS_CACHE_MS = 20000
-let pendingApprovalsCache: { count: number; fetchedAt: number } | null = null
-
 export default function Layout({ children }: { children?: ReactNode }) {
   const { user, logout } = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
-  // Seeded from the module-level cache (if still fresh) rather than always
-  // starting at 0 -- see PENDING_APPROVALS_CACHE_MS's own comment above --
-  // so a remount from simple navigation doesn't even flash a stale "0"
-  // before the (possibly skipped) refetch resolves.
-  const [counts, setCounts] = useState<NavCounts>({
-    pendingApprovals: pendingApprovalsCache ? pendingApprovalsCache.count : 0,
-  })
   const [search, setSearch] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('qa_nav_collapsed') === 'true')
@@ -196,7 +167,14 @@ export default function Layout({ children }: { children?: ReactNode }) {
   // auto-opens whichever group contains the current route, so the active
   // section is never hidden on load; only the OTHER groups start collapsed
   // instead of every group being expanded up front.
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set())
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('qa_nav_expanded_groups') || '[]')
+      return new Set(Array.isArray(saved) ? saved : [])
+    } catch {
+      return new Set()
+    }
+  })
   const searchInputRef = useRef<HTMLInputElement>(null)
   // Topbar user menu -- clicking the signed-in name reveals Department +
   // Role(s) (mirrors the sidebar's own user-chip, but reachable from the
@@ -205,7 +183,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const userMenuRef = useRef<HTMLDivElement>(null)
 
-  const groups = navGroups(counts, user)
+  const groups = navGroups(user)
   const activeGroup = groups.find((group) => group.items.some((item) => (
     item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to)
   )))
@@ -231,14 +209,8 @@ export default function Layout({ children }: { children?: ReactNode }) {
     }
   }, [userMenuOpen])
   useEffect(() => {
-    if (!activeGroup) return
-    setExpandedGroups((previous) => {
-      if (previous.has(activeGroup.label)) return previous
-      const next = new Set(previous)
-      next.add(activeGroup.label)
-      return next
-    })
-  }, [activeGroup?.label])
+    localStorage.setItem('qa_nav_expanded_groups', JSON.stringify(Array.from(expandedGroups)))
+  }, [expandedGroups])
 
   useEffect(() => {
     function focusGlobalSearch(event: KeyboardEvent) {
@@ -268,36 +240,9 @@ export default function Layout({ children }: { children?: ReactNode }) {
     })
   }
 
-  // Clears the module-level pending-approvals cache (see its own comment
-  // above) before signing out -- otherwise a different account signing in
-  // right after on the same browser tab could briefly see the previous
-  // account's stale cached count instead of their own.
   function handleLogout() {
-    pendingApprovalsCache = null
     logout()
   }
-
-  // Pending Approvals is the one nav item with a live badge (see the
-  // render below) -- "how many things need me right now" is the whole point
-  // of that page, so a silent nav entry would defeat it. Every other nav
-  // item's count used to be computed here too (see NavCounts' own comment
-  // above for why that was removed) -- this now only ever makes the one
-  // fetch its one consumer actually needs.
-  const loadCounts = useCallback(async () => {
-    if (pendingApprovalsCache && Date.now() - pendingApprovalsCache.fetchedAt < PENDING_APPROVALS_CACHE_MS) {
-      // Still fresh from a previous mount (e.g. the page navigated to a
-      // moment ago) -- reuse it instead of re-hitting the endpoint again.
-      setCounts({ pendingApprovals: pendingApprovalsCache.count })
-      return
-    }
-    try {
-      const items = await api.get<PendingApprovalItem[]>('/api/pending-approvals')
-      pendingApprovalsCache = { count: items.length, fetchedAt: Date.now() }
-      setCounts({ pendingApprovals: items.length })
-    } catch (e) { /* badge is non-critical; ignore failures */ }
-  }, [])
-
-  useEffect(() => { loadCounts() }, [loadCounts, location.pathname])
 
   function submitSearch(e: React.FormEvent) {
     e.preventDefault()
@@ -331,14 +276,14 @@ export default function Layout({ children }: { children?: ReactNode }) {
   }
 
   return (
-    <div className="app-shell redesigned-shell navigation-v2">
+    <div className="app-shell redesigned-shell navigation-v2 navigation-v8">
       <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">
-          <span className="bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
+          <span className="qualitysphere-mark" aria-hidden="true"><b>Q</b><i>S</i></span>
           <div className="brand-copy">
-            <h1>QualityHub</h1>
-            <p>Bank of Maharashtra · QA Portal</p>
+            <h1>Quality<span>Shield</span></h1>
+            <img className="bank-wordmark sidebar-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
           <button className="sidebar-collapse-control" onClick={toggleSidebarSize} aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'} title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>
             {sidebarCollapsed ? '›' : '‹'}
@@ -347,6 +292,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
         </div>
 
         <nav aria-label="Application modules">
+          <div className="nav-workspace-label"><span>Quality operations</span><i /></div>
           {groups.map((group) => (
             <div className={`nav-group ${sidebarCollapsed || expandedGroups.has(group.label) ? 'group-open' : ''}`} key={group.label}>
               <button className="nav-group-toggle" onClick={() => toggleGroup(group.label)} aria-expanded={sidebarCollapsed || expandedGroups.has(group.label)}>
@@ -361,16 +307,6 @@ export default function Layout({ children }: { children?: ReactNode }) {
                              className={({ isActive }) => (isActive ? 'active' : '')}>
                       <span className="nav-icon"><Icon /></span>
                       <span className="nav-label">{item.label}</span>
-                      {/* Every other nav item's own count is rendered but
-                          switched off (see the disabled block this replaced,
-                          left in git history) -- Pending Approvals is the one
-                          deliberate exception: unlike an in-flight-request
-                          count, which is just descriptive, this number is
-                          the entire point of the page (how many things need
-                          YOU right now), so it stays live. */}
-                      {item.to === '/pending-approvals' && typeof item.count === 'number' && item.count > 0 && (
-                        <span className="nav-count">{item.count}</span>
-                      )}
                     </NavLink>
                   )
                 })}
@@ -395,9 +331,8 @@ export default function Layout({ children }: { children?: ReactNode }) {
                 <div className="role">
                   {(user.roles || []).map((r) => ROLE_LABELS[r] || r).join(' · ') || 'No role assigned'}
                 </div>
-                <div className="dept">{user.department || 'No department set'}</div>
+                <div className="dept">{(user.departments && user.departments.length ? user.departments.join(', ') : user.department) || 'No department set'}</div>
               </div>
-              <button onClick={handleLogout} title="Log out"><IconLogout width={16} height={16} /></button>
             </div>
           )}
         </div>
@@ -407,15 +342,16 @@ export default function Layout({ children }: { children?: ReactNode }) {
         <div className="topbar">
           <button className="mobile-nav-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><span /><span /><span /></button>
           <div className="topbar-context">
-            <span>{activeGroup?.label || 'Workspace'}</span>
-            <strong>{activeItem?.label || 'QualityHub'}</strong>
+            <span><b>QualityShield</b><i>/</i>{activeGroup?.label || 'Workspace'}</span>
+            <strong>{activeItem?.label || 'Dashboard'}</strong>
           </div>
           <form className="search-box" onSubmit={submitSearch}>
             <IconSearch width={16} height={16} />
-            <ClearableSearchInput ref={searchInputRef} aria-label="Global search" placeholder="Search request ID or application…" value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear global search" wrapperClassName="search-grow" />
+            <ClearableSearchInput ref={searchInputRef} aria-label="Global search" placeholder="Search requests, applications or IDs…" value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear global search" wrapperClassName="search-grow" />
             <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">
+            {user && <NotificationBell />}
             {user && (
               <div className="topbar-user-menu" ref={userMenuRef}>
                 <button
@@ -424,23 +360,29 @@ export default function Layout({ children }: { children?: ReactNode }) {
                   onClick={() => setUserMenuOpen((v) => !v)}
                   aria-expanded={userMenuOpen}
                 >
-                  <span className="status-dot" />{user.full_name}
+                  <span className="topbar-avatar">{initials(user.full_name)}</span>
+                  <span className="topbar-user-summary">
+                    <strong className="topbar-user-name">{user.full_name}</strong>
+                    <small>{(user.roles || []).map((role) => ROLE_LABELS[role] || role)[0] || 'Portal user'}</small>
+                  </span>
                   <i className={`topbar-user-caret ${userMenuOpen ? 'open' : ''}`}>⌄</i>
                 </button>
                 {userMenuOpen && (
                   <div className="topbar-user-popover">
                     <div className="topbar-user-popover-name">{user.full_name}</div>
+                    <div className="topbar-user-popover-email">{user.username}</div>
                     <div className="topbar-user-popover-row">
                       <span className="label">Department</span>
-                      <span>{user.department || 'No department set'}</span>
+                      <span>{(user.departments && user.departments.length ? user.departments.join(', ') : user.department) || 'No department set'}</span>
                     </div>
                     <div className="topbar-user-popover-row">
                       <span className="label">Role(s)</span>
                       <span>{(user.roles || []).map((r) => ROLE_LABELS[r] || r).join(', ') || 'No role assigned'}</span>
                     </div>
-                    {/* <button type="button" className="btn btn-sm topbar-user-popover-logout" onClick={logout}>
-                      <IconLogout width={14} height={14} /> Log out
-                    </button> */}
+                    <button type="button" className="topbar-logout" onClick={handleLogout}>
+                      <IconLogout width={15} height={15} />
+                      <span>Log out</span>
+                    </button>
                   </div>
                 )}
               </div>

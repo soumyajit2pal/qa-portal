@@ -17,6 +17,7 @@ import { DastStep } from './steps/DastStep'
 import { PerformanceStep } from './steps/PerformanceStep'
 import { DocumentsStep } from './steps/DocumentsStep'
 import { EvidenceKind, evidenceKey } from './steps/ChecklistEvidencePicker'
+import { POST_SIT_ENVIRONMENTS, userDepartments } from '../constants'
 
 interface NewRequestModalProps {
   onClose: () => void
@@ -78,7 +79,9 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     // only matters while the Performance step is still editable anyway
     // (existingPerformance === false), so the staged Draft value is the only
     // one that matters here.
-    performance_environment: editing.draft_performance?.performance_environment || 'UAT',
+    performance_environment: POST_SIT_ENVIRONMENTS.includes(editing.draft_performance?.performance_environment || '')
+      ? editing.draft_performance!.performance_environment!
+      : 'UAT',
     target_release_date: editing.target_release_date || '',
     remarks: editing.remarks || '',
     // Pre-fill from the requester's previously-saved self-declaration ticks,
@@ -103,7 +106,7 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     sast_checked_items: editing.draft_sast_checked_items || [],
     dast_components: editing.draft_dast_components?.length
       ? editing.draft_dast_components.map((c) => ({
-          application_url: c.application_url || '', environment: c.environment || '',
+          application_url: c.application_url || '', environment: POST_SIT_ENVIRONMENTS.includes(c.environment || '') ? c.environment! : 'UAT',
           authentication_required: (c.authentication_required || '').trim().toLowerCase() === 'yes',
           test_credentials: c.test_credentials || '',
         }))
@@ -116,10 +119,17 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
 
 export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModalProps) {
   const { user } = useAuth()
-  // Department is always the requester's own profile department -- it is
-  // set/enforced server-side regardless of what's submitted here, so this
-  // field is pre-filled and locked (not user-editable per request).
-  const [form, setForm] = useState<QARequestForm>(() => buildInitialForm(editing, user?.department || ''))
+  // 2026-08 "one user can be on multiple departments" CR, follow-up: the
+  // department field is no longer locked -- a requester picks which of
+  // THEIR OWN departments (never any other) a request belongs to, defaulting
+  // to their primary (first-assigned) one. Reported directly: "instead of
+  // this enable the dropdown and by default selection will be primary
+  // department, and then other assigned department only." Still enforced
+  // server-side (see routers/qa_requests.py::_resolve_requester_department)
+  // -- this options list is only for a sane picker, not the source of truth.
+  const departmentOptions = userDepartments(user)
+  const primaryDepartment = departmentOptions[0] || ''
+  const [form, setForm] = useState<QARequestForm>(() => buildInitialForm(editing, primaryDepartment))
   // Once the linked SAST/DAST/Performance request already exists
   // (created on an earlier save), further edits to its details happen on
   // that request's own page -- the wizard step below only collects them up
@@ -380,7 +390,7 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
         </div>
 
         <form onSubmit={submit}>
-          {step.key === 'details' && <DetailsStep form={form} set={set} />}
+          {step.key === 'details' && <DetailsStep form={form} set={set} departmentOptions={departmentOptions} />}
           {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
           {step.key === 'type' && <TypeStep form={form} set={set} />}
           {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}

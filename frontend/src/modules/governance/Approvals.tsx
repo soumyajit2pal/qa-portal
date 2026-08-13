@@ -1,7 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { Card, Table, Badge, ErrorText, PageHeader } from '../../components/Common'
 import { ApprovalActionOut, UserOut } from '../../types'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
+import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 // SAST and DAST log distinctly now ("SAST" / "DAST", not a shared
 // "SAST_DAST") -- see the long comment on routers/sast_dast.py::_log().
@@ -18,39 +20,57 @@ function userName(users: UserOut[], id?: number | null): string | null {
 }
 
 export default function Approvals() {
-  const [rows, setRows] = useState<ApprovalActionOut[]>([])
   const [users, setUsers] = useState<UserOut[]>([])
   const [entityType, setEntityType] = useState('')
+  const [search, setSearch] = useState('')
   const [error, setError] = useState<unknown>(null)
 
-  const load = useCallback(async () => {
-    try {
-      const qs = entityType ? `?entity_type=${entityType}` : ''
-      const [approvals, us] = await Promise.all([
-        api.get<ApprovalActionOut[]>(`/api/approvals${qs}`),
-        api.get<UserOut[]>('/api/auth/users'),
-      ])
-      setRows(approvals)
-      setUsers(us)
-    } catch (err) { setError(err) }
-  }, [entityType])
+  useEffect(() => {
+    api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(setError)
+  }, [])
 
-  useEffect(() => { load() }, [load])
+  // SRS 7.2 pagination rollout -- this is the one consumer of the approval
+  // feed that genuinely browses it page by page (see
+  // routers/approvals.py::list_approval_history's own docstring for why
+  // every other entity_type+entity_id-scoped consumer stays on the plain,
+  // unpaginated `GET /api/approvals`). `total`/`total_pages` are capped at
+  // that endpoint's existing 500-row ceiling, same limitation this page
+  // already lived with before (it used to fetch all 500 in one shot and
+  // paginate 5-per-page client-side; now the server does the paging).
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize,
+  } = usePaginatedList<ApprovalActionOut>('/api/approvals/history', {
+    search,
+    extra: { entity_type: entityType || undefined },
+  })
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="Approval Workflow Log" count={rows.length}
+        title="Approval Workflow Log" count={total}
         subtitle="Full audit / decision trail across QA Requests, Functional Testing, SAST/DAST, Performance, Suppression and Sign-off — who acted, what they decided, and when."
       />
       <div className="toolbar">
+        <ClearableSearchInput
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          onClear={() => setSearch('')}
+          clearLabel="Clear approval workflow search"
+          wrapperClassName="search-grow"
+          placeholder="Search request ID, step, decision, actor, role, status, or comments…"
+          aria-label="Search approval workflow log"
+        />
         <select value={entityType} onChange={(e) => setEntityType(e.target.value)}>
           {ENTITY_TYPES.map((t) => <option key={t} value={t}>{t || 'All entity types'}</option>)}
         </select>
       </div>
       <Card>
-        <Table rowKey="id" columns={[
+        <Table
+          rowKey="id"
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
+          columns={[
           { key: 'entity_type', header: 'Entity' },
           { key: 'request_ref', header: 'Request ID', render: (r) => r.request_ref || `#${r.entity_id}`, filterValue: (r) => r.request_ref || `#${r.entity_id}` },
           { key: 'step_name', header: 'Step' },

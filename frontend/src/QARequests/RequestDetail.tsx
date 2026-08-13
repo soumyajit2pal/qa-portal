@@ -13,11 +13,13 @@ import {
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
 import { ApplicationNameBanner } from "../components/ApplicationNameBanner";
+import RoleGroupLink from "../components/RoleGroupLink";
 import {
   GATEWAY_CANCELLABLE_STATUSES,
   GATEWAY_EDITABLE_STATUSES,
   GATEWAY_STATUS_LABELS,
   hasRole,
+  hasDepartment,
 } from "../constants";
 import { useChecklistTemplate } from "./steps/useChecklistTemplate";
 import {
@@ -33,6 +35,7 @@ import { NewRequestModal } from "./NewRequestModal";
 import { AddDocuments } from "./AddDocuments";
 import JiraActivity from "../components/JiraActivity";
 import ConfirmModal from "../components/ConfirmModal";
+import LinkedDefects from "../components/LinkedDefects";
 
 interface RequestDetailProps {
   req: QARequestOut;
@@ -192,7 +195,7 @@ export function RequestDetail({
   // ApplicationMaster row directly, not off any specific child request --
   // nothing backend-side needed to change. Same same-department gate every
   // other approval checkpoint in the app uses.
-  const sameDept = !!user?.department && user.department === req.department;
+  const sameDept = hasDepartment(user, req.department);
 
   // After an Application Owner/SM approves or rejects this request's
   // Application Name (see ApplicationNameBanner below), refetch this
@@ -558,9 +561,22 @@ export function RequestDetail({
                 )}
               {req.status !== "DRAFT" &&
                 req.application_master_status === "PENDING_APP_OWNER" && (
-                  <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                    Application Owner Approval Pending
-                  </span>
+                  <RoleGroupLink
+                    users={users}
+                    role="APPLICATION_OWNER"
+                    label="Application Owner"
+                    department={req.department}
+                    renderTrigger={(_count, onClick) => (
+                      <button
+                        type="button"
+                        className="badge badge-yellow"
+                        style={{ marginLeft: 8, cursor: "pointer", border: "none", font: "inherit", fontWeight: 600 }}
+                        onClick={onClick}
+                      >
+                        Application Owner Approval Pending
+                      </button>
+                    )}
+                  />
                 )}
               {req.status !== "DRAFT" &&
                 req.application_master_status === "PENDING_SM" && (
@@ -617,6 +633,9 @@ export function RequestDetail({
               {userName(users, req.requester_id) || "—"}
             </DetailField>
           </DetailSection>
+
+          <LinkedDefects query={`qa_request_id=${req.id}`} />
+
 
           {hasLinked && (
             <div style={{ marginTop: 8 }}>
@@ -831,7 +850,6 @@ export function RequestDetail({
           onClose={() => setPendingDeleteDoc(null)}
           variant="dialog"
           preventBackdropClose
-          hideCloseButton
         >
           <div style={{ fontSize: 13.5 }}>
             Delete <strong>{pendingDeleteDoc.file_name}</strong>? This cannot be undone.

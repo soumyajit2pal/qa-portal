@@ -3,16 +3,16 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import InfoModal from './InfoModal'
-import { PendingApprovalItem } from '../types'
 
 // Reported directly: "also show one info on login if there are any pending
 // approval pending." Fires once per sign-in (see AuthContext.tsx's own
 // justLoggedIn/acknowledgeLogin -- set true by login(), never by the
 // session-restore path a page refresh takes, so this doesn't re-nag on
-// every reload) -- checks the same GET /api/pending-approvals feed behind
-// the Pending Approvals nav item (see routers/pending_approvals.py) and, if
-// anything is genuinely awaiting this person's decision, shows a single
-// pop-up with the count and a link straight to that page. Silently
+// every reload) -- uses a count-only endpoint so login does not download
+// and hydrate the full approval feed merely to display one number. Detailed
+// records load only when the user opens Pending Approvals. If anything is
+// genuinely awaiting this person's decision, this shows one pop-up with the
+// count and a link straight to that page. Silently
 // acknowledges itself (no pop-up at all) when the count is zero or the
 // fetch fails, rather than showing an empty/broken notice.
 export default function PendingApprovalsNotice() {
@@ -22,10 +22,10 @@ export default function PendingApprovalsNotice() {
   useEffect(() => {
     if (!justLoggedIn) return
     let cancelled = false
-    api.get<PendingApprovalItem[]>('/api/pending-approvals')
-      .then((items) => {
+    api.get<{ count: number }>('/api/pending-approvals/count')
+      .then((summary) => {
         if (cancelled) return
-        if (items.length > 0) setCount(items.length)
+        if (summary.count > 0) setCount(summary.count)
         else acknowledgeLogin()
       })
       .catch(() => {

@@ -1,20 +1,35 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
 import {
-  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, ENVIRONMENTS, hasRole,
+  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, DEPLOYMENT_ENVIRONMENTS, hasRole, hasDepartment,
   SIGNOFF_EDITABLE_STATUSES, QA_DEPARTMENT, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
-  canSeeQaDepartmentOnlyData,
+  QA_LEAD_GROUP_ROLES, validTargetPromotionOptions, validEnvironmentPromotion,
 } from '../../constants'
-import { SignOffOut, UserOut, FunctionalOut, ApprovalActionOut } from '../../types'
-import JiraActivity from '../../components/JiraActivity'
+import { SignOffOut, UserOut, FunctionalOut, FunctionalListOut, PageOut, ApprovalActionOut } from '../../types'
+import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
+import JiraRichTextField from '../../components/JiraRichTextField'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
+}
+
+interface RecordedElectronicSignature {
+  signer: string
+  appliedAt: string
+  signatureId: string
+  intent: string
+  stage: string
+}
+
+function recordedSignature(item: ApprovalActionOut): RecordedElectronicSignature | null {
+  const match = (item.comments || '').match(/\[Electronic signature \| Signer: (.*?) \| Applied: (.*?) \| Signature ID: (.*?) \| Intent: (.*?)\]/s)
+  if (!match) return null
+  return { signer: match[1].trim(), appliedAt: match[2].trim(), signatureId: match[3].trim(), intent: match[4].trim(), stage: item.step_name || 'Approval' }
 }
 
 // Only Functional Testing Requests that have actually finished QA activity
@@ -45,15 +60,26 @@ function validityError(from: string, to: string): string | null {
   return null
 }
 
+function richTextRequiredError(form: Pick<SignOffForm, 'exit_criteria_notes' | 'open_defect_summary' | 'residual_risk_notes'>): string | null {
+  if (!form.exit_criteria_notes.trim()) return 'Exit Criteria Validation Notes are required.'
+  if (!form.open_defect_summary.trim()) return 'Open Defect Review Summary is required.'
+  if (!form.residual_risk_notes.trim()) return 'Residual Risk Documentation is required.'
+  return null
+}
+
 // Searchable "Testing Request ID" autosuggest over Functional Testing
 // Requests -- same pattern as Suppression.tsx's SAST/DAST RequestIdSearch.
 // Selecting a match hands the full FunctionalOut record back to the caller,
 // which derives every auto-populated certificate field from it (see
 // NewSignOffModal::applyRequest below).
 function TestingRequestIdSearch({ requests, selected, onSelect, onClear }: {
-  requests: FunctionalOut[]
+  requests: FunctionalListOut[]
+  // The already-fully-loaded selection (PAG-006 -- fetched fresh on select,
+  // see NewSignOffModal's onSelect below), not one of the lightweight
+  // `requests` rows -- both shapes carry request_id/application_name so the
+  // "selected" display below works with either.
   selected: FunctionalOut | null
-  onSelect: (r: FunctionalOut) => void
+  onSelect: (r: FunctionalListOut) => void
   onClear: () => void
 }) {
   const [query, setQuery] = useState('')
@@ -134,9 +160,10 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   const { user } = useAuth()
   const [form, setForm] = useState<SignOffForm>(EMPTY)
   const [selectedRequest, setSelectedRequest] = useState<FunctionalOut | null>(null)
-  const [eligibleRequests, setEligibleRequests] = useState<FunctionalOut[]>([])
+  const [eligibleRequests, setEligibleRequests] = useState<FunctionalListOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const [selecting, setSelecting] = useState(false)
   // Supporting documents picked before the certificate exists yet -- there's
   // no signoff id to upload against until POST /api/signoffs returns one, so
   // these are held here and uploaded right after creation succeeds (see
@@ -144,6 +171,23 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   // own Documents tab does post-raise (see Common.tsx::RequestDocuments),
   // just folded into this one form instead of a separate step.
   const [files, setFiles] = useState<File[]>([])
+  // Reported directly: pasting a screenshot into these three fields did
+  // nothing useful (allowImages was false below, same root cause as the
+  // Defect Management module before it was fixed -- see
+  // ORACLE_MIGRATION_2026-07.md sections 29-32) except that, with
+  // allowImages false, JiraRichTextField doesn't attach its own paste
+  // handler at all, so the paste fell through to the browser's raw default
+  // contentEditable behaviour instead of being cleanly blocked -- which for
+  // an image on the clipboard typically means Chrome/Edge embed it directly
+  // as a multi-megabyte base64 <img> in the DOM. That's the most likely
+  // cause of "Save Draft Certificate not working" reported alongside it:
+  // not a backend bug, but the editor silently becoming enormous/sluggish
+  // right before Save was clicked. Enabling proper image support below
+  // (event.preventDefault() inside pasteImages, see RichTextEditor.tsx)
+  // stops the raw paste from ever reaching the DOM in the first place.
+  const [exitCriteriaImages, setExitCriteriaImages] = useState<File[]>([])
+  const [openDefectImages, setOpenDefectImages] = useState<File[]>([])
+  const [residualRiskImages, setResidualRiskImages] = useState<File[]>([])
   function set<K extends keyof SignOffForm>(k: K, v: SignOffForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   const applyRequest = useCallback((r: FunctionalOut) => {
@@ -169,10 +213,35 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
 
   useEffect(() => {
     if (presetRequest) { applyRequest(presetRequest); return }
-    api.get<FunctionalOut[]>('/api/functional-requests')
-      .then((rows) => setEligibleRequests(rows.filter((r) => SIGNOFF_ELIGIBLE_STATUSES.includes(r.status))))
+    // SIGNOFF_ELIGIBLE_STATUSES filtering now happens server-side via
+    // PAG-001's multi-value `status` param, instead of fetching every
+    // Functional Testing Request and filtering client-side. page_size=100
+    // is the same "good enough for a picker, not exhaustive" compatibility
+    // cap used by the other pickers built on top of a paginated endpoint
+    // (see QARequests/index.tsx's own openRequest comment for the pattern).
+    const statusQuery = SIGNOFF_ELIGIBLE_STATUSES.map((s) => `status=${encodeURIComponent(s)}`).join('&')
+    api.get<PageOut<FunctionalListOut>>(`/api/functional-requests?${statusQuery}&page_size=100`)
+      .then((p) => setEligibleRequests(p.items))
       .catch(setError)
   }, [presetRequest, applyRequest])
+
+  // PAG-006 -- `eligibleRequests` only ever holds the lightweight
+  // FunctionalListOut shape; picking one fetches the full FunctionalOut
+  // record fresh (same "fetch full detail on open" pattern as every other
+  // paginated list's own detail view) before deriving the certificate's
+  // auto-populated fields from it.
+  const selectEligibleRequest = useCallback(async (row: FunctionalListOut) => {
+    setSelecting(true)
+    setError(null)
+    try {
+      const full = await api.get<FunctionalOut>(`/api/functional-requests/${row.id}`)
+      applyRequest(full)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setSelecting(false)
+    }
+  }, [applyRequest])
 
   function clearSelection() {
     setSelectedRequest(null)
@@ -186,12 +255,24 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // Request ID(s) fields need this explicit check instead -- they're only
     // ever filled in via picking a Testing Request above.
     if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and Change Request ID(s) are derived from it.'); return }
-    if (!hasRole(user, 'ADMIN') && user?.department !== QA_DEPARTMENT) {
+    if (!hasRole(user, 'ADMIN') && !hasDepartment(user, QA_DEPARTMENT)) {
       setError(`QA Sign-off is restricted to the ${QA_DEPARTMENT} department.`)
       return
     }
     const validityErr = validityError(form.validity_from, form.validity_to)
     if (validityErr) { setError(validityErr); return }
+    const richTextErr = richTextRequiredError(form)
+    if (richTextErr) { setError(richTextErr); return }
+    // Same Environment Tested/Target Promotion Environment ordering rule as
+    // the QA Request wizard's DetailsStep.tsx -- reuses the same shared
+    // validEnvironmentPromotion helper rather than a duplicate check. The
+    // two selects below already only offer valid Target options and
+    // auto-correct on Environment Tested change, so this should never
+    // actually trip, but it's the last line of defense before the POST.
+    if (!validEnvironmentPromotion(form.environment_tested, form.target_promotion_environment)) {
+      setError(`Target Promotion Environment ('${form.target_promotion_environment}') must be later than Environment Tested ('${form.environment_tested}') in the pipeline SIT -> UAT -> Pre-Production -> Production.`)
+      return
+    }
     setBusy(true)
     try {
       const created = await api.post<SignOffOut>('/api/signoffs', {
@@ -203,8 +284,13 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
       // so a failed upload shouldn't block onCreated -- surface the error but
       // still hand back the created certificate (its own Documents tab, via
       // RequestDocuments in SignOffDetail below, can always retry the upload).
-      if (files.length > 0) {
-        try { await api.uploadFiles(`/api/signoffs/${created.id}/documents`, files) }
+      // Screenshots pasted into Exit Criteria/Open Defect/Residual Risk are
+      // never embedded inline (same as every other JiraRichTextField in the
+      // app) -- they're combined with the explicitly-picked Supporting
+      // Documents and uploaded together here.
+      const allFiles = [...files, ...exitCriteriaImages, ...openDefectImages, ...residualRiskImages]
+      if (allFiles.length > 0) {
+        try { await api.uploadFiles(`/api/signoffs/${created.id}/documents`, allFiles) }
         catch (err) { setError(err) }
       }
       onCreated(created)
@@ -223,7 +309,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
               </div>
             </div>
           ) : (
-            <TestingRequestIdSearch requests={eligibleRequests} selected={selectedRequest} onSelect={applyRequest} onClear={clearSelection} />
+            <TestingRequestIdSearch requests={eligibleRequests} selected={selectedRequest} onSelect={selectEligibleRequest} onClear={clearSelection} />
           )}
         </Field>
         <div className="form-row">
@@ -249,14 +335,33 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
               {RISK_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
+          {/* Reported directly (QA Requests wizard, then extended here to
+              every Deployment/Environment-Tested + Target Promotion
+              Environment pair): Production should never be selectable as
+              the environment being tested/deployed FROM -- it's the
+              pipeline's final destination, only ever valid as a Target
+              Promotion Environment. See constants.ts's
+              DEPLOYMENT_ENVIRONMENTS for the shared list. Target Promotion
+              Environment is further restricted (and Environment Tested's own
+              onChange snaps it forward) via the same shared
+              validTargetPromotionOptions/validEnvironmentPromotion helpers
+              the QA Request wizard's DetailsStep.tsx and Functional.tsx's
+              Edit Details modal already use -- reused here, not duplicated. */}
           <Field label="Environment Tested *">
-            <select required value={form.environment_tested} onChange={(e) => set('environment_tested', e.target.value)}>
-              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+            <select required value={form.environment_tested} onChange={(e) => {
+              const nextEnv = e.target.value
+              set('environment_tested', nextEnv)
+              const validTargets = validTargetPromotionOptions(nextEnv)
+              if (!validTargets.includes(form.target_promotion_environment)) {
+                set('target_promotion_environment', validTargets[0] || '')
+              }
+            }}>
+              {DEPLOYMENT_ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Target Promotion Environment *">
             <select required value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
-              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+              {validTargetPromotionOptions(form.environment_tested).map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Validity From">
@@ -266,9 +371,9 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
             <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
-        <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
-        <Field label="Open Defect Review Summary *"><textarea required value={form.open_defect_summary} onChange={(e) => set('open_defect_summary', e.target.value)} /></Field>
-        <Field label="Residual Risk Documentation *"><textarea required value={form.residual_risk_notes} onChange={(e) => set('residual_risk_notes', e.target.value)} /></Field>
+        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
+        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
+        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
         <Field label="Supporting Documents">
           <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
           {files.length > 0 && (
@@ -289,7 +394,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
 
 // Edit Details for an already-raised certificate -- reachable by the QA requester
 // (requester) while it's Draft or sitting back with them after a QA Lead/
-// Executive COE return, or by a QA Lead directly while it's sitting at
+// Executive  return, or by a QA Lead directly while it's sitting at
 // their own QA Lead review (legacy status SM_APPROVAL_PENDING; see routers/signoff.py::
 // update_signoff for the exact permission windows -- "he will have option
 // to modify details" per the requested workflow). Testing Request ID/
@@ -308,20 +413,39 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
   })
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const [exitCriteriaImages, setExitCriteriaImages] = useState<File[]>([])
+  const [openDefectImages, setOpenDefectImages] = useState<File[]>([])
+  const [residualRiskImages, setResidualRiskImages] = useState<File[]>([])
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     const validityErr = validityError(form.validity_from, form.validity_to)
     if (validityErr) { setError(validityErr); return }
+    const richTextErr = richTextRequiredError(form)
+    if (richTextErr) { setError(richTextErr); return }
+    // Same shared-method ordering check as NewSignOffModal above.
+    if (!validEnvironmentPromotion(form.environment_tested, form.target_promotion_environment)) {
+      setError(`Target Promotion Environment ('${form.target_promotion_environment}') must be later than Environment Tested ('${form.environment_tested}') in the pipeline SIT -> UAT -> Pre-Production -> Production.`)
+      return
+    }
     setBusy(true)
     setError(null)
     try {
-      onSaved(await api.put<SignOffOut>(`/api/signoffs/${item.id}`, {
+      const saved = await api.put<SignOffOut>(`/api/signoffs/${item.id}`, {
         ...form,
         validity_from: form.validity_from || null,
         validity_to: form.validity_to || null,
-      }))
+      })
+      // Same best-effort convention as NewSignOffModal above -- the edit
+      // itself already succeeded, so a failed image upload shouldn't block
+      // handing back the saved certificate.
+      const images = [...exitCriteriaImages, ...openDefectImages, ...residualRiskImages]
+      if (images.length > 0) {
+        try { await api.uploadFiles(`/api/signoffs/${item.id}/documents`, images) }
+        catch (err) { setError(err) }
+      }
+      onSaved(saved)
     }
     catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -354,14 +478,24 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
               {RISK_TIERS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
+          {/* Same DEPLOYMENT_ENVIRONMENTS/validTargetPromotionOptions/
+              validEnvironmentPromotion reasoning as the standalone Create
+              Certificate form above -- see that field's own comment. */}
           <Field label="Environment Tested *">
-            <select required value={form.environment_tested} onChange={(e) => set('environment_tested', e.target.value)}>
-              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+            <select required value={form.environment_tested} onChange={(e) => {
+              const nextEnv = e.target.value
+              set('environment_tested', nextEnv)
+              const validTargets = validTargetPromotionOptions(nextEnv)
+              if (!validTargets.includes(form.target_promotion_environment)) {
+                set('target_promotion_environment', validTargets[0] || '')
+              }
+            }}>
+              {DEPLOYMENT_ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Target Promotion Environment *">
             <select required value={form.target_promotion_environment} onChange={(e) => set('target_promotion_environment', e.target.value)}>
-              {ENVIRONMENTS.map((t) => <option key={t} value={t}>{t}</option>)}
+              {validTargetPromotionOptions(form.environment_tested).map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <Field label="Validity From">
@@ -371,9 +505,9 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
             <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
-        <Field label="Exit Criteria Validation Notes *"><textarea required value={form.exit_criteria_notes} onChange={(e) => set('exit_criteria_notes', e.target.value)} /></Field>
-        <Field label="Open Defect Review Summary *"><textarea required value={form.open_defect_summary} onChange={(e) => set('open_defect_summary', e.target.value)} /></Field>
-        <Field label="Residual Risk Documentation *"><textarea required value={form.residual_risk_notes} onChange={(e) => set('residual_risk_notes', e.target.value)} /></Field>
+        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
+        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
+        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
           <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Changes'}</button>
@@ -412,7 +546,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   const isRequester = item.requester_id === user?.id || hasRole(user, 'ADMIN')
   const status = item.status
   const isAdmin = hasRole(user, 'ADMIN')
-  const isQADepartment = user?.department === QA_DEPARTMENT || isAdmin
+  const isQADepartment = hasDepartment(user, QA_DEPARTMENT) || isAdmin
 
   const canSubmit = isRequester && status === 'DRAFT'
   // SM_REJECTED ("Rejected by QA Lead" here) included alongside RETURNED_BY_*
@@ -421,13 +555,23 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status)
   const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Certificate' : 'Re-submit'
   // Reported directly: a person who raised this certificate but also
-  // separately holds QA Lead/Executive COE must not be able to approve
+  // separately holds QA Lead/Executive  must not be able to approve
   // their own certificate -- someone else holding that role must decide it
   // instead. Admin still bypasses (matches the backend's
   // require_not_requester, which enforces the same check server-side).
   const isSelfApproval = item.requester_id === user?.id && !isAdmin
-  const canQALeadDecide = hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
-  const canExecutiveCoeDecide = hasRole(user, 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM') && status === 'DEPT_HEAD_COE_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
+  const isPriorStageApprover = item.reviewed_by_id === user?.id && !isAdmin
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on this QA Lead
+  // checkpoint, same as Admin -- see ORACLE_MIGRATION_2026-07.md section 59.
+  const canQALeadDecide = hasRole(user, ...QA_LEAD_GROUP_ROLES) && status === 'SM_APPROVAL_PENDING' && isQADepartment && !isSelfApproval
+  // Reported directly ("Executive also Chief Manager and AGM only") while
+  // verifying this checkpoint's role set -- this was missing CHIEF_MANAGER_QA
+  // entirely (only checked AGM_QA), even though the backend's
+  // executive_coe_decision (signoff.py) already require_roles()'d both. A
+  // Chief Manager - QA account couldn't even see these buttons; now fixed to
+  // match the backend exactly.
+  const canExecutiveCoeDecide = hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && status === 'DEPT_HEAD_QA_APPROVAL_PENDING' && isQADepartment && !isSelfApproval && !isPriorStageApprover
+  const awaitingIndependentExecutive = status === 'DEPT_HEAD_QA_APPROVAL_PENDING' && isPriorStageApprover
   // Reported directly: "only the assigned person can update" -- once the
   // certificate has moved past the requester, document control passes
   // exclusively to whoever it's actually sitting with now, matching the
@@ -435,13 +579,14 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   const canManageDocuments = isAdmin || (
     ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status) ? isRequester :
     status === 'SM_APPROVAL_PENDING' ? canQALeadDecide :
-    status === 'DEPT_HEAD_COE_APPROVAL_PENDING' ? canExecutiveCoeDecide :
+    status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? canExecutiveCoeDecide :
     false
   )
   // Requester's own editable statuses, or a QA Lead editing during approval.
   // routers/signoff.py::update_signoff.
   const canEditDetails = (isRequester && SIGNOFF_EDITABLE_STATUSES.includes(status))
-    || (hasRole(user, 'QA_LEAD') && status === 'SM_APPROVAL_PENDING' && isQADepartment)
+    || (hasRole(user, ...QA_LEAD_GROUP_ROLES) && status === 'SM_APPROVAL_PENDING' && isQADepartment)
+  const signatures = useMemo(() => history.map(recordedSignature).filter((entry): entry is RecordedElectronicSignature => !!entry), [history])
 
   return (
     <Modal title={item.certificate_id} onClose={onClose} wide>
@@ -452,10 +597,11 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
         <div><strong>Testing Request ID:</strong> {item.testing_request_id || '—'}</div>
         <div><strong>Change Request ID(s):</strong> {item.change_request_ids || '—'}</div>
         <div><strong>Application Owner:</strong> {item.application_owner || '—'}</div>
+        <div><strong>Request Department:</strong> {item.request_department || '—'}</div>
         <div><strong>QA Approval Department:</strong> {item.department || QA_DEPARTMENT}</div>
         <div><strong>Requested By (QA Team):</strong> {userName(users, item.requester_id) || '—'}</div>
         <div><strong>Approved By (QA Lead):</strong> {userName(users, item.reviewed_by_id) || '—'}</div>
-        <div><strong>Approved By (Executive COE):</strong> {userName(users, item.approved_by_id) || '—'}</div>
+        <div><strong>Approved By (Executive):</strong> {userName(users, item.approved_by_id) || '—'}</div>
         <div><strong>Certificate Type:</strong> {item.certificate_type}</div>
         <div><strong>Testing Type:</strong> {item.testing_type}</div>
         <div><strong>Certificate Date:</strong> {item.certificate_date || '—'}</div>
@@ -470,9 +616,9 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
 
       <div className="section-title">Exit Criteria &amp; Risk</div>
       <div className="grid grid-2">
-        <div><strong>Exit Criteria Validation Notes:</strong> {item.exit_criteria_notes || '—'}</div>
-        <div><strong>Open Defect Review Summary:</strong> {item.open_defect_summary || '—'}</div>
-        <div><strong>Residual Risk Documentation:</strong> {item.residual_risk_notes || '—'}</div>
+        <div><strong>Exit Criteria Validation Notes:</strong>{item.exit_criteria_notes ? <AuthenticatedMarkdown value={item.exit_criteria_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
+        <div><strong>Open Defect Review Summary:</strong>{item.open_defect_summary ? <AuthenticatedMarkdown value={item.open_defect_summary} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
+        <div><strong>Residual Risk Documentation:</strong>{item.residual_risk_notes ? <AuthenticatedMarkdown value={item.residual_risk_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -484,12 +630,6 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
         {canResubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
       </div>
 
-      {(canQALeadDecide || canExecutiveCoeDecide) && (
-        <div className="form-field" style={{ marginTop: 10 }}>
-          <label>Action note (optional)</label>
-          <textarea value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next approval action" />
-        </div>
-      )}
       {canQALeadDecide && (
         <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <ApprovalDecisionButtons
@@ -497,8 +637,8 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
             comments={comments}
             busy={!!busyAction}
             onApprove={(signed) => act('qa-lead-decision', { decision: 'Approved', comments: signed })}
-            onReturn={() => act('qa-lead-decision', { decision: 'Returned', comments })}
-            onReject={() => act('qa-lead-decision', { decision: 'Rejected', comments })}
+            onReturn={(actionNote) => act('qa-lead-decision', { decision: 'Returned', comments: actionNote })}
+            onReject={(actionNote) => act('qa-lead-decision', { decision: 'Rejected', comments: actionNote })}
           />
         </div>
       )}
@@ -510,11 +650,29 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
             busy={!!busyAction}
             approveLabel="Approve & Issue Certificate"
             onApprove={(signed) => act('executive-coe-decision', { decision: 'Approved', comments: signed })}
-            onReturn={() => act('executive-coe-decision', { decision: 'Returned', comments })}
-            onReject={() => act('executive-coe-decision', { decision: 'Rejected', comments })}
+            onReturn={(actionNote) => act('executive-coe-decision', { decision: 'Returned', comments: actionNote })}
+            onReject={(actionNote) => act('executive-coe-decision', { decision: 'Rejected', comments: actionNote })}
           />
         </div>
       )}
+      {awaitingIndependentExecutive && (
+        <div className="alert alert-info signoff-independent-approval" role="status">
+          <strong>Your QA Lead e-signature is already recorded.</strong>
+          <span>Final Executive approval must be completed by another eligible Chief Manager QA or AGM QA. No additional signature or decision is required from you at this stage.</span>
+        </div>
+      )}
+
+      {signatures.length > 0 && <>
+        <div className="section-title">Electronic Signatures</div>
+        <div className="signoff-signature-list">
+          {signatures.map((signature) => <article className="signoff-signature-card" key={signature.signatureId}>
+            <header><span>✓</span><div><small>{signature.stage}</small><strong>Electronically signed</strong></div></header>
+            <div className="signoff-signature-mark">{signature.signer}</div>
+            <dl><div><dt>Signer</dt><dd>{signature.signer}</dd></div><div><dt>Signed at</dt><dd>{new Date(signature.appliedAt).toLocaleString()}</dd></div><div className="signature-id"><dt>Signature ID</dt><dd><code>{signature.signatureId}</code></dd></div></dl>
+            <p>{signature.intent}</p>
+          </article>)}
+        </div>
+      </>}
 
       <div className="section-title">Documents</div>
       <RequestDocuments apiBase="/api/signoffs" reqId={item.id} canManage={canManageDocuments} />
@@ -538,6 +696,7 @@ export default function SignOff() {
   const [showNew, setShowNew] = useState(false)
   const [selected, setSelected] = useState<SignOffOut | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
+  const [departmentFilter, setDepartmentFilter] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -561,37 +720,35 @@ export default function SignOff() {
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
   }, [rows, searchParams, setSearchParams])
 
-  // Reported directly: "Hide QA Sign Off except IT-QA." Every certificate's
-  // own department is hardcoded to QA_DEPARTMENT at creation (see
-  // routers/signoff.py::create_signoff), and the list endpoint now scopes to
-  // that (see ORACLE_MIGRATION_2026-07.md section 201) -- so anyone outside
-  // canSeeQaDepartmentOnlyData would only ever land on a guaranteed-empty
-  // page. The nav link is already hidden for them (see Layout.tsx); this is
-  // the matching direct-URL guard, same "Access Restricted" pattern already
-  // used by Admin.tsx/DepartmentAdmin.tsx.
-  if (!canSeeQaDepartmentOnlyData(user)) {
-    return (
-      <Card title="Access Restricted">
-        <p className="muted">QA Sign-off is only available to the {QA_DEPARTMENT} department.</p>
-      </Card>
-    )
-  }
+  const departments = useMemo(() => Array.from(new Set(rows.map((row) => row.request_department).filter((value): value is string => !!value))).sort((a, b) => a.localeCompare(b)), [rows])
+  const visibleRows = useMemo(() => departmentFilter ? rows.filter((row) => row.request_department === departmentFilter) : rows, [rows, departmentFilter])
 
+  // 2026-08 -- reported directly: "'Request Sign Off' button is not
+  // enable[d] for QA lead ... in sign off ... section" -- widened from
+  // QA_ENGINEER-only to also include the QA Lead group, matching the
+  // backend's now-widened POST /api/signoffs role gate (signoff.py's
+  // create_signoff), so a QA Lead can raise a certificate themselves (e.g.
+  // on behalf of a request whose assigned tester isn't available).
   const canCreate = hasRole(user, 'ADMIN')
-    || (hasRole(user, 'QA_ENGINEER') && user?.department === QA_DEPARTMENT)
+    || (hasRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
         title="QA Sign-off Certificates" count={rows.length}
-        subtitle="IT - QA clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive COE approval."
+        subtitle="COE - Quality Assurance clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive approval."
         actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Sign-off Certificate</button>}
       />
       <Card>
+        <div className="signoff-register-toolbar">
+          <div><strong>Certificate Register</strong><span>{visibleRows.length} of {rows.length} certificates</span></div>
+          <label><span>Request Department</span><select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option value="">All departments</option>{departments.map((department) => <option key={department} value={department}>{department}</option>)}</select></label>
+        </div>
         <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
           { key: 'certificate_id', header: 'Certificate ID' },
           { key: 'application_name', header: 'Application' },
+          { key: 'request_department', header: 'Department', render: (r) => r.request_department || '—' },
           { key: 'requester_id', header: 'Requested By', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'reviewed_by_id', header: 'Reviewed By', render: (r) => userName(users, r.reviewed_by_id) || '—', filterValue: (r) => userName(users, r.reviewed_by_id) || '' },
           { key: 'approved_by_id', header: 'Approved By', render: (r) => userName(users, r.approved_by_id) || '—', filterValue: (r) => userName(users, r.approved_by_id) || '' },
@@ -599,7 +756,7 @@ export default function SignOff() {
           { key: 'testing_type', header: 'Testing Type' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={SIGNOFF_STATUS_LABELS[r.status] || r.status} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => SIGNOFF_PENDING_WITH[r.status] || '—', filterValue: (r) => SIGNOFF_PENDING_WITH[r.status] || '' },
-        ]} rows={rows} />
+        ]} rows={visibleRows} />
       </Card>
       {showNew && <NewSignOffModal onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load() }} />}
       {selected && <SignOffDetail item={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }} users={users} />}

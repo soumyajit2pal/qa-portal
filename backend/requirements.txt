@@ -15,3 +15,9 @@ reportlab==4.2.5
 # Required: this application connects to Oracle only, there is no other
 # supported database backend.
 oracledb==2.4.1
+
+# Optional cache backend (dashboard summary + reference-data caching, see
+# cache.py). The app runs fine with this package absent or REDIS_URL unset
+# or unreachable -- cache.py degrades to a no-op cache in all of those
+# cases -- but it's a real dependency once REDIS_URL is configured.
+redis==5.0.8

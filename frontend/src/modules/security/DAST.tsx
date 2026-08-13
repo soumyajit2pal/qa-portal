@@ -6,8 +6,10 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisi
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, hasRole, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { DASTOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import RoleGroupLink from '../../components/RoleGroupLink'
+import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
+import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -83,7 +85,7 @@ function DASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   const { user: modalUser } = useAuth()
   const isAdminModal = hasRole(modalUser, 'ADMIN')
   const isRequesterModal = editing.requester_id === modalUser?.id || isAdminModal
-  const sameDeptModal = !!modalUser?.department && modalUser.department === editing.department
+  const sameDeptModal = hasDepartment(modalUser, editing.department)
   const canSMDecideModal = hasRole(modalUser, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
   const canDeptHeadDecideModal = hasRole(modalUser, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
   const canManageEvidenceModal = isAdminModal || (
@@ -264,6 +266,49 @@ function DASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   )
 }
 
+// Derived from SAST_DAST_PENDING_WITH (constants.ts, shared with SAST -- DAST
+// mirrors SAST's status/role flow exactly) rather than a hand-rolled status
+// list, so this can never drift out of sync with the list's own "Pending
+// With" column or the backend require_roles()/_require_assigned_security_analyst()
+// gates in sast_dast.py. Only labels naming an actual role-holding group get
+// a RoleGroupLink; "Requester" and "--" both resolve to null.
+function assignedGroupFor(
+  status: string,
+  applicationMasterStatus?: string | null,
+  department?: string | null,
+): { role: string | string[]; label: string; department?: string | null } | null {
+  // Reported directly (Application Owner group link): while status is still
+  // SM_APPROVAL_PENDING but the Application Name is awaiting the
+  // Application Owner (applicationNameAwareStatusLabel, same as the Status
+  // badge override), the work is with the Application Owner, not the SM --
+  // checked first since this is a sub-state of SM_APPROVAL_PENDING, not its
+  // own status value. `department` scopes RoleGroupLink's member list, since
+  // Application Owner is department-enforced server-side (require_same_department
+  // in decide_app_owner_name).
+  if (applicationNameAwareStatusLabel(status, applicationMasterStatus)) {
+    return { role: 'APPLICATION_OWNER', label: 'Application Owner', department }
+  }
+  const pendingWith = SAST_DAST_PENDING_WITH[status]
+  // Reported directly: "SM mapping should be based on department level. but
+  // SM group details showing those are from different department." SM and
+  // Department Head are BOTH department-scoped roles enforced server-side
+  // (require_same_department, sast_dast.py) exactly like Application Owner
+  // above -- `department` was missing here, so RoleGroupLink showed every
+  // SM/Department Head in the system instead of just the ones who could
+  // actually act on this request.
+  if (pendingWith === 'SM') return { role: 'SM', label: 'SM', department }
+  if (pendingWith === 'Department Head') {
+    return { role: ['DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM'], label: 'Department Head', department }
+  }
+  // Reported directly: this "QA Lead group members" list should only show
+  // literal QA_LEAD role holders -- Chief Manager - QA / AGM - QA act on
+  // this work via their own separate Executive bypass (isAssignedQALead
+  // below), not by being members of the QA Lead group.
+  if (pendingWith === 'QA Lead') return { role: 'QA_LEAD', label: 'QA Lead' }
+  if (pendingWith === 'Security Analyst') return { role: 'SECURITY_ANALYST', label: 'Security Analyst' }
+  return null
+}
+
 function DASTDetail({ req, onClose, onChanged, users }: {
   req: DASTOut; onClose: () => void; onChanged: (d: DASTOut) => void; users: UserOut[]
 }) {
@@ -275,6 +320,11 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   const [comments, setComments] = useState('')
   const [selectedQALead, setSelectedQALead] = useState('')
   const [selectedAnalyst, setSelectedAnalyst] = useState('')
+  // 2026-08 Reassignment CR -- mandatory only when this is a genuine
+  // reassignment (status already past the initial PLANNING assignment);
+  // backend enforces this too (reassignment.require_reason). Reset once the
+  // assignment actually changes (i.e. on success).
+  const [reassignAnalystReason, setReassignAnalystReason] = useState('')
   // Whether the "require Department Head re-approval on return" popup (see
   // canReadinessDecide below) is open -- an always-visible checkbox next to
   // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
@@ -298,6 +348,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   }, [req.id])
 
   useEffect(() => { load() }, [load])
+  useEffect(() => { setReassignAnalystReason('') }, [req.id, req.security_analyst_id])
 
   async function toggleChecklistItem(item: ChecklistItemOut) {
     setError(null)
@@ -333,33 +384,37 @@ function DASTDetail({ req, onClose, onChanged, users }: {
     }
     if (!noFindings) setTab('findings')
   }
+  // See SAST.tsx's matching comment on its own addFinding/resolveFinding --
+  // same fix, same reasoning (was re-fetching the entire unpaginated list to
+  // find one row by id; now that the list is paginated it could miss the
+  // row entirely, not just waste a request).
   async function addFinding(e: React.FormEvent) {
     e.preventDefault()
     try {
       await api.post(`/api/dast-requests/${req.id}/findings`, finding)
-      const fresh = await api.get<DASTOut[]>('/api/dast-requests')
-      const updated = fresh.find((r) => r.id === req.id)
-      if (updated) onChanged(updated)
+      onChanged(await api.get<DASTOut>(`/api/dast-requests/${req.id}`))
       setFinding({ issue_id: '', severity: 'Medium', description: '' })
     } catch (err) { setError(err) }
   }
   async function resolveFinding(findingId: number) {
     try {
       await api.post(`/api/dast-requests/${req.id}/findings/${findingId}/resolve`, {})
-      const fresh = await api.get<DASTOut[]>('/api/dast-requests')
-      const updated = fresh.find((r) => r.id === req.id)
-      if (updated) onChanged(updated)
+      onChanged(await api.get<DASTOut>(`/api/dast-requests/${req.id}`))
     } catch (err) { setError(err) }
   }
 
   const isAdmin = hasRole(user, 'ADMIN')
   const isRequester = req.requester_id === user?.id || isAdmin
   const status = req.status
-  const sameDept = !!user?.department && user.department === req.department
-  const isAssignedQALead = isAdmin || (hasRole(user, 'QA_LEAD') && req.security_lead_id === user?.id)
+  const sameDept = hasDepartment(user, req.department)
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+  // gated action, same as Admin, without being listed as "QA Lead group"
+  // members (display-only concern, see assignedGroupFor above). See
+  // ORACLE_MIGRATION_2026-07.md section 59.
+  const isAssignedQALead = isAdmin || hasRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   const isAssignedAnalyst = isAdmin || (hasRole(user, 'SECURITY_ANALYST') && req.security_analyst_id === user?.id)
-  const qaLeads = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('QA_LEAD'))
-  const securityAnalysts = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('SECURITY_ANALYST'))
+  const qaLeads = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_LEAD'))
+  const securityAnalysts = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('SECURITY_ANALYST'))
 
   // Edit access -- see the matching (and more detailed) comment in
   // SAST.tsx's canEditDetails for the full reasoning; same rule here.
@@ -430,7 +485,15 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   // distinct from pendingChecklistItems above, which gates Security
   // Readiness's own independent verification instead.
   const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
-  const canAssignSecurityAnalyst = isAssignedQALead && status === 'PLANNING'
+  const isInitialAnalystAssignment = status === 'PLANNING'
+  // 2026-08 Reassignment CR -- see SAST.tsx's identical comment for the
+  // full reasoning, including the later QA_LEAD carve-out. Mirrors
+  // sast_dast.py's _require_can_reassign_security_analyst exactly.
+  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
+  const canReassignSecurityAnalyst = isAssignedAnalyst || isQADepartmentHead || hasRole(user, 'QA_LEAD')
+  const canAssignSecurityAnalyst =
+    (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&
+    SAST_DAST_ANALYST_REASSIGNABLE_STATUSES.includes(status)
   const canStartScan = isAssignedAnalyst && status === 'CONFIGURATION'
   // Findings can be logged while still scanning, and -- this is the bit that
   // was missing -- after Complete Scan answers "findings identified", which
@@ -528,7 +591,10 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 
           <DetailSection title="People">
             <DetailField label="Requester">{userName(users, req.requester_id) || '—'}</DetailField>
-            <DetailField label="Assigned QA Lead">{userName(users, req.security_lead_id) || 'Not assigned'}</DetailField>
+            <DetailField label="Assigned Group">{(() => {
+              const assigned = assignedGroupFor(req.status, req.application_master_status, req.department)
+              return assigned ? <RoleGroupLink users={users} role={assigned.role} label={assigned.label} department={assigned.department} /> : '—'
+            })()}</DetailField>
             <DetailField label="Assigned Security Analyst">{userName(users, req.security_analyst_id) || 'Not assigned'}</DetailField>
           </DetailSection>
 
@@ -555,9 +621,6 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 
           <div className="section-title">Workflow Actions</div>
           <div className="actions-panel">
-            <Field label="Action note (optional)">
-              <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
-            </Field>
             <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
               <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/dast-requests/${req.id}/export`, `${req.request_id}.pdf`)}>
                 Export PDF
@@ -603,8 +666,8 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                       : undefined
                   }
                   onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                  onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
-                  onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+                  onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                  onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
                 />
               )}
               {canDeptHeadDecide && (
@@ -620,21 +683,12 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                       ? 'Mandatory Security Readiness checklist item(s) are not self-declared ready -- see the notice above.'
                       : undefined
                   }
-                  extraControlLabel="Assign IT-QA QA Lead"
-                  extraControl={
-                    <UserAssignSelect
-                      value={selectedQALead}
-                      onChange={setSelectedQALead}
-                      users={qaLeads}
-                      placeholder="Select QA Lead..."
-                      disabled={busy}
-                      style={{ minWidth: 260 }}
-                    />
-                  }
-                  extraReady={!!selectedQALead}
-                  onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed, qa_lead_id: Number(selectedQALead) })}
-                  onReturn={() => act('department-head-decision', { decision: 'Returned', comments })}
-                  onReject={() => act('department-head-decision', { decision: 'Rejected', comments })}
+                  extraControlLabel="Assign to group"
+                  extraControl={<RoleGroupLink users={users} role="QA_LEAD" label="QA Lead" />}
+                  extraReady
+                  onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed })}
+                  onReturn={(actionNote) => act('department-head-decision', { decision: 'Returned', comments: actionNote })}
+                  onReject={(actionNote) => act('department-head-decision', { decision: 'Rejected', comments: actionNote })}
                 />
               )}
               {canStartReadiness && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-readiness')}>Start Security Readiness</button>}
@@ -679,16 +733,29 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                     value={selectedAnalyst}
                     onChange={setSelectedAnalyst}
                     users={securityAnalysts}
-                    placeholder="Select Security Analyst..."
+                    placeholder={isInitialAnalystAssignment ? 'Select Security Analyst...' : 'Reassign Security Analyst...'}
                     disabled={busy}
                     style={{ minWidth: 260 }}
                   />
+                  {!isInitialAnalystAssignment && (
+                    <input
+                      className="reassign-reason-input"
+                      style={{ minWidth: 220 }}
+                      placeholder="Reason for reassignment *"
+                      value={reassignAnalystReason}
+                      onChange={(e) => setReassignAnalystReason(e.target.value)}
+                      disabled={busy}
+                    />
+                  )}
                   <button
                     className="btn btn-primary btn-sm"
-                    disabled={busy || !selectedAnalyst}
-                    onClick={() => act('assign-security-analyst', { security_analyst_id: Number(selectedAnalyst) })}
+                    disabled={busy || !selectedAnalyst || (!isInitialAnalystAssignment && (Number(selectedAnalyst) === req.security_analyst_id || !reassignAnalystReason.trim()))}
+                    onClick={() => act('assign-security-analyst', {
+                      security_analyst_id: Number(selectedAnalyst),
+                      ...(isInitialAnalystAssignment ? {} : { reason: reassignAnalystReason.trim() }),
+                    })}
                   >
-                    Assign Security Analyst
+                    {isInitialAnalystAssignment ? 'Assign Security Analyst' : 'Reassign Security Analyst'}
                   </button>
                 </>
               )}
@@ -826,21 +893,34 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 }
 
 export default function DAST() {
-  const [rows, setRows] = useState<DASTOut[]>([])
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight DASTListOut
+  // shape; opening a request fetches the full DASTOut record fresh via
+  // GET /api/dast-requests/{id} before DASTDetail (which needs every field,
+  // including unmasked test_credentials where authorized) is shown.
   const [selected, setSelected] = useState<DASTOut | null>(null)
+  const [openingId, setOpeningId] = useState<number | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
-  const load = useCallback(async () => {
-    try { setRows(await api.get<DASTOut[]>('/api/dast-requests')) } catch (err) { setError(err) }
-  }, [])
-  useEffect(() => { load() }, [load])
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<DASTListOut>('/api/dast-requests', {})
+
   useEffect(() => {
     // Full user list -- not just security analysts -- so both the Security
     // Lead assignment dropdown and the "Requester" field on the detail view
     // can resolve names from a single fetch.
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
+  }, [])
+
+  const openRequest = useCallback(async (idOrRow: number | DASTListOut) => {
+    const id = typeof idOrRow === 'number' ? idOrRow : idOrRow.id
+    setOpeningId(id)
+    try {
+      setSelected(await api.get<DASTOut>(`/api/dast-requests/${id}`))
+    } catch (err) { setError(err) } finally { setOpeningId(null) }
   }, [])
 
   // Deep-link support -- see the matching effect in Functional.tsx for the
@@ -850,28 +930,34 @@ export default function DAST() {
     const openId = searchParams.get('open')
     if (!openId || rows.length === 0) return
     const match = rows.find((r) => r.request_id === openId)
-    if (match) setSelected(match)
+    if (match) openRequest(match.id)
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams])
+  }, [rows, searchParams, setSearchParams, openRequest])
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="DAST Requests" count={rows.length}
+        title="DAST Requests" count={total}
         subtitle="Dynamic Application Security Testing requests, from submission through findings and report sign-off. Raised via a QA Request (include DAST in its request types) -- not created standalone here."
       />
       <Card>
-        <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
-          { key: 'request_id', header: 'Request ID' },
+        <Table rowKey="id" onRowClick={(r) => openRequest(r)}
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
+          columns={[
+          {
+            key: 'request_id',
+            header: 'Request ID',
+            render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
+          },
           { key: 'application_name', header: 'Application', render: (r) => r.application_name || '—' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
-          { key: 'security_lead_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.security_lead_id) || 'Not assigned', filterValue: (r) => userName(users, r.security_lead_id) || '' },
+          { key: 'security_lead_id', header: 'Assigned Group', render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '—', filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '—'), filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '') },
-          { key: 'findings', header: 'Findings', render: (r) => r.findings.length, filterValue: (r) => String(r.findings.length) },
+          { key: 'findings', header: 'Findings', render: (r) => r.findings_count, filterValue: (r) => String(r.findings_count) },
           { key: 'source', header: 'Source', render: (r) => (
             r.qa_request ? (
               <span className="badge badge-blue" title="Auto-created from a QA Request">
@@ -885,7 +971,7 @@ export default function DAST() {
       </Card>
       {selected && (
         <DASTDetail
-          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }}
+          req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); reload() }}
           users={users}
         />
       )}

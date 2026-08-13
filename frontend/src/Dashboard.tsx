@@ -13,8 +13,8 @@ import {
   PERFORMANCE_TERMINAL_STATUSES,
 } from './constants'
 import {
-  QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut,
-  ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut,
+  QARequestListOut, PageOut, FunctionalListOut, SASTListOut, DASTListOut, PerformanceListOut,
+  ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut, DashboardSummaryOut,
   SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard,
 } from './types'
 
@@ -54,15 +54,17 @@ function toUnified(type: string, rows: {
   }))
 }
 
-// DAST requests fall back to the first scan target's URL (see
-// DASTOut.targets in types.ts) when the delegated application_name isn't
-// set (e.g. a standalone/legacy DAST request with no linked QA Request) --
-// given its own mapper rather than forcing it through the generic shape
-// above.
-function toUnifiedDast(rows: DASTOut[]): UnifiedRequestRow[] {
+// DAST previously fell back to the first scan target's URL when the
+// delegated application_name wasn't set (e.g. a standalone/legacy DAST
+// request with no linked QA Request) -- but `targets` isn't part of the
+// lightweight PAG-005 list schema this now consumes (see DASTListOut), so
+// this mapper is kept separate mainly for its own '—' fallback and type,
+// not for that target-URL fallback anymore (mirrors the same simplification
+// made in Suppression.tsx's selectRequest).
+function toUnifiedDast(rows: DASTListOut[]): UnifiedRequestRow[] {
   return rows.map((r) => ({
     id: r.id, uid: `DAST-${r.id}`, request_id: r.request_id, type: 'DAST',
-    application_name: r.application_name || r.targets?.[0]?.application_url || '—',
+    application_name: r.application_name || '—',
     department: r.department, status: r.status, requester_id: r.requester_id, created_at: r.created_at,
   }))
 }
@@ -108,7 +110,7 @@ const DONUT_COLORS = ['#4f46e5', '#16a34a', '#d97706', '#dc2626', '#7c3aed']
 // findings, pending-approval gates) with no per-request created_at of their
 // own to filter by, so they intentionally stay as-is; a note next to the
 // filter says so rather than silently doing nothing.
-type RaisedRangePreset = 'all' | '1h' | '1m' | 'custom'
+type RaisedRangePreset = 'all' | '1h' | '3d' | '15d' | '1m' | 'custom'
 interface RaisedRange {
   preset: RaisedRangePreset
   from: string
@@ -119,6 +121,8 @@ const DEFAULT_RAISED_RANGE: RaisedRange = { preset: 'all', from: '', to: '' }
 function rangeBounds(range: RaisedRange): { start?: Date; end?: Date } {
   if (range.preset === 'all') return {}
   if (range.preset === '1h') return { start: new Date(Date.now() - 60 * 60 * 1000), end: new Date() }
+  if (range.preset === '3d') return { start: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000), end: new Date() }
+  if (range.preset === '15d') return { start: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000), end: new Date() }
   if (range.preset === '1m') {
     const start = new Date(); start.setMonth(start.getMonth() - 1)
     return { start, end: new Date() }
@@ -141,6 +145,8 @@ function isWithinRaisedRange(dateStr: string, range: RaisedRange): boolean {
   if (range.preset === 'all') return true
   const t = new Date(dateStr).getTime()
   if (range.preset === '1h') return t >= Date.now() - 60 * 60 * 1000
+  if (range.preset === '3d') return t >= Date.now() - 3 * 24 * 60 * 60 * 1000
+  if (range.preset === '15d') return t >= Date.now() - 15 * 24 * 60 * 60 * 1000
   if (range.preset === '1m') {
     const oneMonthAgo = new Date()
     oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
@@ -181,10 +187,24 @@ function Sparkline({ values }: { values?: Record<string, number> | null }) {
   const entries = Object.entries(values || {})
   if (entries.length === 0) return null
   const max = Math.max(1, ...entries.map(([, v]) => v))
+  const riskColors: Record<string, string> = {
+    critical: '#c9363e',
+    high: '#e66a24',
+    medium: '#d2a91e',
+    low: '#2f8a57',
+  }
   return (
     <div className="sparkline">
       {entries.map(([k, v]) => (
-        <div key={k} className={`bar ${v > 0 ? 'filled' : ''}`} style={{ height: `${Math.max(10, (v / max) * 100)}%` }} title={`${k}: ${v}`} />
+        <div
+          key={k}
+          className={`bar ${v > 0 ? 'filled' : ''}`}
+          style={{
+            height: `${Math.max(10, (v / max) * 100)}%`,
+            ...(v > 0 ? { background: riskColors[k.trim().toLowerCase()] || '#16788b' } : {}),
+          }}
+          title={`${k}: ${v}`}
+        />
       ))}
     </div>
   )
@@ -220,7 +240,8 @@ interface StatCardProps {
   // scope/definition under the hood (distinct project epics vs. individual
   // requests vs. specific approval-gate statuses), so they were never meant
   // to add up to each other -- without this line there was nothing on
-  // screen saying so. Always visible, not a hover-only tooltip.
+  // screen saying so. Displayed through the accessible information control
+  // so cards stay compact without losing the metric definition.
   hint?: React.ReactNode
   footline?: React.ReactNode
   spark?: Record<string, number>
@@ -229,15 +250,24 @@ interface StatCardProps {
 
 function StatCard({ icon: Icon, iconClass, tag, value, label, hint, footline, spark, segments }: StatCardProps) {
   return (
-    <div className="stat-card">
+    <div className={`stat-card stat-card-${iconClass}`}>
       <div className="top-row">
         <div className={`icon-chip ${iconClass}`}><Icon width={17} height={17} /></div>
-        {tag && <span className="chip-tag">{tag}</span>}
+        <div className="stat-card-meta">
+          {tag && <span className="chip-tag">{tag}</span>}
+          {(hint || footline) && (
+            <span className="stat-card-info">
+              <button type="button" aria-label={`About ${String(label)}`}>i</button>
+              <span className="stat-card-tooltip" role="tooltip">
+                {hint && <span>{hint}</span>}
+                {footline && <small>{footline}</small>}
+              </span>
+            </span>
+          )}
+        </div>
       </div>
       <div className="value">{value}</div>
       <div className="label">{label}</div>
-      {hint && <div className="hint">{hint}</div>}
-      {footline && <div className="footline">{footline}</div>}
       {spark && <Sparkline values={spark} />}
       {segments && <SegmentBar segments={segments} />}
     </div>
@@ -276,52 +306,71 @@ function Donut({ data, size = 128 }: { data?: Record<string, number> | null; siz
   )
 }
 
-// Representative subset of the QA Request lifecycle used for the funnel
-// visualization. Every status maps to one of these stage indices; CANCELLED requests
-// are excluded from the funnel entirely (they never completed the lifecycle).
+// The actual Functional Request lifecycle. Counts below are mutually
+// exclusive current-stage counts, not a cumulative "has reached this point"
+// funnel; that distinction keeps the numbers consistent with the widget's
+// "current workflow stage" description.
 const LIFECYCLE_STAGES = [
-  { key: 'request', label: 'Request' },
+  { key: 'request', label: 'Requester' },
+  { key: 'sm-approval', label: 'SM Approval' },
   { key: 'department-head-approval', label: 'Department Head Approval' },
-  { key: 'qa-lead-readiness', label: 'QA Lead / Readiness' },
-  { key: 'execution', label: 'Execution' },
+  { key: 'qa-activity', label: 'QA Activity' },
   { key: 'signoff', label: 'Sign-off' },
+  { key: 'closed', label: 'Closed' },
 ]
 
 const STATUS_STAGE_INDEX: Record<string, number> = {
-  DRAFT: 0, SUBMITTED: 0,
-  DEPARTMENT_HEAD_APPROVAL_PENDING: 1, RETURNED_BY_DEPARTMENT_HEAD: 1, DEPARTMENT_HEAD_REJECTED: 1,
-  QA_LEAD_ASSIGNED: 2, READINESS_VERIFICATION: 2, RETURNED_BY_QA_LEAD: 2,
-  QA_ACTIVITY_INITIATED: 3, PLANNING: 3, TESTER_ASSIGNED: 3, TEST_DESIGN: 3, EXECUTION_IN_PROGRESS: 3,
+  DRAFT: 0, RETURNED_BY_SM: 0, SM_REJECTED: 0,
+  RETURNED_BY_DEPARTMENT_HEAD: 0, RETURNED_BY_QA_LEAD: 0,
+  SUBMITTED: 1, SM_APPROVAL_PENDING: 1,
+  DEPARTMENT_HEAD_APPROVAL_PENDING: 2, DEPARTMENT_HEAD_REJECTED: 2,
+  QA_LEAD_ASSIGNED: 3, READINESS_VERIFICATION: 3, QA_ACTIVITY_INITIATED: 3,
+  PLANNING: 3, TESTER_ASSIGNED: 3, TEST_DESIGN: 3, EXECUTION_IN_PROGRESS: 3,
   DEFECT_RAISED: 3, WAITING_FOR_FIX: 3, RETESTING: 3, QA_COMPLETED: 3,
-  QA_SIGNOFF_PENDING: 4, QA_SIGNED_OFF: 4, REQUESTER_VERIFICATION: 4, CLOSED: 4,
+  QA_SIGNOFF_PENDING: 4, QA_SIGNED_OFF: 4, REQUESTER_VERIFICATION: 4,
+  CLOSED: 5,
 }
 
-function lifecycleFunnel(requests: { status: string }[]) {
-  const eligible = requests.filter((r) => r.status !== 'CANCELLED')
+// DSH-001..004 -- takes a raw per-status count dict (Functional Testing
+// Requests -- see FunctionalOut; the QA Request gateway itself only has
+// Draft/Submitted/Raised/Cancelled, see constants.GATEWAY_STATUSES) rather
+// than the full row list this used to filter/count client-side. CANCELLED
+// is excluded the same way it always was (it also never appears in
+// STATUS_STAGE_INDEX, so this filter is belt-and-suspenders, not load-
+// bearing).
+function lifecycleDistribution(statusCounts: Record<string, number>) {
+  const eligible = Object.entries(statusCounts).filter(([status]) => status !== 'CANCELLED')
   return LIFECYCLE_STAGES.map((stage, i) => {
-    const count = eligible.filter((r) => (STATUS_STAGE_INDEX[r.status] ?? 0) >= i).length
+    const count = eligible.reduce((sum, [status, c]) => sum + (STATUS_STAGE_INDEX[status] === i ? c : 0), 0)
     return { ...stage, count }
   })
 }
 
-// Fed with Functional Testing Requests (see FunctionalOut) -- that's where
-// the QAStatus lifecycle now lives; the QA Request gateway itself only has
-// Draft/Submitted/Raised/Cancelled (see constants.GATEWAY_STATUSES).
-function LifecycleStepper({ requests }: { requests: { status: string }[] }) {
-  const funnel = lifecycleFunnel(requests)
-  const maxCount = Math.max(1, ...funnel.map((f) => f.count))
+// Fed with Functional Testing Requests' per-status counts (see
+// DashboardSummaryOut.functional_status_counts) rather than full rows.
+function LifecycleStepper({ statusCounts }: { statusCounts: Record<string, number> }) {
+  const distribution = lifecycleDistribution(statusCounts)
+  const total = distribution.reduce((sum, stage) => sum + stage.count, 0)
   return (
-    <div className="stepper">
-      {funnel.map((s, i) => (
-        <React.Fragment key={s.key}>
-          <div className={`step ${s.count > 0 ? 'filled' : ''}`}>
-            <div className="circle">{s.count}</div>
-            <div className="step-label">{s.label}</div>
+    <div className="lifecycle-distribution">
+      <div className="lifecycle-distribution-summary">
+        <div><span>Current portfolio</span><strong>{total}</strong></div>
+        <p>Each request appears once at its current workflow stage.</p>
+      </div>
+      <div className="lifecycle-stage-list">
+        {distribution.map((stage, index) => {
+          const percentage = total ? Math.round((stage.count / total) * 100) : 0
+          return <div className={`lifecycle-stage-row stage-${index}`} key={stage.key}>
+            <span className="lifecycle-stage-index">{index + 1}</span>
+            <div className="lifecycle-stage-copy">
+              <div><strong>{stage.label}</strong><span>{percentage}%</span></div>
+              <i><b style={{ width: `${percentage}%` }} /></i>
+            </div>
+            <strong className="lifecycle-stage-count">{stage.count}</strong>
           </div>
-          {i < funnel.length - 1 && <div className={`connector ${funnel[i + 1].count > 0 ? 'filled' : ''}`} />}
-        </React.Fragment>
-      ))}
-      {maxCount === 0 && <span className="muted small">No QA requests raised yet.</span>}
+        })}
+      </div>
+      {total === 0 && <span className="muted small">No Functional requests raised yet.</span>}
     </div>
   )
 }
@@ -353,27 +402,19 @@ function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
 }
 
 // Reported directly: "lots of api calling, sometime same api calling
-// multiple time". requests/functionalRequests/sastRequests/dastRequests/
-// performanceRequests used to be fetched independently here AND again in
-// MyRequestsTab below -- since only one tab is ever mounted at a time
-// (see Dashboard's own tab switch), toggling between the "Dashboard" and
-// "Requests" tabs re-fetched all 5 full lists every single time. Lifted
-// to Dashboard itself instead (fetched once, passed down as props) so
-// switching tabs back and forth reuses the same data instead of
-// re-requesting it.
-function CommandCentre({ range, requests, functionalRequests, sastRequests, dastRequests, performanceRequests, requestsLoaded, requestsError }: {
-  range: RaisedRange
-  requests: QARequestOut[]
-  functionalRequests: FunctionalOut[]
-  sastRequests: SASTOut[]
-  dastRequests: DASTOut[]
-  performanceRequests: PerformanceOut[]
-  requestsLoaded: boolean
-  requestsError: unknown
-}) {
+// multiple time". This tab used to separately fetch requests/
+// functionalRequests/sastRequests/dastRequests/performanceRequests (full
+// row lists, up to 5 x page_size=100) just to derive 4 numbers and a
+// Functional-lifecycle breakdown client-side -- that's exactly what
+// DSH-001..004's consolidated GET /api/dashboard/summary now replaces (see
+// its own fetch below). The full row lists are still fetched once at the
+// Dashboard level and shared across tab switches, but only MyRequestsTab
+// needs them now (genuine row browsing, out of scope for this endpoint).
+function CommandCentre({ range }: { range: RaisedRange }) {
   const [proj, setProj] = useState<ProjectWiseOut | null>(null)
   const [threeW, setThreeW] = useState<ThreeWOut | null>(null)
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
+  const [summary, setSummary] = useState<DashboardSummaryOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [govTab, setGovTab] = useState('Overview')
   // Reported directly: "Dashboard is too much of details and tracker." The
@@ -402,8 +443,14 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
       // "Approval Workflow log ... everything also by department only"), so
       // no flag is needed here any more.
       api.get<ApprovalActionOut[]>(`/api/approvals${query}`),
-    ]).then(([p, w, a]) => {
-      setProj(p); setThreeW(w); setActivity(a)
+      // DSH-001..004 -- replaces this tab's own client-side derivation of
+      // active/nearing-release/critical-pending counts and the Functional
+      // lifecycle breakdown from 4-5 fully-fetched request collections (see
+      // dashboard.py::dashboard_summary's own docstring for exactly which
+      // numbers respect date_from/date_to vs. stay all-time).
+      api.get<DashboardSummaryOut>(`/api/dashboard/summary${query}`),
+    ]).then(([p, w, a, s]) => {
+      setProj(p); setThreeW(w); setActivity(a); setSummary(s)
     }).catch(setError)
   }, [range])
 
@@ -418,66 +465,40 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
       (!teamFilter || i.responsible_team === teamFilter)
       && (!priorityFilter || i.priority === priorityFilter)
       && (!ageingFilter || i.ageing_bucket === ageingFilter)
-      && (!query || [i.project_id, i.application_name, i.department, i.pending_stage, i.owner, i.source]
+      && (!query || [i.project_id, i.application_name, i.department, i.pending_stage, i.pending_with, i.owner, i.source]
         .some((value) => String(value || '').toLowerCase().includes(query)))
     ))
   }, [threeW, teamFilter, priorityFilter, ageingFilter, governanceSearch])
 
-  // Combines the gateway + every linked child request type into one list --
-  // org-wide, not scoped to any one user/department (that view now lives in
-  // its own "My Requests" tab below, see MyRequestsTab) -- so the Command
-  // Centre's own stats reflect everything happening across the whole portal.
-  const unifiedRequests = useMemo<UnifiedRequestRow[]>(() => {
-    const all = [
-      ...toUnified('QA Request', requests),
-      ...toUnified('Functional QA', functionalRequests),
-      ...toUnified('SAST', sastRequests),
-      ...toUnifiedDast(dastRequests),
-      ...toUnified('Performance', performanceRequests),
-    ]
-    return all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-  }, [requests, functionalRequests, sastRequests, dastRequests, performanceRequests])
-
   // Everything below this point that's keyed off a raise/created timestamp
   // -- narrowed to whatever window RaisedRangeFilter above has selected (see
   // its own comment for why the other 3 At-a-Glance cards aren't included).
-  const filteredUnifiedRequests = useMemo(
-    () => unifiedRequests.filter((r) => isWithinRaisedRange(r.created_at, range)),
-    [unifiedRequests, range]
-  )
   const filteredActivity = useMemo(
-    () => activity.filter((a) => isWithinRaisedRange(a.created_at, range)).slice(0, 6),
+    () => activity.filter((a) => isWithinRaisedRange(a.created_at, range)).slice(0, 5),
     [activity, range]
   )
 
-  const activeRequestsCount = filteredUnifiedRequests.filter(isActiveRequest).length
-
-  if (error || requestsError) return <ErrorText error={error || requestsError} />
-  if (!proj || !threeW || !requestsLoaded) return <p className="muted">Loading...</p>
+  if (error) return <ErrorText error={error} />
+  if (!proj || !threeW || !summary) return <p className="muted">Loading...</p>
 
   const m = proj.metrics
   const slaWithin = threeW.items.filter((i) => i.ageing_days <= 7).length
   const slaNear = threeW.items.filter((i) => i.ageing_days > 7 && i.ageing_days <= 15).length
   const slaBreached = threeW.items.filter((i) => i.ageing_days > 15).length
   const highRiskPending = threeW.items.filter((i) => ['Critical', 'High'].includes(i.priority || '')).length
-  const nearingRelease = requests.filter((r) => {
-    if (!r.target_release_date) return false
-    const days = (new Date(r.target_release_date).getTime() - Date.now()) / 86400000
-    return days >= 0 && days <= 14
-  }).length
-  // Priority/workflow-stage now live on the linked Functional Testing
-  // Request, not the QA Request gateway (see FunctionalOut).
-  const criticalPending = functionalRequests.filter((r) => (
-    ['DEPARTMENT_HEAD_APPROVAL_PENDING', 'READINESS_VERIFICATION',
-     'QA_SIGNOFF_PENDING', 'REQUESTER_VERIFICATION'].includes(r.status)
-    && r.priority === 'Critical'
-  )).length
+  // DSH-001..004 -- nearingRelease/criticalPending/activeRequestsCount below
+  // all now come straight from the summary endpoint (see its own docstring
+  // for exact query definitions) instead of being derived here from full
+  // request-row collections.
+  const nearingRelease = summary.nearing_release_count
+  const criticalPending = summary.critical_pending_count
+  const activeRequestsCount = summary.active_requests_count
 
   const attentionColumns: TableColumn<ThreeWItem>[] = [
     { key: 'project_id', header: 'Project' },
     { key: 'department', header: 'Department', render: (r) => r.department || '—' },
     { key: 'pending_stage', header: 'Pending At' },
-    { key: 'responsible_team', header: 'Pending With' },
+    { key: 'pending_with', header: 'Pending With' },
     { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
     { key: 'ageing_days', header: 'Since', render: (r) => <span className={`ageing-pill ${r.ageing_days > 15 ? 'breached' : r.ageing_days > 7 ? 'near' : 'within'}`}>{r.ageing_days}d</span> },
     { key: 'ageing_bucket', header: 'Ageing bucket' },
@@ -486,19 +507,8 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
 
   return (
     <div className="dashboard-command-centre">
-      <div className="dashboard-brief">
-        <div>
-          <span className="dashboard-brief-kicker">Enterprise quality overview</span>
-          <h2>Release governance Dashboard</h2>
-          <p>Live visibility across testing, security, approvals, sign-offs, and audit readiness.</p>
-        </div>
-        <div className="dashboard-brief-meta">
-          <span className="live-indicator"><i /> Live data</span>
-          <small>Updated {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
-        </div>
-      </div>
       <div className="dashboard-section-head">
-        <div><span>Portfolio health</span><h3>Operational pulse</h3></div>
+        <div><span>Live portfolio</span><h3>What needs attention</h3></div>
       </div>
       <div className="grid grid-4 dashboard-metric-grid">
         <StatCard icon={IconGrid} iconClass="blue" tag="Live" value={m.active_projects} label="Active projects"
@@ -513,9 +523,9 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
                   footline="Open the relevant request module to approve, return, or reject." />
         <StatCard icon={IconWorkflow} iconClass="purple" tag="Live" value={activeRequestsCount} label="Active requests (org-wide)"
                   hint={range.preset === 'all'
-                    ? 'Open QA, security, and performance requests.'
-                    : 'Open requests raised within the selected period.'}
-                  footline={`${filteredUnifiedRequests.length} raised in total${range.preset === 'all' ? ' across all departments' : ' in the selected range'}`} />
+                    ? 'Open Functional, SAST, DAST, and Performance child requests.'
+                    : 'Open child requests raised within the selected period.'}
+                  footline={`${summary.child_requests_total} exact child request${summary.child_requests_total === 1 ? '' : 's'}${range.preset === 'all' ? ' across all departments' : ' in the selected range'}`} />
       </div>
 
       <Card
@@ -595,7 +605,7 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
                 <button className="btn btn-sm" onClick={() => downloadCsv('projects_requiring_attention.csv', visibleItems, [
                   { key: 'project_id', header: 'Project' }, { key: 'department', header: 'Department' },
                   { key: 'pending_stage', header: 'Pending At' },
-                  { key: 'responsible_team', header: 'Pending With' },
+                  { key: 'pending_with', header: 'Pending With' },
                   { key: 'owner', header: 'Owner' }, { key: 'ageing_days', header: 'Ageing (days)' }, { key: 'priority', header: 'Priority' },
                 ])}>Export CSV</button>
               </div>
@@ -626,7 +636,7 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
               { key: 'application_name', header: 'Application' },
               { key: 'department', header: 'Department', render: (r) => r.department || '—' },
               { key: 'pending_stage', header: 'Pending At' },
-              { key: 'responsible_team', header: 'Team' },
+              { key: 'responsible_team', header: 'Team', render: (r) => r.responsible_team || r.department || '—' },
               { key: 'owner', header: 'Owner', render: (r) => r.owner || '—' },
               { key: 'ageing_days', header: 'Ageing', render: (r) => <span className={`ageing-pill ${r.ageing_days > 15 ? 'breached' : r.ageing_days > 7 ? 'near' : 'within'}`}>{r.ageing_days}d</span> },
               { key: 'priority', header: 'Priority', render: (r) => r.priority ? <Badge status={r.priority} /> : '—' },
@@ -637,7 +647,7 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
         {govExpanded && govTab === 'Ageing' && (
           <div className="subpanel" style={{ marginTop: 12 }}>
             <p className="muted small" style={{ marginTop: -6, marginBottom: 10 }}>
-              All {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} (QA, SAST, DAST & Suppression,
+              All {threeW.total_pending} open item{threeW.total_pending !== 1 ? 's' : ''} (Functional, SAST, DAST, Performance & Suppression,
               excluding Drafts and Closed/Cancelled), grouped by days since last update.
             </p>
             <Donut data={threeW.ageing_bucket_distribution} size={160} />
@@ -649,9 +659,9 @@ function CommandCentre({ range, requests, functionalRequests, sastRequests, dast
       <div className="grid grid-2 dashboard-lower-grid">
         <Card
           title="QA Lifecycle Health"
-          subtitle="Projects by current workflow stage"
+          subtitle="Functional requests by current workflow stage"
         >
-          <LifecycleStepper requests={functionalRequests} />
+          <LifecycleStepper statusCounts={summary.functional_status_counts} />
         </Card>
         <Card title="Recent Activity" subtitle={range.preset === 'all' ? 'Live updates from across the portal' : 'Activity within the selected reporting period'}>
           <RecentActivity items={filteredActivity} />
@@ -797,45 +807,93 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
 // Own dedicated tab (not a card mixed into Dashboard) so the main
 // dashboard always shows the whole portal's data, and this personal/
 // department-scoped view is a deliberate, separate destination instead of
-// something narrowing the default landing view. Reported directly: "lots
-// of api calling, sometime same api calling multiple time" -- this used to
-// fetch its own copy of the same 5 request-type endpoints CommandCentre
-// already fetches, refiring every time a visitor switched to this tab (and
-// again switching back and forth). Now takes them as props from Dashboard,
-// which fetches them once and shares them across whichever tab is mounted.
-function MyRequestsTab({ range, requests, functionalRequests, sastRequests, dastRequests, performanceRequests, loaded, error }: {
-  range: RaisedRange
-  requests: QARequestOut[]
-  functionalRequests: FunctionalOut[]
-  sastRequests: SASTOut[]
-  dastRequests: DASTOut[]
-  performanceRequests: PerformanceOut[]
-  loaded: boolean
-  error: unknown
-}) {
+// something narrowing the default landing view.
+//
+// Reported directly (live undercount, not just "lots of API calling"): this
+// used to take the same 5 department-wide, page_size=100-capped request
+// lists CommandCentre fetched and filter them client-side down to "mine"
+// (requester_id === user.id) / "my department". That silently dropped a
+// user's own older requests once their department's *total* volume for a
+// single request type crossed 100 rows -- the client-side filter was
+// narrowing an already-truncated page 1, not the user's actual complete
+// history. DSH-001..004 removed CommandCentre's need for these lists
+// entirely (it now uses /api/dashboard/summary), so there's no longer
+// anything to share a hoisted fetch with -- this tab now owns two
+// independently server-scoped fetches instead: `requester_id=<me>` for "My
+// Requests" and `department=<mine>` for "My Department" (see
+// qa_requests.py/functional.py/sast_dast.py/performance.py's new
+// requester_id param). Both are still capped at page_size=100 per request
+// type, but that's now a defensible "one person's, or one department's,
+// total lifetime volume of a single request type" ceiling -- the same class
+// of accepted compromise as MyExecutions.tsx's assignment=mine or Pending
+// Approvals' bounded personal queue -- instead of resting on an unrelated
+// org-wide page 1.
+function MyRequestsTab({ range }: { range: RaisedRange }) {
   const navigate = useNavigate()
   const { user } = useAuth()
   const [reqScope, setReqScope] = useState<'mine' | 'department'>('mine')
+  const [myRequests, setMyRequests] = useState<UnifiedRequestRow[]>([])
+  const [departmentRequests, setDepartmentRequests] = useState<UnifiedRequestRow[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  // 2026-08 "one user can be on multiple departments" CR -- "My department"
+  // now means the UNION across every department this user belongs to, not
+  // just their primary one.
+  const myDepartments = user?.departments && user.departments.length
+    ? user.departments : (user?.department ? [user.department] : [])
 
-  const unifiedRequests = useMemo<UnifiedRequestRow[]>(() => {
-    const all = [
-      ...toUnified('QA Request', requests),
-      ...toUnified('Functional QA', functionalRequests),
-      ...toUnified('SAST', sastRequests),
-      ...toUnifiedDast(dastRequests),
-      ...toUnified('Performance', performanceRequests),
-    ]
-    return all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-  }, [requests, functionalRequests, sastRequests, dastRequests, performanceRequests])
+  useEffect(() => {
+    if (!user?.id) return
+    setLoaded(false)
+    function fetchUnified(extraQuery: string): Promise<UnifiedRequestRow[]> {
+      return Promise.all([
+        api.get<PageOut<QARequestListOut>>(`/api/qa-requests?${extraQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<FunctionalListOut>>(`/api/functional-requests?${extraQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<SASTListOut>>(`/api/sast-requests?${extraQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<DASTListOut>>(`/api/dast-requests?${extraQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<PerformanceListOut>>(`/api/performance-requests?${extraQuery}&page_size=100`).then((p) => p.items),
+      ]).then(([r, f, sast, dast, perf]) => {
+        const all = [
+          ...toUnified('QA Request', r),
+          ...toUnified('Functional QA', f),
+          ...toUnified('SAST', sast),
+          ...toUnifiedDast(dast),
+          ...toUnified('Performance', perf),
+        ]
+        return all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      })
+    }
+    // `apply_department_filter` is still a single-value equality filter on
+    // the backend, a deliberate per-request search/narrow control -- see its
+    // own list_requests docstring -- so this fetches once per department and
+    // merges/dedupes client-side rather than widening that filter's own
+    // semantics.
+    Promise.all([
+      fetchUnified(`requester_id=${user.id}`),
+      // A user with no department mapped (rare -- e.g. some executive
+      // accounts) has no meaningful "my department" set; skip the fetch
+      // rather than asking the backend for department="" (which would 400/
+      // filter to nothing useful, not "no department").
+      myDepartments.length
+        ? Promise.all(myDepartments.map((dept) => fetchUnified(`department=${encodeURIComponent(dept)}`)))
+          .then((batches) => {
+            const seen = new Set<string>()
+            const merged: UnifiedRequestRow[] = []
+            for (const batch of batches) {
+              for (const row of batch) {
+                if (seen.has(row.uid)) continue
+                seen.add(row.uid)
+                merged.push(row)
+              }
+            }
+            return merged.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          })
+        : Promise.resolve([]),
+    ]).then(([mine, department]) => {
+      setMyRequests(mine); setDepartmentRequests(department); setLoaded(true)
+    }).catch(setError)
+  }, [user?.id, user?.department, user?.departments])
 
-  const myRequests = useMemo(
-    () => unifiedRequests.filter((r) => !!user?.id && r.requester_id === user.id),
-    [unifiedRequests, user]
-  )
-  const departmentRequests = useMemo(
-    () => unifiedRequests.filter((r) => !!user?.department && r.department === user.department),
-    [unifiedRequests, user]
-  )
   const filteredMyRequests = myRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
   const filteredDepartmentRequests = departmentRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
   const scopedRequests = reqScope === 'mine' ? filteredMyRequests : filteredDepartmentRequests
@@ -853,7 +911,7 @@ function MyRequestsTab({ range, requests, functionalRequests, sastRequests, dast
   return (
     <div>
       <p className="muted small">
-        Everything raised by you, or by {user?.department || 'your department'}, across every request type — QA
+        Everything raised by you, or by {myDepartments.length ? myDepartments.join(', ') : 'your department'}, across every request type — QA
         Request, Functional QA, SAST, DAST and Performance.
       </p>
       <Card
@@ -863,7 +921,7 @@ function MyRequestsTab({ range, requests, functionalRequests, sastRequests, dast
               My Requests ({filteredMyRequests.length})
             </button>
             <button className={reqScope === 'department' ? 'active' : ''} onClick={() => setReqScope('department')}>
-              {user?.department || 'My Department'} ({filteredDepartmentRequests.length})
+              {myDepartments.length ? myDepartments.join(', ') : 'My Department'} ({filteredDepartmentRequests.length})
             </button>
           </div>
         )}
@@ -915,6 +973,17 @@ interface TesterWorkloadRow {
   active_count: number
   waiting_count: number
   near_complete_count: number
+  assignments: TesterAssignment[]
+}
+
+interface TesterAssignment {
+  request_id: string
+  request_pk: number
+  source: 'Functional' | 'Performance' | 'SAST' | 'DAST'
+  application_name: string
+  status: string
+  updated_at: string
+  is_current: boolean
 }
 
 interface TesterWorkloadOut {
@@ -932,9 +1001,12 @@ interface TesterWorkloadOut {
 // QA-team-only capacity view. Aggregation and permission
 // enforcement both live on /api/dashboard/qa-tester-workload; the client
 // gate below is for navigation clarity, not the sole security boundary.
-function TesterOverviewTab({ range }: { range: RaisedRange }) {
+function TesterOverviewTab() {
+  const navigate = useNavigate()
+  const [range, setRange] = useState<RaisedRange>({ preset: 'all', from: '', to: '' })
   const [workload, setWorkload] = useState<TesterWorkloadOut | null>(null)
   const [error, setError] = useState<unknown>(null)
+  const [selectedTesterId, setSelectedTesterId] = useState<number | null>(null)
 
   useEffect(() => {
     setWorkload(null); setError(null)
@@ -993,6 +1065,18 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
         <div><strong>QA team capacity and occupancy</strong><span>Current Functional, Performance, SAST, and DAST assignments for QA Testers and Security Analysts.</span></div>
         <Badge status="QA_LEAD_ASSIGNED" label="QA team only" />
       </div>
+      <div className="tester-period-filter" role="group" aria-label="Completed request period">
+        <div><strong>Completed-work period</strong><span>Current assignments always remain visible.</span></div>
+        <div className="tester-period-presets">
+          {([
+            ['all', 'All time'], ['3d', 'Last 3 days'], ['15d', 'Last 15 days'], ['1m', 'Last month'], ['custom', 'Custom dates'],
+          ] as Array<[RaisedRangePreset, string]>).map(([preset, label]) => <button key={preset} type="button" className={range.preset === preset ? 'active' : ''} onClick={() => setRange((current) => ({ ...current, preset }))}>{label}</button>)}
+        </div>
+        {range.preset === 'custom' && <div className="tester-custom-dates">
+          <label><span>From</span><input type="date" value={range.from} max={range.to || undefined} onChange={(event) => setRange((current) => ({ ...current, from: event.target.value }))} /></label>
+          <label><span>To</span><input type="date" value={range.to} min={range.from || undefined} onChange={(event) => setRange((current) => ({ ...current, to: event.target.value }))} /></label>
+        </div>}
+      </div>
       <div className="tester-workload-summary">
         <div><small>Average team occupancy</small><strong>{workload.average_occupancy}%</strong><span>Across {workload.rows.length} active QA team members</span></div>
         <div><small>Available team members</small><strong>{workload.available_testers}</strong><span>Below 50% occupied</span></div>
@@ -1000,77 +1084,68 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
         <div><small>Overloaded team members</small><strong className={workload.overloaded_testers ? 'danger' : ''}>{workload.overloaded_testers}</strong><span>Above planned capacity</span></div>
       </div>
       <div className="tester-capacity-note">
-        <strong>How occupancy is calculated</strong>
-        <span>{workload.capacity_points} fully-active concurrent assignments equal 100%. Active execution/scanning = 1 point, configuration/retest/regression = 0.75, queued/defect/remediation = 0.5, waiting/result analysis = 0.25, and near-complete work = 0.05–0.15. Shared Functional or Performance requests are divided between assigned testers.</span>
+        <div><strong>How occupancy is calculated</strong>
+        <span>{workload.capacity_points} points equal 100%. Active execution/scanning = 1 point; configuration/retest/baseline = 0.75; queued or remediation work = 0.5; result analysis = 0.25; waiting for fix = 0; and near-complete work = 0.05–0.15. Shared Functional or Performance requests are divided between assigned testers.</span></div>
+        <a className="btn btn-sm" href="/docs/qa-tester-occupancy-guide.pdf" target="_blank" rel="noreferrer">View calculation guide</a>
       </div>
       <Card>
         <Table
           rowKey="tester_id"
           columns={columns}
           rows={workload.rows}
+          onRowClick={(row) => setSelectedTesterId((current) => current === row.tester_id ? null : row.tester_id)}
         />
         {workload.rows.length === 0 && (
           <p className="muted small" style={{ marginTop: 8 }}>No active QA testers are available.</p>
         )}
       </Card>
+      {selectedTesterId && (() => {
+        const tester = workload.rows.find((row) => row.tester_id === selectedTesterId)
+        if (!tester) return null
+        const pathBySource: Record<TesterAssignment['source'], string> = { Functional: '/functional-requests', Performance: '/performance', SAST: '/sast', DAST: '/dast' }
+        return <Card title={`${tester.tester_name} · Request tracking`} className="tester-assignment-ledger">
+          <div className="tester-ledger-summary"><span><strong>{tester.assignments.filter((item) => item.is_current).length}</strong> currently working</span><span><strong>{tester.assignments.filter((item) => !item.is_current).length}</strong> completed in selected period</span></div>
+          <Table
+            tableId="qa-tester-request-ledger"
+            rowKey="request_id"
+            rows={tester.assignments}
+            onRowClick={(assignment) => navigate(`${pathBySource[assignment.source]}?open=${assignment.request_pk}`)}
+            columns={[
+              { key: 'request_id', header: 'Request ID', render: (item) => <strong>{item.request_id}</strong> },
+              { key: 'source', header: 'Request Type' },
+              { key: 'application_name', header: 'Application' },
+              { key: 'status', header: 'Status', render: (item) => <Badge status={item.status} /> },
+              { key: 'work_state', header: 'Work State', render: (item) => <span className={item.is_current ? 'tester-ledger-current' : 'tester-ledger-complete'}>{item.is_current ? 'Currently working' : 'Completed'}</span> },
+              { key: 'updated_at', header: 'Last Activity', render: (item) => new Date(item.updated_at).toLocaleString() },
+            ]}
+          />
+          {!tester.assignments.length && <p className="muted small">No request assignments found for the selected period.</p>}
+        </Card>
+      })()}
     </div>
   )
 }
 
 // Reported directly: the "My Requests" tab (renamed to just "Requests" --
 // see below) should be hidden for these roles -- QA Engineer, QA Lead,
-// Security Analyst, and Executive COE (DEPARTMENT_HEAD_COE_CM /
-// DEPARTMENT_HEAD_COE_AGM, split 2026-08 from the single old
-// DEPARTMENT_HEAD_COE role but with identical authority/visibility) --
-// they work across every team's requests as part of their job, so a
-// "requests I personally raised" view isn't relevant to them the way it is
-// for a Requester/Business Analyst/SM/Department Head. Checked directly
-// against `user.roles` (not the shared `hasRole` helper, which treats ADMIN
-// as satisfying any role check) so an Admin who also happens to hold one of
-// these roles still sees the tab, matching "Admin always sees everything"
-// elsewhere in the app.
+// Security Analyst, and the QA Executive Group (CHIEF_MANAGER_QA / AGM_QA,
+// 2026-08 -- see constants.py::Role's own comment on the CHEIF_MANAGER_COE/
+// AGM_COE consolidation) -- they work across every team's requests as part
+// of their job, so a "requests I personally raised" view isn't relevant to
+// them the way it is for a Requester/Business Analyst/SM/Department Head.
+// Checked directly against `user.roles` (not the shared `hasRole` helper,
+// which treats ADMIN as satisfying any role check) so an Admin who also
+// happens to hold one of these roles still sees the tab, matching "Admin
+// always sees everything" elsewhere in the app.
 const REQUESTS_TAB_HIDDEN_ROLES = [
-  'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM',
+  'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA',
 ]
 
 export default function Dashboard() {
   const { user } = useAuth()
   const [tab, setTab] = useState('command')
+  const [insightTab, setInsightTab] = useState<'security' | 'suppression' | '3w'>('security')
   const range = DEFAULT_RAISED_RANGE
-
-  // Shared across CommandCentre and MyRequestsTab (see each of their own
-  // comments) -- fetched once here instead of separately by whichever tab
-  // happens to be mounted, so switching between "Dashboard" and "Requests"
-  // reuses the same data instead of re-fetching all 5 lists every time.
-  const [requests, setRequests] = useState<QARequestOut[]>([])
-  const [functionalRequests, setFunctionalRequests] = useState<FunctionalOut[]>([])
-  const [sastRequests, setSastRequests] = useState<SASTOut[]>([])
-  const [dastRequests, setDastRequests] = useState<DASTOut[]>([])
-  const [performanceRequests, setPerformanceRequests] = useState<PerformanceOut[]>([])
-  const [requestsLoaded, setRequestsLoaded] = useState(false)
-  const [requestsError, setRequestsError] = useState<unknown>(null)
-
-  useEffect(() => {
-    // These 5 endpoints now apply department scoping unconditionally on the
-    // backend (see dashboard_department_scope in deps.py) -- originally
-    // opt-in here via a dashboard_scope=true flag while this was believed to
-    // be Dashboard-only, then extended (reported directly) to "QA Requests,
-    // Functional Requests, SAST, DAST, Suppression, Performance everywhere
-    // ... it also be by department only", so the flag is gone and every
-    // caller of these endpoints -- this fetch included -- gets the same
-    // scoping with no query param needed.
-    Promise.all([
-      api.get<QARequestOut[]>('/api/qa-requests'),
-      api.get<FunctionalOut[]>('/api/functional-requests'),
-      api.get<SASTOut[]>('/api/sast-requests'),
-      api.get<DASTOut[]>('/api/dast-requests'),
-      api.get<PerformanceOut[]>('/api/performance-requests'),
-    ]).then(([r, f, sast, dast, perf]) => {
-      setRequests(r); setFunctionalRequests(f)
-      setSastRequests(sast); setDastRequests(dast); setPerformanceRequests(perf)
-      setRequestsLoaded(true)
-    }).catch(setRequestsError)
-  }, [])
 
   const hideRequestsTab = !!user?.roles?.some((r) => REQUESTS_TAB_HIDDEN_ROLES.includes(r))
     && !user?.roles?.includes('ADMIN')
@@ -1078,15 +1153,13 @@ export default function Dashboard() {
   // a direct role check (not hasRole's Admin bypass): Admin-only accounts are
   // not QA team members and therefore must not see this restricted view.
   const showTesterOverviewTab = !!user?.roles?.some((role) => (
-    ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'DEPARTMENT_HEAD_COE_CM', 'DEPARTMENT_HEAD_COE_AGM'].includes(role)
+    ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA'].includes(role)
   ))
 
   const tabs = [
     { key: 'command', label: 'Dashboard' },
     ...(hideRequestsTab ? [] : [{ key: 'my-requests', label: 'Requests' }]),
-    { key: 'security', label: 'Security (SAST/DAST)' },
-    { key: 'suppression', label: 'Suppression' },
-    { key: '3w', label: '3W Pending Items' },
+    { key: 'insights', label: 'Insights' },
     ...(showTesterOverviewTab ? [{ key: 'tester-overview', label: 'QA Tester Overview' }] : []),
   ]
 
@@ -1105,34 +1178,24 @@ export default function Dashboard() {
           <button key={t.key} className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}>{t.label}</button>
         ))}
       </div>
-      {tab === 'command' && (
-        <CommandCentre
-          range={range}
-          requests={requests}
-          functionalRequests={functionalRequests}
-          sastRequests={sastRequests}
-          dastRequests={dastRequests}
-          performanceRequests={performanceRequests}
-          requestsLoaded={requestsLoaded}
-          requestsError={requestsError}
-        />
+      {tab === 'command' && <CommandCentre range={range} />}
+      {tab === 'my-requests' && !hideRequestsTab && <MyRequestsTab range={range} />}
+      {tab === 'insights' && (
+        <div className="dashboard-insights">
+          <div className="dashboard-insights-head">
+            <div><span>Detailed analytics</span><h2>Insights</h2><p>Open a focused view only when deeper analysis is needed.</p></div>
+            <div className="pill-tabs dashboard-insight-tabs">
+              <button className={insightTab === 'security' ? 'active' : ''} onClick={() => setInsightTab('security')}>Security</button>
+              <button className={insightTab === 'suppression' ? 'active' : ''} onClick={() => setInsightTab('suppression')}>Suppression</button>
+              <button className={insightTab === '3w' ? 'active' : ''} onClick={() => setInsightTab('3w')}>3W Pending</button>
+            </div>
+          </div>
+          {insightTab === 'security' && <SecurityTab range={range} />}
+          {insightTab === 'suppression' && <SuppressionTab range={range} />}
+          {insightTab === '3w' && <ThreeWTab range={range} />}
+        </div>
       )}
-      {tab === 'my-requests' && !hideRequestsTab && (
-        <MyRequestsTab
-          range={range}
-          requests={requests}
-          functionalRequests={functionalRequests}
-          sastRequests={sastRequests}
-          dastRequests={dastRequests}
-          performanceRequests={performanceRequests}
-          loaded={requestsLoaded}
-          error={requestsError}
-        />
-      )}
-      {tab === 'security' && <SecurityTab range={range} />}
-      {tab === 'suppression' && <SuppressionTab range={range} />}
-      {tab === '3w' && <ThreeWTab range={range} />}
-      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab range={range} />}
+      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab />}
     </div>
   )
 }

@@ -2,18 +2,21 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import MultiUserAssignSelect from '../../components/MultiUserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { IconCheckCircle } from '../../components/Icons'
+import RoleGroupLink from '../../components/RoleGroupLink'
 import {
-  PRIORITIES, RISK_RATINGS, ENVIRONMENTS,
-  PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, canManageReadinessEvidence,
-  QA_DEPARTMENT, PERFORMANCE_PENDING_WITH,
+  PRIORITIES, RISK_RATINGS, ENVIRONMENTS, DEPLOYMENT_ENVIRONMENTS,
+  PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, hasDepartment, canManageReadinessEvidence,
+  QA_DEPARTMENT, PERFORMANCE_PENDING_WITH, QA_EXECUTION_GROUP_ROLE,
+  PERFORMANCE_TESTER_REASSIGNABLE_STATUSES,
 } from '../../constants'
-import { PerformanceOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { PerformanceOut, PerformanceListOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -53,7 +56,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
   // canDeptHeadDecide -- this modal only opens via canEditDetails, but the
   // checklist evidence controls inside it need their own explicit check.
   const isRequesterModal = editing.requester_id === user?.id || isAdmin
-  const sameDeptModal = !!user?.department && user.department === editing.department
+  const sameDeptModal = hasDepartment(user, editing.department)
   const canSMDecideModal = hasRole(user, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
   const canDeptHeadDecideModal = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
   const canManageEvidenceModal = isAdmin || (
@@ -99,7 +102,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
       )}
       <form onSubmit={submit}>
         <div className="form-section">
-          <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div>
+          {/* <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div> */}
           <div className="form-row">
             <Field label="Application Name *"><input required disabled={!isAdmin} value={form.application_name} onChange={(e) => set('application_name', e.target.value)} /></Field>
             <Field label="Epic Number"><input disabled={!isAdmin} value={form.epic_number} onChange={(e) => set('epic_number', e.target.value)} /></Field>
@@ -110,9 +113,13 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
         <div className="form-section">
           <div className="form-section-title">Test Basics</div>
           <div className="form-row">
+            {/* Same DEPLOYMENT_ENVIRONMENTS reasoning as DetailsStep.tsx's
+                own Deployment Environment field -- this is that same field
+                for the Performance Edit modal, paired with Target Promotion
+                Environment further down this form. */}
             <Field label="Environment">
               <select value={form.environment} onChange={(e) => set('environment', e.target.value)}>
-                {ENVIRONMENTS.map((e_) => <option key={e_} value={e_}>{e_}</option>)}
+                {DEPLOYMENT_ENVIRONMENTS.map((e_) => <option key={e_} value={e_}>{e_}</option>)}
               </select>
             </Field>
             <Field label="Risk Category">
@@ -220,6 +227,54 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
   )
 }
 
+// Derived from PERFORMANCE_PENDING_WITH (constants.ts) -- the same table
+// that already drives the list's "Pending With" column and is itself kept
+// in exact sync with performance.py's require_roles()/
+// _require_performance_execution_owner() gates -- rather than re-deriving
+// its own status list. Only labels naming an actual role-holding group get
+// a RoleGroupLink; "Requester" and "--" both resolve to null.
+function assignedGroupFor(
+  status: string,
+  applicationMasterStatus?: string | null,
+  department?: string | null,
+): { role: string | string[]; label: string; department?: string | null } | null {
+  // Reported directly (Application Owner group link): while status is still
+  // SM_APPROVAL_PENDING but the Application Name is awaiting the
+  // Application Owner (applicationNameAwareStatusLabel, same as the Status
+  // badge override), the work is with the Application Owner, not the SM --
+  // checked first since this is a sub-state of SM_APPROVAL_PENDING, not its
+  // own status value. `department` scopes RoleGroupLink's member list, since
+  // Application Owner is department-enforced server-side (require_same_department
+  // in decide_app_owner_name).
+  if (applicationNameAwareStatusLabel(status, applicationMasterStatus)) {
+    return { role: 'APPLICATION_OWNER', label: 'Application Owner', department }
+  }
+  const pendingWith = PERFORMANCE_PENDING_WITH[status]
+  // Reported directly: "SM mapping should be based on department level. but
+  // SM group details showing those are from different department." SM and
+  // Department Head are BOTH department-scoped roles enforced server-side
+  // (require_same_department, performance.py) exactly like Application
+  // Owner above -- `department` was missing here, so RoleGroupLink showed
+  // every SM/Department Head in the system instead of just the ones who
+  // could actually act on this request.
+  if (pendingWith === 'SM') return { role: 'SM', label: 'SM', department }
+  if (pendingWith === 'Department Head') {
+    return { role: ['DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM'], label: 'Department Head', department }
+  }
+  // Reported directly: this "QA Lead group members" list should only show
+  // literal QA_LEAD role holders -- Chief Manager - QA / AGM - QA act on
+  // this work via their own separate Executive bypass (isAssignedQALead
+  // below), not by being members of the QA Lead group.
+  if (pendingWith === 'QA Lead') return { role: 'QA_LEAD', label: 'QA Lead' }
+  // "QA" covers ENVIRONMENT_SETUP/SCRIPT_DEVELOPMENT/BASELINE/LOAD_TEST_EXECUTION
+  // -- limited to QA_ENGINEER only (reported directly) -- "Assigned Tester(s)"
+  // elsewhere on the page names the specific individual, this names the
+  // execution-team group accountable for the stage; QA_LEAD has its own
+  // separate group above instead of also appearing here.
+  if (pendingWith === 'QA') return { role: QA_EXECUTION_GROUP_ROLE, label: 'QA' }
+  return null
+}
+
 function PerformanceDetail({ req, onClose, onChanged, users }: {
   req: PerformanceOut; onClose: () => void; onChanged: (p: PerformanceOut) => void; users: UserOut[]
 }) {
@@ -229,6 +284,12 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const [comments, setComments] = useState('')
   const [selectedQALead, setSelectedQALead] = useState('')
   const [selectedTesters, setSelectedTesters] = useState<string[]>([])
+  // 2026-08 Reassignment CR -- a reason is mandatory when this is a genuine
+  // reassignment (not the very first tester assignment); the backend
+  // enforces this too (reassignment.require_reason), this is just the UI
+  // half. Reset once the assignment actually changes (i.e. on success).
+  const [reassignReason, setReassignReason] = useState('')
+  useEffect(() => { setReassignReason('') }, [req.id, req.assigned_tester_ids])
   // Whether the "require Department Head re-approval on return" popup (see
   // canCompleteReadiness below) is open -- an always-visible checkbox next to
   // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
@@ -273,14 +334,18 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 
   const isRequester = req.requester_id === user?.id || hasRole(user, 'ADMIN')
   const status = req.status
-  const sameDept = !!user?.department && user.department === req.department
+  const sameDept = hasDepartment(user, req.department)
   const isAdmin = hasRole(user, 'ADMIN')
-  const isAssignedQALead = isAdmin || (hasRole(user, 'QA_LEAD') && req.engineer_id === user?.id)
+  // Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+  // gated action, same as Admin, without being listed as "QA Lead group"
+  // members (display-only concern, see assignedGroupFor above). See
+  // ORACLE_MIGRATION_2026-07.md section 59.
+  const isAssignedQALead = isAdmin || hasRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   const assignedTesterIds = new Set((req.assigned_tester_ids || '').split(',').filter(Boolean).map(Number))
   const isAssignedTester = isAdmin || (hasRole(user, 'QA_ENGINEER') && !!user?.id && assignedTesterIds.has(user.id))
   const isExecutionOwner = isAssignedQALead || isAssignedTester
-  const qaLeads = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('QA_LEAD'))
-  const testers = users.filter((u) => u.is_active && u.department === QA_DEPARTMENT && (u.roles || []).includes('QA_ENGINEER'))
+  const qaLeads = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_LEAD'))
+  const testers = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_ENGINEER'))
 
   // Edit access -- see the matching (and more detailed) comment in
   // SAST.tsx's canEditDetails for the full reasoning; same rule here.
@@ -354,7 +419,34 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const canStartReadiness = isAssignedQALead && status === 'ENGINEER_ASSIGNED'
   const canCompleteReadiness = isAssignedQALead && status === 'READINESS'
   const canCompleteFeasibility = isAssignedQALead && status === 'FEASIBILITY'
-  const canCompletePlanning = isAssignedQALead && status === 'PLANNING'
+  // 2026-08 -- reported directly: "once assigned there are no other option
+  // to reassign the tester or modify the tester. give qa lead to reassign as
+  // well as the current assign people can reasign to another qa member."
+  // Widened the same way as Functional.tsx's canAssignTester: QA Lead group
+  // OR any currently-assigned tester, across the full
+  // PERFORMANCE_TESTER_REASSIGNABLE_STATUSES window (Planning onward) --
+  // not just while status is exactly PLANNING. The backend
+  // (performance.py's complete-planning) enforces the same window/authors;
+  // this only decides whether the button renders. Calling it while status
+  // is still PLANNING is the initial assignment (advances to
+  // ENVIRONMENT_SETUP); any later status is a pure reassignment that leaves
+  // status untouched -- see isInitialPerformanceTesterAssignment below.
+  const isInitialPerformanceTesterAssignment = status === 'PLANNING'
+  // 2026-08 Reassignment CR, reported directly: "Reassignment shall be
+  // permitted to: the current assignee, the Department Head of the
+  // department to which the current assignee belongs, or Admin users." --
+  // then, reported directly again: QA_LEAD is required to keep reassignment
+  // rights too, restoring parity with isAssignedQALead (which already gates
+  // the first assignment). Mirrors performance.py's
+  // _require_can_reassign_performance_tester exactly.
+  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
+  const canReassignPerformanceTester = isAssignedTester || isQADepartmentHead || hasRole(user, 'QA_LEAD')
+  const canCompletePlanning =
+    (isInitialPerformanceTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignPerformanceTester) &&
+    PERFORMANCE_TESTER_REASSIGNABLE_STATUSES.includes(status)
+  const currentTesterIds = (req.assigned_tester_ids || '').split(',').filter(Boolean).map(Number).sort((a, b) => a - b)
+  const nextTesterIds = selectedTesters.map(Number).sort((a, b) => a - b)
+  const testerAssignmentChanged = currentTesterIds.length !== nextTesterIds.length || currentTesterIds.some((id, index) => id !== nextTesterIds[index])
   const canCompleteEnvSetup = isExecutionOwner && status === 'ENVIRONMENT_SETUP'
   const canCompleteScriptDev = isExecutionOwner && status === 'SCRIPT_DEVELOPMENT'
   const canCompleteBaseline = isExecutionOwner && status === 'BASELINE'
@@ -365,6 +457,16 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const canSignOff = isAssignedQALead && status === 'SIGNOFF_PENDING'
   const canRequesterDecide = isRequester && status === 'REQUESTER_VERIFICATION'
   const canVerifyChecklist = isAssignedQALead && status === 'READINESS'
+
+  // Pre-fill the picker with the currently-assigned tester(s) when this is a
+  // reassignment (not the first-ever assignment) -- same reasoning as
+  // Functional.tsx's matching effect.
+  useEffect(() => {
+    if (canCompletePlanning && !isInitialPerformanceTesterAssignment) {
+      setSelectedTesters((req.assigned_tester_ids || '').split(',').filter(Boolean))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req.id, req.assigned_tester_ids, isInitialPerformanceTesterAssignment])
 
   return (
     <Modal title={`${req.request_id} — ${req.application_name}`} onClose={onClose} wide>
@@ -437,7 +539,10 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 
           <DetailSection title="People">
             <DetailField label="Requester">{userName(users, req.requester_id) || '—'}</DetailField>
-            <DetailField label="Assigned QA Lead">{userName(users, req.engineer_id) || 'Not assigned'}</DetailField>
+            <DetailField label="Assigned Group">{(() => {
+              const assigned = assignedGroupFor(req.status, req.application_master_status, req.department)
+              return assigned ? <RoleGroupLink users={users} role={assigned.role} label={assigned.label} department={assigned.department} /> : '—'
+            })()}</DetailField>
             <DetailField label="Assigned QA Tester(s)">
               {req.assigned_tester_ids
                 ? req.assigned_tester_ids.split(',').map((id) => userName(users, Number(id)) || id).join(', ')
@@ -465,9 +570,6 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
           )}
 
           <div className="actions-panel">
-          <Field label="Action note (optional)">
-            <input value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Attached only to the next workflow action" />
-          </Field>
           {canCompleteReadiness && pendingChecklistItems.length > 0 && (
             <p className="muted small" style={{ color: 'var(--danger, #c0392b)' }}>
               {pendingChecklistItems.length} mandatory pre-testing readiness checklist item(s) still incomplete —
@@ -495,8 +597,8 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                     : undefined
                 }
                 onApprove={(signed) => act('sm-decision', { decision: 'Approved', comments: signed })}
-                onReturn={() => act('sm-decision', { decision: 'Returned', comments })}
-                onReject={() => act('sm-decision', { decision: 'Rejected', comments })}
+                onReturn={(actionNote) => act('sm-decision', { decision: 'Returned', comments: actionNote })}
+                onReject={(actionNote) => act('sm-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canDeptHeadDecide && (
@@ -512,21 +614,12 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                     ? 'Mandatory Pre-Testing Readiness checklist item(s) are not self-declared ready -- see the notice above.'
                     : undefined
                 }
-                extraControlLabel="Assign IT-QA QA Lead"
-                extraControl={
-                  <UserAssignSelect
-                    value={selectedQALead}
-                    onChange={setSelectedQALead}
-                    users={qaLeads}
-                    placeholder="Select QA Lead..."
-                    disabled={busy}
-                    style={{ minWidth: 260 }}
-                  />
-                }
-                extraReady={!!selectedQALead}
-                onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed, qa_lead_id: Number(selectedQALead) })}
-                onReturn={() => act('department-head-decision', { decision: 'Returned', comments })}
-                onReject={() => act('department-head-decision', { decision: 'Rejected', comments })}
+                extraControlLabel="Assign to group"
+                extraControl={<RoleGroupLink users={users} role="QA_LEAD" label="QA Lead" />}
+                extraReady
+                onApprove={(signed) => act('department-head-decision', { decision: 'Approved', comments: signed })}
+                onReturn={(actionNote) => act('department-head-decision', { decision: 'Returned', comments: actionNote })}
+                onReject={(actionNote) => act('department-head-decision', { decision: 'Rejected', comments: actionNote })}
               />
             )}
             {canStartReadiness && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-readiness')}>Start Readiness</button>}
@@ -566,16 +659,35 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                   value={selectedTesters}
                   onChange={setSelectedTesters}
                   users={testers}
-                  placeholder="Assign QA Tester(s)..."
+                  placeholder={
+                    isInitialPerformanceTesterAssignment
+                      ? 'Assign QA Tester(s)...'
+                      : 'Reassign QA Tester(s)...'
+                  }
                   disabled={busy}
                   style={{ minWidth: 260 }}
                 />
+                {!isInitialPerformanceTesterAssignment && (
+                  <input
+                    className="reassign-reason-input"
+                    style={{ minWidth: 220 }}
+                    placeholder="Reason for reassignment *"
+                    value={reassignReason}
+                    onChange={(e) => setReassignReason(e.target.value)}
+                    disabled={busy}
+                  />
+                )}
                 <button
                   className="btn btn-primary btn-sm"
-                  disabled={busy || selectedTesters.length === 0}
-                  onClick={() => act('complete-planning', { tester_ids: selectedTesters.map(Number) })}
+                  disabled={busy || selectedTesters.length === 0 || (!isInitialPerformanceTesterAssignment && (!testerAssignmentChanged || !reassignReason.trim()))}
+                  onClick={() => act('complete-planning', {
+                    tester_ids: selectedTesters.map(Number),
+                    ...(isInitialPerformanceTesterAssignment ? {} : { reason: reassignReason.trim() }),
+                  })}
                 >
-                  Assign Tester(s) &amp; Complete Planning
+                  {isInitialPerformanceTesterAssignment
+                    ? 'Assign Tester(s) & Complete Planning'
+                    : 'Reassign Tester(s)'}
                 </button>
               </>
             )}
@@ -584,19 +696,19 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
             {canCompleteBaseline && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-baseline')}>Complete Baseline</button>}
             {canCompleteLoadTest && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-load-test')}>Complete Load Test Execution</button>}
             {canResultAnalysisDecide && (
-              <>
-                <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('result-analysis-decision', { decision: 'Passed', comments })}>Result Analysis Passed</button>
-                <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('result-analysis-decision', { decision: 'Failed', comments })}>Result Analysis Failed</button>
-              </>
+              <WorkflowDecisionPanel busy={busy} title="Result analysis decision" options={[
+                { key: 'pass', label: 'Result Analysis Passed', description: 'Accept results and continue the workflow', tone: 'approve', onClick: () => act('result-analysis-decision', { decision: 'Passed', comments }) },
+                { key: 'fail', label: 'Result Analysis Failed', description: 'Record failure and start corrective action', tone: 'reject', onClick: () => act('result-analysis-decision', { decision: 'Failed', comments }) },
+              ]} />
             )}
             {canCompleteDefectFixRetest && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-defect-fix-retest')}>Complete Defect / Fix / Retest</button>}
             {canCompleteReport && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-report')}>Complete Report</button>}
             {canSignOff && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('sign-off')}>Sign Off</button>}
             {canRequesterDecide && (
-              <>
-                <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('requester-decision', { decision: 'Accepted', comments })}>Accept &amp; Close</button>
-                <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('requester-decision', { decision: 'ChangesRequired', comments })}>Request Changes</button>
-              </>
+              <WorkflowDecisionPanel busy={busy} title="Requester verification decision" options={[
+                { key: 'accept', label: 'Accept & Close', description: 'Confirm the result and complete the request', tone: 'approve', onClick: () => act('requester-decision', { decision: 'Accepted', comments }) },
+                { key: 'changes', label: 'Request Changes', description: 'Return the request for additional work', tone: 'return', onClick: () => act('requester-decision', { decision: 'ChangesRequired', comments }) },
+              ]} />
             )}
           </div>
           </div>
@@ -674,21 +786,34 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 }
 
 export default function Performance() {
-  const [rows, setRows] = useState<PerformanceOut[]>([])
+  // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
+  // PerformanceListOut shape; opening a request fetches the full
+  // PerformanceOut record fresh via GET /api/performance-requests/{id}
+  // before PerformanceDetail (which needs every field) is shown.
   const [selected, setSelected] = useState<PerformanceOut | null>(null)
+  const [openingId, setOpeningId] = useState<number | null>(null)
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
-  const load = useCallback(async () => {
-    try { setRows(await api.get<PerformanceOut[]>('/api/performance-requests')) } catch (err) { setError(err) }
-  }, [])
-  useEffect(() => { load() }, [load])
+  const {
+    items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
+    loading, setPage, setPageSize, reload,
+  } = usePaginatedList<PerformanceListOut>('/api/performance-requests', {})
+
   useEffect(() => {
     // Full user list -- not just QA Engineer/Lead -- so both the Assign
     // Requester and readiness-starter fields can
     // resolve names from a single fetch.
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
+  }, [])
+
+  const openRequest = useCallback(async (idOrRow: number | PerformanceListOut) => {
+    const id = typeof idOrRow === 'number' ? idOrRow : idOrRow.id
+    setOpeningId(id)
+    try {
+      setSelected(await api.get<PerformanceOut>(`/api/performance-requests/${id}`))
+    } catch (err) { setError(err) } finally { setOpeningId(null) }
   }, [])
 
   // Deep-link support -- see the matching effect in Functional.tsx for the
@@ -698,23 +823,29 @@ export default function Performance() {
     const openId = searchParams.get('open')
     if (!openId || rows.length === 0) return
     const match = rows.find((r) => r.request_id === openId)
-    if (match) setSelected(match)
+    if (match) openRequest(match.id)
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams])
+  }, [rows, searchParams, setSearchParams, openRequest])
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="Performance Testing Requests" count={rows.length}
+        title="Performance Testing Requests" count={total}
         subtitle="Load/performance testing requests, from submission through baseline, load test execution, and sign-off. Raised via a QA Request (include Performance Testing in its request types) -- not created standalone here."
       />
       <Card>
-        <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
-          { key: 'request_id', header: 'Request ID' },
+        <Table rowKey="id" onRowClick={(r) => openRequest(r)}
+          server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
+          columns={[
+          {
+            key: 'request_id',
+            header: 'Request ID',
+            render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
+          },
           { key: 'application_name', header: 'Application' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
-          { key: 'engineer_id', header: 'Assigned QA Lead', render: (r) => userName(users, r.engineer_id) || 'Not assigned', filterValue: (r) => userName(users, r.engineer_id) || '' },
+          { key: 'engineer_id', header: 'Assigned Group', render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '—', filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
           { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
@@ -729,7 +860,7 @@ export default function Performance() {
         ]} rows={rows} />
       </Card>
       {selected && (
-        <PerformanceDetail req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }} users={users} />
+        <PerformanceDetail req={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); reload() }} users={users} />
       )}
     </div>
   )

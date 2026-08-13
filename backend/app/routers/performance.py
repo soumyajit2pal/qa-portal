@@ -1,19 +1,18 @@
-import datetime
 import os
-from typing import List
-from zoneinfo import ZoneInfo
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
-from .. import models, schemas
+from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
+from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, PERFORMANCE_STATUS_LABELS, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
+from .. import reassignment
 
 router = APIRouter(prefix="/api/performance-requests", tags=["performance"])
 
@@ -61,40 +60,124 @@ def _get_or_404(db: Session, req_id: int):
 
 def _it_qa_user(db: Session, user_id: int | None, role: str, label: str) -> models.User:
     user = db.query(models.User).get(user_id) if user_id else None
-    if not user or not user.is_active or not user.has_role(role) or user.department != QA_DEPARTMENT:
+    if not user or not user.is_active or not user.has_role(role) or not user.has_department(QA_DEPARTMENT):
         raise HTTPException(400, f"{label} must be an active {role.replace('_', ' ').title()} from {QA_DEPARTMENT}")
     return user
 
 
 def _require_assigned_qa_lead(obj: "models.PerformanceRequest", user: models.User) -> None:
-    if not user.has_role(Role.ADMIN) and obj.engineer_id != user.id:
-        raise HTTPException(403, "Only the QA Lead assigned by the Department Head can perform this action")
+    # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+    # gated action, same as ADMIN, without being listed as "QA Lead group"
+    # members (display-only concern, kept to literal QA_LEAD elsewhere --
+    # see ORACLE_MIGRATION_2026-07.md section 59).
+    if not user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        raise HTTPException(403, "Only a member of the QA Lead group can perform this action")
 
 
 def _performance_tester_ids(obj: "models.PerformanceRequest") -> set[int]:
     return {int(value) for value in (obj.assigned_tester_ids or "").split(",") if value}
 
 
+# 2026-08 -- reported directly, same fix as functional.py's
+# _require_assigned_qa_lead_or_current_tester (see that function's own
+# comment / TESTER_REASSIGNABLE_STATUSES on constants.py): reassigning is
+# now open to the QA Lead group at any point, AND to whoever is currently
+# assigned -- "the current assign[ed] people can reassign to another qa
+# member." Deliberately its own function rather than reusing
+# _require_performance_execution_owner above -- that one is for acting on
+# the request's OWN execution steps (complete-environment-setup etc.), this
+# one is specifically about who may change WHO is assigned; same shape,
+# different concern, and keeping them separate means changing one doesn't
+# silently change the other.
+def _require_assigned_qa_lead_or_current_performance_tester(obj: "models.PerformanceRequest", user: models.User) -> None:
+    if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        return
+    if user.id in _performance_tester_ids(obj):
+        return
+    raise HTTPException(403, "Only the QA Lead group or a currently assigned tester can reassign the tester(s) on this request")
+
+
+# 2026-08 Reassignment CR, reported directly: "Reassignment shall be
+# permitted to: the current assignee, the Department Head of the department
+# to which the current assignee belongs, or Admin users." See functional.py's
+# identically-shaped _require_can_reassign_tester for the full reasoning --
+# same narrowing (plain QA_LEAD is not itself a Department Head), applies
+# only once this is a genuine reassignment, not the first assignment.
+def _require_can_reassign_performance_tester(obj: "models.PerformanceRequest", user: models.User) -> None:
+    if user.has_role(Role.ADMIN):
+        return
+    if user.id in _performance_tester_ids(obj):
+        return
+    if user.has_department(QA_DEPARTMENT) and user.has_role(*reassignment.department_head_roles(QA_DEPARTMENT)):
+        return
+    # 2026-08 -- reported directly: QA_LEAD is required to keep reassignment
+    # rights here too, mirroring functional.py's identical fix -- the CR's
+    # own eligibility list would otherwise narrow existing behavior, where a
+    # plain QA_LEAD could reassign any tester, same as the initial-assignment
+    # gate (_require_assigned_qa_lead_or_current_performance_tester) allows.
+    if user.has_role(Role.QA_LEAD):
+        return
+    raise HTTPException(
+        403,
+        "Only a currently assigned tester, a QA Lead, the QA Department Head (Chief Manager QA / AGM QA), "
+        "or an Administrator can reassign the tester(s) on this request",
+    )
+
+
 def _require_performance_execution_owner(obj: "models.PerformanceRequest", user: models.User) -> None:
     if user.has_role(Role.ADMIN):
         return
-    if obj.engineer_id == user.id and user.has_role(Role.QA_LEAD):
+    if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return
     if user.id in _performance_tester_ids(obj) and user.has_role(Role.QA_ENGINEER):
         return
-    raise HTTPException(403, "Only the assigned QA Lead or an assigned IT-QA QA Tester can perform this action")
+    raise HTTPException(403, "Only the assigned QA Lead or an assigned COE - Quality Assurance QA Tester can perform this action")
 
 
-@router.get("", response_model=List[schemas.PerformanceOut])
-def list_performance(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.PerformanceRequest)
-    # See list_functional's matching comment in routers/functional.py -- same
-    # reasoning, applied unconditionally.
+@router.get("", response_model=pagination.Page[schemas.PerformanceListOut])
+def list_performance(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # application_name is a real column on PerformanceRequest itself (unlike
+    # Functional/SAST/DAST, which all delegate it) -- but department/
+    # application_master_status still are, so the QARequest join/eager-load
+    # is still needed for those. isouter=True so a standalone (no
+    # qa_request_id) row isn't dropped -- see list_functional's matching
+    # comment in routers/functional.py.
+    q = db.query(models.PerformanceRequest).join(
+        models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id, isouter=True
+    ).options(
+        joinedload(models.PerformanceRequest.qa_request).joinedload(models.QARequest.application_master)
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.join(models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
-    return q.order_by(models.PerformanceRequest.created_at.desc()).all()
+        q = q.filter(models.QARequest.department.in_(scope))
+    q = pagination.apply_search(q, params, models.PerformanceRequest.request_id, models.PerformanceRequest.application_name)
+    q = pagination.apply_status_filter(q, params, models.PerformanceRequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    # Module-specific, same reasoning as qa_requests.py/functional.py's own
+    # requester_id addition (reported directly -- Dashboard.tsx's "My
+    # Requests" tab).
+    if requester_id is not None:
+        q = q.filter(models.PerformanceRequest.requester_id == requester_id)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "created_at": models.PerformanceRequest.created_at,
+            "updated_at": models.PerformanceRequest.updated_at,
+            "status": models.PerformanceRequest.status,
+            "application_name": models.PerformanceRequest.application_name,
+        },
+        default_column=models.PerformanceRequest.created_at, id_column=models.PerformanceRequest.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/{req_id}", response_model=schemas.PerformanceOut)
+def get_performance(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # PAG-006 -- the detail endpoint the frontend fetches from when a list
+    # row is opened, now that the list above only returns PerformanceListOut.
+    return _get_or_404(db, req_id)
 
 
 # Standalone creation is DISABLED -- Performance requests can only originate
@@ -262,7 +345,7 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 @router.post("/{req_id}/department-head-decision", response_model=schemas.PerformanceOut)
 def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDecisionIn, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
-    """Approval requires assignment to an active IT-QA QA Lead."""
+    """Approval requires assignment to an active COE - Quality Assurance QA Lead."""
     obj = _get_or_404(db, req_id)
     require_same_department(current_user, obj.department)
     require_not_requester(current_user, obj.requester_id)
@@ -270,9 +353,7 @@ def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDe
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
         raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     if payload.decision == "Approved":
-        qa_lead_id = payload.qa_lead_id or payload.engineer_id
-        qa_lead = _it_qa_user(db, qa_lead_id, Role.QA_LEAD, "qa_lead_id")
-        obj.engineer_id = qa_lead.id
+        obj.engineer_id = None
         obj.status = "ENGINEER_ASSIGNED"
     elif payload.decision == "Returned":
         obj.status = "RETURNED_BY_DEPARTMENT_HEAD"
@@ -288,7 +369,7 @@ def department_head_decision(req_id: int, payload: schemas.PerformanceDeptHeadDe
 
 @router.post("/{req_id}/start-readiness", response_model=schemas.PerformanceOut)
 def start_readiness(req_id: int, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, "ENGINEER_ASSIGNED", "Start readiness")
     _require_assigned_qa_lead(obj, current_user)
@@ -310,7 +391,7 @@ def _advance(db, obj, expected, next_status, step_label, current_user):
 
 @router.post("/{req_id}/readiness-decision", response_model=schemas.PerformanceOut)
 def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                        current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """Passed requires every item the requester self-declared ready on
     "L1: Pre-Testing Readiness Checklist" (Annexure VIII) to be QA-verified
     (is_complete), not just the mandatory ones -- see the long comment
@@ -375,7 +456,7 @@ def get_checklist(req_id: int, db: Session = Depends(get_db), current_user: mode
 @router.put("/{req_id}/checklist/{item_id}", response_model=schemas.PerformanceChecklistItemOut)
 def update_checklist_item(req_id: int, item_id: int, payload: schemas.PerformanceChecklistItemUpdate,
                            db: Session = Depends(get_db),
-                           current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                           current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     item = db.query(models.PerformanceChecklistItem).filter_by(id=item_id, performance_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")
@@ -401,7 +482,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.Performanc
     if payload.is_complete:
         item.approved_by_id = current_user.id
         import datetime
-        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        item.approved_at = models.now()
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -412,7 +493,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.Performanc
 
 @router.post("/{req_id}/complete-feasibility", response_model=schemas.PerformanceOut)
 def complete_feasibility(req_id: int, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                          current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require_assigned_qa_lead(obj, current_user)
     return _advance(db, obj, "FEASIBILITY", "PLANNING", "Feasibility", current_user)
@@ -420,18 +501,57 @@ def complete_feasibility(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/complete-planning", response_model=schemas.PerformanceOut)
 def complete_planning(req_id: int, payload: schemas.AssignTesterIn, db: Session = Depends(get_db),
-                       current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                       current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.QA_ENGINEER))):
+    """2026-08 -- reported directly: "once assigned there are no other
+    option to reassign the tester or modify the tester." Previously only
+    ever callable while status was exactly "PLANNING" (assigning a tester
+    AND advancing straight to "ENVIRONMENT_SETUP" in the same action) by the
+    QA Lead group -- see PERFORMANCE_TESTER_REASSIGNABLE_STATUSES' own
+    comment on constants.py. Now also callable through the rest of the
+    active-testing range (ENVIRONMENT_SETUP..REPORT), by either the QA Lead
+    group OR any currently-assigned tester (self-handoff to another QA
+    member). Reassigning after the initial PLANNING->ENVIRONMENT_SETUP
+    transition deliberately does NOT touch `status` -- a request already at,
+    say, LOAD_TEST_EXECUTION must stay there after a tester swap, not
+    regress back to ENVIRONMENT_SETUP and lose track of where the work
+    actually is.
+
+    2026-08 Reassignment CR -- once this is a genuine reassignment (status
+    already past PLANNING), eligibility narrows to
+    _require_can_reassign_performance_tester and a reason becomes
+    mandatory; the newly-added tester(s) are notified, and a dedicated
+    "Reassigned" audit row is written alongside the existing history log
+    entry below."""
     obj = _get_or_404(db, req_id)
-    _require(obj, "PLANNING", "Assign QA Tester")
-    _require_assigned_qa_lead(obj, current_user)
+    _require(obj, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, "Assign QA Tester")
+    is_initial_assignment = obj.status == "PLANNING"
+    previous_ids = _performance_tester_ids(obj)
+    if is_initial_assignment:
+        _require_assigned_qa_lead_or_current_performance_tester(obj, current_user)
+    else:
+        _require_can_reassign_performance_tester(obj, current_user)
+        reassignment.require_reason(payload.reason)
     if not payload.tester_ids:
         raise HTTPException(400, "At least one tester_id is required")
     tester_ids = list(dict.fromkeys(payload.tester_ids))
     testers = [_it_qa_user(db, tester_id, Role.QA_ENGINEER, f"tester_id {tester_id}") for tester_id in tester_ids]
     obj.assigned_tester_ids = ",".join(str(value) for value in tester_ids)
-    obj.status = "ENVIRONMENT_SETUP"
-    _log(db, obj.id, "Planning", current_user, "QA Tester Assigned",
+    if is_initial_assignment:
+        obj.status = "ENVIRONMENT_SETUP"
+    decision = "QA Tester Assigned" if is_initial_assignment else "QA Tester Reassigned"
+    step = "Planning" if is_initial_assignment else PERFORMANCE_STATUS_LABELS.get(obj.status, obj.status)
+    _log(db, obj.id, step, current_user, decision,
          f"Assigned tester(s): {', '.join(tester.full_name for tester in testers)}")
+    if not is_initial_assignment:
+        previous_users = db.query(models.User).filter(models.User.id.in_(previous_ids)).all() if previous_ids else []
+        previous_label = ", ".join(u.full_name for u in previous_users) if previous_users else "Unassigned"
+        new_label = ", ".join(tester.full_name for tester in testers)
+        reassignment.record_reassignment(db, "PERFORMANCE", obj.id, current_user, previous_label, new_label, payload.reason)
+        for new_id in set(tester_ids) - previous_ids:
+            reassignment.notify_new_assignee(
+                db, new_id, "PERFORMANCE", obj.id, obj.request_id,
+                f"You have been assigned as QA Tester on {obj.request_id}.", current_user.id,
+            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -439,7 +559,7 @@ def complete_planning(req_id: int, payload: schemas.AssignTesterIn, db: Session 
 
 @router.post("/{req_id}/complete-environment-setup", response_model=schemas.PerformanceOut)
 def complete_environment_setup(req_id: int, db: Session = Depends(get_db),
-                                current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                                current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "ENVIRONMENT_SETUP", "SCRIPT_DEVELOPMENT", "Environment Setup", current_user)
@@ -447,7 +567,7 @@ def complete_environment_setup(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/complete-script-development", response_model=schemas.PerformanceOut)
 def complete_script_development(req_id: int, db: Session = Depends(get_db),
-                                 current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                                 current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "SCRIPT_DEVELOPMENT", "BASELINE", "Script Development", current_user)
@@ -455,7 +575,7 @@ def complete_script_development(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/complete-baseline", response_model=schemas.PerformanceOut)
 def complete_baseline(req_id: int, db: Session = Depends(get_db),
-                       current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                       current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "BASELINE", "LOAD_TEST_EXECUTION", "Baseline", current_user)
@@ -463,7 +583,7 @@ def complete_baseline(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/complete-load-test", response_model=schemas.PerformanceOut)
 def complete_load_test(req_id: int, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                        current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require_performance_execution_owner(obj, current_user)
     return _advance(db, obj, "LOAD_TEST_EXECUTION", "RESULT_ANALYSIS", "Load Test Execution", current_user)
@@ -471,7 +591,7 @@ def complete_load_test(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/result-analysis-decision", response_model=schemas.PerformanceOut)
 def result_analysis_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                              current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                              current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, "RESULT_ANALYSIS", "Result analysis decision")
     _require_assigned_qa_lead(obj, current_user)
@@ -489,7 +609,7 @@ def result_analysis_decision(req_id: int, payload: schemas.ReadinessDecisionIn, 
 
 @router.post("/{req_id}/complete-defect-fix-retest", response_model=schemas.PerformanceOut)
 def complete_defect_fix_retest(req_id: int, db: Session = Depends(get_db),
-                                current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
+                                current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """Loops back to Load Test Execution for a re-run once the fix is in."""
     obj = _get_or_404(db, req_id)
     _require_performance_execution_owner(obj, current_user)
@@ -498,7 +618,7 @@ def complete_defect_fix_retest(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/complete-report", response_model=schemas.PerformanceOut)
 def complete_report(req_id: int, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require_assigned_qa_lead(obj, current_user)
     return _advance(db, obj, "REPORT", "SIGNOFF_PENDING", "Report", current_user)
@@ -506,7 +626,7 @@ def complete_report(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/sign-off", response_model=schemas.PerformanceOut)
 def sign_off(req_id: int, db: Session = Depends(get_db),
-             current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+             current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
     _require(obj, "SIGNOFF_PENDING", "Sign off")
     _require_assigned_qa_lead(obj, current_user)
@@ -566,7 +686,7 @@ def acknowledge_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_d
         raise HTTPException(404, "Walkthrough session not found")
     import datetime
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj
@@ -647,7 +767,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
         subtitle="Performance Testing Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -679,9 +799,9 @@ def _can_upload_documents(obj: "models.PerformanceRequest", user: models.User) -
                   "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER", "REQUESTER_VERIFICATION"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     # Every post-readiness/terminal status -- locked for everyone but Admin
     # until the request is returned to the requester above.
     return False
@@ -714,9 +834,9 @@ def _can_edit_details(obj: "models.PerformanceRequest", user: models.User) -> bo
     if status in ("DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     return False
 
 

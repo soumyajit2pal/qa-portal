@@ -1,15 +1,27 @@
 import { QARequestForm, SAST_COMPONENT_FIELDS } from './types'
-import { validEnvironmentPromotion } from '../constants'
+import { validEnvironmentPromotion, validTargetPromotionOptions } from '../constants'
 
 // Mandatory text fields on the "Application & Change Details" / "Release &
 // Environment" steps (everything marked "(*)" in the QA Request field spec).
 // The select-type mandatory fields (Change Type, Deployment Environment,
-// Target Promotion Environment, Priority, Risk Rating) never need a separate
-// "is it filled in" check here -- their dropdowns always default to a real
-// (non-blank) value, so they can't be left empty through the UI. Target
-// Promotion Environment does get one extra check below though: its *value*
-// (not just presence) must be ordered correctly against Deployment
-// Environment.
+// Priority, Risk Rating) never need a separate "is it filled in" check here
+// -- their dropdowns always default to a real (non-blank) value, so they
+// can't be left empty through the UI.
+//
+// Target Promotion Environment is the one exception -- reported directly:
+// "'Select Target Promotion Environment' is getting as selection... still
+// it's allowing to go next." Unlike the other selects above, its own
+// dropdown (DetailsStep.tsx/Functional.tsx's Edit Details modal) always
+// renders a real blank `<option value="">Select Target Promotion
+// Environment</option>` placeholder alongside the real choices, so it CAN
+// be left on that blank value and submitted -- the comment this replaced
+// wrongly assumed otherwise. Checked explicitly below instead, but only
+// when there's actually a valid choice to make: if Deployment Environment
+// is already "Production" (the final pipeline stage), there is no later
+// stage to promote to -- validTargetPromotionOptions returns an empty list,
+// and DetailsStep.tsx itself now reflects that by disabling the field and
+// dropping its "*" -- so requiring a value there would make the form
+// impossible to complete instead of just quietly under-validated.
 const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
   { key: 'application_name', label: 'Application Name' },
   { key: 'application_owner', label: 'Application Owner' },
@@ -47,6 +59,15 @@ export function detailsStepError(f: QARequestForm): string | null {
   }
   if (!EPIC_NUMBER_REGEX.test(f.epic_number.trim())) {
     return 'Epic Number is not in a valid format. Example: EPIC-1234'
+  }
+  // Reported directly -- see this function's own header comment for the
+  // full story. Only enforced when there's actually a valid choice
+  // (Deployment Environment isn't already the final "Production" stage);
+  // DetailsStep.tsx mirrors this same condition to disable the field and
+  // drop its "*" in that edge case, so the message and the UI never
+  // disagree about whether a value is actually required right now.
+  if (validTargetPromotionOptions(f.environment).length > 0 && !f.target_promotion_environment) {
+    return 'Please select a Target Promotion Environment.'
   }
   // DetailsStep.tsx's own Target Promotion Environment dropdown already
   // only offers options strictly later than the picked Deployment

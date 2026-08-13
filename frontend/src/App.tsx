@@ -5,6 +5,7 @@ import Layout from './components/Layout'
 import DepartmentPrompt from './components/DepartmentPrompt'
 import PendingApprovalsNotice from './components/PendingApprovalsNotice'
 import { UserOut } from './types'
+import { hasDepartment, QA_DEPARTMENT } from './constants'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
 // gateway feeds every module, the Dashboard summarizes across all of
@@ -14,6 +15,7 @@ import Login from './Login'
 import Dashboard from './Dashboard'
 import QARequests from './QARequests'
 import ModuleBoundary from './components/ModuleBoundary'
+import ApiActivityIndicator from './components/ApiActivityIndicator'
 
 const Help = lazy(() => import('./Help'))
 
@@ -48,6 +50,12 @@ const ChecklistConfig = lazy(() => import('./modules/governance/ChecklistConfig'
 const TestProjects = lazy(() => import('./modules/test-management/TestProjects'))
 const TestRepository = lazy(() => import('./modules/test-management/TestRepository'))
 const TestExecution = lazy(() => import('./modules/test-management/TestExecution'))
+const Defects = lazy(() => import('./modules/test-management/Defects'))
+// SRS EXE-002 "My Executions" -- the signed-in user's actionable items
+// across every authorized project.
+const MyExecutions = lazy(() => import('./modules/test-management/MyExecutions'))
+// SRS section 11 -- the 8 Test Management reporting views.
+const TestReports = lazy(() => import('./modules/test-management/TestReports'))
 
 // The chrome every signed-in page sits inside -- sidebar/topbar (Layout)
 // plus the two blocking pop-ups that can appear on top of any of them
@@ -96,13 +104,18 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
 // before), which a route nested under an auth-gated parent could never do.
 function ProtectedLayout() {
   const { user, loading } = useAuth()
-  if (loading) return <div style={{ padding: 40 }}>Loading...</div>
+  if (loading) return <ModuleFallback />
   if (!user) return <Navigate to="/login" replace />
   return (
     <AuthenticatedChrome user={user}>
       <Outlet />
     </AuthenticatedChrome>
   )
+}
+
+function QaGroupOnly({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  return hasDepartment(user, QA_DEPARTMENT) ? <>{children}</> : <Navigate to="/" replace />
 }
 
 // Reported directly: "Help & user Manual should come on login page as well,
@@ -120,7 +133,7 @@ function ProtectedLayout() {
 // manual to keep in sync.
 function HelpRoute() {
   const { user, loading } = useAuth()
-  if (loading) return <div style={{ padding: 40 }}>Loading...</div>
+  if (loading) return <ModuleFallback />
   if (user) return <AuthenticatedChrome user={user}><Help /></AuthenticatedChrome>
   return <PublicHelp />
 }
@@ -130,10 +143,10 @@ function PublicHelp() {
     <div className="public-help-shell">
       <div className="public-help-topbar">
         <Link to="/help" className="public-help-brand">
-          <span className="bank-logo" role="img" aria-label="Bank of Maharashtra logo" />
+          <span className="qualitysphere-mark" aria-hidden="true"><b>Q</b><i>S</i></span>
           <div>
-            <strong>QualityHub</strong>
-            <span>Bank of Maharashtra</span>
+            <strong>Quality<em>Shield</em></strong>
+            <img className="bank-wordmark public-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
         </Link>
         <Link to="/login" className="public-help-back">← Back to sign in</Link>
@@ -149,13 +162,22 @@ function PublicHelp() {
 // plain-text loading state above rather than introducing a spinner
 // component just for this.
 function ModuleFallback() {
-  return <div style={{ padding: 40 }}>Loading...</div>
+  return (
+    <div className="route-loading" role="status" aria-label="Loading page">
+      <div className="route-loading-title" />
+      <div className="route-loading-toolbar" />
+      <div className="route-loading-card" />
+      <div className="route-loading-card route-loading-card-short" />
+    </div>
+  )
 }
 
 export default function App() {
   return (
-    <Suspense fallback={<ModuleFallback />}>
-      <Routes>
+    <>
+      <ApiActivityIndicator />
+      <Suspense fallback={<ModuleFallback />}>
+        <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/help" element={<HelpRoute />} />
 
@@ -196,10 +218,14 @@ export default function App() {
           <Route path="/test-projects" element={<ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary>} />
           <Route path="/test-repository" element={<ModuleBoundary moduleName="Test Management"><TestRepository /></ModuleBoundary>} />
           <Route path="/test-execution" element={<ModuleBoundary moduleName="Test Management"><TestExecution /></ModuleBoundary>} />
+          <Route path="/defects" element={<ModuleBoundary moduleName="Defect Management"><Defects /></ModuleBoundary>} />
+          <Route path="/my-executions" element={<QaGroupOnly><ModuleBoundary moduleName="Test Management"><MyExecutions /></ModuleBoundary></QaGroupOnly>} />
+          <Route path="/test-reports" element={<ModuleBoundary moduleName="Test Management"><TestReports /></ModuleBoundary>} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Suspense>
+        </Routes>
+      </Suspense>
+    </>
   )
 }

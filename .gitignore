@@ -6,6 +6,7 @@ backend/*.db
 backend/.env
 backend/app/uploads/*
 !backend/app/uploads/.gitkeep
+backend/logs/
 
 # Frontend
 frontend/node_modules/

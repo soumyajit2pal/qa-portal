@@ -15,14 +15,11 @@ from sqlalchemy.orm import Session
 
 from . import models
 from .constants import Role
+from .storage_config import get_upload_root, resolve_upload_path
 
-# Shares the same physical uploads folder as QARequest's own documents
-# (routers/qa_requests.py::UPLOAD_ROOT), just under a per-module
-# subdirectory so filenames never collide across modules.
-UPLOAD_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
-os.makedirs(UPLOAD_ROOT, exist_ok=True)
-
-
+# Shares the same physical uploads folder as QARequest's own documents.
+# Request folders are always the top-level boundary; module/type is nested
+# inside them so one request does not create several sibling folders.
 def list_documents(db: Session, module: str, request_id: int) -> List[models.RequestDocument]:
     return (db.query(models.RequestDocument)
             .filter_by(module=module, request_id=request_id)
@@ -74,7 +71,7 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
                     log_actor: Optional["models.User"] = None,
                     log_label: Optional[str] = None) -> List[models.RequestDocument]:
     """Accepts one or more files (multipart/form-data, field name 'files')
-    and stores them under UPLOAD_ROOT/<module>/<folder_name>/, named to
+    and stores them under UPLOAD_ROOT/<folder_name>/<module>/, named to
     avoid collisions. `folder_name` should be the request's own human-
     readable request_id/suppression_id/certificate_id string.
 
@@ -87,7 +84,8 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
     tab of its own. log_label, if given, is folded into the log message
     (e.g. "checklist item 'Test Data Prepared'") so an item-level upload
     reads distinctly from a top-level Documents-tab one."""
-    request_dir = os.path.join(UPLOAD_ROOT, module, folder_name)
+    upload_root = get_upload_root()
+    request_dir = os.path.join(upload_root, folder_name, module)
     os.makedirs(request_dir, exist_ok=True)
 
     created = []
@@ -105,7 +103,7 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
         doc = models.RequestDocument(
             module=module, request_id=request_id,
             file_name=f.filename or original_name,
-            stored_path=os.path.join(module, folder_name, original_name),
+            stored_path=os.path.join(folder_name, module, original_name),
             content_type=f.content_type,
             file_size=os.path.getsize(dest_path),
             uploaded_by_id=uploaded_by_id,
@@ -127,6 +125,71 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
     return created
 
 
+def migrate_legacy_document_layout(db: Session) -> int:
+    """Move tracked files from module-first to request-first storage.
+
+    Legacy: uploads/<module>/<request-or-folder>/<file>
+    Current: uploads/<request-or-folder>/<module>/<file>
+
+    Only rows whose stored path begins with their historic/current module are
+    migrated. Unknown/orphaned files are left untouched, and filename
+    collisions receive a suffix instead of overwriting either file.
+    """
+    upload_root = get_upload_root()
+    migrated = 0
+    legacy_roots = set()
+    rows = db.query(models.RequestDocument).all()
+    for document in rows:
+        parts = os.path.normpath(document.stored_path).split(os.sep)
+        if len(parts) < 3:
+            continue
+        legacy_module = parts[0]
+        # Draft evidence is promoted by changing its database module while
+        # its stored path retains the original DRAFT_* module prefix.
+        is_known_legacy = legacy_module == document.module or legacy_module.startswith("DRAFT_")
+        if not is_known_legacy:
+            continue
+
+        source = os.path.join(upload_root, *parts)
+        if not os.path.isfile(source):
+            continue
+        folder_parts = parts[1:-1]
+        filename = parts[-1]
+        destination_dir = os.path.join(upload_root, *folder_parts, legacy_module)
+        os.makedirs(destination_dir, exist_ok=True)
+        destination = os.path.join(destination_dir, filename)
+        if os.path.exists(destination):
+            stem, ext = os.path.splitext(filename)
+            filename = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
+            destination = os.path.join(destination_dir, filename)
+        shutil.move(source, destination)
+        document.stored_path = os.path.join(*folder_parts, legacy_module, filename)
+        legacy_roots.add(os.path.join(upload_root, legacy_module))
+        migrated += 1
+
+    if migrated:
+        db.commit()
+
+    # Finder metadata is not application evidence and otherwise prevents
+    # now-empty legacy directories from disappearing after migration.
+    for root, _, files in os.walk(upload_root):
+        if ".DS_Store" in files:
+            try:
+                os.remove(os.path.join(root, ".DS_Store"))
+            except OSError:
+                pass
+    for legacy_root in legacy_roots:
+        if not os.path.isdir(legacy_root):
+            continue
+        for root, _, _ in os.walk(legacy_root, topdown=False):
+            try:
+                os.rmdir(root)
+            except OSError:
+                # Preserve any untracked/orphaned content for manual review.
+                pass
+    return migrated
+
+
 def get_document_or_404(db: Session, module: str, request_id: int, doc_id: int) -> models.RequestDocument:
     doc = db.query(models.RequestDocument).filter_by(id=doc_id, module=module, request_id=request_id).first()
     if not doc:
@@ -135,7 +198,7 @@ def get_document_or_404(db: Session, module: str, request_id: int, doc_id: int) 
 
 
 def full_path(doc: models.RequestDocument) -> str:
-    return os.path.join(UPLOAD_ROOT, doc.stored_path)
+    return resolve_upload_path(doc.stored_path)
 
 
 def can_delete_document(doc, user: "models.User", is_current_stage_actor: bool = True) -> bool:

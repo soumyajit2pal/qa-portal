@@ -2,13 +2,28 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import cache, models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles
 from ..constants import Role
 from ..checklist_config import CHECKLIST_MODULES, DETAIL_COLUMN_LABELS, get_template_items, reseed_defaults
 
 router = APIRouter(prefix="/api/checklist-config", tags=["checklist-config"])
+
+# CAC-001..007 -- active checklist items are read on every QA Request wizard
+# step (Functional/SAST/DAST/Performance self-declaration) and rendered on
+# most readiness-checklist screens, but only change through deliberate Admin
+# configuration. Keyed per-module (not one blanket key) so editing one
+# module's items doesn't force a refetch of every other module's cache too.
+_ACTIVE_ITEMS_CACHE_TTL = 300
+
+
+def _active_items_cache_key(module: str) -> str:
+    return f"refdata:checklist-items:active:v1:{module}"
+
+
+def _invalidate_active_items_cache(module: str) -> None:
+    cache.delete(_active_items_cache_key(module))
 
 
 def _check_module(module: str) -> str:
@@ -34,7 +49,14 @@ def list_active_items(module: str, db: Session = Depends(get_db),
     checklist while raising a new request, so it's open to any authenticated
     user (not Admin-only), same as e.g. GET /api/departments."""
     module = _check_module(module)
-    return get_template_items(db, module, only_active=True)
+    cache_key = _active_items_cache_key(module)
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+    rows = get_template_items(db, module, only_active=True)
+    result = [schemas.ChecklistTemplateItemOut.model_validate(row).model_dump(mode="json") for row in rows]
+    cache.set_json(cache_key, result, _ACTIVE_ITEMS_CACHE_TTL)
+    return result
 
 
 @router.get("/{module}/all", response_model=List[schemas.ChecklistTemplateItemOut])
@@ -69,6 +91,7 @@ def create_item(module: str, payload: schemas.ChecklistTemplateItemCreate, db: S
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    _invalidate_active_items_cache(module)
     return obj
 
 
@@ -101,6 +124,7 @@ def update_item(module: str, item_id: int, payload: schemas.ChecklistTemplateIte
         obj.active = data["active"]
     db.commit()
     db.refresh(obj)
+    _invalidate_active_items_cache(module)
     return obj
 
 
@@ -119,6 +143,7 @@ def delete_item(module: str, item_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "Checklist item not found")
     db.delete(obj)
     db.commit()
+    _invalidate_active_items_cache(module)
     return {"ok": True}
 
 
@@ -135,4 +160,5 @@ def restore_defaults(module: str, db: Session = Depends(get_db),
     db.flush()
     reseed_defaults(db, module)
     db.commit()
+    _invalidate_active_items_cache(module)
     return get_template_items(db, module, only_active=False)

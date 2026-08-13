@@ -13,7 +13,7 @@ import React, { useEffect, useRef, useState } from 'react'
 // what used to happen -- see ORACLE_MIGRATION_2026-07.md for the section
 // documenting this extraction).
 
-export type PendingRichImage = { file: File; previewUrl: string }
+export type PendingRichImage = { file: File; previewUrl: string; alt: string }
 
 export const RICH_TEXT_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
 export const RICH_TEXT_MAX_IMAGES = 8
@@ -37,6 +37,19 @@ function listToMarkdown(element: HTMLElement, ordered: boolean): string {
   }).join('\n') + '\n'
 }
 
+function tableToMarkdown(element: HTMLElement): string {
+  const rows = Array.from(element.querySelectorAll('tr')).map((row) =>
+    Array.from(row.querySelectorAll('th,td')).map((cell) =>
+      textOf(cell).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').trim()
+    )
+  ).filter((row) => row.length > 0)
+  if (!rows.length) return ''
+  const width = Math.max(...rows.map((row) => row.length))
+  const normalized = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill('')])
+  const line = (row: string[]) => `| ${row.join(' | ')} |`
+  return `${line(normalized[0])}\n${line(Array(width).fill('---'))}\n${normalized.slice(1).map(line).join('\n')}\n`
+}
+
 function styledMarkdown(element: HTMLElement, value: string): string {
   let result = value
   const weight = element.style.fontWeight
@@ -58,6 +71,11 @@ function nodeToMarkdown(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent || ''
   if (!(node instanceof HTMLElement)) return ''
   const content = textOf(node)
+  const attachmentName = node.getAttribute('data-rich-image-name')
+  if (attachmentName) {
+    const alt = node.getAttribute('data-rich-image-alt') || node.getAttribute('alt') || attachmentName
+    return `![${alt.replace(/[\]\\]/g, '')}](attachment:${encodeURIComponent(attachmentName)})`
+  }
   switch (node.tagName) {
     case 'BR': return '\n'
     case 'DIV':
@@ -67,7 +85,7 @@ function nodeToMarkdown(node: Node): string {
     case 'H3':
     case 'H4':
     case 'H5':
-    case 'H6': return content ? `**${content.trim()}**\n` : ''
+    case 'H6': return content ? `${'#'.repeat(Number(node.tagName.slice(1)))} ${content.trim()}\n` : ''
     case 'B':
     case 'STRONG': return content ? `**${content}**` : ''
     case 'I':
@@ -80,6 +98,7 @@ function nodeToMarkdown(node: Node): string {
     case 'BLOCKQUOTE': return content.split('\n').filter(Boolean).map((line) => `> ${line}`).join('\n') + '\n'
     case 'UL': return listToMarkdown(node, false)
     case 'OL': return listToMarkdown(node, true)
+    case 'TABLE': return tableToMarkdown(node)
     case 'A': {
       const href = node.getAttribute('href') || ''
       return href ? `[${content || href}](${href})` : content
@@ -101,6 +120,10 @@ function escapeHtml(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
+export function decodeRichImageName(value: string): string {
+  try { return decodeURIComponent(value) } catch { return value }
+}
+
 function inlineHtml(value: string): string {
   return escapeHtml(value)
     .replace(/\[u\]([\s\S]+?)\[\/u\]/g, '<u>$1</u>')
@@ -116,13 +139,47 @@ function inlineHtml(value: string): string {
 // this direction (JiraActivity's composer always starts empty), but it
 // belongs in the same codec as the rest of this file rather than living
 // off on its own.
-export function markdownToEditorHtml(value: string): string {
+export function normalizeStoredRichText(value: string): string {
   const lines = value.replace(/\r/g, '').split('\n')
+  return lines.map((line, index) => {
+    const trimmed = line.trim()
+    const previous = lines[index - 1]?.trim() || ''
+    const next = lines[index + 1]?.trim() || ''
+    // Older/editor-originated values can contain a Markdown table wrapped
+    // in a single backtick pair. That makes the entire table look like code
+    // and prevents both display and edit parsers from recognizing it.
+    if (trimmed === '`' && (previous.includes('|') || next.includes('|'))) return ''
+    if (/^`\s*\|/.test(line)) return line.replace(/^`\s*/, '')
+    if (/\|\s*`$/.test(line)) return line.replace(/`\s*$/, '')
+    return line
+  }).join('\n')
+}
+
+export function markdownToEditorHtml(value: string): string {
+  const lines = normalizeStoredRichText(value).split('\n')
   const blocks: string[] = []
   let index = 0
   while (index < lines.length) {
     const line = lines[index]
     if (!line.trim()) { blocks.push('<div><br></div>'); index += 1; continue }
+    const image = line.match(/^!\[([^\]]*)\]\(attachment:([^)]+)\)$/)
+    if (image) {
+      const name = decodeRichImageName(image[2])
+      blocks.push(`<div class="jira-inline-image-placeholder" data-rich-image-name="${escapeHtml(name)}" data-rich-image-alt="${escapeHtml(image[1] || name)}" contenteditable="false">▧ ${escapeHtml(image[1] || name)}</div>`)
+      index += 1
+      continue
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/)
+    if (heading) { const level = heading[1].length; blocks.push(`<h${level}>${inlineHtml(heading[2])}</h${level}>`); index += 1; continue }
+    if (line.includes('|') && index + 1 < lines.length && /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[index + 1])) {
+      const cells = (entry: string) => entry.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => inlineHtml(cell.trim().replace(/\\\|/g, '|')))
+      const header = cells(line)
+      index += 2
+      const body: string[][] = []
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) body.push(cells(lines[index++]))
+      blocks.push(`<table><thead><tr>${header.map((cell) => `<th>${cell}</th>`).join('')}</tr></thead><tbody>${body.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table>`)
+      continue
+    }
     if (/^\s*[-*]\s+/.test(line)) {
       const items: string[] = []
       while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) items.push(`<li>${inlineHtml(lines[index++].replace(/^\s*[-*]\s+/, ''))}</li>`)
@@ -169,9 +226,14 @@ export function useRichTextImages(opts: {
   useEffect(() => { imagesRef.current = images }, [images])
   useEffect(() => () => imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl)), [])
 
-  function addImages(files: File[]): boolean {
+  function addImages(files: File[]): PendingRichImage[] {
     const accepted: PendingRichImage[] = []
-    for (const file of files) {
+    for (const [fileIndex, sourceFile] of files.entries()) {
+      const file = new File(
+        [sourceFile],
+        `${filenamePrefix}-${Date.now()}-${fileIndex + 1}-${(sourceFile.name || 'image').replace(/[^a-zA-Z0-9._-]+/g, '-')}`,
+        { type: sourceFile.type },
+      )
       const name = file.name || 'Pasted image'
       if (!RICH_TEXT_IMAGE_TYPES.has(file.type)) {
         onError(`“${name}” is not supported. Use PNG, JPEG, GIF, or WebP.`)
@@ -179,13 +241,13 @@ export function useRichTextImages(opts: {
       }
       if (file.size > maxBytes) { onError(messages.tooLarge(name)); continue }
       if (images.length + accepted.length >= maxImages) { onError(messages.tooMany()); break }
-      accepted.push({ file, previewUrl: URL.createObjectURL(file) })
+      accepted.push({ file, previewUrl: URL.createObjectURL(file), alt: sourceFile.name || 'Pasted image' })
     }
     if (accepted.length) {
       setImages((current) => [...current, ...accepted])
       onError('')
     }
-    return accepted.length > 0
+    return accepted
   }
 
   function removeImage(previewUrl: string) {
@@ -202,7 +264,21 @@ export function useRichTextImages(opts: {
   // actually contained image file(s) -- lets the caller decide what else
   // should happen on a successful image paste (e.g. JiraActivity expanding
   // its composer).
-  function pasteImages(event: React.ClipboardEvent<HTMLDivElement>): boolean {
+  function pasteImages(event: React.ClipboardEvent<HTMLDivElement>): PendingRichImage[] {
+    // Excel (and some other spreadsheet applications) place several
+    // representations of the same copied cells on the clipboard: HTML/table
+    // markup, tab-separated plain text, and an image preview. Previously the
+    // image item won, preventDefault() discarded the real cells, and the
+    // spreadsheet data was saved as a screenshot attachment. Prefer the
+    // structured representation whenever it is present; the browser will
+    // paste the table into contentEditable and the shared Markdown codec will
+    // persist it as an editable Markdown table.
+    const clipboardHtml = event.clipboardData.getData('text/html')
+    const clipboardText = event.clipboardData.getData('text/plain')
+    const hasSpreadsheetData = /<table\b|urn:schemas-microsoft-com:office:excel|\bmso-/i.test(clipboardHtml)
+      || /\t/.test(clipboardText)
+    if (hasSpreadsheetData) return []
+
     const files = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
       .map((item, index) => {
@@ -211,12 +287,30 @@ export function useRichTextImages(opts: {
         const extension = blob.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
         return new File([blob], `${filenamePrefix}-${Date.now()}-${index + 1}.${extension}`, { type: blob.type })
       }).filter((file): file is File => !!file)
-    if (!files.length) return false
+    if (!files.length) return []
     event.preventDefault()
     return addImages(files)
   }
 
   return { images, addImages, removeImage, clearImages, pasteImages }
+}
+
+export function insertRichTextImages(editor: HTMLDivElement | null, images: PendingRichImage[], savedRange?: Range | null) {
+  if (!editor || images.length === 0) return
+  editor.focus()
+  const selection = window.getSelection()
+  if (selection && savedRange && editor.contains(savedRange.commonAncestorContainer)) {
+    selection.removeAllRanges(); selection.addRange(savedRange)
+  }
+  images.forEach((image) => {
+    const img = document.createElement('img')
+    img.src = image.previewUrl
+    img.alt = image.alt
+    img.setAttribute('data-rich-image-name', image.file.name)
+    img.setAttribute('data-rich-image-alt', image.alt)
+    img.className = 'jira-inline-editor-image'
+    document.execCommand('insertHTML', false, `<div><img class="jira-inline-editor-image" src="${img.src}" alt="${escapeHtml(image.alt)}" data-rich-image-name="${escapeHtml(image.file.name)}" data-rich-image-alt="${escapeHtml(image.alt)}"></div><div><br></div>`)
+  })
 }
 
 // ---- Inline link editor (Add link toolbar button + URL input row) ----
@@ -265,11 +359,12 @@ export function useRichTextLink(editorRef: React.RefObject<HTMLDivElement>, onEr
 
 export function RichTextToolbar({
   ariaLabel,
-  imageButtonTitle = 'Attach images',
+  imageButtonTitle = 'Add image',
   codeButtonTitle = 'Inline code',
   onCommand,
   onBeginLink,
   onPickImage,
+  onInsertTable,
 }: {
   ariaLabel: string
   imageButtonTitle?: string
@@ -277,21 +372,38 @@ export function RichTextToolbar({
   onCommand: (name: string, value?: string) => void
   onBeginLink: () => void
   onPickImage?: () => void
+  onInsertTable?: () => void
 }) {
+  const [menu, setMenu] = useState<'style' | 'list' | 'emoji' | 'insert' | null>(null)
+  const run = (name: string, value?: string) => { onCommand(name, value); setMenu(null) }
+  const toggle = (name: typeof menu) => setMenu((current) => current === name ? null : name)
   return (
     <div className="jira-editor-toolbar" role="toolbar" aria-label={ariaLabel}>
-      <button type="button" title="Bold" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('bold')}><strong>B</strong></button>
-      <button type="button" title="Italic" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('italic')}><em>I</em></button>
-      <button type="button" title="Underline" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('underline')}><u>U</u></button>
-      <button type="button" title="Strikethrough" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('strikeThrough')}><s>S</s></button>
-      <span />
-      <button type="button" title="Bulleted list" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('insertUnorderedList')}>• List</button>
-      <button type="button" title="Numbered list" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('insertOrderedList')}>1. List</button>
-      <button type="button" title="Quote" onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('formatBlock', 'blockquote')}>❝</button>
-      <button type="button" title={codeButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={() => onCommand('formatBlock', 'pre')}>{'</>'}</button>
-      <span />
-      <button type="button" title="Add link" onMouseDown={(event) => event.preventDefault()} onClick={onBeginLink}>Link</button>
-      {onPickImage && <button type="button" title={imageButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={onPickImage}>Image</button>}
+      <div className="jira-toolbar-menu-wrap">
+        <button type="button" className={menu === 'style' ? 'active' : ''} title="Text style" aria-label="Text style" aria-expanded={menu === 'style'} onMouseDown={(event) => event.preventDefault()} onClick={() => toggle('style')}><b className="jira-toolbar-glyph">T</b><small>⌄</small></button>
+        {menu === 'style' && <div className="jira-toolbar-menu style-menu"><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'div')}>Normal text</button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'h2')}><strong>Heading</strong></button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'h3')}><strong>Subheading</strong></button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'blockquote')}>Quote</button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'pre')}>Code block</button></div>}
+      </div>
+      <button type="button" title="Bold" aria-label="Bold" onMouseDown={(event) => event.preventDefault()} onClick={() => run('bold')}><strong className="jira-toolbar-glyph">B</strong></button>
+      <button type="button" title="Italic" aria-label="Italic" onMouseDown={(event) => event.preventDefault()} onClick={() => run('italic')}><em className="jira-toolbar-glyph">I</em></button>
+      <button type="button" title="Underline" aria-label="Underline" onMouseDown={(event) => event.preventDefault()} onClick={() => run('underline')}><u className="jira-toolbar-glyph">U</u></button>
+      <button type="button" title="Strikethrough" aria-label="Strikethrough" onMouseDown={(event) => event.preventDefault()} onClick={() => run('strikeThrough')}><s className="jira-toolbar-glyph">S</s></button>
+      <i />
+      <div className="jira-toolbar-menu-wrap">
+        <button type="button" className={menu === 'list' ? 'active' : ''} title="Lists" aria-label="Lists" aria-expanded={menu === 'list'} onMouseDown={(event) => event.preventDefault()} onClick={() => toggle('list')}><span className="jira-toolbar-icon">☷</span><small>⌄</small></button>
+        {menu === 'list' && <div className="jira-toolbar-menu"><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('insertUnorderedList')}>• Bulleted list</button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('insertOrderedList')}>1. Numbered list</button></div>}
+      </div>
+      <button type="button" title="Clear formatting" aria-label="Clear formatting" onMouseDown={(event) => event.preventDefault()} onClick={() => run('removeFormat')}><span className="jira-toolbar-clear">A</span></button>
+      {onPickImage && <button type="button" className="jira-toolbar-emphasis" title={imageButtonTitle} aria-label={imageButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={onPickImage}><span className="jira-toolbar-icon">▧</span></button>}
+      <button type="button" title={codeButtonTitle} aria-label={codeButtonTitle} onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'pre')}><span className="jira-toolbar-code">{'</>'}</span></button>
+      <div className="jira-toolbar-menu-wrap">
+        <button type="button" className={menu === 'emoji' ? 'active' : ''} title="Insert emoji" aria-label="Insert emoji" aria-expanded={menu === 'emoji'} onMouseDown={(event) => event.preventDefault()} onClick={() => toggle('emoji')}><span className="jira-toolbar-icon">☺</span></button>
+        {menu === 'emoji' && <div className="jira-toolbar-menu emoji-menu">{['🙂', '👍', '✅', '⚠️', '❌', '🎯', '🐞', '🚀'].map((emoji) => <button type="button" key={emoji} onMouseDown={(event) => event.preventDefault()} onClick={() => run('insertText', emoji)}>{emoji}</button>)}</div>}
+      </div>
+      {onInsertTable && <div className="jira-toolbar-menu-wrap"><button type="button" className={menu === 'insert' ? 'active' : ''} title="Insert more" aria-label="Insert more" aria-expanded={menu === 'insert'} onMouseDown={(event) => event.preventDefault()} onClick={() => toggle('insert')}><span className="jira-toolbar-icon">＋</span></button>{menu === 'insert' && <div className="jira-toolbar-menu"><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => { onInsertTable(); setMenu(null) }}>▦ Insert table</button><button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => run('formatBlock', 'blockquote')}>❝ Insert quote</button></div>}</div>}
+      <button type="button" title="Add link" aria-label="Add link" onMouseDown={(event) => event.preventDefault()} onClick={() => { setMenu(null); onBeginLink() }}><span className="jira-toolbar-icon">⌁</span></button>
+      <i />
+      <button type="button" title="Undo" aria-label="Undo" onMouseDown={(event) => event.preventDefault()} onClick={() => run('undo')}><span className="jira-toolbar-icon">↶</span></button>
+      <button type="button" title="Redo" aria-label="Redo" onMouseDown={(event) => event.preventDefault()} onClick={() => run('redo')}><span className="jira-toolbar-icon">↷</span></button>
     </div>
   )
 }

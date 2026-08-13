@@ -1,19 +1,19 @@
 import datetime
 import os
 from typing import List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
-from .. import models, schemas
+from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, is_readiness_evidence_editable, application_name_block_message
+from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
+from .. import reassignment
 
 router = APIRouter(tags=["sast-dast"])
 
@@ -82,8 +82,8 @@ _ADMIN_ONLY_FIELDS = {"application_name", "epic_number", "cr_number"}
 # above SAST_DAST_STATUSES in constants.py):
 #
 #   Draft -> Submit -> same-department SM Approval -> same-department
-#   Department Head Approval (assigns an IT-QA QA Lead) -> Security Readiness
-#   (owned by that QA Lead) -> Planning (QA Lead assigns an IT-QA Security
+#   Department Head Approval (assigns a COE - Quality Assurance QA Lead) -> Security Readiness
+#   (owned by that QA Lead) -> Planning (QA Lead assigns a COE - Quality Assurance Security
 #   Analyst) -> Configuration -> Scanning -> Complete
 #   Scan, gated on a confirmation pop-up ("Are you sure no security findings
 #   were identified during the scan?"):
@@ -161,19 +161,51 @@ def _get_or_404(db: Session, model_cls, req_id: int, label: str):
 
 def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> models.User:
     user = db.query(models.User).get(user_id) if user_id else None
-    if not user or not user.is_active or not user.has_role(role) or user.department != QA_DEPARTMENT:
+    if not user or not user.is_active or not user.has_role(role) or not user.has_department(QA_DEPARTMENT):
         raise HTTPException(400, f"{label} must be an active {role.replace('_', ' ').title()} from {QA_DEPARTMENT}")
     return user
 
 
 def _require_assigned_qa_lead(obj, user: models.User) -> None:
-    if not user.has_role(Role.ADMIN) and obj.security_lead_id != user.id:
-        raise HTTPException(403, "Only the QA Lead assigned by the Department Head can perform this action")
+    # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
+    # gated action, same as ADMIN, without being listed as "QA Lead group"
+    # members (display-only concern, kept to literal QA_LEAD elsewhere --
+    # see ORACLE_MIGRATION_2026-07.md section 59).
+    if not user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        raise HTTPException(403, "Only a member of the QA Lead group can perform this action")
 
 
 def _require_assigned_security_analyst(obj, user: models.User) -> None:
     if not user.has_role(Role.ADMIN) and obj.security_analyst_id != user.id:
         raise HTTPException(403, "Only the Security Analyst assigned by the QA Lead can perform this action")
+
+
+# 2026-08 Reassignment CR, reported directly: "Reassignment shall be
+# permitted to: the current assignee, the Department Head of the department
+# to which the current assignee belongs, or Admin users." Applies once this
+# is a genuine reassignment (status already past the initial PLANNING
+# assignment) -- the first assignment stays QA-Lead-group-only
+# (_require_assigned_qa_lead), unchanged. See functional.py's identically-
+# shaped _require_can_reassign_tester for the full reasoning.
+def _require_can_reassign_security_analyst(obj, user: models.User) -> None:
+    if user.has_role(Role.ADMIN):
+        return
+    if obj.security_analyst_id and obj.security_analyst_id == user.id:
+        return
+    if user.has_department(QA_DEPARTMENT) and user.has_role(*reassignment.department_head_roles(QA_DEPARTMENT)):
+        return
+    # 2026-08 -- reported directly: QA_LEAD is required to keep reassignment
+    # rights here too, mirroring functional.py/performance.py's identical
+    # fix -- the CR's own eligibility list would otherwise narrow existing
+    # behavior, where a plain QA_LEAD could reassign the analyst, same as
+    # the initial-assignment gate (_require_assigned_qa_lead) allows.
+    if user.has_role(Role.QA_LEAD):
+        return
+    raise HTTPException(
+        403,
+        "Only the currently assigned Security Analyst, a QA Lead, the QA Department Head (Chief Manager QA / AGM QA), "
+        "or an Administrator can reassign the Security Analyst on this request",
+    )
 
 
 def _can_upload_documents(obj, user: models.User) -> bool:
@@ -201,9 +233,9 @@ def _can_upload_documents(obj, user: models.User) -> bool:
                   "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     # Every post-readiness/terminal status -- locked for everyone but Admin
     # until the request is returned to the requester above.
     return False
@@ -236,9 +268,9 @@ def _can_edit_details(obj, user: models.User) -> bool:
     if status in ("DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.SM) and user.department == obj.department
+        return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.department == obj.department
+        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
     return False
 
 
@@ -353,16 +385,14 @@ def _sm_decision(db: Session, obj, payload, current_user):
 
 
 def _department_head_decision(db: Session, obj, payload, current_user):
-    """Approval requires assignment to an active IT-QA QA Lead."""
+    """Approval requires assignment to an active COE - Quality Assurance QA Lead."""
     require_same_department(current_user, obj.department)
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPARTMENT_HEAD_APPROVAL_PENDING", "Department Head decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
         raise HTTPException(400, application_name_block_message(obj.application_master_status, "department_head"))
     if payload.decision == "Approved":
-        qa_lead_id = payload.qa_lead_id or payload.security_lead_id
-        qa_lead = _it_qa_user(db, qa_lead_id, Role.QA_LEAD, "qa_lead_id")
-        obj.security_lead_id = qa_lead.id
+        obj.security_lead_id = None
         obj.security_analyst_id = None
         obj.status = "SECURITY_LEAD_ASSIGNED"
     elif payload.decision == "Returned":
@@ -426,14 +456,45 @@ def _readiness_decision(db: Session, obj, payload, current_user):
 
 
 def _assign_security_analyst(db: Session, obj, payload, current_user):
-    _require(obj, "PLANNING", "Assign Security Analyst")
-    _require_assigned_qa_lead(obj, current_user)
+    """2026-08 Reassignment CR, reported directly: "Everywhere the system
+    provides an Assign option ... it must also provide a Reassign option."
+    Previously single-shot -- callable only while status was exactly
+    PLANNING. Now also callable through the rest of the active-scan window
+    (SAST_DAST_ANALYST_REASSIGNABLE_STATUSES: Configuration..Security
+    Complete), by either the QA Lead group (unchanged -- the initial
+    assignment gate) or, once a reassignment, the CR's own eligibility list
+    (current analyst / QA Department Head / Admin) with a mandatory reason.
+    Reassigning after the initial PLANNING->CONFIGURATION transition
+    deliberately does NOT touch `status` -- a request already at, say,
+    SCANNING must stay there after an analyst swap."""
+    _require(obj, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, "Assign Security Analyst")
+    is_initial_assignment = obj.status == "PLANNING"
+    previous_id = obj.security_analyst_id
+    if is_initial_assignment:
+        _require_assigned_qa_lead(obj, current_user)
+    else:
+        _require_can_reassign_security_analyst(obj, current_user)
+        reassignment.require_reason(payload.reason)
     analyst = _it_qa_user(db, payload.security_analyst_id, Role.SECURITY_ANALYST,
                           "security_analyst_id")
     obj.security_analyst_id = analyst.id
-    obj.status = "CONFIGURATION"
-    _log(db, obj, "Planning", current_user, "Security Analyst Assigned",
-         f"Assigned Security Analyst: {analyst.full_name}")
+    if is_initial_assignment:
+        obj.status = "CONFIGURATION"
+    decision = "Security Analyst Assigned" if is_initial_assignment else "Security Analyst Reassigned"
+    step = "Planning" if is_initial_assignment else SAST_DAST_STATUS_LABELS.get(obj.status, obj.status)
+    _log(db, obj, step, current_user, decision, f"Assigned Security Analyst: {analyst.full_name}")
+    if not is_initial_assignment:
+        entity_type = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+        previous_user = db.query(models.User).get(previous_id) if previous_id else None
+        reassignment.record_reassignment(
+            db, entity_type, obj.id, current_user,
+            previous_user.full_name if previous_user else "Unassigned", analyst.full_name, payload.reason,
+        )
+        if analyst.id != previous_id:
+            reassignment.notify_new_assignee(
+                db, analyst.id, entity_type, obj.id, obj.request_id,
+                f"You have been assigned as Security Analyst on {obj.request_id}.", current_user.id,
+            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -443,7 +504,7 @@ def _start_configuration(db: Session, obj, current_user):
     raise HTTPException(
         400,
         "A Security Analyst must be assigned before configuration can start. "
-        "Use Assign Security Analyst and select an active IT-QA Security Analyst.",
+        "Use Assign Security Analyst and select an active COE - Quality Assurance Security Analyst.",
     )
 
 
@@ -642,20 +703,62 @@ def _add_finding(db: Session, obj, payload, current_user):
 
 
 # ---------------- Module 4: SAST ----------------
-@router.get("/api/sast-requests", response_model=List[schemas.SASTOut])
-def list_sast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.SASTRequest)
-    # See list_functional's matching comment in routers/functional.py -- same
-    # reasoning, applied unconditionally (reported directly, then extended to
-    # "everywhere"). department is a delegated property (models.SASTRequest.
-    # department), not a real column, hence the join rather than a plain
-    # .filter(); standalone SAST requests (no qa_request_id) are excluded by
-    # this inner join, same as they already resolve to department=None today.
+@router.get("/api/sast-requests", response_model=pagination.Page[schemas.SASTListOut])
+def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+              db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # department/application_name/application_master_status are delegated
+    # properties (models.SASTRequest.department etc.), not real columns --
+    # every filter/read that touches them needs qa_request (+ its own
+    # application_master) eager-loaded, same reasoning as list_functional in
+    # routers/functional.py. findings is selectinload'd (a second, batched
+    # query) rather than joinedload'd (which would multiply row count via
+    # the one-to-many join) so SASTListOut.findings_count doesn't lazy-load
+    # per row. isouter=True on the QARequest join so a standalone (no
+    # qa_request_id) SAST request isn't dropped for every caller, not just
+    # scoped ones -- the original code only joined at all when `scope` was
+    # set, so this preserves that "never silently excluded" behavior now
+    # that the join always happens (needed for search/sort on the delegated
+    # fields).
+    q = db.query(models.SASTRequest).join(
+        models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id, isouter=True
+    ).options(
+        joinedload(models.SASTRequest.qa_request).joinedload(models.QARequest.application_master),
+        selectinload(models.SASTRequest.findings),
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
-    return q.order_by(models.SASTRequest.created_at.desc()).all()
+        q = q.filter(models.QARequest.department.in_(scope))
+    q = pagination.apply_search(q, params, models.SASTRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_status_filter(q, params, models.SASTRequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    # Module-specific, same reasoning as qa_requests.py/functional.py's own
+    # requester_id addition (reported directly -- Dashboard.tsx's "My
+    # Requests" tab).
+    if requester_id is not None:
+        q = q.filter(models.SASTRequest.requester_id == requester_id)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "created_at": models.SASTRequest.created_at,
+            "updated_at": models.SASTRequest.updated_at,
+            "status": models.SASTRequest.status,
+            "application_name": models.QARequest.application_name,
+        },
+        default_column=models.SASTRequest.created_at, id_column=models.SASTRequest.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/api/sast-requests/{req_id}", response_model=schemas.SASTOut)
+def get_sast(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # PAG-006 -- the detail endpoint the frontend fetches from when a list
+    # row is opened, now that the list above only returns SASTListOut. Also
+    # closes a real gap: this endpoint did not exist before (every other
+    # module already had one), and frontend code that re-fetched the entire
+    # unpaginated list just to find one row by id (see SAST.tsx's own
+    # addFinding/resolveFinding) now uses this instead.
+    return _get_or_404(db, models.SASTRequest, req_id, "SAST")
 
 
 # Standalone SAST request creation is DISABLED per request -- SAST requests
@@ -761,26 +864,34 @@ def sast_department_head_decision(req_id: int, payload: schemas.SecurityDeptHead
 
 @router.post("/api/sast-requests/{req_id}/start-readiness", response_model=schemas.SASTOut)
 def sast_start_readiness(req_id: int, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                          current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     return _start_readiness(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/readiness-decision", response_model=schemas.SASTOut)
 def sast_readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                             current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     return _readiness_decision(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), payload, current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/start-configuration", response_model=schemas.SASTOut)
 def sast_start_configuration(req_id: int, db: Session = Depends(get_db),
-                              current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                              current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     return _start_configuration(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/assign-security-analyst", response_model=schemas.SASTOut)
 def sast_assign_security_analyst(req_id: int, payload: schemas.AssignSecurityAnalystIn,
                                   db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                  # 2026-08 Reassignment CR -- widened to include
+                                  # SECURITY_ANALYST so the currently-assigned analyst
+                                  # can hand their own assignment off (self-handoff,
+                                  # same shape as Functional/Performance's tester
+                                  # reassignment); _assign_security_analyst itself
+                                  # still enforces exactly who may call it at each
+                                  # stage (QA Lead group for the initial assignment,
+                                  # the CR's narrower list once it's a reassignment).
+                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.SECURITY_ANALYST))):
     return _assign_security_analyst(
         db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), payload, current_user
     )
@@ -902,7 +1013,7 @@ def export_sast(req_id: int, db: Session = Depends(get_db), current_user: models
         subtitle="SAST Request — Full Detail Export",
         sections=sections, history=history, history_note=history_note,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -1031,7 +1142,7 @@ def get_sast_checklist(req_id: int, db: Session = Depends(get_db), current_user:
 @router.put("/api/sast-requests/{req_id}/checklist/{item_id}", response_model=schemas.ChecklistItemOut)
 def update_sast_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistItemUpdate,
                                 db: Session = Depends(get_db),
-                                current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     item = db.query(models.SASTChecklistItem).filter_by(id=item_id, sast_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")
@@ -1052,7 +1163,7 @@ def update_sast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     item.is_complete = payload.is_complete
     if payload.is_complete:
         item.approved_by_id = current_user.id
-        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        item.approved_at = models.now()
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -1088,7 +1199,7 @@ def acknowledge_sast_walkthrough(req_id: int, wt_id: int, db: Session = Depends(
     if not obj:
         raise HTTPException(404, "Walkthrough session not found")
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj
@@ -1118,17 +1229,48 @@ def _dast_out(obj: models.DASTRequest, current_user: models.User) -> schemas.DAS
     return out
 
 
-@router.get("/api/dast-requests", response_model=List[schemas.DASTOut])
-def list_dast(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.DASTRequest)
-    # See list_sast's matching comment just above -- identical reasoning,
-    # applied unconditionally.
+@router.get("/api/dast-requests", response_model=pagination.Page[schemas.DASTListOut])
+def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+              db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # See list_sast's matching comment just above -- identical reasoning.
+    # DASTListOut has no `targets` field at all (see its own docstring in
+    # schemas.py), so _dast_out's per-row credential-masking below is only
+    # ever needed for the single-record detail endpoint, not this list.
+    q = db.query(models.DASTRequest).join(
+        models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id, isouter=True
+    ).options(
+        joinedload(models.DASTRequest.qa_request).joinedload(models.QARequest.application_master),
+        selectinload(models.DASTRequest.findings),
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
-             .filter(models.QARequest.department == scope)
-    rows = q.order_by(models.DASTRequest.created_at.desc()).all()
-    return [_dast_out(r, current_user) for r in rows]
+        q = q.filter(models.QARequest.department.in_(scope))
+    q = pagination.apply_search(q, params, models.DASTRequest.request_id, models.QARequest.application_name)
+    q = pagination.apply_status_filter(q, params, models.DASTRequest.status)
+    q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    # Module-specific, same reasoning as qa_requests.py/functional.py's own
+    # requester_id addition (reported directly -- Dashboard.tsx's "My
+    # Requests" tab).
+    if requester_id is not None:
+        q = q.filter(models.DASTRequest.requester_id == requester_id)
+    q = pagination.apply_sort(
+        q, params,
+        sortable={
+            "created_at": models.DASTRequest.created_at,
+            "updated_at": models.DASTRequest.updated_at,
+            "status": models.DASTRequest.status,
+            "application_name": models.QARequest.application_name,
+        },
+        default_column=models.DASTRequest.created_at, id_column=models.DASTRequest.id,
+    )
+    result = pagination.paginate(q, params)
+    return pagination.to_page_response(result, params)
+
+
+@router.get("/api/dast-requests/{req_id}", response_model=schemas.DASTOut)
+def get_dast(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # PAG-006, same reasoning as get_sast above -- did not exist before.
+    return _dast_out(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
 
 
 @router.post("/api/dast-requests", response_model=schemas.DASTOut)
@@ -1200,21 +1342,21 @@ def dast_department_head_decision(req_id: int, payload: schemas.SecurityDeptHead
 
 @router.post("/api/dast-requests/{req_id}/start-readiness", response_model=schemas.DASTOut)
 def dast_start_readiness(req_id: int, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                          current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _start_readiness(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return _dast_out(obj, current_user)
 
 
 @router.post("/api/dast-requests/{req_id}/readiness-decision", response_model=schemas.DASTOut)
 def dast_readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                             current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _readiness_decision(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), payload, current_user)
     return _dast_out(obj, current_user)
 
 
 @router.post("/api/dast-requests/{req_id}/start-configuration", response_model=schemas.DASTOut)
 def dast_start_configuration(req_id: int, db: Session = Depends(get_db),
-                              current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                              current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _start_configuration(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return _dast_out(obj, current_user)
 
@@ -1222,7 +1364,9 @@ def dast_start_configuration(req_id: int, db: Session = Depends(get_db),
 @router.post("/api/dast-requests/{req_id}/assign-security-analyst", response_model=schemas.DASTOut)
 def dast_assign_security_analyst(req_id: int, payload: schemas.AssignSecurityAnalystIn,
                                   db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                  # 2026-08 Reassignment CR -- see sast_assign_security_analyst's
+                                  # identical comment for why SECURITY_ANALYST is added here.
+                                  current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.SECURITY_ANALYST))):
     obj = _assign_security_analyst(
         db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), payload, current_user
     )
@@ -1356,7 +1500,7 @@ def export_dast(req_id: int, db: Session = Depends(get_db), current_user: models
         subtitle="DAST Request — Full Detail Export",
         sections=sections, history=history, history_note=history_note,
         generated_by=current_user.full_name,
-        generated_at=datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",
@@ -1482,7 +1626,7 @@ def get_dast_checklist(req_id: int, db: Session = Depends(get_db), current_user:
 @router.put("/api/dast-requests/{req_id}/checklist/{item_id}", response_model=schemas.ChecklistItemOut)
 def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistItemUpdate,
                                 db: Session = Depends(get_db),
-                                current_user: models.User = Depends(require_roles(Role.QA_LEAD))):
+                                current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     item = db.query(models.DASTChecklistItem).filter_by(id=item_id, dast_request_id=req_id).first()
     if not item:
         raise HTTPException(404, "Checklist item not found")
@@ -1503,7 +1647,7 @@ def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     item.is_complete = payload.is_complete
     if payload.is_complete:
         item.approved_by_id = current_user.id
-        item.approved_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+        item.approved_at = models.now()
     else:
         item.approved_by_id = None
         item.approved_at = None
@@ -1537,7 +1681,7 @@ def acknowledge_dast_walkthrough(req_id: int, wt_id: int, db: Session = Depends(
     if not obj:
         raise HTTPException(404, "Walkthrough session not found")
     obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    obj.qa_acknowledged_at = models.now()
     db.commit()
     db.refresh(obj)
     return obj
