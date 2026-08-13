@@ -9,7 +9,7 @@ import {
   QA_LEAD_GROUP_ROLES, validTargetPromotionOptions, validEnvironmentPromotion,
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, FunctionalListOut, PageOut, ApprovalActionOut } from '../../types'
-import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
+import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
@@ -599,9 +599,9 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
 
       <div className="section-title">Exit Criteria &amp; Risk</div>
       <div className="grid grid-2">
-        <div><strong>Exit Criteria Validation Notes:</strong>{item.exit_criteria_notes ? <MarkdownComment value={item.exit_criteria_notes} /> : '—'}</div>
-        <div><strong>Open Defect Review Summary:</strong>{item.open_defect_summary ? <MarkdownComment value={item.open_defect_summary} /> : '—'}</div>
-        <div><strong>Residual Risk Documentation:</strong>{item.residual_risk_notes ? <MarkdownComment value={item.residual_risk_notes} /> : '—'}</div>
+        <div><strong>Exit Criteria Validation Notes:</strong>{item.exit_criteria_notes ? <AuthenticatedMarkdown value={item.exit_criteria_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
+        <div><strong>Open Defect Review Summary:</strong>{item.open_defect_summary ? <AuthenticatedMarkdown value={item.open_defect_summary} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
+        <div><strong>Residual Risk Documentation:</strong>{item.residual_risk_notes ? <AuthenticatedMarkdown value={item.residual_risk_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>

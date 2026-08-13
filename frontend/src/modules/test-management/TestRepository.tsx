@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Table, Modal, Field, ErrorText, PageHeader, Badge, InfoTooltip } from '../../components/Common'
+import { Table, Modal, Field, ErrorText, PageHeader, Badge, InfoTooltip, WorkflowDecisionPanel } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import {
   hasRole, TEST_CASE_TYPES, TEST_CASE_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES,
@@ -1242,6 +1242,13 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
 // picking two versions from this list; the diff itself renders inline
 // underneath rather than as a second modal, so the two versions being
 // compared stay visible alongside their differences.
+const _CONTENT_VERSION_FIELDS: Array<[keyof TestCaseVersionOut, string]> = [
+  ['epic_id', 'Epic ID'], ['cr_number', 'CR Number'], ['feature_id', 'Feature ID'],
+  ['user_story_id', 'User Story ID'], ['test_type', 'Test Type'], ['module_name', 'Module'],
+  ['test_scenario', 'Test Scenario'], ['pre_condition', 'Pre-condition'],
+  ['description', 'Description'], ['priority', 'Priority'],
+]
+
 function TestCaseVersionsModal({ testCase, versions, onClose }: {
   testCase: TestCaseOut
   versions: TestCaseVersionSummary[]
@@ -1252,6 +1259,7 @@ function TestCaseVersionsModal({ testCase, versions, onClose }: {
     right: versions[0]?.id || 0,
   })
   const [diff, setDiff] = useState<TestCaseVersionCompareOut | null>(null)
+  const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   // Stage 1 (Reviewer) and Stage 2 (QA Lead) decisions are two independent
@@ -1286,6 +1294,10 @@ function TestCaseVersionsModal({ testCase, versions, onClose }: {
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
+  const selectedVersion = selectedVersionId ? details[selectedVersionId] : null
+  const displayStatus = (index: number, status: string) => index === 0 ? status : 'Superseded'
+  const fieldLabel = (field: string) => field.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+
   return (
     <Modal title={`${testCase.test_case_key} · Version history`} onClose={onClose} wide>
       <table className="simple-table">
@@ -1296,12 +1308,12 @@ function TestCaseVersionsModal({ testCase, versions, onClose }: {
           </tr>
         </thead>
         <tbody>
-          {versions.map((v) => {
+          {versions.map((v, index) => {
             const full = details[v.id]
             return (
-              <tr key={v.id}>
-                <td>v{v.version}</td>
-                <td><Badge status={v.status} /></td>
+              <tr key={v.id} className="tm-version-row" onClick={() => setSelectedVersionId(v.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedVersionId(v.id) }}>
+                <td><button type="button" className="tm-version-link" onClick={() => setSelectedVersionId(v.id)}>v{v.version}</button></td>
+                <td><Badge status={displayStatus(index, v.status)} /></td>
                 <td>{v.author_name || '—'}</td>
                 <td>{new Date(v.created_at).toLocaleString()}</td>
                 <td>{v.submitted_at ? new Date(v.submitted_at).toLocaleString() : '—'}</td>
@@ -1326,16 +1338,27 @@ function TestCaseVersionsModal({ testCase, versions, onClose }: {
           })}
         </tbody>
       </table>
+      {selectedVersionId && (
+        <section className="tm-version-details">
+          <div className="tm-version-details-head"><div><strong>Version v{versions.find((version) => version.id === selectedVersionId)?.version}</strong><small>Immutable version snapshot</small></div><button type="button" className="btn btn-sm" onClick={() => setSelectedVersionId(null)}>Hide details</button></div>
+          {!selectedVersion ? <p className="muted small">Loading version details…</p> : <>
+            <dl className="tm-version-detail-grid">
+              {_CONTENT_VERSION_FIELDS.map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{String(selectedVersion[key] ?? '—')}</dd></div>)}
+            </dl>
+            <div className="tm-version-steps"><strong>Test steps</strong>{selectedVersion.steps.length ? selectedVersion.steps.map((step) => <div key={step.id}><b>Step {step.step_no}</b><span>{step.step_text || '—'}</span><span>{step.expected_result || '—'}</span></div>) : <p className="muted small">No test steps in this version.</p>}</div>
+          </>}
+        </section>
+      )}
       {versions.length > 1 && (
         <div className="tm-version-compare">
           <strong>Compare two versions</strong>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
             <select value={compare.left} onChange={(e) => setCompare((c) => ({ ...c, left: Number(e.target.value) }))}>
-              {versions.map((v) => <option key={v.id} value={v.id}>v{v.version} ({v.status})</option>)}
+              {versions.map((v, index) => <option key={v.id} value={v.id}>v{v.version} ({displayStatus(index, v.status)})</option>)}
             </select>
             <span>vs</span>
             <select value={compare.right} onChange={(e) => setCompare((c) => ({ ...c, right: Number(e.target.value) }))}>
-              {versions.map((v) => <option key={v.id} value={v.id}>v{v.version} ({v.status})</option>)}
+              {versions.map((v, index) => <option key={v.id} value={v.id}>v{v.version} ({displayStatus(index, v.status)})</option>)}
             </select>
             <button type="button" className="btn btn-sm" onClick={runCompare} disabled={busy || compare.left === compare.right}>
               {busy ? 'Comparing…' : 'Compare'}
@@ -1344,13 +1367,14 @@ function TestCaseVersionsModal({ testCase, versions, onClose }: {
           <ErrorText error={error} />
           {diff && (
             <div className="tm-version-diff">
+              <div className="tm-diff-header"><strong>Changed field</strong><span>v{diff.left.version}</span><span>v{diff.right.version}</span></div>
               {Object.keys(diff.field_diffs).length === 0 && Object.keys(diff.step_diffs).length === 0 ? (
                 <p className="muted small">No field or step differences between these two versions.</p>
               ) : (
                 <>
                   {Object.entries(diff.field_diffs).map(([field, values]) => (
                     <div className="tm-diff-row" key={field}>
-                      <strong>{field}</strong>
+                      <strong>{fieldLabel(field)}</strong>
                       <span className="tm-diff-left">{String(values.left ?? '—')}</span>
                       <span className="tm-diff-right">{String(values.right ?? '—')}</span>
                     </div>
@@ -1977,21 +2001,19 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
       )}
       {/* Stage 1 -- Reviewer tier, only valid while "In Review" (RECOMMEND/RETURN). */}
       {existing && existing.status === 'In Review' && canReview && canActOnPendingStage && (
-        <div className="tm-review-actions">
-          <div><strong>QA review decision (Stage 1)</strong><span>{isCurrentDraftAuthor ? 'You authored this testcase version. Another Reviewer must record the decision.' : 'Approve for QA management, return for correction, or reject the test case.'}</span></div>
-          <button className="btn btn-primary" disabled={isCurrentDraftAuthor} onClick={() => setReviewDecision('APPROVE')}>Approve Stage 1</button>
-          <button className="btn" disabled={isCurrentDraftAuthor} onClick={() => setReviewDecision('RETURN')}>{TEST_CASE_REVIEW_ACTION_LABELS.RETURN}</button>
-          <button className="btn btn-danger" disabled={isCurrentDraftAuthor} onClick={() => setReviewDecision('REJECT')}>{TEST_CASE_REVIEW_ACTION_LABELS.REJECT}</button>
-        </div>
+        <WorkflowDecisionPanel title="QA review decision (Stage 1)" description={isCurrentDraftAuthor ? 'You authored this testcase version. Another Reviewer must record the decision.' : 'Approve for QA management, return for correction, or reject the test case.'} options={[
+          { key: 'approve', label: 'Approve Stage 1', description: 'Recommend for final QA approval', tone: 'approve', disabled: isCurrentDraftAuthor, onClick: () => setReviewDecision('APPROVE') },
+          { key: 'return', label: TEST_CASE_REVIEW_ACTION_LABELS.RETURN, description: 'Send back to the author for correction', tone: 'return', disabled: isCurrentDraftAuthor, onClick: () => setReviewDecision('RETURN') },
+          { key: 'reject', label: TEST_CASE_REVIEW_ACTION_LABELS.REJECT, description: 'Reject this testcase version', tone: 'reject', disabled: isCurrentDraftAuthor, onClick: () => setReviewDecision('REJECT') },
+        ]} />
       )}
       {/* Stage 2 -- QA Lead tier, only valid while "Review Completed" (APPROVE/RETURN/REJECT). Strictly narrower than Stage 1 -- a plain Reviewer project role does not qualify. */}
       {existing && existing.status === 'Review Completed' && canGiveFinalApproval && canActOnPendingStage && (
-        <div className="tm-review-actions">
-          <div><strong>QA management decision (Stage 2)</strong><span>CM QA or AGM QA may approve and activate this test case, return it for changes, or reject it.</span></div>
-          <button className="btn btn-primary" onClick={() => setReviewDecision('APPROVE')}>{TEST_CASE_REVIEW_ACTION_LABELS.APPROVE}</button>
-          <button className="btn" onClick={() => setReviewDecision('RETURN')}>{TEST_CASE_REVIEW_ACTION_LABELS.RETURN}</button>
-          <button className="btn btn-danger" onClick={() => setReviewDecision('REJECT')}>{TEST_CASE_REVIEW_ACTION_LABELS.REJECT}</button>
-        </div>
+        <WorkflowDecisionPanel title="QA management decision (Stage 2)" description="Approve and activate this test case, return it for changes, or reject it." options={[
+          { key: 'approve', label: TEST_CASE_REVIEW_ACTION_LABELS.APPROVE, description: 'Approve and activate this testcase version', tone: 'approve', onClick: () => setReviewDecision('APPROVE') },
+          { key: 'return', label: TEST_CASE_REVIEW_ACTION_LABELS.RETURN, description: 'Send back to the author for correction', tone: 'return', onClick: () => setReviewDecision('RETURN') },
+          { key: 'reject', label: TEST_CASE_REVIEW_ACTION_LABELS.REJECT, description: 'Reject this testcase version', tone: 'reject', onClick: () => setReviewDecision('REJECT') },
+        ]} />
       )}
       {/* 2026-08 "Simplified Test Management" NEW-path Stage 1 -- QA Group
           (QA_ENGINEER) tier, only valid while "Recommendation Pending"

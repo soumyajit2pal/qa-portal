@@ -603,6 +603,9 @@ export default function TestProjects() {
             <div className="tm-project-card-head">
               <span className="tm-project-key">{project.project_key}</span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {project.shared_with_you && (
+                  <span className="badge badge-blue" title="The project owner or an authorized project manager shared view access with you or your department.">Shared with you</span>
+                )}
                 {project.view_only && (
                   <span className="badge badge-gray" title="You can see this project's Test Execution/Repository/Reports/Defects, but only a Department Head, QA Lead, or Admin from its own department can manage it.">View only</span>
                 )}

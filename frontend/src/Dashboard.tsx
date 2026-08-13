@@ -110,7 +110,7 @@ const DONUT_COLORS = ['#4f46e5', '#16a34a', '#d97706', '#dc2626', '#7c3aed']
 // findings, pending-approval gates) with no per-request created_at of their
 // own to filter by, so they intentionally stay as-is; a note next to the
 // filter says so rather than silently doing nothing.
-type RaisedRangePreset = 'all' | '1h' | '1m' | 'custom'
+type RaisedRangePreset = 'all' | '1h' | '3d' | '15d' | '1m' | 'custom'
 interface RaisedRange {
   preset: RaisedRangePreset
   from: string
@@ -121,6 +121,8 @@ const DEFAULT_RAISED_RANGE: RaisedRange = { preset: 'all', from: '', to: '' }
 function rangeBounds(range: RaisedRange): { start?: Date; end?: Date } {
   if (range.preset === 'all') return {}
   if (range.preset === '1h') return { start: new Date(Date.now() - 60 * 60 * 1000), end: new Date() }
+  if (range.preset === '3d') return { start: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000), end: new Date() }
+  if (range.preset === '15d') return { start: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000), end: new Date() }
   if (range.preset === '1m') {
     const start = new Date(); start.setMonth(start.getMonth() - 1)
     return { start, end: new Date() }
@@ -143,6 +145,8 @@ function isWithinRaisedRange(dateStr: string, range: RaisedRange): boolean {
   if (range.preset === 'all') return true
   const t = new Date(dateStr).getTime()
   if (range.preset === '1h') return t >= Date.now() - 60 * 60 * 1000
+  if (range.preset === '3d') return t >= Date.now() - 3 * 24 * 60 * 60 * 1000
+  if (range.preset === '15d') return t >= Date.now() - 15 * 24 * 60 * 60 * 1000
   if (range.preset === '1m') {
     const oneMonthAgo = new Date()
     oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
@@ -969,6 +973,17 @@ interface TesterWorkloadRow {
   active_count: number
   waiting_count: number
   near_complete_count: number
+  assignments: TesterAssignment[]
+}
+
+interface TesterAssignment {
+  request_id: string
+  request_pk: number
+  source: 'Functional' | 'Performance' | 'SAST' | 'DAST'
+  application_name: string
+  status: string
+  updated_at: string
+  is_current: boolean
 }
 
 interface TesterWorkloadOut {
@@ -986,9 +1001,12 @@ interface TesterWorkloadOut {
 // QA-team-only capacity view. Aggregation and permission
 // enforcement both live on /api/dashboard/qa-tester-workload; the client
 // gate below is for navigation clarity, not the sole security boundary.
-function TesterOverviewTab({ range }: { range: RaisedRange }) {
+function TesterOverviewTab() {
+  const navigate = useNavigate()
+  const [range, setRange] = useState<RaisedRange>({ preset: 'all', from: '', to: '' })
   const [workload, setWorkload] = useState<TesterWorkloadOut | null>(null)
   const [error, setError] = useState<unknown>(null)
+  const [selectedTesterId, setSelectedTesterId] = useState<number | null>(null)
 
   useEffect(() => {
     setWorkload(null); setError(null)
@@ -1047,6 +1065,18 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
         <div><strong>QA team capacity and occupancy</strong><span>Current Functional, Performance, SAST, and DAST assignments for QA Testers and Security Analysts.</span></div>
         <Badge status="QA_LEAD_ASSIGNED" label="QA team only" />
       </div>
+      <div className="tester-period-filter" role="group" aria-label="Completed request period">
+        <div><strong>Completed-work period</strong><span>Current assignments always remain visible.</span></div>
+        <div className="tester-period-presets">
+          {([
+            ['all', 'All time'], ['3d', 'Last 3 days'], ['15d', 'Last 15 days'], ['1m', 'Last month'], ['custom', 'Custom dates'],
+          ] as Array<[RaisedRangePreset, string]>).map(([preset, label]) => <button key={preset} type="button" className={range.preset === preset ? 'active' : ''} onClick={() => setRange((current) => ({ ...current, preset }))}>{label}</button>)}
+        </div>
+        {range.preset === 'custom' && <div className="tester-custom-dates">
+          <label><span>From</span><input type="date" value={range.from} max={range.to || undefined} onChange={(event) => setRange((current) => ({ ...current, from: event.target.value }))} /></label>
+          <label><span>To</span><input type="date" value={range.to} min={range.from || undefined} onChange={(event) => setRange((current) => ({ ...current, to: event.target.value }))} /></label>
+        </div>}
+      </div>
       <div className="tester-workload-summary">
         <div><small>Average team occupancy</small><strong>{workload.average_occupancy}%</strong><span>Across {workload.rows.length} active QA team members</span></div>
         <div><small>Available team members</small><strong>{workload.available_testers}</strong><span>Below 50% occupied</span></div>
@@ -1054,19 +1084,44 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
         <div><small>Overloaded team members</small><strong className={workload.overloaded_testers ? 'danger' : ''}>{workload.overloaded_testers}</strong><span>Above planned capacity</span></div>
       </div>
       <div className="tester-capacity-note">
-        <strong>How occupancy is calculated</strong>
-        <span>{workload.capacity_points} fully-active concurrent assignments equal 100%. Active execution/scanning = 1 point, configuration/retest/regression = 0.75, queued/defect/remediation = 0.5, waiting/result analysis = 0.25, and near-complete work = 0.05–0.15. Shared Functional or Performance requests are divided between assigned testers.</span>
+        <div><strong>How occupancy is calculated</strong>
+        <span>{workload.capacity_points} points equal 100%. Active execution/scanning = 1 point; configuration/retest/baseline = 0.75; queued or remediation work = 0.5; result analysis = 0.25; waiting for fix = 0; and near-complete work = 0.05–0.15. Shared Functional or Performance requests are divided between assigned testers.</span></div>
+        <a className="btn btn-sm" href="/docs/qa-tester-occupancy-guide.pdf" target="_blank" rel="noreferrer">View calculation guide</a>
       </div>
       <Card>
         <Table
           rowKey="tester_id"
           columns={columns}
           rows={workload.rows}
+          onRowClick={(row) => setSelectedTesterId((current) => current === row.tester_id ? null : row.tester_id)}
         />
         {workload.rows.length === 0 && (
           <p className="muted small" style={{ marginTop: 8 }}>No active QA testers are available.</p>
         )}
       </Card>
+      {selectedTesterId && (() => {
+        const tester = workload.rows.find((row) => row.tester_id === selectedTesterId)
+        if (!tester) return null
+        const pathBySource: Record<TesterAssignment['source'], string> = { Functional: '/functional-requests', Performance: '/performance', SAST: '/sast', DAST: '/dast' }
+        return <Card title={`${tester.tester_name} · Request tracking`} className="tester-assignment-ledger">
+          <div className="tester-ledger-summary"><span><strong>{tester.assignments.filter((item) => item.is_current).length}</strong> currently working</span><span><strong>{tester.assignments.filter((item) => !item.is_current).length}</strong> completed in selected period</span></div>
+          <Table
+            tableId="qa-tester-request-ledger"
+            rowKey="request_id"
+            rows={tester.assignments}
+            onRowClick={(assignment) => navigate(`${pathBySource[assignment.source]}?open=${assignment.request_pk}`)}
+            columns={[
+              { key: 'request_id', header: 'Request ID', render: (item) => <strong>{item.request_id}</strong> },
+              { key: 'source', header: 'Request Type' },
+              { key: 'application_name', header: 'Application' },
+              { key: 'status', header: 'Status', render: (item) => <Badge status={item.status} /> },
+              { key: 'work_state', header: 'Work State', render: (item) => <span className={item.is_current ? 'tester-ledger-current' : 'tester-ledger-complete'}>{item.is_current ? 'Currently working' : 'Completed'}</span> },
+              { key: 'updated_at', header: 'Last Activity', render: (item) => new Date(item.updated_at).toLocaleString() },
+            ]}
+          />
+          {!tester.assignments.length && <p className="muted small">No request assignments found for the selected period.</p>}
+        </Card>
+      })()}
     </div>
   )
 }
@@ -1140,7 +1195,7 @@ export default function Dashboard() {
           {insightTab === '3w' && <ThreeWTab range={range} />}
         </div>
       )}
-      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab range={range} />}
+      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab />}
     </div>
   )
 }

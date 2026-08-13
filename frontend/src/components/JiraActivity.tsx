@@ -15,6 +15,8 @@ import {
   RichTextLinkEditor,
   RichTextPastedImages,
   normalizeStoredRichText,
+  insertRichTextImages,
+  decodeRichImageName,
 } from './RichTextEditor'
 
 type ActivityFilter = 'all' | 'comments' | 'history'
@@ -72,7 +74,7 @@ function inlineMarkdown(value: string, keyPrefix: string): React.ReactNode[] {
   return nodes
 }
 
-export function MarkdownComment({ value }: { value: string }) {
+export function MarkdownComment({ value, attachmentUrls = {} }: { value: string; attachmentUrls?: Record<string, string> }) {
   const lines = normalizeStoredRichText(value).split('\n')
   const isTableStart = (lineIndex: number) =>
     lineIndex + 1 < lines.length &&
@@ -83,6 +85,16 @@ export function MarkdownComment({ value }: { value: string }) {
   while (index < lines.length) {
     const line = lines[index]
     if (!line.trim()) { index += 1; continue }
+    const image = line.match(/^!\[([^\]]*)\]\(attachment:([^)]+)\)$/)
+    if (image) {
+      const name = decodeRichImageName(image[2])
+      const url = attachmentUrls[name]
+      blocks.push(url
+        ? <button type="button" className="jira-inline-rich-image" key={`image-${index}`} title={`Open ${image[1] || name}`} onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}><img src={url} alt={image[1] || name} /></button>
+        : <span className="jira-inline-image-missing" key={`image-${index}`}>▧ {image[1] || name}</span>)
+      index += 1
+      continue
+    }
     const heading = line.match(/^(#{1,6})\s+(.+)$/)
     if (heading) {
       const HeadingTag = `h${Math.min(6, heading[1].length)}` as keyof React.JSX.IntrinsicElements
@@ -125,7 +137,26 @@ export function MarkdownComment({ value }: { value: string }) {
   return <div className="jira-markdown">{blocks}</div>
 }
 
-function CommentAttachments({ commentId }: { commentId: number }) {
+export function AuthenticatedMarkdown({ value, basePath }: { value: string; basePath: string }) {
+  const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({})
+  useEffect(() => {
+    let active = true
+    const createdUrls: string[] = []
+    api.get<RequestDocumentOut[]>(basePath).then(async (documents) => {
+      const loaded = await Promise.all(documents.map(async (document) => {
+        const blob = await api.getBlob(`${basePath}/${document.id}/download`)
+        const url = URL.createObjectURL(blob); createdUrls.push(url)
+        return [document.file_name, url] as const
+      }))
+      if (active) setAttachmentUrls(Object.fromEntries(loaded))
+      else loaded.forEach(([, url]) => URL.revokeObjectURL(url))
+    }).catch(() => undefined)
+    return () => { active = false; createdUrls.forEach((url) => URL.revokeObjectURL(url)) }
+  }, [basePath])
+  return <MarkdownComment value={value} attachmentUrls={attachmentUrls} />
+}
+
+function CommentContent({ commentId, value }: { commentId: number; value: string }) {
   const [documents, setDocuments] = useState<RequestDocumentOut[]>([])
   const [urls, setUrls] = useState<Record<number, string>>({})
 
@@ -153,16 +184,21 @@ function CommentAttachments({ commentId }: { commentId: number }) {
     return () => { active = false; createdUrls.forEach((url) => URL.revokeObjectURL(url)) }
   }, [commentId])
 
-  if (documents.length === 0) return null
+  const attachmentUrls = Object.fromEntries(documents.filter((document) => urls[document.id]).map((document) => [document.file_name, urls[document.id]]))
+  const referenced = new Set(Array.from(value.matchAll(/!\[[^\]]*\]\(attachment:([^)]+)\)/g)).map((match) => decodeRichImageName(match[1])))
+  const unplaced = documents.filter((document) => !referenced.has(document.file_name))
   return (
-    <div className="jira-comment-attachments">
-      {documents.map((document) => urls[document.id] && (
+    <>
+      <div className="jira-activity-message comment-box"><MarkdownComment value={value} attachmentUrls={attachmentUrls} /></div>
+      {unplaced.length > 0 && <div className="jira-comment-attachments">
+      {unplaced.map((document) => urls[document.id] && (
         <button key={document.id} type="button" className="jira-comment-image" title={`Open ${document.file_name}`} onClick={() => window.open(urls[document.id], '_blank', 'noopener,noreferrer')}>
           <img src={urls[document.id]} alt={document.file_name} />
           <span>{document.file_name}</span>
         </button>
       ))}
-    </div>
+      </div>}
+    </>
   )
 }
 
@@ -175,6 +211,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
   const { user } = useAuth()
   const editorRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const imageInsertRange = useRef<Range | null>(null)
   const [filter, setFilter] = useState<ActivityFilter>('all')
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -223,7 +260,29 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
   }
 
   function onPaste(event: React.ClipboardEvent<HTMLDivElement>) {
-    if (pasteImages(event)) setExpanded(true)
+    const accepted = pasteImages(event)
+    insertRichTextImages(editorRef.current, accepted)
+    if (accepted.length) { setExpanded(true); syncEditor() }
+  }
+
+  function pickImages() {
+    const selection = window.getSelection()
+    imageInsertRange.current = selection?.rangeCount && editorRef.current?.contains(selection.anchorNode)
+      ? selection.getRangeAt(0).cloneRange() : null
+    fileInputRef.current?.click()
+  }
+
+  function addInlineImages(files: File[]) {
+    const accepted = addImages(files)
+    insertRichTextImages(editorRef.current, accepted, imageInsertRange.current)
+    imageInsertRange.current = null
+    if (accepted.length) syncEditor()
+  }
+
+  function removeInlineImage(previewUrl: string) {
+    const image = images.find((item) => item.previewUrl === previewUrl)
+    if (image && editorRef.current) editorRef.current.querySelectorAll(`[data-rich-image-name="${CSS.escape(image.file.name)}"]`).forEach((node) => node.parentElement?.remove())
+    removeImage(previewUrl); syncEditor()
   }
 
   async function postComment() {
@@ -266,10 +325,10 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
                 ariaLabel="Comment formatting"
                 onCommand={runCommand}
                 onBeginLink={beginLink}
-                onPickImage={() => fileInputRef.current?.click()}
+                onPickImage={pickImages}
                 onInsertTable={insertTable}
               />
-              <RichTextImageInput inputRef={fileInputRef} onFiles={addImages} />
+              <RichTextImageInput inputRef={fileInputRef} onFiles={addInlineImages} />
             </>
           )}
           {showLink && (
@@ -302,7 +361,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
             }}
             suppressContentEditableWarning
           />
-          <RichTextPastedImages images={images} onRemove={removeImage} />
+          <RichTextPastedImages images={images} onRemove={removeInlineImage} />
           {expanded && <div className="jira-composer-actions"><div><button className="btn btn-primary btn-sm" disabled={busy || characterCount > 5000 || (characterCount === 0 && images.length === 0)} onClick={postComment}>{busy ? 'Posting…' : 'Comment'}</button><button className="btn btn-sm" onClick={clearComposer}>Cancel</button></div><span className={characterCount > 5000 ? 'over-limit' : ''}>{characterCount}/5000 · Rich text · Paste images with Ctrl/Cmd+V</span></div>}
           <ErrorText error={error} title="Comment could not be posted" guidance="Correct the issue described above, then post the comment again. Your draft and pasted images remain available." />
         </div>
@@ -330,8 +389,8 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
                   )}
                   <time title={new Date(item.created_at).toLocaleString()}>{relativeTime(item.created_at)}</time>
                 </div>
-                {item.comments && <div className={`jira-activity-message ${isComment ? 'comment-box' : ''}`}>{isComment ? <MarkdownComment value={item.comments} /> : item.comments}</div>}
-                {isComment && <CommentAttachments commentId={item.id} />}
+                {item.comments && (isComment ? <CommentContent commentId={item.id} value={item.comments} /> : <div className="jira-activity-message">{item.comments}</div>)}
+                {isComment && !item.comments && <CommentContent commentId={item.id} value="" />}
               </div>
             </article>
           )

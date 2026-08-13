@@ -54,7 +54,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'workflows', number: '06', title: 'Approval and testing workflows',
     summary: 'Functional, Performance, SAST, DAST, Suppression, and QA Sign-off lifecycles.',
-    keywords: 'workflow sm department head qa lead tester security analyst approval readiness scanning execution signoff suppression false positive coe',
+    keywords: 'workflow sm department head qa lead tester security analyst approval readiness scanning execution signoff suppression false positive coe decision design identity confirmation return reject approval workflow log search',
   },
   {
     id: 'evidence', number: '07', title: 'Readiness, evidence, and decisions',
@@ -63,8 +63,8 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'test-management', number: '08', title: 'Test management',
-    summary: 'Projects, repository, test-case review, cycles, assignment, execution, defects, and export.',
-    keywords: 'project department application repository folder tag testcase test case bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete execution runner assign attempt defect blocked checkout checkin export actual result image',
+    summary: 'Projects, sharing, repository, testcase versions, cycles, assignment, execution, defects, and export.',
+    keywords: 'project shared with you view access view only repository folder tag testcase test case version major minor superseded compare details bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete my executions qa group runner assign reassign reason change attempt defect rejected duplicate not a defect blocked checkout checkin export actual result image',
   },
   {
     id: 'collaboration', number: '09', title: 'Comments and collaboration',
@@ -73,8 +73,8 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'find-report', number: '10', title: 'Find, monitor, and report',
-    summary: 'Global ID search, dashboard filters, approvals, exports, and workload views.',
-    keywords: 'search id tqa tc dashboard insights columns date range occupancy grouped parent child pending approvals report export workflow log',
+    summary: 'Global search, dashboard periods, tester tracking, occupancy, approval search, and exports.',
+    keywords: 'search id tqa tc dashboard insights columns date range last 3 days 15 days one month custom from to qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals report export workflow log',
   },
   {
     id: 'audit', number: '11', title: 'Audit and control',
@@ -209,7 +209,7 @@ export default function Help() {
         <div className="help-hero-meta">
           <span>Audience</span><strong>All portal users</strong>
           <span>Manual status</span><strong>Current portal workflow</strong>
-          <span>Last reviewed</span><strong>07 August 2026</strong>
+          <span>Last reviewed</span><strong>13 August 2026</strong>
         </div>
       </div>
 
@@ -377,6 +377,9 @@ export default function Help() {
                 <article className="return"><IconWorkflow /><h3>Return</h3><p>Sends the request back for correction. State exactly what must change or which evidence is missing.</p></article>
                 <article className="reject"><IconWarning /><h3>Reject</h3><p>Use for a decision that should not proceed. Provide the business, control, or technical reason.</p></article>
               </div>
+              <Callout title="The decision panel is consistent across workflows">
+                Complete Identity Confirmation first, then choose Approve, Return to Requester, or Reject in Workflow Decision. The selected action opens its required comment or reason capture, and the result is written to the request timeline and Approval Workflow Log.
+              </Callout>
               <h3 className="help-subheading">Evidence rules</h3>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Attach evidence beside the relevant readiness criterion during request preparation.</li>
@@ -410,6 +413,19 @@ export default function Help() {
                 { title: 'Use check-out for editing', text: 'Check Out reserves the case so others know it is being edited. Save the work, then Check In to release the editing reservation.' },
                 { title: 'Maintain in bulk', text: 'Use tags to filter matching test cases. Bulk update can change Test Type, Folder, Module Name, and Priority. Confirm the selected count before bulk update or delete.' },
               ]} />
+              <h3 className="help-subheading">Testcase versioning and comparison</h3>
+              <div className="help-rule-grid">
+                <article><strong>Minor version</strong><p>Normal approved revisions increment the number after the decimal: v1.8 → v1.9 → v1.10. Version numbers are numeric components, so v1.10 follows v1.9.</p></article>
+                <article><strong>Major version</strong><p>A major version is created through the final QA approval flow when the revision is explicitly approved as a major change with its required justification: v1.10 → v2.0.</p></article>
+                <article><strong>Current version</strong><p>Only the latest version keeps its actual current status. Every older version is displayed as Superseded, preserving the historical snapshot without presenting it as active.</p></article>
+                <article><strong>Version details</strong><p>Open Version History and select a row to render that version’s complete stored details, author, timestamps, and reviewer decisions.</p></article>
+              </div>
+              <SopSteps items={[
+                { title: 'Open version history', text: 'Select the history action from the testcase. The newest version appears first and prior versions are marked Superseded.' },
+                { title: 'Inspect one version', text: 'Click the required version row. Review its stored testcase fields and approval metadata; this view does not alter the current testcase.' },
+                { title: 'Choose two different versions', text: 'In Compare two versions, select the baseline on the left and the revision on the right. The same version cannot be meaningfully compared with itself.' },
+                { title: 'Compare changes', text: 'Select Compare to see field-by-field old and new values with clear separation and change highlighting. Unchanged fields remain identifiable for context.' },
+              ]} />
               <h3 className="help-subheading">Execution SOP</h3>
               <SopSteps items={[
                 { title: 'Create or edit a test cycle', text: 'Choose an active project, define cycle scope and dates, and optionally link the cycle to a child Functional, SAST, DAST, or Performance request ID. Existing cycles can be edited.' },
@@ -422,6 +438,39 @@ export default function Help() {
                 { title: 'Operate in bulk', text: 'Use bulk assignment, bulk execution, bulk removal from the cycle, or export after validating the selected cases and confirmation summary.' },
                 { title: 'Maintain request links', text: 'Link or unlink a child request from either Functional Request details or Test Lifecycle while the cycle remains active.' },
               ]} />
+              <Callout title="My Executions is a QA-only personal queue">
+                My Executions is visible only to users in the COE - Quality Assurance group. It shows the signed-in user’s assigned execution items; use Open cycle for the full cycle context. Non-QA users do not see the menu and cannot open the route.
+              </Callout>
+              <h3 className="help-subheading">Assignment and reassignment control</h3>
+              <ul className="help-check-list">
+                <li><IconCheckCircle />An initial assignment requires an eligible active assignee but is not treated as a reassignment.</li>
+                <li><IconCheckCircle />For reassignment, first change the selected user or assignment set. Typing only a reason does not enable the Reassign button.</li>
+                <li><IconCheckCircle />A genuine change requires a non-blank reason. Re-selecting the existing assignee, or the same multi-select set in a different order, is not a change.</li>
+                <li><IconCheckCircle />Successful reassignment records the old assignee, new assignee, reason, actor, and timestamp in history.</li>
+              </ul>
+              <h3 className="help-subheading">Defect lifecycle and terminal triage</h3>
+              <Workflow label="Standard defect path" steps={['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Closed']} />
+              <div className="help-table-wrap">
+                <table className="help-role-table">
+                  <thead><tr><th>Outcome</th><th>Who can mark it</th><th>Required condition</th></tr></thead>
+                  <tbody>
+                    <tr><td><strong>Not a Defect</strong></td><td>QA Lead or Defect Reporter</td><td>Record the discussion with the Developer/Dev Lead and confirmation against requirements.</td></tr>
+                    <tr><td><strong>Duplicate</strong></td><td>QA Lead or Defect Reporter</td><td>Select and link the original defect ID.</td></tr>
+                    <tr><td><strong>Rejected</strong></td><td>QA Lead or Defect Reporter</td><td>Enter a valid rejection reason and include supporting evidence, either already attached or newly pasted/uploaded.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <Callout tone="warning" title="Terminal triage is available from New">
+                Rejected, Duplicate, and Not a Defect close that triage path and remain visible in defect details and history. Use Deferred when valid work is intentionally postponed; it can later return to Assigned.
+              </Callout>
+              <h3 className="help-subheading">Project view sharing</h3>
+              <SopSteps items={[
+                { title: 'Open project access', text: 'An authorized project manager opens View Access for the project.' },
+                { title: 'Select the recipient', text: 'Grant access to a department or one particular active user. Duplicate grants and the project’s own department are excluded.' },
+                { title: 'Confirm the recipient view', text: 'The recipient sees the project in Quality workspace with Shared with you and View only badges.' },
+                { title: 'Understand the boundary', text: 'A view grant allows visibility into the project’s Repository, Execution, Reports, and Defects. It does not grant project management or write authority.' },
+                { title: 'Remove when no longer needed', text: 'Remove the grant from View Access. Project history remains intact while the recipient’s extra visibility ends.' },
+              ]} />
               <Callout title="One test case can be executed many times">
                 Execution attempts preserve runner, result, timestamps, evidence, and linked defects independently. This provides a complete run and retest trail.
               </Callout>
@@ -432,7 +481,7 @@ export default function Help() {
             <ManualSection {...topic('collaboration')}>
               <div className="help-card-grid three">
                 <article><IconEditNote /><h3>Write for the next action</h3><p>State the observation, expected action, owner, and any date or dependency. Avoid comments such as “done” without context.</p></article>
-                <article><IconFolder /><h3>Add usable evidence</h3><p>Paste screenshots, upload files, and use bullets or numbered lists. Explain what each image or attachment demonstrates.</p></article>
+                <article><IconFolder /><h3>Add usable evidence</h3><p>Paste or upload screenshots at the cursor to place them between surrounding text. Explain what each image or attachment demonstrates.</p></article>
                 <article><IconWorkflow /><h3>Preserve the timeline</h3><p>New comments appear immediately in Activity. Workflow decisions and comments remain in chronological audit history.</p></article>
               </div>
               <h3 className="help-subheading">Recommended comment format</h3>
@@ -446,6 +495,8 @@ export default function Help() {
               </div>
               <ul className="help-check-list">
                 <li><IconCheckCircle />After posting, the editor clears and the new comment is shown immediately.</li>
+                <li><IconCheckCircle />Inline images preserve their position: text → image → more text. Select an image to open the authenticated full-size version.</li>
+                <li><IconCheckCircle />Images from older comments remain available in their attachment gallery even though those records do not contain inline position information.</li>
                 <li><IconCheckCircle />Do not place credentials, secrets, production customer data, or unmasked personal information in comments or screenshots.</li>
                 <li><IconCheckCircle />Use the workflow action dialog for an approval reason; use Activity for ongoing collaboration and supporting context.</li>
               </ul>
@@ -456,9 +507,47 @@ export default function Help() {
             <ManualSection {...topic('find-report')}>
               <div className="help-card-grid three">
                 <article><IconSearch /><h3>Global search</h3><p>Search a full TQA ID from the top bar. Short test-case input such as TC-02 is normalized to TQA-TC-02 automatically.</p></article>
-                <article><IconChart /><h3>Dashboard</h3><p>Dashboard filters apply to the whole dashboard. QA-only occupancy shows active workload across Functional, Performance, SAST, and DAST.</p></article>
-                <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request ID and opens the selected item directly. Approval Workflow Log provides the decision trail.</p></article>
+                <article><IconChart /><h3>Dashboard</h3><p>Dashboard date controls provide All time, Last hour, Last 3 days, Last 15 days, Last month, and a custom From/To range. QA-only views include tester assignments and capacity.</p></article>
+                <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request ID. Approval Workflow Log supports server-side search and entity filtering across the decision trail.</p></article>
               </div>
+              <h3 className="help-subheading">QA Tester Overview: who worked on which request</h3>
+              <SopSteps items={[
+                { title: 'Choose a period', text: 'Use All time, Last 3 days, Last 15 days, Last month, or Custom. For Custom, enter From and To dates; the To date includes the complete selected day.' },
+                { title: 'Review current assignments', text: 'Current Functional, Performance, SAST, and DAST assignments remain visible regardless of the selected historical period so ongoing ownership is never hidden.' },
+                { title: 'Review completed work', text: 'The period applies to requests completed during that window. This answers which QA Tester or Security Analyst worked on a request within the selected reporting period.' },
+                { title: 'Open the request ledger', text: 'Select a tester row to see request ID, module, application, current status, assignment state, and relevant activity/completion timing.' },
+              ]} />
+              <Callout title="What does “period” mean?">
+                The selected period filters completed-work history by completion time. It does not remove currently assigned work merely because that assignment began before the period. This keeps the dashboard useful for both historical reporting and today’s ownership tracking.
+              </Callout>
+              <h3 className="help-subheading">How occupancy is calculated</h3>
+              <p>Occupancy is an explainable estimate of concurrent QA workload, not timesheet utilization. Each active assignment contributes lifecycle-weighted points. Eight points equal 100%, and shared Functional or Performance work is divided equally among its assigned testers.</p>
+              <div className="help-table-wrap">
+                <table className="help-role-table">
+                  <thead><tr><th>Work state</th><th>Points</th><th>Examples</th></tr></thead>
+                  <tbody>
+                    <tr><td><strong>Fully active</strong></td><td>1.00</td><td>Functional test design/execution, Performance setup/script/load execution, Security scanning.</td></tr>
+                    <tr><td><strong>Configuration, validation, baseline, or retest</strong></td><td>0.75</td><td>Performance baseline/retest; Security configuration, validation, or rescan; Functional retesting.</td></tr>
+                    <tr><td><strong>Queued or remediation</strong></td><td>0.50</td><td>Tester assigned, defect raised, or Security remediation.</td></tr>
+                    <tr><td><strong>Analysis</strong></td><td>0.25</td><td>Performance result analysis.</td></tr>
+                    <tr><td><strong>Near complete</strong></td><td>0.05–0.15</td><td>QA completed/sign-off/verification, report, or security-complete stages.</td></tr>
+                    <tr><td><strong>Waiting</strong></td><td>0.00</td><td>Waiting for fix does not consume planned active capacity.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="help-rule-grid">
+                <article><strong>Example 1: single tester</strong><p>Four active 1-point assignments = 4 points. 4 ÷ 8 × 100 = 50% occupancy.</p></article>
+                <article><strong>Example 2: mixed stages</strong><p>Execution 1.00 + retest 0.75 + analysis 0.25 + remediation 0.50 = 2.50 points, or 31% after rounding.</p></article>
+                <article><strong>Example 3: shared request</strong><p>A 1-point Functional request shared by two testers contributes 0.50 point to each tester.</p></article>
+                <article><strong>Example 4: overload</strong><p>Nine fully active assignments = 9 points. 9 ÷ 8 × 100 = 113%, displayed as Overloaded.</p></article>
+              </div>
+              <p><a className="btn btn-sm" href="/docs/qa-tester-occupancy-guide.pdf" target="_blank" rel="noreferrer">Open detailed occupancy calculation guide</a></p>
+              <h3 className="help-subheading">Approval Workflow Log search</h3>
+              <ul className="help-check-list">
+                <li><IconCheckCircle />Search by request ID, workflow step, decision, actor, actor role, previous/new status, or comment text.</li>
+                <li><IconCheckCircle />Combine text search with the Entity filter to narrow results to QA Request, Functional, SAST, DAST, Performance, Suppression, or Sign-off.</li>
+                <li><IconCheckCircle />Results are searched and paginated on the server. Clear the search to restore the complete accessible log.</li>
+              </ul>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Use module filters and status badges to narrow operational lists.</li>
                 <li><IconCheckCircle />Use Reports & Export Centre for governed summaries and audit evidence exports.</li>

@@ -111,7 +111,10 @@ def _rich_text_flowables(markdown: str, available_width: float = 320) -> list:
             width = max(len(row) for row in rows)
             normalized = [row + [""] * (width - len(row)) for row in rows]
             table_data = [[Paragraph(_markdown_inline(cell), _styles["Normal"]) for cell in row] for row in normalized]
-            nested = Table(table_data, colWidths=[available_width / width] * width, repeatRows=1)
+            nested = Table(
+                table_data, colWidths=[available_width / width] * width,
+                repeatRows=1, splitByRow=1, splitInRow=1,
+            )
             nested.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8edf2")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#263442")),
@@ -145,6 +148,37 @@ def _field_content(value: object):
     return Paragraph(_fmt(value), _styles["Normal"])
 
 
+def _detail_table(data: list[list]) -> Table:
+    """Build the normal two-column field table.
+
+    Rich-text values are deliberately excluded by the caller: a ReportLab
+    table row is atomic, so one long Paragraph/list inside that row cannot
+    continue on the next page and raises LayoutError. Normal short metadata
+    keeps the compact two-column layout.
+    """
+    table = Table(data, colWidths=[150, 330], splitByRow=1, splitInRow=1)
+    table.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d9dce3")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f3f4f8")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return table
+
+
+def _rich_field_label(label: str) -> Table:
+    table = Table([[Paragraph(f"<b>{_safe_text(label)}</b>", _styles["Normal"])]], colWidths=[480])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f3f4f8")),
+        ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#d9dce3")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return table
+
+
 def build_request_detail_pdf(
     *, title: str, subtitle: str, sections: Iterable[Section],
     history: Sequence[HistoryRow], generated_by: str, generated_at: str,
@@ -165,19 +199,25 @@ def build_request_detail_pdf(
 
     for section_title, fields in sections:
         elements.append(Paragraph(_safe_text(section_title), _section_title_style))
-        data = [[Paragraph(_safe_text(label), _styles["Normal"]), _field_content(value)] for label, value in fields]
-        if not data:
-            continue
-        t = Table(data, colWidths=[150, 330])
-        t.setStyle(TableStyle([
-            ("FONTSIZE", (0, 0), (-1, -1), 8.5),
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d9dce3")),
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f3f4f8")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-            ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
-        elements.append(t)
+        pending_rows: list[list] = []
+
+        def flush_rows() -> None:
+            if pending_rows:
+                elements.append(_detail_table(pending_rows[:]))
+                pending_rows.clear()
+
+        for label, value in fields:
+            if isinstance(value, RichTextValue):
+                flush_rows()
+                elements.append(_rich_field_label(label))
+                # Paragraphs and nested Markdown tables are top-level
+                # flowables here, so ReportLab may split them naturally over
+                # as many pages as required.
+                elements.extend(_rich_text_flowables(value.markdown, available_width=470))
+                elements.append(Spacer(1, 5))
+            else:
+                pending_rows.append([Paragraph(_safe_text(label), _styles["Normal"]), _field_content(value)])
+        flush_rows()
         elements.append(Spacer(1, 6))
 
     if history_title:
@@ -188,7 +228,10 @@ def build_request_detail_pdf(
         if history:
             head = ["Step", "Decision", "Actor", "Role", "Comments", "When"]
             rows = [[Paragraph(_fmt(c), _styles["Normal"]) for c in row] for row in history]
-            t = Table([head] + rows, repeatRows=1, colWidths=[70, 60, 75, 65, 140, 70])
+            t = Table(
+                [head] + rows, repeatRows=1, colWidths=[70, 60, 75, 65, 140, 70],
+                splitByRow=1, splitInRow=1,
+            )
             t.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),

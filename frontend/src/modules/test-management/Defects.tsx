@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { Badge, Card, ErrorText, Field, Modal, Table } from '../../components/Common'
-import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
+import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
@@ -14,16 +14,16 @@ import { useAuth } from '../../context/AuthContext'
 import { ENVIRONMENTS, DEFECT_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canReassign } from '../../constants'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 
-const STATUSES = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Closed']
+const STATUSES = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect', 'Closed']
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
 const PRIORITIES = ['P1 – Immediate', 'P2 – High', 'P3 – Medium', 'P4 – Low']
 const RESOLUTION_TYPES = ['Fixed', 'Configuration Changed', 'Data Corrected', 'Code Change', 'Environment Issue Resolved', 'Cannot Reproduce', 'Working as Designed', 'Other']
 const TRANSITIONS: Record<string, string[]> = {
-  New: ['Assigned', 'Rejected', 'Duplicate', 'Deferred'],
+  New: ['Assigned', 'Rejected', 'Duplicate', 'Not a Defect', 'Deferred'],
   Assigned: ['In Progress', 'Deferred'],
   'In Progress': ['Resolved', 'Deferred'],
   Resolved: ['Retest'], Retest: ['Closed', 'Reopened'], Reopened: ['Assigned'],
-  Deferred: ['Assigned'], Closed: ['Reopened'], Rejected: [], Duplicate: [],
+  Deferred: ['Assigned'], Closed: ['Reopened'], Rejected: [], Duplicate: [], 'Not a Defect': [],
 }
 
 // 2026-08 -- was a locally-defined interface; now just an alias for the
@@ -255,8 +255,9 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
   </Modal>
 }
 
-function TransitionModal({ defect, target, users, departments, requestDepartment, defects, onClose, onChanged }: {
+function TransitionModal({ defect, target, users, departments, requestDepartment, defects, hasEvidence, onClose, onChanged }: {
   defect: DefectOut; target: string; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]
+  hasEvidence: boolean
   onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
   // 2026-08 -- reported directly: "During assigning defect, department
@@ -313,6 +314,7 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
     if (target === 'Reopened') return need('reopen_reason', 'Reopening Reason')
     if (target === 'Deferred') return need('deferral_reason', 'Deferral Reason')
     if (target === 'Rejected') return need('rejection_reason', 'Rejection Reason')
+    if (target === 'Not a Defect') return need('not_a_defect_reason', 'Reason')
     return null
   }
 
@@ -337,9 +339,20 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
     if (savedDefect) { setBusy(true); setError(null); await attachStagedEvidence(savedDefect); return }
     const validationError = validateRichFields()
     if (validationError) { setError(new Error(validationError)); return }
+    const stagedFiles = Object.values(imageValues).flat()
+    if (target === 'Rejected' && !hasEvidence && !stagedFiles.length) {
+      setError(new Error('Supporting evidence is required before rejecting a defect'))
+      return
+    }
     setBusy(true); setError(null)
     try {
+      // Rejection evidence is a server-side precondition, so upload staged
+      // screenshots before requesting the terminal transition.
+      if (target === 'Rejected' && stagedFiles.length) {
+        await api.uploadFormFiles(`/api/defects/${defect.id}/attachments`, {}, stagedFiles)
+      }
       const saved = await api.post<DefectOut>(`/api/defects/${defect.id}/transition`, { status: target, ...values })
+      if (target === 'Rejected') { onChanged(saved); return }
       setSavedDefect(saved)
       await attachStagedEvidence(saved)
     } catch (err) { setError(err); setBusy(false) }
@@ -353,15 +366,16 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
       {target === 'Closed' && <><Field label="Tested Build Version *"><input required value={values.tested_build_version || ''} onChange={(e) => set('tested_build_version', e.target.value)} /></Field><Field label="Retest Actual Result *"><JiraRichTextField value={values.actual_result || ''} onChange={(v) => set('actual_result', v)} onImagesChange={setImages('actual_result')} disabled={!!savedDefect} ariaLabel="Retest Actual Result" placeholder="Describe the retest outcome…" /></Field><Field label="Retest Remarks *"><JiraRichTextField value={values.retest_remarks || ''} onChange={(v) => set('retest_remarks', v)} onImagesChange={setImages('retest_remarks')} disabled={!!savedDefect} ariaLabel="Retest Remarks" /></Field><Field label="Closure Remarks *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="Closure Remarks" /></Field></>}
       {target === 'Reopened' && <Field label="Reopening Reason *"><JiraRichTextField value={values.reopen_reason || ''} onChange={(v) => set('reopen_reason', v)} onImagesChange={setImages('reopen_reason')} disabled={!!savedDefect} ariaLabel="Reopening Reason" placeholder="Attach supporting evidence in the defect before reopening." /></Field>}
       {target === 'Deferred' && <><Field label="Deferral Reason *"><JiraRichTextField value={values.deferral_reason || ''} onChange={(v) => set('deferral_reason', v)} onImagesChange={setImages('deferral_reason')} disabled={!!savedDefect} ariaLabel="Deferral Reason" /></Field><div className="grid grid-2"><Field label="Approved By *"><input required value={values.deferral_approved_by || ''} onChange={(e) => set('deferral_approved_by', e.target.value)} /></Field><Field label="Target Release *"><input required value={values.target_release || ''} onChange={(e) => set('target_release', e.target.value)} /></Field></div><Field label="Expected Resolution Date *"><input required type="date" value={values.expected_resolution_date || ''} onChange={(e) => set('expected_resolution_date', e.target.value)} /></Field></>}
-      {target === 'Rejected' && <Field label="Rejection Reason *"><JiraRichTextField value={values.rejection_reason || ''} onChange={(v) => set('rejection_reason', v)} onImagesChange={setImages('rejection_reason')} disabled={!!savedDefect} ariaLabel="Rejection Reason" /></Field>}
+      {target === 'Rejected' && <><Field label="Rejection Reason *"><JiraRichTextField value={values.rejection_reason || ''} onChange={(v) => set('rejection_reason', v)} onImagesChange={setImages('rejection_reason')} disabled={!!savedDefect} ariaLabel="Rejection Reason" placeholder="Give a valid rejection reason and paste or upload supporting evidence." /></Field><p className="muted small">Supporting evidence is mandatory. Use an existing attachment or paste/upload evidence above.</p></>}
       {target === 'Duplicate' && <Field label="Original Defect ID *"><SearchableSelect value={values.duplicate_defect_id ? String(values.duplicate_defect_id) : ''} onChange={(value) => set('duplicate_defect_id', value ? Number(value) : null)} placeholder="Select original defect…" options={defects.filter((item) => item.id !== defect.id).map((item) => ({ value: String(item.id), label: `${item.defect_key} · ${item.title}` }))} /></Field>}
-      {!['Assigned', 'Resolved', 'Closed', 'Reopened', 'Deferred', 'Rejected', 'Duplicate'].includes(target) && <Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" /></Field>}
+      {target === 'Not a Defect' && <Field label="Discussion & Requirements Confirmation *"><JiraRichTextField value={values.not_a_defect_reason || ''} onChange={(v) => set('not_a_defect_reason', v)} onImagesChange={setImages('not_a_defect_reason')} disabled={!!savedDefect} ariaLabel="Discussion and Requirements Confirmation" placeholder="Record the discussion with the Developer/Dev Lead and confirmation against requirements…" /></Field>}
+      {!['Assigned', 'Resolved', 'Closed', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect'].includes(target) && <Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" /></Field>}
       </fieldset>
       <ErrorText error={error} title={savedDefect ? `${savedDefect.defect_key} was updated` : 'Defect workflow action failed'} />
       <div className="modal-actions">
         {savedDefect
           ? <><button className="btn btn-primary" disabled={busy}>{busy ? 'Attaching…' : 'Retry attaching evidence'}</button><button type="button" className="btn" disabled={busy} onClick={() => onChanged(savedDefect)}>Continue without evidence</button></>
-          : <><button className={`btn ${['Rejected', 'Duplicate'].includes(target) ? 'btn-danger' : 'btn-primary'}`} disabled={busy || (target === 'Assigned' && (!values.assignee_id || !values.assigned_team))}>{busy ? 'Updating…' : target}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></>}
+          : <><button className={`btn ${['Rejected', 'Duplicate', 'Not a Defect'].includes(target) ? 'btn-danger' : 'btn-primary'}`} disabled={busy || (target === 'Assigned' && (!values.assignee_id || !values.assigned_team))}>{busy ? 'Updating…' : target}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></>}
       </div>
     </form>
   </Modal>
@@ -572,7 +586,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
       ? currentAssigneeUser.departments : currentAssigneeUser?.department)
   const allowedTransitions = (TRANSITIONS[defect.status] || []).filter((target) => {
     if (target === 'Assigned') return canAssign
-    if (['Rejected', 'Duplicate'].includes(target)) return manager
+    if (['Rejected', 'Duplicate', 'Not a Defect'].includes(target)) return manager || defect.reporter_id === user?.id
     if (target === 'Deferred') return manager || applicationOwner
     if (['In Progress', 'Resolved'].includes(target)) return manager || assignee
     if (['Retest', 'Closed'].includes(target)) return manager || tester
@@ -587,6 +601,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     return false
   })
   const lifecycle = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Closed']
+  const terminalOutcomes = ['Rejected', 'Not a Defect']
   const lifecycleIndex = lifecycle.indexOf(defect.status)
   return <>
     <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} wide>
@@ -594,9 +609,12 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
         <div className="defect-detail-summary"><span className="defect-detail-kicker">{defect.application_name} · {defect.module_feature}</span><div><Badge status={defect.status} /><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><span className="defect-priority-pill">{defect.priority}</span>{!defect.execution_id && <span className="badge badge-yellow">Traceability incomplete</span>}</div></div>
         <div className="defect-actions">{defect.status === 'New' && (manager || defect.reporter_id === user?.id) && <button className="btn btn-sm" onClick={() => setEditMode(true)}>Edit</button>}{!defect.execution_id && <button className="btn btn-sm btn-primary" disabled={!contexts.length} onClick={() => setShowLinkExecution(true)}>Link to execution</button>}{canReassignDefect && <button className="btn btn-sm" onClick={() => setShowReassign(true)}>Reassign</button>}{allowedTransitions.map((status) => <button key={status} className={`btn btn-sm ${status === 'Rejected' ? 'btn-danger' : status === 'Closed' ? 'btn-primary' : ''}`} onClick={() => setTransition(status)}>{status}</button>)}</div>
       </div>
-      <div className={`defect-lifecycle ${lifecycleIndex < 0 ? 'has-exception' : ''}`}>
+      <div className="defect-lifecycle">
         {lifecycle.map((stage, index) => <div key={stage} className={`${index === lifecycleIndex ? 'current' : ''} ${lifecycleIndex >= 0 && index < lifecycleIndex ? 'complete' : ''}`}><i>{index < lifecycleIndex ? '✓' : index + 1}</i><span>{stage}</span></div>)}
-        {lifecycleIndex < 0 && <div className="defect-lifecycle-exception"><strong>{defect.status}</strong><span>Exception workflow state</span></div>}
+        <div className="defect-lifecycle-outcomes" aria-label="Alternative terminal outcomes">
+          {terminalOutcomes.map((status) => <div key={status} className={defect.status === status ? 'current' : ''}><i>{defect.status === status ? '✓' : '×'}</i><span>{status}</span></div>)}
+        </div>
+        {lifecycleIndex < 0 && !terminalOutcomes.includes(defect.status) && <div className="defect-lifecycle-exception"><strong>{defect.status}</strong><span>Exception workflow state</span></div>}
       </div>
       <div className="defect-trace-grid">
         <button onClick={() => navigate(`/qa-requests?open=${defect.qa_request_id}`)}><small>QA Request</small><strong>{defect.qa_request_key || `#${defect.qa_request_id}`}</strong></button>
@@ -606,25 +624,26 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
       </div>
       <div className="defect-detail-grid">
         <div className="defect-detail-main">
-          <section><span className="defect-section-label">Issue definition</span><h4>Description</h4><MarkdownComment value={defect.description} /></section>
-          <section><span className="defect-section-label">Reproduction evidence</span><h4>Steps to Reproduce</h4><MarkdownComment value={defect.steps_to_reproduce} /></section>
-          <div className="defect-result-compare"><section className="actual"><h4>Actual Result</h4><MarkdownComment value={defect.actual_result} /></section><section className="expected"><h4>Expected Result</h4><MarkdownComment value={defect.expected_result} /></section></div>
+          <section><span className="defect-section-label">Issue definition</span><h4>Description</h4><AuthenticatedMarkdown value={defect.description} basePath={`/api/defects/${defect.id}/attachments`} /></section>
+          <section><span className="defect-section-label">Reproduction evidence</span><h4>Steps to Reproduce</h4><AuthenticatedMarkdown value={defect.steps_to_reproduce} basePath={`/api/defects/${defect.id}/attachments`} /></section>
+          <div className="defect-result-compare"><section className="actual"><h4>Actual Result</h4><AuthenticatedMarkdown value={defect.actual_result} basePath={`/api/defects/${defect.id}/attachments`} /></section><section className="expected"><h4>Expected Result</h4><AuthenticatedMarkdown value={defect.expected_result} basePath={`/api/defects/${defect.id}/attachments`} /></section></div>
         </div>
         <aside className="defect-detail-aside"><section><span className="defect-section-label">Operating context</span><h4>Defect properties</h4><dl><dt>Application</dt><dd>{defect.application_name}</dd><dt>Module / Feature</dt><dd>{defect.module_feature}</dd><dt>Environment</dt><dd>{defect.environment}</dd><dt>Build</dt><dd>{defect.build_version || '—'}</dd><dt>Reporter</dt><dd>{defect.reporter_name}</dd><dt>Assignee</dt><dd>{defect.assignee_name || 'Unassigned'}</dd></dl></section></aside>
       </div>
-      {(defect.assignment_remarks || defect.resolution_summary || defect.retest_remarks || defect.reopen_reason || defect.deferral_reason || defect.rejection_reason) && <section className="defect-workflow-details"><h4>Workflow Details</h4>
-        {defect.assignment_remarks && <div className="defect-workflow-item"><strong>Assignment{defect.assigned_by_name ? ` · ${defect.assigned_by_name}` : ''}</strong><MarkdownComment value={defect.assignment_remarks} /></div>}
-        {defect.resolution_summary && <div className="defect-workflow-item"><strong>Resolution</strong><MarkdownComment value={defect.resolution_summary} /></div>}
-        {defect.root_cause && <div className="defect-workflow-item"><strong>Root cause</strong><MarkdownComment value={defect.root_cause} /></div>}
-        {defect.retest_remarks && <div className="defect-workflow-item"><strong>Retest</strong><MarkdownComment value={defect.retest_remarks} /></div>}
-        {defect.reopen_reason && <div className="defect-workflow-item"><strong>Reopened</strong><MarkdownComment value={defect.reopen_reason} /></div>}
-        {defect.deferral_reason && <div className="defect-workflow-item"><strong>Deferred{defect.target_release ? ` · ${defect.target_release}` : ''}</strong><MarkdownComment value={defect.deferral_reason} /></div>}
-        {defect.rejection_reason && <div className="defect-workflow-item"><strong>Rejected</strong><MarkdownComment value={defect.rejection_reason} /></div>}
+      {(defect.assignment_remarks || defect.resolution_summary || defect.retest_remarks || defect.reopen_reason || defect.deferral_reason || defect.rejection_reason || defect.not_a_defect_reason) && <section className="defect-workflow-details"><h4>Workflow Details</h4>
+        {defect.assignment_remarks && <div className="defect-workflow-item"><strong>Assignment{defect.assigned_by_name ? ` · ${defect.assigned_by_name}` : ''}</strong><AuthenticatedMarkdown value={defect.assignment_remarks} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
+        {defect.resolution_summary && <div className="defect-workflow-item"><strong>Resolution</strong><AuthenticatedMarkdown value={defect.resolution_summary} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
+        {defect.root_cause && <div className="defect-workflow-item"><strong>Root cause</strong><AuthenticatedMarkdown value={defect.root_cause} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
+        {defect.retest_remarks && <div className="defect-workflow-item"><strong>Retest</strong><AuthenticatedMarkdown value={defect.retest_remarks} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
+        {defect.reopen_reason && <div className="defect-workflow-item"><strong>Reopened</strong><AuthenticatedMarkdown value={defect.reopen_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
+        {defect.deferral_reason && <div className="defect-workflow-item"><strong>Deferred{defect.target_release ? ` · ${defect.target_release}` : ''}</strong><AuthenticatedMarkdown value={defect.deferral_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
+        {defect.rejection_reason && <div className="defect-workflow-item"><strong>Rejected</strong><AuthenticatedMarkdown value={defect.rejection_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
+        {defect.not_a_defect_reason && <div className="defect-workflow-item"><strong>Not a Defect</strong><AuthenticatedMarkdown value={defect.not_a_defect_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
       </section>}
       <section className="defect-evidence"><div><h4>Evidence & Attachments <span>{documents.length}</span></h4><label className="btn btn-sm">{uploading ? 'Uploading…' : '+ Add evidence'}<input type="file" multiple hidden disabled={uploading} onChange={(e) => upload(e.target.files)} /></label></div>{documents.length ? <div className="defect-files">{documents.map((document) => <button key={document.id} onClick={() => download(document)}>{document.file_name}</button>)}</div> : <p className="muted small">No supporting evidence attached.</p>}<ErrorText error={error} /></section>
       <JiraActivity entityType="DEFECT" entityId={defect.id} items={activity} onPosted={(item) => setActivity((current) => [...current, item])} />
     </Modal>
-    {transition && <TransitionModal defect={defect} target={transition} users={users} departments={departments} requestDepartment={requestDepartment} defects={defects} onClose={() => setTransition('')} onChanged={(saved) => { setTransition(''); onChanged(saved) }} />}
+    {transition && <TransitionModal defect={defect} target={transition} users={users} departments={departments} requestDepartment={requestDepartment} defects={defects} hasEvidence={documents.length > 0} onClose={() => setTransition('')} onChanged={(saved) => { setTransition(''); onChanged(saved) }} />}
     {showReassign && <ReassignDefectModal defect={defect} users={users} departments={departments} onClose={() => setShowReassign(false)} onChanged={(saved) => { setShowReassign(false); onChanged(saved) }} />}
     {showLinkExecution && <LinkExecutionModal defect={defect} contexts={contexts} onClose={() => setShowLinkExecution(false)} onChanged={(saved) => { setShowLinkExecution(false); onChanged(saved) }} />}
     {editMode && <EditDefectModal defect={defect} manager={manager} onClose={() => setEditMode(false)} onChanged={(saved) => { setEditMode(false); onChanged(saved) }} />}

@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RequestDocuments } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole, hasDepartment } from '../../constants'
@@ -416,14 +416,11 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
               />
             )}
             {canSecurityDecide && (
-              <>
-                <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('security-team-decision', { decision: 'Accepted', comments })}>Accept (mark Done)</button>
-                <button className="btn btn-sm" disabled={busy}
-                        onClick={() => setShowReapprovalConfirm(true)}>
-                  Return to Requester
-                </button>
-                <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('security-team-decision', { decision: 'Rejected', comments })}>Reject</button>
-              </>
+              <WorkflowDecisionPanel busy={busy} title="Security verification decision" options={[
+                { key: 'accept', label: 'Accept & mark done', description: 'Complete the suppression workflow', tone: 'approve', onClick: () => act('security-team-decision', { decision: 'Accepted', comments }) },
+                { key: 'return', label: 'Return to Requester', description: 'Send back for corrections and resubmission', tone: 'return', onClick: () => setShowReapprovalConfirm(true) },
+                { key: 'reject', label: 'Reject', description: 'Stop and close this approval path', tone: 'reject', onClick: () => act('security-team-decision', { decision: 'Rejected', comments }) },
+              ]} />
             )}
             {showReapprovalConfirm && (
               <ConfirmModal

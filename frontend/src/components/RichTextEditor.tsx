@@ -13,7 +13,7 @@ import React, { useEffect, useRef, useState } from 'react'
 // what used to happen -- see ORACLE_MIGRATION_2026-07.md for the section
 // documenting this extraction).
 
-export type PendingRichImage = { file: File; previewUrl: string }
+export type PendingRichImage = { file: File; previewUrl: string; alt: string }
 
 export const RICH_TEXT_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
 export const RICH_TEXT_MAX_IMAGES = 8
@@ -71,6 +71,11 @@ function nodeToMarkdown(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent || ''
   if (!(node instanceof HTMLElement)) return ''
   const content = textOf(node)
+  const attachmentName = node.getAttribute('data-rich-image-name')
+  if (attachmentName) {
+    const alt = node.getAttribute('data-rich-image-alt') || node.getAttribute('alt') || attachmentName
+    return `![${alt.replace(/[\]\\]/g, '')}](attachment:${encodeURIComponent(attachmentName)})`
+  }
   switch (node.tagName) {
     case 'BR': return '\n'
     case 'DIV':
@@ -115,6 +120,10 @@ function escapeHtml(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
+export function decodeRichImageName(value: string): string {
+  try { return decodeURIComponent(value) } catch { return value }
+}
+
 function inlineHtml(value: string): string {
   return escapeHtml(value)
     .replace(/\[u\]([\s\S]+?)\[\/u\]/g, '<u>$1</u>')
@@ -153,6 +162,13 @@ export function markdownToEditorHtml(value: string): string {
   while (index < lines.length) {
     const line = lines[index]
     if (!line.trim()) { blocks.push('<div><br></div>'); index += 1; continue }
+    const image = line.match(/^!\[([^\]]*)\]\(attachment:([^)]+)\)$/)
+    if (image) {
+      const name = decodeRichImageName(image[2])
+      blocks.push(`<div class="jira-inline-image-placeholder" data-rich-image-name="${escapeHtml(name)}" data-rich-image-alt="${escapeHtml(image[1] || name)}" contenteditable="false">▧ ${escapeHtml(image[1] || name)}</div>`)
+      index += 1
+      continue
+    }
     const heading = line.match(/^(#{1,6})\s+(.+)$/)
     if (heading) { const level = heading[1].length; blocks.push(`<h${level}>${inlineHtml(heading[2])}</h${level}>`); index += 1; continue }
     if (line.includes('|') && index + 1 < lines.length && /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(lines[index + 1])) {
@@ -210,9 +226,14 @@ export function useRichTextImages(opts: {
   useEffect(() => { imagesRef.current = images }, [images])
   useEffect(() => () => imagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl)), [])
 
-  function addImages(files: File[]): boolean {
+  function addImages(files: File[]): PendingRichImage[] {
     const accepted: PendingRichImage[] = []
-    for (const file of files) {
+    for (const [fileIndex, sourceFile] of files.entries()) {
+      const file = new File(
+        [sourceFile],
+        `${filenamePrefix}-${Date.now()}-${fileIndex + 1}-${(sourceFile.name || 'image').replace(/[^a-zA-Z0-9._-]+/g, '-')}`,
+        { type: sourceFile.type },
+      )
       const name = file.name || 'Pasted image'
       if (!RICH_TEXT_IMAGE_TYPES.has(file.type)) {
         onError(`“${name}” is not supported. Use PNG, JPEG, GIF, or WebP.`)
@@ -220,13 +241,13 @@ export function useRichTextImages(opts: {
       }
       if (file.size > maxBytes) { onError(messages.tooLarge(name)); continue }
       if (images.length + accepted.length >= maxImages) { onError(messages.tooMany()); break }
-      accepted.push({ file, previewUrl: URL.createObjectURL(file) })
+      accepted.push({ file, previewUrl: URL.createObjectURL(file), alt: sourceFile.name || 'Pasted image' })
     }
     if (accepted.length) {
       setImages((current) => [...current, ...accepted])
       onError('')
     }
-    return accepted.length > 0
+    return accepted
   }
 
   function removeImage(previewUrl: string) {
@@ -243,7 +264,7 @@ export function useRichTextImages(opts: {
   // actually contained image file(s) -- lets the caller decide what else
   // should happen on a successful image paste (e.g. JiraActivity expanding
   // its composer).
-  function pasteImages(event: React.ClipboardEvent<HTMLDivElement>): boolean {
+  function pasteImages(event: React.ClipboardEvent<HTMLDivElement>): PendingRichImage[] {
     // Excel (and some other spreadsheet applications) place several
     // representations of the same copied cells on the clipboard: HTML/table
     // markup, tab-separated plain text, and an image preview. Previously the
@@ -256,7 +277,7 @@ export function useRichTextImages(opts: {
     const clipboardText = event.clipboardData.getData('text/plain')
     const hasSpreadsheetData = /<table\b|urn:schemas-microsoft-com:office:excel|\bmso-/i.test(clipboardHtml)
       || /\t/.test(clipboardText)
-    if (hasSpreadsheetData) return false
+    if (hasSpreadsheetData) return []
 
     const files = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
@@ -266,12 +287,30 @@ export function useRichTextImages(opts: {
         const extension = blob.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
         return new File([blob], `${filenamePrefix}-${Date.now()}-${index + 1}.${extension}`, { type: blob.type })
       }).filter((file): file is File => !!file)
-    if (!files.length) return false
+    if (!files.length) return []
     event.preventDefault()
     return addImages(files)
   }
 
   return { images, addImages, removeImage, clearImages, pasteImages }
+}
+
+export function insertRichTextImages(editor: HTMLDivElement | null, images: PendingRichImage[], savedRange?: Range | null) {
+  if (!editor || images.length === 0) return
+  editor.focus()
+  const selection = window.getSelection()
+  if (selection && savedRange && editor.contains(savedRange.commonAncestorContainer)) {
+    selection.removeAllRanges(); selection.addRange(savedRange)
+  }
+  images.forEach((image) => {
+    const img = document.createElement('img')
+    img.src = image.previewUrl
+    img.alt = image.alt
+    img.setAttribute('data-rich-image-name', image.file.name)
+    img.setAttribute('data-rich-image-alt', image.alt)
+    img.className = 'jira-inline-editor-image'
+    document.execCommand('insertHTML', false, `<div><img class="jira-inline-editor-image" src="${img.src}" alt="${escapeHtml(image.alt)}" data-rich-image-name="${escapeHtml(image.file.name)}" data-rich-image-alt="${escapeHtml(image.alt)}"></div><div><br></div>`)
+  })
 }
 
 // ---- Inline link editor (Add link toolbar button + URL input row) ----

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, ReactNode } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS, hasRole } from '../constants'
+import { ROLE_LABELS, hasRole, hasDepartment, QA_DEPARTMENT } from '../constants'
 import { UserOut } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
@@ -79,7 +79,9 @@ function navGroups(user: UserOut | null): NavGroup[] {
         // SRS EXE-002 "My Executions" -- the signed-in user's own actionable
         // items across every authorized project, one cross-project view
         // instead of hunting through each project's own Test Execution page.
-        { to: '/my-executions', label: 'My Executions', icon: IconCheckCircle },
+        ...(hasDepartment(user, QA_DEPARTMENT)
+          ? [{ to: '/my-executions', label: 'My Executions', icon: IconCheckCircle }]
+          : []),
         // SRS section 11 -- the 5 reporting views (repository health, cycle
         // progress, defect quality, version impact, project portfolio).
         { to: '/test-reports', label: 'Test Reports', icon: IconChart },
@@ -331,7 +333,6 @@ export default function Layout({ children }: { children?: ReactNode }) {
                 </div>
                 <div className="dept">{(user.departments && user.departments.length ? user.departments.join(', ') : user.department) || 'No department set'}</div>
               </div>
-              <button onClick={handleLogout} title="Log out"><IconLogout width={16} height={16} /></button>
             </div>
           )}
         </div>
@@ -360,7 +361,10 @@ export default function Layout({ children }: { children?: ReactNode }) {
                   aria-expanded={userMenuOpen}
                 >
                   <span className="topbar-avatar">{initials(user.full_name)}</span>
-                  <span className="topbar-user-name">{user.full_name}</span>
+                  <span className="topbar-user-summary">
+                    <strong className="topbar-user-name">{user.full_name}</strong>
+                    <small>{(user.roles || []).map((role) => ROLE_LABELS[role] || role)[0] || 'Portal user'}</small>
+                  </span>
                   <i className={`topbar-user-caret ${userMenuOpen ? 'open' : ''}`}>⌄</i>
                 </button>
                 {userMenuOpen && (

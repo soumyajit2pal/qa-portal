@@ -199,15 +199,16 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
                               models.UserDepartment.department == QA_DEPARTMENT
                           ))
                   .distinct().order_by(models.User.full_name).all())
-    functional_requests = (_in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at,
-                                      date_from, date_to)
+    # Period filters apply only to completed-work history below. Capacity is
+    # a current-state view, so an active assignment must never disappear just
+    # because its request was raised before the selected reporting window.
+    functional_requests = (db.query(models.FunctionalRequest)
                            .filter(models.FunctionalRequest.status.in_(TESTER_WORKLOAD_STATUSES)).all())
-    performance_requests = (_in_period(db.query(models.PerformanceRequest), models.PerformanceRequest.created_at,
-                                       date_from, date_to)
+    performance_requests = (db.query(models.PerformanceRequest)
                             .filter(models.PerformanceRequest.status.in_(PERFORMANCE_TESTER_WORKLOAD_STATUSES)).all())
-    sast_requests = (_in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to)
+    sast_requests = (db.query(models.SASTRequest)
                      .filter(models.SASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all())
-    dast_requests = (_in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to)
+    dast_requests = (db.query(models.DASTRequest)
                      .filter(models.DASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all())
 
     def role_label(user) -> str:
@@ -232,6 +233,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
             "active_count": 0,
             "waiting_count": 0,
             "near_complete_count": 0,
+            "assignments": [],
         }
 
     rows = {
@@ -248,6 +250,15 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
         row["source_counts"][source] += 1
         row["total_pending"] += 1
         row["occupied_points"] += float(load) / max(1, shared_by)
+        row["assignments"].append({
+            "request_id": request.request_id,
+            "request_pk": request.id,
+            "source": source,
+            "application_name": request.application_name or "—",
+            "status": request.status,
+            "updated_at": request.updated_at or request.created_at,
+            "is_current": True,
+        })
         if request.status in _QUEUED_TESTER_STATUSES:
             row["queued_count"] += 1
         elif request.status in _WAITING_TESTER_STATUSES:
@@ -278,7 +289,38 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     add_security_requests(sast_requests, "SAST")
     add_security_requests(dast_requests, "DAST")
 
+    # Historical ledger: assignment columns remain on completed child
+    # requests, so they provide a durable "worked on" record in addition to
+    # the active-capacity figures above. Keep these out of occupancy totals.
+    completed_sources = [
+        (models.FunctionalRequest, "Functional", QA_REQUEST_TERMINAL_STATUSES, "assigned_tester_ids"),
+        (models.PerformanceRequest, "Performance", PERFORMANCE_TERMINAL_STATUSES, "assigned_tester_ids"),
+        (models.SASTRequest, "SAST", SAST_DAST_TERMINAL_STATUSES, "security_analyst_id"),
+        (models.DASTRequest, "DAST", SAST_DAST_TERMINAL_STATUSES, "security_analyst_id"),
+    ]
+    for model, source, terminal_statuses, assignment_field in completed_sources:
+        completed = (_in_period(db.query(model), model.updated_at, date_from, date_to)
+                     .filter(model.status.in_(terminal_statuses)).all())
+        for request in completed:
+            raw_assignment = getattr(request, assignment_field)
+            assigned_ids = ([raw_assignment] if assignment_field == "security_analyst_id" and raw_assignment
+                            else _assigned_user_ids(raw_assignment))
+            for tester_id in assigned_ids:
+                if tester_id not in rows:
+                    user = db.query(models.User).get(tester_id)
+                    rows[tester_id] = empty_row(tester_id, user)
+                rows[tester_id]["assignments"].append({
+                    "request_id": request.request_id,
+                    "request_pk": request.id,
+                    "source": source,
+                    "application_name": request.application_name or "—",
+                    "status": request.status,
+                    "updated_at": request.updated_at or request.created_at,
+                    "is_current": False,
+                })
+
     for row in rows.values():
+        row["assignments"].sort(key=lambda item: item["updated_at"] or datetime.datetime.min, reverse=True)
         row["occupied_points"] = round(row["occupied_points"], 2)
         row["occupancy_percent"] = round(row["occupied_points"] / TESTER_CAPACITY_POINTS * 100)
         row["available_percent"] = max(0, 100 - row["occupancy_percent"])

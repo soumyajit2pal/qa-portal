@@ -67,6 +67,7 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     Cancelled: "badge-gray",
     Approved: "badge-green",
     Rejected: "badge-red",
+    "Not a Defect": "badge-red",
     Passed: "badge-green",
     Failed: "badge-red",
     "In Progress": "badge-purple",
@@ -662,6 +663,44 @@ export function ApprovalDecisionButtons({
       )}
     </>
   );
+}
+
+export interface WorkflowDecisionOption {
+  key: string;
+  label: string;
+  description: string;
+  tone?: "approve" | "return" | "reject";
+  icon?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}
+
+// Shared visual treatment for workflow decisions that do not require the
+// identity-signature step (analysis outcomes, requester acceptance, test
+// case review, security verification, etc.).
+export function WorkflowDecisionPanel({
+  title = "Choose a decision",
+  description = "Select one outcome for this workflow stage.",
+  options,
+  busy = false,
+}: {
+  title?: string;
+  description?: string;
+  options: WorkflowDecisionOption[];
+  busy?: boolean;
+}) {
+  return <div className="workflow-decision-step workflow-decision-standalone">
+    <div className="workflow-decision-heading">
+      <span className="workflow-step-number">1</span>
+      <span className="workflow-sign-copy"><small>WORKFLOW DECISION</small><strong>{title}</strong><em>{description}</em></span>
+    </div>
+    <div className="workflow-decision-options">
+      {options.map((option) => <button key={option.key} type="button" className={`workflow-decision-card ${option.tone || "return"}`} disabled={busy || option.disabled} onClick={option.onClick}>
+        <span className="workflow-decision-icon">{option.icon || (option.tone === "approve" ? "✓" : option.tone === "reject" ? "×" : "↩")}</span>
+        <span><strong>{option.label}</strong><small>{option.description}</small></span><i>→</i>
+      </button>)}
+    </div>
+  </div>;
 }
 
 export function Field({

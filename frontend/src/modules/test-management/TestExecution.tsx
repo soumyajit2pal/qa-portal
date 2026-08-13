@@ -9,7 +9,7 @@ import { hasRole, hasDepartment, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CY
 import { TestProjectOut, TestCaseOut, TestCaseListOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import InfoModal from '../../components/InfoModal'
-import JiraActivity, { MarkdownComment } from '../../components/JiraActivity'
+import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import LinkedDefects from '../../components/LinkedDefects'
@@ -731,7 +731,7 @@ function AttemptHistory({ executionId, readOnly }: { executionId: number; readOn
           </button>
           {expandedId === run.id && (
             <div style={{ padding: '0 12px 12px' }}>
-              {run.actual_result ? <MarkdownComment value={run.actual_result} /> : <p className="muted small">No actual result recorded.</p>}
+              {run.actual_result ? <AuthenticatedMarkdown value={run.actual_result} basePath={`/api/test-execution/executions/${executionId}/runs/${run.id}/images`} /> : <p className="muted small">No actual result recorded.</p>}
               {run.test_run_artifacts && <p className="small"><strong>Test Run Artifacts:</strong> {run.test_run_artifacts}</p>}
               <DefectLinks executionId={executionId} run={run} readOnly={readOnly || run.id !== runs[runs.length - 1].id || !['Fail', 'Blocked'].includes(run.status)} onChanged={(defects) => setRuns((current) => current.map((item) => item.id === run.id ? { ...item, defects } : item))} />
               <ImageGallery

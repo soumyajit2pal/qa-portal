@@ -162,6 +162,19 @@ def list_approval_history(entity_type: Optional[str] = None, params: pagination.
     itself so scoping could run in SQL instead of Python -- out of scope
     for this pagination rollout."""
     rows = _filtered_approval_rows(db, current_user, entity_type)
+    if params.search:
+        needle = params.search.casefold()
+        filtered = []
+        for row in rows:
+            request_ref = _resolve_request_ref(db, row.entity_type, row.entity_id)
+            searchable = (
+                row.entity_type, request_ref, f"#{row.entity_id}", row.step_name,
+                row.decision, row.actor_name, row.actor_role, row.comments,
+                row.previous_state, row.new_state,
+            )
+            if any(needle in str(value or "").casefold() for value in searchable):
+                filtered.append(row)
+        rows = filtered
     total = len(rows)
     start = (params.page - 1) * params.page_size
     page_rows = rows[start:start + params.page_size]

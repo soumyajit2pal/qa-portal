@@ -1000,6 +1000,8 @@ def list_executions(
     _get_cycle_or_404(db, cycle_id)
     q = db.query(models.TestExecution).filter(models.TestExecution.cycle_id == cycle_id).options(*_LIST_EXECUTION_EAGER_LOADS)
     if assignment == "mine":
+        if not any(current_user.has_department(department) for department in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
+            raise HTTPException(403, "My execution assignments are restricted to the QA group")
         q = q.filter(models.TestExecution.assigned_to_id == current_user.id)
     elif assignment == "unassigned":
         q = q.filter(models.TestExecution.assigned_to_id.is_(None))

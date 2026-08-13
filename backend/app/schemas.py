@@ -3,6 +3,18 @@ import re
 from typing import Optional, List, Dict
 from pydantic import BaseModel, ConfigDict, field_validator
 
+RICH_TEXT_MAX_LENGTH = 10000
+
+
+def _limited_rich_text(value, info):
+    if value is not None and len(value) > RICH_TEXT_MAX_LENGTH:
+        label = info.field_name.replace("_", " ").title()
+        raise ValueError(
+            f"{label} cannot exceed {RICH_TEXT_MAX_LENGTH:,} characters; "
+            f"remove {len(value) - RICH_TEXT_MAX_LENGTH:,} characters"
+        )
+    return value
+
 
 def _plain_person_name(value):
     """Legacy demo accounts embedded request context in full_name (for
@@ -1255,6 +1267,10 @@ class DefectCreate(BaseModel):
     remarks: Optional[str] = None
     labels: Optional[str] = None
 
+    _limit_rich_text = field_validator(
+        "description", "steps_to_reproduce", "expected_result", "actual_result", "remarks"
+    )(_limited_rich_text)
+
 
 class DefectLinkExecution(BaseModel):
     execution_id: int
@@ -1280,6 +1296,10 @@ class DefectUpdate(BaseModel):
     remarks: Optional[str] = None
     labels: Optional[str] = None
 
+    _limit_rich_text = field_validator(
+        "description", "steps_to_reproduce", "expected_result", "actual_result", "remarks"
+    )(_limited_rich_text)
+
 
 class DefectTransition(BaseModel):
     status: str
@@ -1301,7 +1321,18 @@ class DefectTransition(BaseModel):
     expected_resolution_date: Optional[datetime.date] = None
     rejection_reason: Optional[str] = None
     duplicate_defect_id: Optional[int] = None
+    # 2026-08 "Not a Defect" cycle addition -- required (see
+    # routers/defects.py::transition_defect's own "Not a Defect" branch)
+    # when transitioning to that status, same pattern as rejection_reason
+    # above for Rejected.
+    not_a_defect_reason: Optional[str] = None
     closure_remarks: Optional[str] = None
+
+    _limit_rich_text = field_validator(
+        "remarks", "resolution_summary", "root_cause", "fix_details", "actual_result",
+        "retest_remarks", "reopen_reason", "deferral_reason", "rejection_reason",
+        "not_a_defect_reason", "closure_remarks",
+    )(_limited_rich_text)
 
 
 # 2026-08 Reassignment Requirement -- dedicated endpoint/payload for changing
@@ -1385,6 +1416,7 @@ class DefectOut(ORMModel):
     target_release: Optional[str] = None
     expected_resolution_date: Optional[datetime.date] = None
     rejection_reason: Optional[str] = None
+    not_a_defect_reason: Optional[str] = None
     duplicate_of_id: Optional[int] = None
     duplicate_of_key: Optional[str] = None
     closure_remarks: Optional[str] = None
@@ -1479,6 +1511,10 @@ class SignOffCreate(BaseModel):
     open_defect_summary: Optional[str] = None
     residual_risk_notes: Optional[str] = None
 
+    _limit_rich_text = field_validator(
+        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes"
+    )(_limited_rich_text)
+
 
 class SignOffUpdate(BaseModel):
     """Edits a certificate's own descriptive fields -- available to the
@@ -1502,6 +1538,10 @@ class SignOffUpdate(BaseModel):
     exit_criteria_notes: Optional[str] = None
     open_defect_summary: Optional[str] = None
     residual_risk_notes: Optional[str] = None
+
+    _limit_rich_text = field_validator(
+        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes"
+    )(_limited_rich_text)
 
 
 class SignOffOut(ORMModel):
@@ -1700,6 +1740,11 @@ class TestProjectOut(ORMModel):
     # enforced server-side by its own existing role/ownership checks
     # regardless of what this flag says.
     view_only: bool = False
+    # True when an explicit project view grant targets the current user or
+    # one of their departments. Separate from view_only because a QA-wide
+    # viewer may already have broad visibility and still be a named grant
+    # recipient who should see the sharing indicator.
+    shared_with_you: bool = False
 
 
 class TestProjectViewGrantOut(ORMModel):

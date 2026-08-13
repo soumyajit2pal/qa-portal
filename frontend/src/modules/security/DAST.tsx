@@ -749,7 +749,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                   )}
                   <button
                     className="btn btn-primary btn-sm"
-                    disabled={busy || !selectedAnalyst || (!isInitialAnalystAssignment && !reassignAnalystReason.trim())}
+                    disabled={busy || !selectedAnalyst || (!isInitialAnalystAssignment && (Number(selectedAnalyst) === req.security_analyst_id || !reassignAnalystReason.trim()))}
                     onClick={() => act('assign-security-analyst', {
                       security_analyst_id: Number(selectedAnalyst),
                       ...(isInitialAnalystAssignment ? {} : { reason: reassignAnalystReason.trim() }),

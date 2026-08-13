@@ -2746,6 +2746,21 @@ class Defect(Base):
     expected_resolution_date = Column(Date, nullable=True)
     rejection_reason = Column(Text, nullable=True)
     duplicate_of_id = Column(Integer, ForeignKey("qap_defects.id"), nullable=True)
+    # 2026-08 -- reported directly: "implement not a defect cycle, which is
+    # missing as per defect cycle standard." A new terminal status, "Not a
+    # Defect" (routers/defects.py's STATUSES/TRANSITIONS), reachable only
+    # from "New" -- same triage-time slot as Rejected/Duplicate, distinct
+    # from Rejected (which can mean duplicate/invalid/won't-fix) in that the
+    # reported behavior was investigated and found to be expected/working as
+    # designed, not an application defect at all. Mirrors rejection_reason's
+    # own pattern exactly (a single required free-text reason, no FK like
+    # Duplicate's duplicate_of_id needs). New column on an EXISTING Oracle
+    # table -- create_all() never alters existing columns (additive-only,
+    # no-Alembic convention, see database.py's own docstring) -- see
+    # backend/scripts/2026-08_add_defect_not_a_defect_column.sql, which
+    # STILL NEEDS TO BE RUN BY HAND against the live Oracle schema before
+    # this code is deployed.
+    not_a_defect_reason = Column(Text, nullable=True)
     closure_remarks = Column(Text, nullable=True)
     closed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=now, nullable=False)

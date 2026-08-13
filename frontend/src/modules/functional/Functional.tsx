@@ -996,6 +996,9 @@ function FunctionalDetail({
   const canAssignTester =
     (isInitialTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignTester) &&
     TESTER_REASSIGNABLE_STATUSES.includes(status);
+  const currentTesterIds = (req.assigned_tester_ids || "").split(",").filter(Boolean).map(Number).sort((a, b) => a - b);
+  const nextTesterIds = selectedTesters.map(Number).sort((a, b) => a - b);
+  const testerAssignmentChanged = currentTesterIds.length !== nextTesterIds.length || currentTesterIds.some((id, index) => id !== nextTesterIds[index]);
   // Pre-fill the picker with the currently-assigned tester(s) when this is a
   // reassignment (not the first-ever assignment) -- so reassigning defaults
   // to "hand off from the current roster" rather than starting blank. Only
@@ -1523,7 +1526,7 @@ function FunctionalDetail({
                     disabled={
                       selectedTesters.length === 0 ||
                       !!busyAction ||
-                      (!isInitialTesterAssignment && !reassignReason.trim())
+                      (!isInitialTesterAssignment && (!testerAssignmentChanged || !reassignReason.trim()))
                     }
                     onClick={() =>
                       act("assign-tester", {

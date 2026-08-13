@@ -197,7 +197,7 @@ def sweep_overdue_defects(db: Session) -> int:
         .filter(
             models.Defect.expected_resolution_date.isnot(None),
             models.Defect.expected_resolution_date < today,
-            ~models.Defect.status.in_(("Closed", "Rejected", "Duplicate")),
+            ~models.Defect.status.in_(("Closed", "Rejected", "Duplicate", "Not a Defect")),
         )
         .all()
     )

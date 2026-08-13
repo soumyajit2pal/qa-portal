@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import MultiUserAssignSelect from '../../components/MultiUserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -444,6 +444,9 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const canCompletePlanning =
     (isInitialPerformanceTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignPerformanceTester) &&
     PERFORMANCE_TESTER_REASSIGNABLE_STATUSES.includes(status)
+  const currentTesterIds = (req.assigned_tester_ids || '').split(',').filter(Boolean).map(Number).sort((a, b) => a - b)
+  const nextTesterIds = selectedTesters.map(Number).sort((a, b) => a - b)
+  const testerAssignmentChanged = currentTesterIds.length !== nextTesterIds.length || currentTesterIds.some((id, index) => id !== nextTesterIds[index])
   const canCompleteEnvSetup = isExecutionOwner && status === 'ENVIRONMENT_SETUP'
   const canCompleteScriptDev = isExecutionOwner && status === 'SCRIPT_DEVELOPMENT'
   const canCompleteBaseline = isExecutionOwner && status === 'BASELINE'
@@ -676,7 +679,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                 )}
                 <button
                   className="btn btn-primary btn-sm"
-                  disabled={busy || selectedTesters.length === 0 || (!isInitialPerformanceTesterAssignment && !reassignReason.trim())}
+                  disabled={busy || selectedTesters.length === 0 || (!isInitialPerformanceTesterAssignment && (!testerAssignmentChanged || !reassignReason.trim()))}
                   onClick={() => act('complete-planning', {
                     tester_ids: selectedTesters.map(Number),
                     ...(isInitialPerformanceTesterAssignment ? {} : { reason: reassignReason.trim() }),
@@ -693,19 +696,19 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
             {canCompleteBaseline && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-baseline')}>Complete Baseline</button>}
             {canCompleteLoadTest && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-load-test')}>Complete Load Test Execution</button>}
             {canResultAnalysisDecide && (
-              <>
-                <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('result-analysis-decision', { decision: 'Passed', comments })}>Result Analysis Passed</button>
-                <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('result-analysis-decision', { decision: 'Failed', comments })}>Result Analysis Failed</button>
-              </>
+              <WorkflowDecisionPanel busy={busy} title="Result analysis decision" options={[
+                { key: 'pass', label: 'Result Analysis Passed', description: 'Accept results and continue the workflow', tone: 'approve', onClick: () => act('result-analysis-decision', { decision: 'Passed', comments }) },
+                { key: 'fail', label: 'Result Analysis Failed', description: 'Record failure and start corrective action', tone: 'reject', onClick: () => act('result-analysis-decision', { decision: 'Failed', comments }) },
+              ]} />
             )}
             {canCompleteDefectFixRetest && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-defect-fix-retest')}>Complete Defect / Fix / Retest</button>}
             {canCompleteReport && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-report')}>Complete Report</button>}
             {canSignOff && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('sign-off')}>Sign Off</button>}
             {canRequesterDecide && (
-              <>
-                <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('requester-decision', { decision: 'Accepted', comments })}>Accept &amp; Close</button>
-                <button className="btn btn-danger btn-sm" disabled={busy} onClick={() => act('requester-decision', { decision: 'ChangesRequired', comments })}>Request Changes</button>
-              </>
+              <WorkflowDecisionPanel busy={busy} title="Requester verification decision" options={[
+                { key: 'accept', label: 'Accept & Close', description: 'Confirm the result and complete the request', tone: 'approve', onClick: () => act('requester-decision', { decision: 'Accepted', comments }) },
+                { key: 'changes', label: 'Request Changes', description: 'Return the request for additional work', tone: 'return', onClick: () => act('requester-decision', { decision: 'ChangesRequired', comments }) },
+              ]} />
             )}
           </div>
           </div>

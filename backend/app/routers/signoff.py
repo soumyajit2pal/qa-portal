@@ -97,6 +97,31 @@ def _require_qa_department(user: models.User) -> None:
         )
 
 
+def _validate_rich_text_before_progress(obj: models.QASignOff) -> None:
+    """Block workflow advancement for legacy records saved before the API
+    enforced the editor's 10,000-character contract. Return/reject decisions
+    remain available so an approver can send an invalid record back; callers
+    invoke this only for submit/resubmit/approve paths.
+    """
+    fields = (
+        ("Exit Criteria Validation Notes", obj.exit_criteria_notes),
+        ("Open Defect Review Summary", obj.open_defect_summary),
+        ("Residual Risk Documentation", obj.residual_risk_notes),
+    )
+    oversized = [
+        f"{label} ({len(value):,}/{schemas.RICH_TEXT_MAX_LENGTH:,})"
+        for label, value in fields
+        if value is not None and len(value) > schemas.RICH_TEXT_MAX_LENGTH
+    ]
+    if oversized:
+        raise HTTPException(
+            400,
+            "Cannot continue the QA Sign-off workflow because rich-text content exceeds the limit: "
+            + "; ".join(oversized)
+            + ". Edit the certificate and reduce each field to 10,000 characters or fewer.",
+        )
+
+
 @router.get("", response_model=List[schemas.SignOffOut])
 def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # The module is visible to every authenticated account, but business
@@ -213,6 +238,7 @@ def submit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this certificate")
     _require(obj, "DRAFT", "Submit")
+    _validate_rich_text_before_progress(obj)
     obj.status = "SUBMITTED"
     _log(db, obj.id, "Requester", current_user, "Submitted", None)
     obj.status = "SM_APPROVAL_PENDING"
@@ -238,6 +264,7 @@ def resubmit_signoff(signoff_id: int, db: Session = Depends(get_db), current_use
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this certificate")
     _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"], "Resubmit")
+    _validate_rich_text_before_progress(obj)
     if obj.status in ("RETURNED_BY_SM", "SM_REJECTED"):
         reopening = obj.status == "SM_REJECTED"
         obj.status = "SM_APPROVAL_PENDING"
@@ -262,6 +289,7 @@ def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Ses
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "SM_APPROVAL_PENDING", "QA Lead decision")
     if payload.decision == "Approved":
+        _validate_rich_text_before_progress(obj)
         obj.status = "DEPT_HEAD_QA_APPROVAL_PENDING"
         obj.reviewed_by_id = current_user.id
     elif payload.decision == "Returned":
@@ -295,6 +323,7 @@ def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, d
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPT_HEAD_QA_APPROVAL_PENDING", "Executive COE decision")
     if payload.decision == "Approved":
+        _validate_rich_text_before_progress(obj)
         obj.status = "ISSUED"
         obj.approved_by_id = current_user.id
         _sync_linked_functional_request(db, obj, current_user)

@@ -3,6 +3,7 @@ import { api } from '../../api'
 import { Card, Table, Badge, ErrorText, PageHeader } from '../../components/Common'
 import { ApprovalActionOut, UserOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 // SAST and DAST log distinctly now ("SAST" / "DAST", not a shared
 // "SAST_DAST") -- see the long comment on routers/sast_dast.py::_log().
@@ -21,6 +22,7 @@ function userName(users: UserOut[], id?: number | null): string | null {
 export default function Approvals() {
   const [users, setUsers] = useState<UserOut[]>([])
   const [entityType, setEntityType] = useState('')
+  const [search, setSearch] = useState('')
   const [error, setError] = useState<unknown>(null)
 
   useEffect(() => {
@@ -39,6 +41,7 @@ export default function Approvals() {
     items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
     loading, setPage, setPageSize,
   } = usePaginatedList<ApprovalActionOut>('/api/approvals/history', {
+    search,
     extra: { entity_type: entityType || undefined },
   })
 
@@ -50,6 +53,15 @@ export default function Approvals() {
         subtitle="Full audit / decision trail across QA Requests, Functional Testing, SAST/DAST, Performance, Suppression and Sign-off — who acted, what they decided, and when."
       />
       <div className="toolbar">
+        <ClearableSearchInput
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          onClear={() => setSearch('')}
+          clearLabel="Clear approval workflow search"
+          wrapperClassName="search-grow"
+          placeholder="Search request ID, step, decision, actor, role, status, or comments…"
+          aria-label="Search approval workflow log"
+        />
         <select value={entityType} onChange={(e) => setEntityType(e.target.value)}>
           {ENTITY_TYPES.map((t) => <option key={t} value={t}>{t || 'All entity types'}</option>)}
         </select>

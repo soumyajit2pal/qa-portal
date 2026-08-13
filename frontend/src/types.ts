@@ -862,6 +862,9 @@ export interface TestProjectOut {
   // not their own department or an unrestricted QA/Admin role. Computed
   // per-request server-side (routers/test_projects.py); defaults false.
   view_only?: boolean
+  // Viewer-specific marker returned when a user/department View Access
+  // grant explicitly includes the signed-in user.
+  shared_with_you?: boolean
 }
 
 // 2026-08 "view-only access to department/user" CR -- mirrors backend
@@ -1421,6 +1424,7 @@ export interface DefectOut {
   target_release?: string | null
   expected_resolution_date?: string | null
   rejection_reason?: string | null
+  not_a_defect_reason?: string | null
   duplicate_of_id?: number | null
   duplicate_of_key?: string | null
   closure_remarks?: string | null

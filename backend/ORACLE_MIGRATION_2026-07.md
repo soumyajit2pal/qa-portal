@@ -4656,3 +4656,54 @@ was asked to fix, so it's flagged here rather than silently expanded in scope.
 
 **Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean;
 `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/`.
+
+## 99. Defect lifecycle -- new "Not a Defect" terminal status
+
+Reported directly: "implement not a defect cycle, which is missing as per defect cycle standard." The
+defect status lifecycle (`routers/defects.py`'s `STATUSES`/`TRANSITIONS`) previously only had two terminal
+outcomes reachable from a fresh "New" defect at triage time -- Rejected (invalid/won't-fix/insufficient
+info) and Duplicate (already tracked elsewhere, linked via `duplicate_of_id`) -- with no way to record that
+a reported behavior was investigated and found to be expected/working as designed, i.e. not an application
+defect at all. That distinct outcome is a standard slot in most defect-tracking workflows (Jira, Bugzilla,
+Azure DevOps all ship an equivalent), and its absence meant testers/leads had to misuse "Rejected" for it,
+losing the semantic distinction in reporting and in the rejection-reason text itself.
+
+**New status: "Not a Defect".** Added to `STATUSES`, and to `TRANSITIONS["New"]` alongside Rejected/
+Duplicate/Deferred -- reachable only from New, same triage-time slot, terminal itself (empty transition
+set). Mirrors Rejected's shape exactly: a single required free-text reason (`not_a_defect_reason`), no FK
+like Duplicate's `duplicate_of_id` needs. Gated the same as Rejected/Duplicate -- manager only (Admin/QA
+Lead/Chief Manager QA, or final-approval holder), enforced both in `transition_defect`'s existing manager
+check and mirrored in the frontend's `allowedTransitions` filter.
+
+**Backend (`models.py`, `schemas.py`, `routers/defects.py`, `routers/notifications.py`).** New
+`Defect.not_a_defect_reason` column (nullable `Text`) -- an ADDITIVE column on the existing `qap_defects`
+Oracle table, so (per this app's no-Alembic, `create_all()`-only-emits-new-tables convention) it needs a
+manual DBA-run script: **`backend/scripts/2026-08_add_defect_not_a_defect_column.sql`, STILL NEEDS TO BE
+RUN BY HAND against the live Oracle schema before this code is deployed** (idempotent -- safe to re-run,
+swallows ORA-01430 if the column already exists; a brand-new deployment with no existing `qap_defects`
+table gets the column automatically from `create_all()` and doesn't need it). Added
+`not_a_defect_reason: Optional[str] = None` to `schemas.DefectTransition` and `schemas.DefectOut`.
+`transition_defect` gained an `elif requested == "Not a Defect":` branch requiring the reason, mirroring
+the existing Rejected branch. Every other place "terminal defect status" was checked got the new status
+added in lockstep, since `_TERMINAL_STATUSES` is duplicated as literal sets in a few spots rather than
+referenced everywhere: `_TERMINAL_STATUSES` itself, `link_defect_execution`'s block-on-terminal check,
+`export_defects`'s open-defect-count calculation, and `notifications.py::sweep_overdue_defects`'s
+already-terminal exclusion (found via a follow-up grep for other hardcoded `("Closed", "Rejected",
+"Duplicate")` literals after the obvious defects.py ones were done). Deliberately did NOT touch
+`DEFECT_REASSIGNABLE_STATUSES` (Not a Defect is reached only from New, before any assignment happens --
+same reasoning that already excludes Rejected/Duplicate/Closed) or `test_execution.py`'s
+`_DEFECT_RETEST_CLEAR_STATUSES` (that set already deliberately excludes Rejected/Duplicate too, per its
+own comment -- a separate, narrower "clears the retest lock" concept, not a terminal-status enumeration).
+
+**Frontend (`Defects.tsx`, `Common.tsx`, `types.ts`).** `STATUSES`/`TRANSITIONS` updated to match the
+backend. Transition modal gained a required "Reason *" `JiraRichTextField` shown only when the target is
+"Not a Defect" (mirroring the Rejected field), wired into `validateRichFields()`, and excluded from the
+generic Remarks-field fallback. Submit button styled `btn-danger` for this status, same as Rejected/
+Duplicate. Detail view's "Workflow Details" panel gained a "Not a Defect" item rendering the reason,
+alongside the existing Rejected/Deferred/etc. items. `Badge`'s status-color map gained an explicit
+`"Not a Defect": "badge-red"` entry (would otherwise fall back to gray, unlike Rejected which already had
+its own red entry). `types.ts`'s `DefectOut`/`DefectListOut` gained `not_a_defect_reason?: string | null`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean;
+`rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/` (only `__pycache__`/
+`uploads` runtime artifacts differed, both already excluded from the real sync).

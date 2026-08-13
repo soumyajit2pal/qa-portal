@@ -183,8 +183,20 @@ def list_test_projects(include_inactive: bool = Query(False), params: pagination
     # client-side. Computed here rather than as a TestProject @property
     # since it's inherently per-viewer, not a fact about the project itself.
     own_scope = dashboard_department_scope(current_user)
+    project_ids_on_page = [row.id for row in result.items]
+    shared_project_ids = set()
+    if project_ids_on_page:
+        grant_query = db.query(models.TestProjectViewGrant.project_id).filter(
+            models.TestProjectViewGrant.project_id.in_(project_ids_on_page),
+            or_(
+                models.TestProjectViewGrant.user_id == current_user.id,
+                models.TestProjectViewGrant.department.in_(current_user.departments or ["__none__"]),
+            ),
+        )
+        shared_project_ids = {project_id for (project_id,) in grant_query.all()}
     for row in result.items:
         row.view_only = bool(own_scope is not None and not current_user.has_department(row.department))
+        row.shared_with_you = row.id in shared_project_ids
     return pagination.to_page_response(result, params)
 
 
@@ -662,4 +674,3 @@ def remove_project_member(project_id: int, member_id: int, db: Session = Depends
         "Project membership management is disabled; Test Management now routes automatically by "
         "QA Group / QA Lead Group system role.",
     )
-

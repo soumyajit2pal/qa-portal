@@ -5,6 +5,7 @@ import Layout from './components/Layout'
 import DepartmentPrompt from './components/DepartmentPrompt'
 import PendingApprovalsNotice from './components/PendingApprovalsNotice'
 import { UserOut } from './types'
+import { hasDepartment, QA_DEPARTMENT } from './constants'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
 // gateway feeds every module, the Dashboard summarizes across all of
@@ -112,6 +113,11 @@ function ProtectedLayout() {
   )
 }
 
+function QaGroupOnly({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  return hasDepartment(user, QA_DEPARTMENT) ? <>{children}</> : <Navigate to="/" replace />
+}
+
 // Reported directly: "Help & user Manual should come on login page as well,
 // without login atleast user can read" -- Help.tsx is entirely static
 // content (no API calls, no auth-scoped data, see its own file), so there's
@@ -213,7 +219,7 @@ export default function App() {
           <Route path="/test-repository" element={<ModuleBoundary moduleName="Test Management"><TestRepository /></ModuleBoundary>} />
           <Route path="/test-execution" element={<ModuleBoundary moduleName="Test Management"><TestExecution /></ModuleBoundary>} />
           <Route path="/defects" element={<ModuleBoundary moduleName="Defect Management"><Defects /></ModuleBoundary>} />
-          <Route path="/my-executions" element={<ModuleBoundary moduleName="Test Management"><MyExecutions /></ModuleBoundary>} />
+          <Route path="/my-executions" element={<QaGroupOnly><ModuleBoundary moduleName="Test Management"><MyExecutions /></ModuleBoundary></QaGroupOnly>} />
           <Route path="/test-reports" element={<ModuleBoundary moduleName="Test Management"><TestReports /></ModuleBoundary>} />
         </Route>
 
