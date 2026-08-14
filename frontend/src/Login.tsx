@@ -49,7 +49,7 @@ export default function Login() {
         <aside className="login-brand">
           <div className="login-brand-top">
             <div className="qualitysphere-identity">
-              <span className="qualitysphere-mark qualitysphere-mark-lg" aria-hidden="true"><b>Q</b><i>S</i></span>
+              <img className="qualityshield-app-logo qualityshield-app-logo-lg" src="/qualityshield-logo.png" alt="" aria-hidden="true" />
               <div className="brand-name">
                 <strong>Quality<em>Shield</em></strong>
                 <small>Enterprise quality assurance</small>
@@ -78,7 +78,7 @@ export default function Login() {
 
         <div className="login-card">
           <div className="login-mobile-brand">
-            <span className="qualitysphere-mark" aria-hidden="true"><b>Q</b><i>S</i></span>
+            <img className="qualityshield-app-logo" src="/qualityshield-logo.png" alt="" aria-hidden="true" />
             <div><strong>Quality<em>Shield</em></strong><img className="bank-wordmark mobile-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" /></div>
           </div>
 

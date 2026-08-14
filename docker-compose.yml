@@ -1,7 +1,4 @@
 services:
-  # One-shot schema migration. The API waits for this service to finish
-  # successfully, so no web worker can start against an outdated schema.
-  # This uses the exact same image/model metadata as the backend service.
   migrate:
     image: qualityshield-backend:${IMAGE_TAG:-latest}
     build:
@@ -9,7 +6,7 @@ services:
       dockerfile: Dockerfile
     command: ["alembic", "upgrade", "head"]
     environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:Oracle123@127.0.0.1:1521/?service_name=FREEPDB1}
     restart: "no"
 
   backend:
@@ -20,8 +17,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:Oracle123@127.0.0.1:1521/?service_name=FREEPDB1}
+      SECRET_KEY: ${SECRET_KEY:-change-this-to-a-long-random-string-in-production}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
       DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}

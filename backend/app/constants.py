@@ -376,7 +376,7 @@ QA_REQUEST_STATUS_LABELS = {
 }
 
 DEFAULT_CHECKLIST_ITEMS = [
-    ("BRD / FRS / User Stories approved", "Business / BA",  True),
+    ("EPIC / Feature / User Stories approved", "Business / BA",  True),
     ("Scope finalized & change freeze", "Business / IT", True),
     ("Test Environment availability (UAT / SIT)", "Business", True),
     ("Test data creation", "User dept / Dev team", False),

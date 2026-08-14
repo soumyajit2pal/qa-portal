@@ -629,8 +629,8 @@ function StepsEditor({ steps, onChange }: { steps: TestStepIn[]; onChange: (s: T
       {steps.map((s, i) => (
         <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 8 }}>
           <span className="muted small" style={{ paddingTop: 8 }}>{i + 1}.</span>
-          <textarea placeholder="Step" value={s.step_text || ''} onChange={(e) => update(i, 'step_text', e.target.value)} style={{ flex: 1 }} />
-          <textarea placeholder="Expected Result" value={s.expected_result || ''} onChange={(e) => update(i, 'expected_result', e.target.value)} style={{ flex: 1 }} />
+          <textarea required aria-label={`Step ${i + 1}`} placeholder="Step *" value={s.step_text || ''} onChange={(e) => update(i, 'step_text', e.target.value)} style={{ flex: 1 }} />
+          <textarea required aria-label={`Expected Result ${i + 1}`} placeholder="Expected Result *" value={s.expected_result || ''} onChange={(e) => update(i, 'expected_result', e.target.value)} style={{ flex: 1 }} />
           <button type="button" className="btn btn-sm" onClick={() => remove(i)}>Remove</button>
         </div>
       ))}
@@ -1210,7 +1210,7 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
           <div className="tm-bulk-confirm-count"><strong>{submitIds.length}</strong><span>Draft / Returned testcase{submitIds.length !== 1 ? 's' : ''} will move to review</span></div>
           <p>Each one is checked for complete steps (TC-003) before anything is changed -- if any selected testcase isn't ready, none of them are submitted.</p>
           <div className="info-banner">Stage 1 is automatically shared with every eligible reviewer -- system QA Lead for a testcase already mid-review under the pre-existing workflow, or the whole QA Group for a fresh submission. After Stage 1 is complete, Stage 2 is shared with CM QA/AGM QA (pre-existing items) or the whole QA Lead Group (new submissions).</div>
-          <p className="muted small">Group routing controls notifications automatically -- there's no individual reviewer/QA Lead to assign. The testcase author is excluded from acting on their own submission at every stage.</p>
+          <p className="muted small">Group routing sends work to the appropriate approval queue -- there's no individual reviewer/QA Lead to assign. The testcase author is excluded from acting on their own submission at every stage.</p>
           <Field label="Note for the Reviewer (optional)">
             <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional context shared on every selected testcase…" />
           </Field>
@@ -1649,7 +1649,6 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
 }) {
   const [folder, setFolder] = useState<number | ''>(existing?.folder_id ?? folderId)
   const [epicId, setEpicId] = useState(existing?.epic_id || '')
-  const [crNumber, setCrNumber] = useState(existing?.cr_number || '')
   const [featureId, setFeatureId] = useState(existing?.feature_id || '')
   const [userStoryId, setUserStoryId] = useState(existing?.user_story_id || '')
   const [testType, setTestType] = useState(existing?.test_type || TEST_CASE_TYPES[0])
@@ -1803,16 +1802,38 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
-    setBusy(true); setError(null)
+    setError(null)
+    const incompleteSteps = steps
+      .map((step, index) => ({ step, number: index + 1 }))
+      .filter(({ step }) => !step.step_text?.trim() || !step.expected_result?.trim())
+    const missing: string[] = []
+    if (!testType.trim()) missing.push('Test Type')
+    if (!moduleName.trim()) missing.push('Module Name')
+    if (!priority.trim()) missing.push('Priority')
+    if (!scenario.trim()) missing.push('Test Scenario')
+    if (!description.trim()) missing.push('Description')
+    if (!steps.length) missing.push('at least one Step')
+    if (missing.length || incompleteSteps.length) {
+      const messages: string[] = []
+      if (missing.length) messages.push(`Complete the mandatory fields: ${missing.join(', ')}.`)
+      if (incompleteSteps.length) messages.push(`Provide both Step and Expected Result for step ${incompleteSteps.map(({ number }) => number).join(', ')}.`)
+      setError(new Error(messages.join(' ')))
+      return
+    }
+    setBusy(true)
     const body = {
       test_case_key: null,
       folder_id: folder || null,
-      epic_id: epicId || null, cr_number: crNumber || null, feature_id: featureId || null, user_story_id: userStoryId || null,
-      test_type: testType || null, module_name: moduleName || null, test_scenario: scenario || null,
+      epic_id: epicId || null, feature_id: featureId || null, user_story_id: userStoryId || null,
+      test_type: testType, module_name: moduleName.trim(), test_scenario: scenario.trim(),
       pre_condition: preCondition || null, description: description || null,
-      priority: priority || null,
+      priority,
       tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
-      steps,
+      steps: steps.map((step) => ({
+        ...step,
+        step_text: step.step_text?.trim(),
+        expected_result: step.expected_result?.trim(),
+      })),
     }
     try {
       const saved = existing
@@ -1854,25 +1875,22 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
           <Field label="Epic ID">
             <input value={epicId} onChange={(e) => setEpicId(e.target.value)} disabled={readOnly} />
           </Field>
-          <Field label="CR Number">
-            <input value={crNumber} onChange={(e) => setCrNumber(e.target.value)} disabled={readOnly} placeholder="e.g. CR-2026-001" />
-          </Field>
           <Field label="Feature ID">
             <input value={featureId} onChange={(e) => setFeatureId(e.target.value)} disabled={readOnly} />
           </Field>
           <Field label="User Story ID">
             <input value={userStoryId} onChange={(e) => setUserStoryId(e.target.value)} disabled={readOnly} />
           </Field>
-          <Field label="Test Type">
-            <select value={testType} onChange={(e) => setTestType(e.target.value)} disabled={readOnly}>
+          <Field label="Test Type *">
+            <select required value={testType} onChange={(e) => setTestType(e.target.value)} disabled={readOnly}>
               {TEST_CASE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
-          <Field label="Module Name">
-            <input value={moduleName} onChange={(e) => setModuleName(e.target.value)} disabled={readOnly} />
+          <Field label="Module Name *">
+            <input required value={moduleName} onChange={(e) => setModuleName(e.target.value)} disabled={readOnly} />
           </Field>
-          <Field label="Priority">
-            <select value={priority} onChange={(e) => setPriority(e.target.value)} disabled={readOnly}>
+          <Field label="Priority *">
+            <select required value={priority} onChange={(e) => setPriority(e.target.value)} disabled={readOnly}>
               {TEST_CASE_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </Field>
@@ -1953,16 +1971,16 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
         {existing && canAuthor && !existing.checked_out_by_id && !pendingDecisionStatus && (
           <div className="tm-edit-access-notice"><strong>Read-only until reserved</strong><span>Select <b>Start editing</b> above to check out this case and enable the form.</span></div>
         )}
-        <Field label="Test Scenario">
-          <input value={scenario} onChange={(e) => setScenario(e.target.value)} disabled={readOnly} />
+        <Field label="Test Scenario *">
+          <input required value={scenario} onChange={(e) => setScenario(e.target.value)} disabled={readOnly} />
         </Field>
         <Field label="Pre-Condition">
           <textarea value={preCondition} onChange={(e) => setPreCondition(e.target.value)} disabled={readOnly} />
         </Field>
-        <Field label="Description">
-          <textarea value={description} onChange={(e) => setDescription(e.target.value)} disabled={readOnly} />
+        <Field label="Description *">
+          <textarea required value={description} onChange={(e) => setDescription(e.target.value)} disabled={readOnly} />
         </Field>
-        <Field label="Steps">
+        <Field label="Steps *">
           {readOnly ? (
             <table className="simple-table">
               <thead><tr><th>#</th><th>Step</th><th>Expected Result</th></tr></thead>

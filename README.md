@@ -24,9 +24,9 @@ that renders each one.
 |---|---|---|
 | `auth.py` | `src/Login.tsx` | JWT login, `/auth/me`, user directory, Admin CRUD |
 | `qa_requests.py` | `src/QARequests.tsx` | The cross-module request gateway/inbox — raise a request, pick its type, route it |
-| `functional.py` | **Functional** (`src/modules/functional/`) | Functional QA request lifecycle: SM/dept-head decisions, readiness checklist, walkthroughs, planning → test design → execution → defects → retest → regression → sign-off, documents, history |
-| `sast_dast.py` | **Security** (`src/modules/security/`) | SAST and DAST request lifecycle: readiness, scan configuration/execution, findings, walkthroughs, documents, history |
-| `suppression.py` | **Security** (`src/modules/security/`) | False-positive/suppression requests: app-owner and dept-head decisions, security-team decision, walkthroughs, documents, history |
+| `functional.py` | **Functional** (`src/modules/functional/`) | Functional QA request lifecycle: SM/dept-head decisions, readiness checklist, planning → test design → execution → defects → retest → regression → sign-off, documents, history |
+| `sast_dast.py` | **Security** (`src/modules/security/`) | SAST and DAST request lifecycle: readiness, scan configuration/execution, findings, documents, history |
+| `suppression.py` | **Security** (`src/modules/security/`) | False-positive/suppression requests: app-owner and dept-head decisions, security-team decision, documents, history |
 | `automation.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Automation request lifecycle: feasibility, engineer assignment, script development, review, CI/CD integration, sign-off |
 | `performance.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Performance testing lifecycle: readiness, baseline, load test, result analysis, defect fix/retest, report, sign-off |
 | `approvals.py` | **Governance** (`src/modules/governance/`) | Cross-module workflow-decision feed (`/approvals`, `/approvals/pending-mine`) |
@@ -134,7 +134,8 @@ export DATABASE_URL="oracle+oracledb://QA_PORTAL:your_password@dbhost:1521/?serv
 ```
 
 The `QA_PORTAL` user needs `CREATE TABLE`/`CREATE SEQUENCE` privileges the first time you run
-`python -m app.seed` (it calls `Base.metadata.create_all()`, see the migrations note below).
+`python -m app.seed`. Existing environments must then adopt the Alembic baseline once; see
+[`backend/MIGRATIONS.md`](backend/MIGRATIONS.md) before applying or generating migrations.
 
 All tables are prefixed `qap_` (e.g. `qap_users`, `qap_requests`, `qap_module_documents`) so
 this app's schema won't collide with any other application's tables (like a generic `users`
@@ -177,7 +178,9 @@ pip install -r requirements.txt
 
 cp .env.example .env            # edit DATABASE_URL / SECRET_KEY
 
-python -m app.seed              # creates tables in Oracle + seeds demo users/data
+python -m app.seed              # first empty DB only: creates tables + seeds demo data
+alembic stamp head              # first empty DB only: records the Alembic baseline
+# Existing baseline adopted: use `alembic upgrade head` on every deployment.
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -263,11 +266,11 @@ host-installed Oracle from inside Docker on Mac/Windows; on Linux use the host's
 The backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`) and
 a `redis` service is included and wired up by default (`REDIS_URL`) -- required for cache
 correctness (dashboard summary + reference-data caching, see `backend/app/cache.py`) and for the
-one-time startup migration/notification-sweep to run once per deployment instead of once per
+one-time startup migration to run once per deployment instead of once per
 worker (see `backend/app/main.py`'s startup-lock comment) whenever more than one worker is
 running. The app still runs fine without Redis reachable -- caching and the startup lock both
 degrade to a no-op/permissive fallback -- but then each of the 4 workers keeps its own cache and
-the startup sweep can run up to 4 times.
+the startup task can run up to 4 times.
 
 ### Verification status
 
@@ -359,13 +362,13 @@ Key endpoint groups:
 - `/api/qa-requests` — CRUD + `/submit`, `/cancel`, `/history`, `/export`, `/documents`
   (multi-file upload/list), `/documents/{id}/download`
 - `/api/functional-requests` — CRUD + decision/lifecycle actions, `/checklist`,
-  `/walkthroughs` (+ `/acknowledge`), `/history`, `/export`, `/documents`
+  `/history`, `/export`, `/documents`
 - `/api/sast-requests`, `/api/dast-requests` — CRUD + decision/lifecycle actions, `/findings`
-  (+ `/resolve`), `/walkthroughs` (+ `/acknowledge`), `/history`, `/export`, `/documents`
+  (+ `/resolve`), `/history`, `/export`, `/documents`
 - `/api/suppressions` — CRUD + `/sm-decision`, `/dept-head-decision`,
-  `/security-team-decision`, `/walkthroughs`, `/history`, `/export`, `/documents`
+  `/security-team-decision`, `/history`, `/export`, `/documents`
 - `/api/automation-requests`, `/api/performance-requests` — CRUD + decision/lifecycle actions,
-  `/checklist`, `/walkthroughs`, `/history`, `/export`, `/documents`
+  `/checklist`, `/history`, `/export`, `/documents`
 - `/api/signoffs` — CRUD + `/issue`, `/history`, `/export`, `/documents`
 - `/api/approvals`, `/api/approvals/pending-mine` — cross-module audit/decision feed
 - `/api/audit`, `/api/audit/export` — protected application/access audit log and CSV evidence export

@@ -24,12 +24,13 @@ interface RecordedElectronicSignature {
   signatureId: string
   intent: string
   stage: string
+  style: 'professional' | 'classic' | 'handwritten'
 }
 
 function recordedSignature(item: ApprovalActionOut): RecordedElectronicSignature | null {
-  const match = (item.comments || '').match(/\[Electronic signature \| Signer: (.*?) \| Applied: (.*?) \| Signature ID: (.*?) \| Intent: (.*?)\]/s)
+  const match = (item.comments || '').match(/\[Electronic signature \| Signer: (.*?) \| Applied: (.*?) \| Signature ID: (.*?)(?: \| Style: (professional|classic|handwritten))? \| Intent: (.*?)\]/s)
   if (!match) return null
-  return { signer: match[1].trim(), appliedAt: match[2].trim(), signatureId: match[3].trim(), intent: match[4].trim(), stage: item.step_name || 'Approval' }
+  return { signer: match[1].trim(), appliedAt: match[2].trim(), signatureId: match[3].trim(), style: (match[4] || 'professional') as RecordedElectronicSignature['style'], intent: match[5].trim(), stage: item.step_name || 'Approval' }
 }
 
 // Only Functional Testing Requests that have actually finished QA activity
@@ -149,7 +150,7 @@ function TestingRequestIdSearch({ requests, selected, onSelect, onClear }: {
 // Request via TestingRequestIdSearch above.
 //
 // Either way, once a Testing Request is selected, Application Name/Owner/
-// Department/Change Request ID(s) are derived from it and locked -- never
+// Department/CR Number/EPIC Number are derived from it and locked -- never
 // independently editable, so the certificate can't drift from the request
 // it's actually for.
 export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
@@ -254,7 +255,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // entirely, so the locked Application Name/Owner/Department/Change
     // Request ID(s) fields need this explicit check instead -- they're only
     // ever filled in via picking a Testing Request above.
-    if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and Change Request ID(s) are derived from it.'); return }
+    if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and CR Number/EPIC Number are derived from it.'); return }
     if (!hasRole(user, 'ADMIN') && !hasDepartment(user, QA_DEPARTMENT)) {
       setError(`QA Sign-off is restricted to the ${QA_DEPARTMENT} department.`)
       return
@@ -316,7 +317,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
           <Field label="Application Name *"><input required disabled value={form.application_name} onChange={() => {}} /></Field>
           <Field label="Application Owner *"><input required disabled value={form.application_owner} onChange={() => {}} /></Field>
           <Field label="QA Approval Department *"><input required disabled value={form.department || QA_DEPARTMENT} onChange={() => {}} /></Field>
-          <Field label="Change Request ID(s) *"><input required disabled value={form.change_request_ids} onChange={() => {}} /></Field>
+          <Field label="CR Number/EPIC Number *"><input required disabled value={form.change_request_ids} onChange={() => {}} /></Field>
           <Field label="Technology Stack *"><input required value={form.technology_stack} onChange={(e) => set('technology_stack', e.target.value)} /></Field>
           <Field label="Release Version *"><input required value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>
           <Field label="Build Number *"><input required value={form.build_number} onChange={(e) => set('build_number', e.target.value)} /></Field>
@@ -398,7 +399,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
 // their own QA Lead review (legacy status SM_APPROVAL_PENDING; see routers/signoff.py::
 // update_signoff for the exact permission windows -- "he will have option
 // to modify details" per the requested workflow). Testing Request ID/
-// Application Name/Owner/Department/Change Request ID(s) stay locked here
+// Application Name/Owner/Department/CR Number/EPIC Number stay locked here
 // too, same as at creation -- they're derived from the linked Functional
 // Testing Request and shouldn't drift from it.
 function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClose: () => void; onSaved: (s: SignOffOut) => void }) {
@@ -595,7 +596,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
         <div><strong>Application:</strong> {item.application_name}</div>
         <div><strong>Status:</strong> <Badge status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /></div>
         <div><strong>Testing Request ID:</strong> {item.testing_request_id || '—'}</div>
-        <div><strong>Change Request ID(s):</strong> {item.change_request_ids || '—'}</div>
+        <div><strong>CR Number/EPIC Number:</strong> {item.change_request_ids || '—'}</div>
         <div><strong>Application Owner:</strong> {item.application_owner || '—'}</div>
         <div><strong>Request Department:</strong> {item.request_department || '—'}</div>
         <div><strong>QA Approval Department:</strong> {item.department || QA_DEPARTMENT}</div>
@@ -667,7 +668,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
         <div className="signoff-signature-list">
           {signatures.map((signature) => <article className="signoff-signature-card" key={signature.signatureId}>
             <header><span>✓</span><div><small>{signature.stage}</small><strong>Electronically signed</strong></div></header>
-            <div className="signoff-signature-mark">{signature.signer}</div>
+            <div className={`signoff-signature-mark signature-style-${signature.style}`}>{signature.signer}</div>
             <dl><div><dt>Signer</dt><dd>{signature.signer}</dd></div><div><dt>Signed at</dt><dd>{new Date(signature.appliedAt).toLocaleString()}</dd></div><div className="signature-id"><dt>Signature ID</dt><dd><code>{signature.signatureId}</code></dd></div></dl>
             <p>{signature.intent}</p>
           </article>)}

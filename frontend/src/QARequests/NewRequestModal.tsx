@@ -35,8 +35,10 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     department: editing.department || department,
     application_name: editing.application_name || '',
     application_owner: editing.application_owner || '',
-    cr_number: editing.cr_number || '',
-    epic_number: editing.epic_number || '',
+    // Consolidated identifier: legacy Drafts that only have epic_number are
+    // carried into the single CR/EPIC field when reopened.
+    cr_number: editing.cr_number || editing.epic_number || '',
+    epic_number: '',
     change_type: editing.change_type || 'New',
     vendor_si_partner: editing.vendor_si_partner || '',
     technology_stack: editing.technology_stack || '',
@@ -245,9 +247,11 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
     setBusy(true)
     setError(null)
     try {
-      const { performance_request_types, sast_components, dast_components, ...rest } = form
+      const { performance_request_types, sast_components, dast_components, epic_number: _legacyEpicNumber, ...rest } = form
       const payload = {
         ...rest,
+        // Clear the retired separate field when an older Draft is saved.
+        epic_number: null,
         target_release_date: form.target_release_date || null,
         performance_request_type: performance_request_types.join(','),
         // Sent as real arrays now -- one entry per repository/target row --

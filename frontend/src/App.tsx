@@ -143,7 +143,7 @@ function PublicHelp() {
     <div className="public-help-shell">
       <div className="public-help-topbar">
         <Link to="/help" className="public-help-brand">
-          <span className="qualitysphere-mark" aria-hidden="true"><b>Q</b><i>S</i></span>
+          <img className="qualityshield-app-logo" src="/qualityshield-logo.png" alt="" aria-hidden="true" />
           <div>
             <strong>Quality<em>Shield</em></strong>
             <img className="bank-wordmark public-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />

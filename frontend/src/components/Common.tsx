@@ -14,7 +14,7 @@ import {
   SUPPRESSION_STATUS_LABELS,
   PERFORMANCE_STATUS_LABELS,
 } from "../constants";
-import { IconFolder, IconFilter } from "./Icons";
+import { IconFolder, IconFilter, IconEdit } from "./Icons";
 import { api } from "../api";
 import { useAuth } from "../context/AuthContext";
 import type { RequestDocumentOut, ChecklistItemDocumentOut } from "../types";
@@ -443,7 +443,20 @@ export interface ElectronicSignature {
   signedAt: string;
   signatureId: string;
   statement: string;
+  style: SignatureStyle;
 }
+
+export type SignatureStyle = "professional" | "classic" | "handwritten";
+
+const SIGNATURE_STYLE_OPTIONS: Array<{
+  value: SignatureStyle;
+  label: string;
+  description: string;
+}> = [
+  { value: "professional", label: "Professional", description: "Clean and formal" },
+  { value: "classic", label: "Classic", description: "Traditional serif" },
+  { value: "handwritten", label: "Handwritten", description: "Personal script" },
+];
 
 // Deliberate electronic-signature ceremony for approval checkpoints. The
 // identity is locked to the authenticated account; the user must open the
@@ -463,6 +476,7 @@ export function SignField({
   const [signature, setSignature] = useState<ElectronicSignature | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [consented, setConsented] = useState(false);
+  const [signatureStyle, setSignatureStyle] = useState<SignatureStyle>("professional");
   const signed = !!signature;
 
   useEffect(() => {
@@ -478,6 +492,7 @@ export function SignField({
       signedAt: new Date().toISOString(),
       signatureId: `ESIG-${globalThis.crypto?.randomUUID?.().toUpperCase() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`.toUpperCase()}`,
       statement: "I confirm my identity and intend this electronic signature to authorize the approval decision.",
+      style: signatureStyle,
     };
     setSignature(applied);
     onSignedChange(applied);
@@ -494,11 +509,11 @@ export function SignField({
       </span>
       <button
         type="button"
-        className={`btn btn-sm ${signed ? "btn-success" : ""}`}
+        className={`btn btn-sm esign-trigger${signed ? " signed" : ""}`}
         disabled={disabled || !userName}
         onClick={() => { setConsented(false); setDialogOpen(true); }}
       >
-        {signed ? "✓ E-signed" : "Add e-signature"}
+        {signed ? <><span className="esign-trigger-check" aria-hidden="true">✓</span><span>E-signed</span></> : <><IconEdit /><span>Add e-signature</span></>}
       </button>
       {dialogOpen && (
         <Modal title="Apply electronic signature" onClose={() => setDialogOpen(false)} variant="dialog" preventBackdropClose>
@@ -506,9 +521,28 @@ export function SignField({
             <div className="esign-security-note"><span>✓</span><div><strong>Authenticated identity</strong><small>Your signature is locked to the currently signed-in account and will be recorded with the approval audit entry.</small></div></div>
             <div className="esign-preview" aria-label={`Electronic signature preview for ${userName}`}>
               <small>SIGNATURE PREVIEW</small>
-              <strong>{userName}</strong>
+              <strong className={`signature-style-${signatureStyle}`}>{userName}</strong>
               <span>QualityShield electronic approval</span>
             </div>
+            <fieldset className="esign-style-picker">
+              <legend>Choose signature style</legend>
+              <div className="esign-style-options">
+                {SIGNATURE_STYLE_OPTIONS.map((option) => (
+                  <label key={option.value} className={signatureStyle === option.value ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name="signature-style"
+                      value={option.value}
+                      checked={signatureStyle === option.value}
+                      onChange={() => setSignatureStyle(option.value)}
+                    />
+                    <span className={`esign-style-sample signature-style-${option.value}`}>{userName}</span>
+                    <strong>{option.label}</strong>
+                    <small>{option.description}</small>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
             <dl className="esign-details"><div><dt>Signer</dt><dd>{userName}</dd></div><div><dt>Purpose</dt><dd>Authorize this workflow approval</dd></div><div><dt>Audit evidence</dt><dd>Account, role, server timestamp, decision and signature reference</dd></div></dl>
             <label className="esign-consent"><input type="checkbox" checked={consented} onChange={(event) => setConsented(event.target.checked)} /><span><strong>I agree to sign electronically.</strong><small>I confirm my identity and intend this signature to authorize the approval decision.</small></span></label>
             <div className="modal-actions esign-actions"><button type="button" className="btn btn-sm" onClick={() => setDialogOpen(false)}>Cancel</button><button type="button" className="btn btn-success btn-sm" disabled={!consented} onClick={applySignature}>Apply signature</button></div>
@@ -528,7 +562,7 @@ export function withSignature(
 ): string {
   if (!signature) return comments;
   const base = (comments || "").trim();
-  return `${base ? base + " " : ""}[Electronic signature | Signer: ${signature.signer} | Applied: ${signature.signedAt} | Signature ID: ${signature.signatureId} | Intent: ${signature.statement}]`;
+  return `${base ? base + " " : ""}[Electronic signature | Signer: ${signature.signer} | Applied: ${signature.signedAt} | Signature ID: ${signature.signatureId} | Style: ${signature.style} | Intent: ${signature.statement}]`;
 }
 
 interface ApprovalDecisionButtonsProps {

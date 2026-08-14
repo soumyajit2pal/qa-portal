@@ -61,14 +61,14 @@ import { usePaginatedList } from "../../hooks/usePaginatedList";
 import { NewSignOffModal } from "../governance/SignOff";
 
 // Priority/Risk Rating are real columns on FunctionalRequest itself. Every
-// other field here (Application Name, Epic Number, CR Number, Change Type,
+// other field here (Application Name, CR Number/EPIC Number, Change Type,
 // Deployment Environment, Target Promotion Environment, Release Version,
 // Build Number, Target Release Date) is otherwise delegated (read-only) from
 // the parent QA Request -- update_functional (backend) writes those straight
 // through to the linked QA Request instead, since the QA Request gateway
 // itself can no longer be edited once it's left Draft (see
 // GATEWAY_EDITABLE_STATUSES) -- this is the only place left to fix one of
-// them after that point. Application Name/Epic Number/CR Number identify
+// them after that point. Application Name/CR Number/EPIC Number identify
 // *which* request this actually is, so -- once raised -- only an Admin can
 // change them (backend-enforced too, see update_functional's
 // _ADMIN_ONLY_FIELDS); everyone else sees them locked. Department stays
@@ -88,8 +88,7 @@ function FunctionalFormModal({
     priority: editing.priority || "Medium",
     risk_rating: editing.risk_rating || "Medium",
     application_name: editing.application_name || "",
-    epic_number: editing.epic_number || "",
-    cr_number: editing.cr_number || "",
+    cr_number: editing.cr_number || editing.epic_number || "",
     change_type: editing.change_type || "New",
     environment: editing.environment || "SIT",
     target_promotion_environment: editing.target_promotion_environment || "UAT",
@@ -185,7 +184,7 @@ function FunctionalFormModal({
       )}
       {!isAdmin && (
         <p className="muted small" style={{ marginTop: -4 }}>
-          Application Name, Epic Number and Change Request ID(s) are locked once
+          Application Name and CR Number/EPIC Number are locked once
           this request has been raised -- only an Administrator can change them.
         </p>
       )}
@@ -202,14 +201,7 @@ function FunctionalFormModal({
                 onChange={(e) => set("application_name", e.target.value)}
               />
             </Field>
-            <Field label="Epic Number">
-              <input
-                disabled={!isAdmin}
-                value={form.epic_number}
-                onChange={(e) => set("epic_number", e.target.value)}
-              />
-            </Field>
-            <Field label="Change Request ID(s)">
+            <Field label="CR Number/EPIC Number">
               <input
                 disabled={!isAdmin}
                 value={form.cr_number}
@@ -1176,11 +1168,8 @@ function FunctionalDetail({
                 </span>
               )}
             </DetailField>
-            <DetailField label="Epic Number">
-              {req.epic_number || "—"}
-            </DetailField>
-            <DetailField label="Change Request ID(s)">
-              {req.cr_number || "—"}
+            <DetailField label="CR Number/EPIC Number">
+              {req.cr_number || req.epic_number || "—"}
             </DetailField>
             <DetailField label="Change Type">
               {req.change_type || "—"}
@@ -1894,9 +1883,9 @@ export default function Functional() {
               render: (r) => r.application_name || "—",
             },
             {
-              key: "epic_number",
-              header: "Epic Number",
-              render: (r) => r.epic_number || "—",
+              key: "cr_number",
+              header: "CR Number/EPIC Number",
+              render: (r) => r.cr_number || r.epic_number || "—",
             },
             {
               key: "requester_id",

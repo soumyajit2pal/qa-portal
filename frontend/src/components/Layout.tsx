@@ -10,7 +10,6 @@ import {
   IconHelp,
 } from './Icons'
 import ClearableSearchInput from './ClearableSearchInput'
-import NotificationBell from './NotificationBell'
 
 interface NavItem {
   to: string
@@ -280,7 +279,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
       <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">
-          <span className="qualitysphere-mark" aria-hidden="true"><b>Q</b><i>S</i></span>
+          <img className="qualityshield-app-logo" src="/qualityshield-logo.png" alt="" aria-hidden="true" />
           <div className="brand-copy">
             <h1>Quality<span>Shield</span></h1>
             <img className="bank-wordmark sidebar-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
@@ -351,7 +350,11 @@ export default function Layout({ children }: { children?: ReactNode }) {
             <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">
-            {user && <NotificationBell />}
+            {hasRole(user, 'REQUESTER', 'BUSINESS_ANALYST') && (
+              <button className="btn btn-primary btn-sm" onClick={() => navigate('/qa-requests', { state: { openNew: true } })}>
+                <IconPlus width={14} height={14} /> New QA request
+              </button>
+            )}
             {user && (
               <div className="topbar-user-menu" ref={userMenuRef}>
                 <button
@@ -388,11 +391,6 @@ export default function Layout({ children }: { children?: ReactNode }) {
               </div>
             )}
             {!user && <span className="topbar-user-context"><span className="status-dot" />Signed in</span>}
-            {hasRole(user, 'REQUESTER', 'BUSINESS_ANALYST') && (
-              <button className="btn btn-primary btn-sm" onClick={() => navigate('/qa-requests', { state: { openNew: true } })}>
-                <IconPlus width={14} height={14} /> New QA request
-              </button>
-            )}
           </div>
         </div>
         <div className="content">{children}</div>

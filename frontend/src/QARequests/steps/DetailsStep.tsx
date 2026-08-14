@@ -5,7 +5,7 @@ import SearchableSelect from "../../components/SearchableSelect";
 import { CHANGE_TYPES, DEPLOYMENT_ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
 import { ApplicationMasterOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
-import { CR_NUMBER_REGEX, EPIC_NUMBER_REGEX } from "../validation";
+import { CR_OR_EPIC_NUMBER_REGEX } from "../validation";
 
 // Sentinel dropdown value for "Other" -- never a real application name (all
 // real names are always upper-cased, see backend routers/qa_requests.py::
@@ -33,7 +33,6 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
     ? [form.department, ...departmentOptions]
     : departmentOptions;
   const [crError, setCrError] = useState("");
-  const [epicError, setEpicError] = useState("");
   // Approved names only -- a brand-new name typed via "Other" doesn't show up
   // here until an Application Owner, then an SM, both from the requester's
   // department, approve it in turn (see backend
@@ -137,10 +136,11 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
                 : "Fixed to your registered department. Contact an Administrator to add more."}
             </p>
           </Field>
-          <Field label="Change Request ID(s) *">
+          <Field label="CR Number/EPIC Number *">
             <input
               required
-              maxLength={8}
+              maxLength={11}
+              placeholder="e.g. CR-1234 or EPIC-123456"
               value={form.cr_number}
               onChange={(e) => {
                 set("cr_number", e.target.value.toUpperCase());
@@ -150,8 +150,8 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
                 if (crError) setCrError("");
               }}
               onBlur={(e) => {
-                if (e.target.value && !CR_NUMBER_REGEX.test(e.target.value)) {
-                  setCrError("Invalid format. Example: CR-1234");
+                if (e.target.value && !CR_OR_EPIC_NUMBER_REGEX.test(e.target.value)) {
+                  setCrError("Invalid format. Example: CR-1234 or EPIC-123456");
                 } else {
                   setCrError("");
                 }
@@ -160,37 +160,10 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
             {/* Plain inline text, not the shared ErrorText -- that component
                 renders a full blocking dialog (Modal), which is right for a
                 stopped save/submit action but was wrong here: tabbing through
-                both this field and Epic Number while either was invalid
-                popped up that dialog per field, so two near-identical
-                "invalid format" popups could appear stacked on screen at
-                once, reading as the same error "showing multiple times". */}
+                this field was invalid. */}
             {crError && (
               <p className="small" style={{ color: "var(--danger)", margin: "4px 0 0" }}>
                 {crError}
-              </p>
-            )}
-          </Field>
-
-          <Field label="Epic Number *">
-            <input
-              required
-              maxLength={10}
-              value={form.epic_number}
-              onChange={(e) => {
-                set("epic_number", e.target.value.toUpperCase());
-                if (epicError) setEpicError("");
-              }}
-              onBlur={(e) => {
-                if (e.target.value && !EPIC_NUMBER_REGEX.test(e.target.value)) {
-                  setEpicError("Invalid format. Example: EPIC-1234");
-                } else {
-                  setEpicError("");
-                }
-              }}
-            />
-            {epicError && (
-              <p className="small" style={{ color: "var(--danger)", margin: "4px 0 0" }}>
-                {epicError}
               </p>
             )}
           </Field>

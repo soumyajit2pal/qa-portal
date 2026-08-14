@@ -595,8 +595,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                 </span>
               )}
             </DetailField>
-            <DetailField label="Epic Number">{req.epic_number || '—'}</DetailField>
-            <DetailField label="CR Number">{req.cr_number || '—'}</DetailField>
+            <DetailField label="CR Number/EPIC Number">{req.cr_number || req.epic_number || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
             <DetailField label="Application Owner">{req.application_owner || '—'}</DetailField>
           </DetailSection>

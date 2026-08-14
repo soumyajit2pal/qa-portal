@@ -43,13 +43,10 @@ export function TypeStep({ form, set }: Props) {
       )}
       {form.request_types.length > 0 && (
         <p className="muted small" style={{ marginTop: 10 }}>
-          This QA Request is just the intake form — a separate request with its own unique ID will be raised
-          for each selected type, landing straight at SM Approval Pending the moment you submit (no separate
-          Draft/Submit step of its own): Functional Testing / Sanity Testing / Regression Testing / UAT Support
-          are combined into one Functional Testing Request, while SAST, DAST, and Performance Testing
-          each get their own separate request (see the extra page(s) added above for the ones that need more
-          detail up front). Every one of these runs its own workflow from here — this gateway record itself
-          has no approval step of its own.
+          This QA Request is only an intake form. 
+          On submission, separate requests are created for each selected testing type and sent directly for SM Approval. 
+          Functional, Sanity, Regression, and UAT Support are combined into one Functional Testing Request, 
+          while SAST, DAST, and Performance Testing create separate requests with their own IDs and workflows.
         </p>
       )}
     </div>

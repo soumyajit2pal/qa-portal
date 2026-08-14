@@ -25,8 +25,7 @@ import { validEnvironmentPromotion, validTargetPromotionOptions } from '../const
 const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
   { key: 'application_name', label: 'Application Name' },
   { key: 'application_owner', label: 'Application Owner' },
-  { key: 'cr_number', label: 'Change Request ID(s)' },
-  { key: 'epic_number', label: 'Epic Number' },
+  { key: 'cr_number', label: 'CR Number/EPIC Number' },
   { key: 'technology_stack', label: 'Technology Stack' },
   // { key: 'release_version', label: 'Release Version / Hash Value' },
   // { key: 'build_number', label: 'Build Number / Hash Value' },
@@ -35,8 +34,7 @@ const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
 // Exported so steps/DetailsStep.tsx's inline onBlur error text checks the
 // exact same rule as the real gate below, instead of keeping its own
 // separate copy that could silently drift out of sync with this one.
-export const CR_NUMBER_REGEX = /^[A-Z]{2,4}-[0-9]{1,4}$/
-export const EPIC_NUMBER_REGEX = /^[A-Z]{2,4}-[0-9]{1,6}$/
+export const CR_OR_EPIC_NUMBER_REGEX = /^(?:CR-[0-9]{1,4}|EPIC-[0-9]{1,6})$/
 
 // Because each wizard step's fields are unmounted once you move to another
 // step, the browser's native `required` attribute can't catch a missing
@@ -48,17 +46,14 @@ export function detailsStepError(f: QARequestForm): string | null {
   const missing = REQUIRED_DETAIL_FIELDS.filter(({ key }) => !String(f[key] || '').trim())
   if (missing.length > 0) return `Please fill in: ${missing.map((m) => m.label).join(', ')}`
   // Reported directly: DetailsStep.tsx already showed an inline "Invalid
-  // format" message under Change Request ID/Epic Number on blur, but that
+  // format" message under CR Number/EPIC Number on blur, but that
   // check lived only in local component state -- Next/Submit never
   // consulted it, so a clearly-flagged invalid value still went through.
   // Enforced here instead, the same place every other mandatory-field rule
   // already lives, so it actually blocks Next/Submit like the on-screen
   // error implies it should.
-  if (!CR_NUMBER_REGEX.test(f.cr_number.trim())) {
-    return 'Change Request ID(s) is not in a valid format. Example: CR-1234'
-  }
-  if (!EPIC_NUMBER_REGEX.test(f.epic_number.trim())) {
-    return 'Epic Number is not in a valid format. Example: EPIC-1234'
+  if (!CR_OR_EPIC_NUMBER_REGEX.test(f.cr_number.trim())) {
+    return 'CR Number/EPIC Number is not in a valid format. Example: CR-1234 or EPIC-123456'
   }
   // Reported directly -- see this function's own header comment for the
   // full story. Only enforced when there's actually a valid choice

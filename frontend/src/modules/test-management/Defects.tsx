@@ -260,53 +260,24 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
   hasEvidence: boolean
   onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
-  // 2026-08 -- reported directly: "During assigning defect, department
-  // should be auto populated based on linked request or Failed / Blocked
-  // Test Execution." defect.project_department (the linked Test Cycle's own
-  // Project.department -- only set once this defect is linked to an
-  // execution) takes priority over requestDepartment (the linked QA
-  // Request's own department, previously the only source) as the more
-  // specific "which team actually owns the failing area" signal; falls back
-  // to requestDepartment when no execution is linked (e.g. a defect opened
-  // standalone), then the defect's own already-recorded assigned_team when
-  // re-assigning. Still just a prefill -- the Department field stays a
-  // normal editable SearchableSelect below, this only decides its starting
-  // value.
+
   const autoDepartment = defect.project_department || requestDepartment || ''
   const [values, setValues] = useState<Record<string, any>>(
     target === 'Assigned' ? { assigned_team: autoDepartment || defect.assigned_team || '' } : {},
   )
-  // Every free-text field below (Resolution Summary, Root Cause, Fix
-  // Details, Retest Actual Result, Retest Remarks, Closure Remarks,
-  // Reopening Reason, Deferral Reason, Rejection Reason, generic Remarks)
-  // is now a JiraRichTextField, so pasted/uploaded screenshots are tracked
-  // per field-key here rather than per named useState (there are simply too
-  // many possible fields, only ever one small subset of which is visible at
-  // once depending on `target`, to justify one useState each).
+
   const [imageValues, setImageValues] = useState<Record<string, File[]>>({})
   const setImages = (key: string) => (files: File[]) => setImageValues((current) => ({ ...current, [key]: files }))
-  // Set once the transition itself has succeeded -- if the follow-up
-  // attachment upload then fails, we must not resubmit the transition
-  // (the defect has already moved to `target`; re-posting could 400 on an
-  // invalid transition, or silently re-run side effects like reopen_count).
-  // Instead the form switches into a "retry attaching evidence / continue
-  // without it" state against the already-transitioned record, same pattern
-  // as CreateDefectModal/EditDefectModal.
+
   const [savedDefect, setSavedDefect] = useState<DefectOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const set = (key: string, value: any) => setValues((current) => ({ ...current, [key]: value }))
-  // The responsible user must belong to the Department the defect is being
-  // routed to -- Department drives the Assignee choice, not the other way
-  // around, so this is only ever the users actually mapped to whichever
-  // department is currently selected (empty until a department is picked).
+
   const departmentUsers = values.assigned_team
     ? users.filter((user) => user.is_active && hasDepartment(user, values.assigned_team))
     : []
 
-  // JiraRichTextField's contentEditable div has no native "required"
-  // attribute to lean on (unlike the textareas it replaces), so the fields
-  // that used to be `<textarea required>` need their own check here.
   function validateRichFields(): string | null {
     const need = (key: string, label: string) => (!values[key] || !String(values[key]).trim()) ? `${label} is required` : null
     if (target === 'Resolved') return need('resolution_summary', 'Resolution Summary') || need('root_cause', 'Root Cause') || need('fix_details', 'Fix Details')
@@ -692,7 +663,7 @@ export default function Defects() {
 
   // PAG-006 -- the register only ever holds the lightweight DefectListOut
   // shape; opening a row (by id) or resolving the `?open=<defect_key>`
-  // deep-link (Global Search, notifications, LinkedDefects.tsx, and this
+  // deep-link (Global Search, LinkedDefects.tsx, and this
   // page's own "open what was just created" step) fetches the full
   // DefectOut before showing the detail panel.
   const openDefect = useCallback(async (keyOrId: number | string) => {

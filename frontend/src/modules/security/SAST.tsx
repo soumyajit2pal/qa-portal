@@ -27,7 +27,7 @@ const SAST_COMPONENT_FIELDS: RepeatableGroupField[] = [
 // Standalone SAST request creation is DISABLED per request -- a SAST request
 // can now only come into being by including "SAST" in a QA Request's request
 // types (see backend routers/qa_requests.py::_sync_linked_security_requests),
-// which creates it with just application_name/epic_number/cr_number/risk
+// which creates it with just application_name/cr_number/risk
 // populated. This modal is therefore edit-only now: it fills in the rest of
 // the mandatory details (repository URL, branch, commit ID, tech stack,
 // build number) on that auto-created request before the security team picks
@@ -47,8 +47,8 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
       : [{ repository_url: '', git_branch: '', commit_id: '', technology_stack: '', build_number: '' }]
   }
   const [form, setForm] = useState({
-    application_name: editing.application_name || '', epic_number: editing.epic_number || '',
-    cr_number: editing.cr_number || '',
+    application_name: editing.application_name || '',
+    cr_number: editing.cr_number || editing.epic_number || '',
     components: toRows(editing.components),
     risk_category: editing.risk_category || 'Medium', priority: editing.priority || 'Medium',
     hash_value: editing.hash_value || '',
@@ -82,8 +82,7 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   function formError(): string | null {
     const missing: string[] = []
     if (!form.application_name.trim()) missing.push('Application Name')
-    if (!form.epic_number.trim()) missing.push('Epic Number')
-    if (!form.cr_number.trim()) missing.push('CR Number')
+    if (!form.cr_number.trim()) missing.push('CR Number/EPIC Number')
     const incomplete = form.components.some((c) => SAST_COMPONENT_FIELDS.some((f) => !c[f.key]?.trim()))
     if (incomplete) missing.push('Repository Details (every field, for every repository row)')
     return missing.length > 0 ? `Please fill in: ${missing.join(', ')}` : null
@@ -127,7 +126,7 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
       )}
       {!isAdmin && (
         <p className="muted small" style={{ marginTop: -4 }}>
-          Application Name, Epic Number and CR Number are locked once this request has been raised --
+          Application Name and CR Number/EPIC Number are locked once this request has been raised --
           only an Administrator can change them.
         </p>
       )}
@@ -136,8 +135,7 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
           {/* <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div> */}
           <div className="form-row">
             <Field label="Application Name *"><input required disabled={!isAdmin} value={form.application_name} onChange={(e) => set('application_name', e.target.value)} /></Field>
-            <Field label="Epic Number *"><input required disabled={!isAdmin} value={form.epic_number} onChange={(e) => set('epic_number', e.target.value)} /></Field>
-            <Field label="CR Number *"><input required disabled={!isAdmin} value={form.cr_number} onChange={(e) => set('cr_number', e.target.value)} /></Field>
+            <Field label="CR Number/EPIC Number *"><input required disabled={!isAdmin} value={form.cr_number} onChange={(e) => set('cr_number', e.target.value)} /></Field>
           </div>
         </div>
 
@@ -600,8 +598,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                 </span>
               )}
             </DetailField>
-            <DetailField label="Epic Number">{req.epic_number || '—'}</DetailField>
-            <DetailField label="CR Number">{req.cr_number || '—'}</DetailField>
+            <DetailField label="CR Number/EPIC Number">{req.cr_number || req.epic_number || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
             <DetailField label="Application Owner">{req.application_owner || '—'}</DetailField>
           </DetailSection>

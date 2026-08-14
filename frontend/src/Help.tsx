@@ -28,8 +28,8 @@ interface ManualTopic {
 const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'getting-started', number: '01', title: 'Getting started',
-    summary: 'Login, profile, navigation, dashboard, table controls, notifications, and first request.',
-    keywords: 'login ldap standard profile department navigation dashboard insights columns table drawer pending approval notification request quick start',
+    summary: 'Login, profile, navigation, dashboard, table controls, and your first request.',
+    keywords: 'login ldap standard profile department navigation dashboard insights columns table drawer pending approval request quick start',
   },
   {
     id: 'roles', number: '02', title: 'Roles and access model',
@@ -256,7 +256,7 @@ export default function Help() {
               <SopSteps items={[
                 { title: 'Sign in', text: 'Use the login method assigned to your account: Standard credentials or LDAP / Active Directory.' },
                 { title: 'Complete first-login setup', text: 'A new LDAP user selects exactly one primary department. Secondary department access can be added later only by an Administrator. The account initially receives the lowest-privilege Requester role until access is reviewed.' },
-                { title: 'Check pending work', text: 'Review the login notification, Pending Approvals, and status badges before starting a new action.' },
+                { title: 'Check pending work', text: 'Review Pending Approvals and status badges before starting a new action.' },
                 { title: 'Use record IDs', text: 'Reference the full TQA ID in comments, evidence, exports, and support requests so the exact record is traceable.' },
               ]} />
               <h3 className="help-subheading">Working efficiently in lists and details</h3>
@@ -378,7 +378,7 @@ export default function Help() {
                 <article className="reject"><IconWarning /><h3>Reject</h3><p>Use for a decision that should not proceed. Provide the business, control, or technical reason.</p></article>
               </div>
               <Callout title="The decision panel is consistent across workflows">
-                Select Add e-signature, review the locked logged-in identity and signature preview, accept the electronic-signature consent statement, and apply the signature. Then choose Approve, Return to Requester, or Reject in Workflow Decision. Approval records the signer, intent, signature reference, account, role, and authoritative server timestamp in the Approval Workflow Log. QA Sign-off details and exported certificates show the rendered signature together with its full Signature ID and signing time.
+                Select Add e-signature, review the locked logged-in identity, choose Professional, Classic, or Handwritten style, accept the electronic-signature consent statement, and apply the signature. Then choose Approve, Return to Requester, or Reject in Workflow Decision. Approval records the signer, selected style, intent, signature reference, account, role, and authoritative server timestamp in the Approval Workflow Log. QA Sign-off details and exported certificates show the selected signature style together with its full Signature ID and signing time.
               </Callout>
               <p className="help-inline-note">This is an auditable in-application electronic signature. A certificate-based PKI signature using a USB token, DSC provider, or enterprise signing gateway requires a separately configured trust-provider integration.</p>
               <h3 className="help-subheading">Evidence rules</h3>

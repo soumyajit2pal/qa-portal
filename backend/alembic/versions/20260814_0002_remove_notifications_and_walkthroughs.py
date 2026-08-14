@@ -70,8 +70,10 @@ def upgrade() -> None:
     op.execute(
         """
         BEGIN
-          DELETE FROM qap_system_settings
-          WHERE key IN ('test_approval_reminder_days', 'test_approval_escalation_days');
+          EXECUTE IMMEDIATE q'[
+            DELETE FROM qap_system_settings
+            WHERE key IN ('test_approval_reminder_days', 'test_approval_escalation_days')
+          ]';
         EXCEPTION
           WHEN OTHERS THEN
             IF SQLCODE != -942 THEN RAISE; END IF;

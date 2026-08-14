@@ -593,11 +593,8 @@ export function RequestDetail({
             <DetailField label="Department">
               {req.department || "—"}
             </DetailField>
-            <DetailField label="Change Request ID(s)">
+            <DetailField label="CR Number/EPIC Number">
               {req.cr_number || "—"}
-            </DetailField>
-            <DetailField label="Epic Number">
-              {req.epic_number || "—"}
             </DetailField>
             <DetailField label="Change Type">
               {req.change_type || "—"}

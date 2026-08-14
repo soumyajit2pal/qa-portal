@@ -32,8 +32,8 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
   const { user } = useAuth()
   const isAdmin = hasRole(user, 'ADMIN')
   const [form, setForm] = useState({
-    application_name: editing.application_name || '', epic_number: editing.epic_number || '',
-    cr_number: editing.cr_number || '', environment: editing.environment || 'UAT',
+    application_name: editing.application_name || '',
+    cr_number: editing.cr_number || editing.epic_number || '', environment: editing.environment || 'UAT',
     risk_category: editing.risk_category || 'Medium', priority: editing.priority || 'Medium',
     request_type: (editing.request_type || '').split(',').filter(Boolean) as string[],
     change_type: editing.change_type || '', vendor_si_partner: editing.vendor_si_partner || '',
@@ -96,7 +96,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
       )}
       {!isAdmin && (
         <p className="muted small" style={{ marginTop: -4 }}>
-          Application Name, Epic Number and CR Number are locked once this request has been raised --
+          Application Name and CR Number/EPIC Number are locked once this request has been raised --
           only an Administrator can change them.
         </p>
       )}
@@ -105,8 +105,7 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
           {/* <div className="form-section-title">Identity{!isAdmin ? ' (Admin-only)' : ''}</div> */}
           <div className="form-row">
             <Field label="Application Name *"><input required disabled={!isAdmin} value={form.application_name} onChange={(e) => set('application_name', e.target.value)} /></Field>
-            <Field label="Epic Number"><input disabled={!isAdmin} value={form.epic_number} onChange={(e) => set('epic_number', e.target.value)} /></Field>
-            <Field label="CR Number"><input disabled={!isAdmin} value={form.cr_number} onChange={(e) => set('cr_number', e.target.value)} /></Field>
+            <Field label="CR Number/EPIC Number"><input disabled={!isAdmin} value={form.cr_number} onChange={(e) => set('cr_number', e.target.value)} /></Field>
           </div>
         </div>
 
@@ -517,8 +516,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
                 </span>
               )}
             </DetailField>
-            <DetailField label="Epic Number">{req.epic_number || '—'}</DetailField>
-            <DetailField label="CR Number">{req.cr_number || '—'}</DetailField>
+            <DetailField label="CR Number/EPIC Number">{req.cr_number || req.epic_number || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
             <DetailField label="Application Owner">{req.application_owner || '—'}</DetailField>
             <DetailField label="Change Type">{req.change_type || '—'}</DetailField>

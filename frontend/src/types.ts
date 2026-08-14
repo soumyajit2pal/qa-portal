@@ -301,6 +301,7 @@ export interface FunctionalListOut {
   priority?: string | null
   application_name?: string | null
   epic_number?: string | null
+  cr_number?: string | null
   department?: string | null
   application_owner?: string | null
   qa_request?: LinkedRequestRef | null
@@ -1579,33 +1580,6 @@ export interface PendingApprovalItem {
   submitted_by?: string | null
   submitted_at?: string | null
   path: string
-}
-
-// 2026-08 Test Approval Workflow refactor (section 10) -- in-app-only
-// notifications; see backend/app/routers/notifications.py. No email/SMTP
-// delivery exists anywhere in this app.
-export interface NotificationOut {
-  id: number
-  recipient_id: number
-  event_type: string
-  entity_type: string
-  entity_id: number
-  entity_key?: string | null
-  message: string
-  created_by_id?: number | null
-  created_by_name?: string | null
-  created_at: string
-  read_at?: string | null
-}
-
-// GET/PATCH /api/system-settings/approval-notifications (Admin-only).
-export interface ApprovalNotificationSettingsOut {
-  reminder_business_days: number
-  escalation_business_days: number
-}
-export interface ApprovalNotificationSettingsUpdateIn {
-  reminder_business_days: number
-  escalation_business_days: number
 }
 
 export interface StorageSettingsOut {

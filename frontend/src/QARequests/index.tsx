@@ -174,7 +174,7 @@ export default function QARequests() {
               filterValue: (r) => r.request_id || `Draft #${r.id}`,
             },
             { key: "application_name", header: "Application" },
-            { key: "epic_number", header: "Epic Number" },
+            { key: "cr_number", header: "CR Number/EPIC Number" },
             {
               key: "requester_id",
               header: "Requester",

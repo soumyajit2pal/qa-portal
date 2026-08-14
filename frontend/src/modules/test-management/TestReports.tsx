@@ -8,13 +8,6 @@ import {
   VersionImpactOut, ProjectPortfolioOut, PageOut,
 } from '../../types'
 
-// SRS section 11 -- the 5 Test Management reporting views. Each report is a
-// read-only aggregate served by test_reports.py; RPT-002 "counts shall link
-// to the filtered underlying records" is satisfied by every grouped row
-// carrying enough identifying detail (project/cycle/test case key,
-// requirement, status) to find the matching rows yourself in Repository/
-// Execution -- this page intentionally stays a pure aggregate dashboard
-// rather than re-implementing those list views' filtering here too.
 type ReportTab = 'health' | 'cycle-progress' | 'defects' | 'version-impact' | 'portfolio'
 
 const TABS: { id: ReportTab; label: string; scope: 'project' | 'cycle' | 'none' }[] = [
@@ -42,10 +35,6 @@ function barTone(label: string): string {
   return 'tone-primary'
 }
 
-// A simple horizontal-bar breakdown -- used for every "counts by X" group
-// across all 5 reports rather than a charting library, matching how
-// Dashboard.tsx's own summary tiles favor plain styled bars/numbers over a
-// chart dependency.
 function CountBars({ rows, total }: { rows: { key: string; count: number }[]; total?: number }) {
   const max = Math.max(1, ...rows.map((r) => r.count))
   return (
@@ -123,8 +112,7 @@ function CycleProgressPanel({ projectId }: { projectId: number }) {
 
   useEffect(() => {
     setCycleId(''); setData(null)
-    // SRS 7.2 pagination rollout -- Page[T] wrapper (task #82); page_size=100
-    // + .items since this picker still wants the complete list.
+
     api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${projectId}/cycles?page_size=100`).then((page) => {
       const c = page.items
       setCycles(c)
@@ -263,9 +251,6 @@ export default function TestReports() {
 
   const load = useCallback(async () => {
     try {
-      // SRS 7.2 pagination rollout -- Page[T] wrapper (task #82);
-      // page_size=100 + .items since this picker still wants the complete
-      // list.
       const p = await api.get<PageOut<TestProjectOut>>('/api/test-projects?page_size=100').then((page) => page.items)
       setProjects(p)
       if (p.length) setProjectId(p[0].id)

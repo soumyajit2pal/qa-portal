@@ -48,6 +48,26 @@ a { color: inherit; }
 
 :focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; border-radius: 4px; }
 
+/* Generated QualityShield application mark. The transparent PNG replaces
+   the former CSS letter construction while keeping each brand lockup's
+   existing spacing and accessible text label. */
+.qualityshield-app-logo {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  display: block;
+  object-fit: contain;
+  filter: drop-shadow(0 3px 7px rgba(0, 31, 38, .2));
+}
+.qualityshield-app-logo-lg {
+  width: 68px;
+  height: 68px;
+  flex-basis: 68px;
+}
+.login-mobile-brand .qualityshield-app-logo,
+.public-help-brand .qualityshield-app-logo { width: 40px; height: 40px; flex-basis: 40px; }
+.sidebar-collapsed .qualityshield-app-logo { width: 36px; height: 36px; flex-basis: 36px; }
+
 /* Reported request: the sidebar's app-name header (.brand) and its
    username/logout footer (.sidebar-bottom), plus the top .topbar (search/
    status/+New), should stay fixed in place instead of scrolling away with
@@ -133,7 +153,7 @@ a { color: inherit; }
 .topbar .search-box {
   /* flex-shrink is intentionally allowed (unlike .right-group below) so this
      box gives up space first on narrow windows, instead of the action icons
-     (Favorites/Help/Notifications/Apps) getting squeezed off-screen -- see
+     (Favorites/Help/Apps) getting squeezed off-screen -- see
      .right-group's flex-shrink: 0 for the other half of that fix. */
   flex: 1 1 160px; min-width: 0; max-width: 420px; display: flex; align-items: center; gap: 8px; background: var(--bg);
   border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; color: var(--muted);
@@ -148,7 +168,7 @@ a { color: inherit; }
 }
 .topbar .status-pill { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
 .topbar .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.15); }
-/* flex-shrink: 0 keeps Favorites/Help/Notifications/Apps/+New always fully
+/* flex-shrink: 0 keeps Favorites/Help/Apps/+New always fully
    visible -- without it, this group shrank along with the search box on
    narrower windows and its buttons got squeezed out past the visible edge. */
 .topbar .right-group { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
@@ -812,6 +832,13 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .workflow-sign-copy strong { overflow: hidden; color: #293445; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
 .workflow-sign-copy em { color: #7c8795; font-size: 8px; font-style: normal; }
 .workflow-sign-step .btn { min-height: 28px; padding: 4px 9px; font-size: 9px; border-radius: 6px; }
+.workflow-sign-step .esign-trigger { min-height: 36px; padding: 7px 14px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex: 0 0 auto; border: 1px solid #075466; border-radius: 9px; color: #fff; background: linear-gradient(135deg,#168097 0%,#0d6678 55%,#075466 100%); box-shadow: 0 5px 13px rgba(7,84,102,.28),inset 0 1px 0 rgba(255,255,255,.2); font-size: 10.5px; font-weight: 800; letter-spacing: .01em; }
+.workflow-sign-step .esign-trigger svg { width: 15px; height: 15px; stroke-width: 2.25; }
+.workflow-sign-step .esign-trigger:hover:not(:disabled) { border-color: #043e4c; color: #fff; background: linear-gradient(135deg,#1b91aa 0%,#0b6172 55%,#043e4c 100%); box-shadow: 0 8px 18px rgba(7,84,102,.36),inset 0 1px 0 rgba(255,255,255,.24); transform: translateY(-1px); }
+.workflow-sign-step .esign-trigger:focus-visible { outline: 3px solid rgba(13,102,120,.24); outline-offset: 3px; }
+.workflow-sign-step .esign-trigger.signed { border-color: #1d693d; background: linear-gradient(135deg,#43a76c,#237747 70%); box-shadow: 0 5px 13px rgba(35,119,71,.25),inset 0 1px 0 rgba(255,255,255,.2); }
+.workflow-sign-step .esign-trigger.signed:hover:not(:disabled) { border-color: #185f37; background: linear-gradient(135deg,#4db777,#1d693d 72%); box-shadow: 0 8px 18px rgba(35,119,71,.32),inset 0 1px 0 rgba(255,255,255,.22); }
+.esign-trigger-check { display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; color: #237747; background: #fff; font-size: 10px; font-weight: 900; }
 .workflow-decision-step { display: grid; gap: 10px; max-width: 880px; padding: 9px 10px; border: 1px solid #dfe4ea; border-radius: 8px; background: #fff; }
 .workflow-decision-heading { display: flex; align-items: center; gap: 9px; }
 .workflow-decision-heading > span:last-child { display: grid; gap: 1px; }
@@ -2266,7 +2293,7 @@ tbody tr:hover { background: #f8f9fc; }
 /* topbar-user-context is now a <button> (was a plain <span>) so clicking the
    signed-in name can open the Department/Role(s) popover below -- reset the
    native button chrome so it keeps looking like the same inline label. */
-.topbar-user-menu { position: relative; }
+.topbar-user-menu { position:relative;flex:0 0 auto;margin-left:0; }
 .navigation-v2 .topbar-user-context {
   background: none; border: none; padding: 4px 6px; border-radius: 7px; cursor: pointer; font-family: inherit;
   transition: background .12s var(--ease);
@@ -3554,37 +3581,6 @@ td { padding: 12px; }
 .tm-report-population-note { margin: 0 0 16px; padding: 9px 12px; border-radius: 8px; background: #f8f9fc; }
 .tm-report-pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
 
-/* 2026-08 "Test Approval Workflow" refactor -- in-app notification bell
-   (components/NotificationBell.tsx). Reuses .topbar-user-menu/
-   .topbar-user-popover's own positioning (relative wrapper / absolute
-   right-anchored popover) via those same shared class names on the wrapper
-   and popover, so only the notification-specific bits need new rules here. */
-.topbar-notification-trigger {
-  position: relative; display: inline-flex; align-items: center; justify-content: center;
-  width: 34px; height: 34px; border-radius: 8px; border: 1px solid transparent;
-  background: none; cursor: pointer; color: #526970; padding: 0;
-}
-.topbar-notification-trigger:hover { background: var(--bg); }
-.topbar-notification-badge {
-  position: absolute; top: 1px; right: 1px; min-width: 15px; height: 15px; padding: 0 3px;
-  border-radius: 999px; background: #dc2626; color: #fff; font-size: 9px; font-weight: 700;
-  display: flex; align-items: center; justify-content: center; line-height: 1;
-}
-.topbar-notification-popover { width: 330px; padding: 10px; }
-.topbar-notification-popover-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.topbar-notification-popover-head .link-btn { padding: 2px 4px; font-size: 11px; background: none; border: none; color: var(--navy); cursor: pointer; }
-.topbar-notification-popover-head .link-btn:disabled { color: #b7bccb; cursor: default; }
-.topbar-notification-list { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-.topbar-notification-row {
-  display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px;
-  border: none; border-radius: 8px; background: none; cursor: pointer; width: 100%; font-family: inherit;
-}
-.topbar-notification-row:hover { background: var(--bg); }
-.topbar-notification-row.unread { background: #eef4ff; }
-.topbar-notification-row.unread:hover { background: #e2ecff; }
-.topbar-notification-message { font-size: 12.5px; color: var(--text); line-height: 1.4; }
-.topbar-notification-meta { font-size: 10.5px; color: #9aa1b1; }
-.topbar-notification-empty { padding: 14px 8px; text-align: center; color: #9aa1b1; font-size: 12px; }
 .tm-cycle-status-actions {
   display: inline-flex;
   flex-wrap: wrap;
@@ -4560,22 +4556,21 @@ td { padding: 12px; }
   .navigation-v7 .topbar-context { min-width:0; }
 }
 
-/* Navigation v8 — compact corporate navigation.
-   Dark Bank-teal restores visual authority; selection uses a quieter teal
-   surface and a precise edge marker instead of bright or decorative colour. */
+/* Navigation v8 — unified brand and workspace navigation. */
 .navigation-v8 .sidebar {
   width:258px;
-  border-right:1px solid #403653;
-  background:linear-gradient(180deg,#514366 0%,#3b324f 54%,#29243d 100%);
-  box-shadow:7px 0 24px rgba(35,29,52,.22);
+  border-right:1px solid #102f5b;
+  background:linear-gradient(180deg,#1d4f85 0%,#173f73 54%,#0c294f 100%);
+  box-shadow:7px 0 24px rgba(11,38,76,.2);
 }
 .navigation-v8 .sidebar .brand {
   min-height:76px;padding:13px 13px 12px 17px;
-  border-bottom:1px solid rgba(242,199,53,.18);background:rgba(2,42,51,.2);
+  border-bottom:1px solid rgba(242,199,53,.24);
+  background:linear-gradient(180deg,#1d4f85 0%,#1b497e 100%);
 }
 .navigation-v8 .qualitysphere-mark {
   width:38px;height:38px;flex-basis:38px;border:1px solid rgba(242,199,53,.72);
-  border-radius:9px;background:linear-gradient(145deg,#6c5a84 0%,#473a5f 58%,#2b2540 100%);
+  border-radius:9px;background:linear-gradient(145deg,#0f7d8d 0%,#075363 58%,#043a47 100%);
   box-shadow:0 5px 13px rgba(2,40,49,.28),inset 0 0 0 1px rgba(255,255,255,.06);
 }
 .navigation-v8 .qualitysphere-mark::before { border-color:rgba(246,210,73,.9);border-left-color:transparent; }
@@ -4619,7 +4614,7 @@ td { padding: 12px; }
 .navigation-v8 .sidebar nav a:hover .nav-icon { color:#e0f1f2;background:rgba(225,243,245,.08); }
 .navigation-v8 .sidebar nav a.active {
   color:#fff;border-color:rgba(158,215,221,.24);
-  background:linear-gradient(110deg,#77629a,#5a4979);
+  background:linear-gradient(110deg,#2474b9,#195992);
   box-shadow:0 4px 12px rgba(0,27,33,.18);font-weight:760;
 }
 .navigation-v8 .sidebar nav a.active::before {
@@ -4736,19 +4731,6 @@ td { padding: 12px; }
 
 /* Topbar account command area */
 .navigation-v8 .topbar .right-group { gap:9px; }
-.navigation-v8 .topbar-notification-trigger {
-  width:42px;height:42px;padding:0;display:grid;place-items:center;position:relative;
-  border:1px solid #d7e3e5;border-radius:10px;color:#45656c;background:#fff;
-  box-shadow:0 2px 7px rgba(26,65,72,.045);cursor:pointer;
-}
-.navigation-v8 .topbar-notification-trigger:hover,.navigation-v8 .topbar-notification-trigger[aria-expanded="true"] {
-  color:#086b7c;border-color:#a9cbd0;background:#edf7f8;
-}
-.navigation-v8 .topbar-notification-trigger svg { width:20px;height:20px;stroke-width:1.8; }
-.navigation-v8 .topbar-notification-badge {
-  min-width:18px;height:18px;padding:0 4px;display:grid;place-items:center;position:absolute;top:-5px;right:-5px;
-  border:2px solid #fff;border-radius:10px;background:#d83c42;color:#fff;font-size:8px;font-weight:850;line-height:1;
-}
 .navigation-v8 .topbar-user-context {
   min-width:178px;min-height:44px;padding:4px 9px 4px 5px;gap:9px;
   border:1px solid #d4e1e3;border-radius:10px;color:#294f57;background:#fff;
@@ -5005,8 +4987,24 @@ td { padding: 12px; }
 .esign-preview { min-height: 128px; padding: 18px 22px; display: flex; align-items: center; justify-content: center; flex-direction: column; position: relative; overflow: hidden; border: 1px solid #cddfe2; border-radius: 12px; color: #123f48; background: linear-gradient(135deg,#f8fcfc,#e9f4f5); }
 .esign-preview::after { width: 58%; height: 1px; position: absolute; bottom: 33px; content: ''; background: #8db7bd; }
 .esign-preview small { position: absolute; top: 11px; left: 13px; color: #789297; font-size: 7.5px; font-weight: 850; letter-spacing: .12em; }
-.esign-preview strong { max-width: 100%; overflow: hidden; color: #0b6677; font-family: "Brush Script MT","Segoe Script",cursive; font-size: clamp(27px,5vw,40px); font-weight: 500; line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; transform: rotate(-2deg); }
+.esign-preview > strong { max-width: 100%; overflow: hidden; color: #0b6677; font-size: clamp(20px,3vw,28px); line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
 .esign-preview span { position: absolute; right: 13px; bottom: 11px; color: #789297; font-size: 7.5px; text-transform: uppercase; letter-spacing: .08em; }
+.signature-style-professional { font-family: inherit; font-style: normal; font-weight: 750; letter-spacing: .01em; }
+.signature-style-classic { font-family: Georgia,"Times New Roman",serif; font-style: italic; font-weight: 700; letter-spacing: .015em; }
+.signature-style-handwritten { font-family: "Segoe Script","Bradley Hand","Brush Script MT",cursive; font-style: normal; font-weight: 600; letter-spacing: .02em; }
+.esign-preview > .signature-style-classic { font-size: clamp(22px,3.3vw,31px); }
+.esign-preview > .signature-style-handwritten { font-size: clamp(25px,4vw,36px); transform: rotate(-1deg); }
+.esign-style-picker { min-width: 0; margin: 0; padding: 0; border: 0; }
+.esign-style-picker legend { margin-bottom: 8px; color: #405e65; font-size: 10px; font-weight: 800; }
+.esign-style-options { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; }
+.esign-style-options label { min-width: 0; padding: 10px; display: grid; grid-template-columns: auto minmax(0,1fr); gap: 2px 7px; align-items: center; border: 1px solid #d3e1e3; border-radius: 10px; background: #fff; cursor: pointer; transition: border-color .15s ease,background .15s ease,box-shadow .15s ease; }
+.esign-style-options label:hover { border-color: #8fbac1; background: #f8fbfc; }
+.esign-style-options label.selected { border-color: #278096; background: #f0f9fb; box-shadow: 0 0 0 2px rgba(39,128,150,.1); }
+.esign-style-options input { width: 15px; height: 15px; margin: 0; accent-color: #0b6677; }
+.esign-style-sample { min-width: 0; overflow: hidden; color: #0b6677; font-size: 16px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.esign-style-sample.signature-style-handwritten { font-size: 20px; }
+.esign-style-options label > strong { grid-column: 2; color: #38575e; font-size: 9.5px; }
+.esign-style-options label > small { grid-column: 2; color: #7a9095; font-size: 8px; }
 .esign-details { margin: 0; display: grid; border: 1px solid #dce7e9; border-radius: 10px; overflow: hidden; }
 .esign-details > div { min-width: 0; padding: 9px 11px; display: grid; grid-template-columns: 110px minmax(0,1fr); gap: 12px; border-bottom: 1px solid #e7eef0; }
 .esign-details > div:last-child { border-bottom: 0; }
@@ -5019,7 +5017,8 @@ td { padding: 12px; }
 .esign-consent strong { color: #2c4d54; font-size: 11.5px; }
 .esign-consent small { color: #72868b; font-size: 9px; line-height: 1.45; }
 .esign-actions { margin-top: 0; justify-content: flex-end; }
-@media (max-width: 520px) { .esign-details > div { grid-template-columns: 1fr; gap: 3px; }.esign-preview strong { font-size: 27px; } }
+@media (max-width: 700px) { .esign-style-options { grid-template-columns: 1fr; }.esign-style-options label { grid-template-columns: auto minmax(0,1fr) auto; }.esign-style-options label > strong { grid-column: 3; grid-row: 1; }.esign-style-options label > small { grid-column: 2 / 4; } }
+@media (max-width: 520px) { .esign-details > div { grid-template-columns: 1fr; gap: 3px; }.esign-preview > strong { font-size: 20px; }.esign-preview > .signature-style-handwritten { font-size: 26px; } }
 
 /* Persisted signature evidence on the issued/signing certificate screen. */
 .signoff-signature-list { display: grid; grid-template-columns: repeat(auto-fit,minmax(300px,1fr)); gap: 12px; }
@@ -5029,7 +5028,9 @@ td { padding: 12px; }
 .signoff-signature-card header > div { display: grid; gap: 1px; }
 .signoff-signature-card header small { color: #668274; font-size: 8px; font-weight: 850; letter-spacing: .09em; text-transform: uppercase; }
 .signoff-signature-card header strong { color: #245d3d; font-size: 11px; }
-.signoff-signature-mark { min-height: 62px; padding: 12px 8px 7px; display: grid; place-items: center; border-bottom: 1px solid #a9cdb5; color: #0b6677; font-family: "Brush Script MT","Segoe Script",cursive; font-size: clamp(25px,3vw,34px); transform: rotate(-1.5deg); }
+.signoff-signature-mark { min-height: 62px; padding: 12px 8px 7px; display: grid; place-items: center; border-bottom: 1px solid #a9cdb5; color: #0b6677; font-size: clamp(18px,2vw,24px); }
+.signoff-signature-mark.signature-style-classic { font-size: clamp(20px,2.2vw,27px); }
+.signoff-signature-mark.signature-style-handwritten { font-size: clamp(23px,2.8vw,32px); transform: rotate(-1deg); }
 .signoff-signature-card dl { margin: 10px 0 0; display: grid; gap: 6px; }
 .signoff-signature-card dl > div { min-width: 0; display: grid; grid-template-columns: 82px minmax(0,1fr); gap: 8px; }
 .signoff-signature-card dt { color: #71877b; font-size: 8px; font-weight: 850; text-transform: uppercase; }
@@ -5047,6 +5048,93 @@ td { padding: 12px; }
 .security-scan-intro strong { color: #244e58; font-size: 12px; }
 .security-scan-intro span { color: #658087; font-size: 10px; line-height: 1.5; }
 .security-scan-start .modal-actions .btn-primary { display: inline-flex; align-items: center; gap: 7px; }
+
+/* Navigation-blue application theme -----------------------------------------
+   The v8 sidebar is the visual anchor for the signed-in product. Reuse its
+   blue family for every neutral/primary interaction so screens no longer mix
+   teal, indigo and blue controls. Semantic success, warning and danger
+   treatments deliberately retain their green, amber and red meaning. */
+.navigation-v8 {
+  --navy: #1d4f85;
+  --navy-light: #173f73;
+  --navy-dark: #0c294f;
+  --navy-50: #eaf2fb;
+  --accent-2: #2b72ae;
+  --border: #d8e3ef;
+}
+
+.navigation-v8 ::selection { color: #fff; background: #1d4f85; }
+.navigation-v8 :is(input,select,textarea):not([type="checkbox"]):not([type="radio"]):focus,
+.navigation-v8 .search-box:focus-within,
+.navigation-v8 .access-user-search:focus-within {
+  border-color: #2b72ae;
+  outline-color: rgba(43,114,174,.2);
+  box-shadow: 0 0 0 3px rgba(43,114,174,.13);
+}
+.navigation-v8 input:is([type="checkbox"],[type="radio"]) { accent-color: #1d4f85; }
+
+.navigation-v8 .btn {
+  border-color: #b9cce0;
+  color: #173f73;
+  background: linear-gradient(180deg,#fff 0%,#edf3f9 100%);
+  box-shadow: 0 2px 5px rgba(12,41,79,.09),inset 0 1px 0 rgba(255,255,255,.9);
+}
+.navigation-v8 .btn:hover:not(:disabled) {
+  border-color: #7fa6ca;
+  color: #123867;
+  background: linear-gradient(180deg,#fff 0%,#e1ebf5 100%);
+  box-shadow: 0 5px 13px rgba(12,41,79,.14),inset 0 1px 0 #fff;
+}
+.navigation-v8 .btn:focus-visible { outline-color: rgba(43,114,174,.28); }
+.navigation-v8 .btn-primary,
+.navigation-v8 .right-group .btn-primary,
+.navigation-v8 .tm-project-actions > button:first-child,
+.navigation-v8 .tm-play-button {
+  border-color: #173f73;
+  color: #fff;
+  background: linear-gradient(135deg,#2b72ae 0%,#1d4f85 52%,#173f73 100%);
+  box-shadow: 0 5px 13px rgba(12,41,79,.25),inset 0 1px 0 rgba(255,255,255,.18);
+}
+.navigation-v8 .btn-primary:hover:not(:disabled),
+.navigation-v8 .right-group .btn-primary:hover:not(:disabled),
+.navigation-v8 .tm-project-actions > button:first-child:hover,
+.navigation-v8 .tm-play-button:hover:not(:disabled) {
+  border-color: #0c294f;
+  color: #fff;
+  background: linear-gradient(135deg,#357fbc 0%,#194778 52%,#0c294f 100%);
+  box-shadow: 0 7px 17px rgba(12,41,79,.31);
+}
+/* Preserve workflow semantics after the general button treatment above. */
+.navigation-v8 .btn-danger { border-color:#b4232d;color:#fff;background:linear-gradient(135deg,#df5962,#b4232d 72%); }
+.navigation-v8 .btn-success { border-color:#237747;color:#fff;background:linear-gradient(135deg,#3c9b63,#237747 72%); }
+.navigation-v8 .btn-danger:hover:not(:disabled) { border-color:#8f1720;color:#fff;background:linear-gradient(135deg,#e7656e,#981c25 72%); }
+.navigation-v8 .btn-success:hover:not(:disabled) { border-color:#185f37;color:#fff;background:linear-gradient(135deg,#48a86f,#1d693d 72%); }
+
+.navigation-v8 :is(.tabs,.pill-tabs,.dashboard-tabs,.tm-result-tabs,.defect-queue-tabs) button.active,
+.navigation-v8 :is(.tabs,.pill-tabs,.dashboard-tabs,.tm-result-tabs,.defect-queue-tabs) button:hover {
+  color: #1d4f85;
+}
+.navigation-v8 :is(.tabs,.pill-tabs,.dashboard-tabs,.tm-result-tabs,.defect-queue-tabs) button.active {
+  border-bottom-color: #2b72ae;
+  box-shadow: inset 0 -2px #2b72ae;
+}
+.navigation-v8 :is(.tester-period-presets,.tm-inline-result-options) button.selected,
+.navigation-v8 .tester-period-presets button.active,
+.navigation-v8 .execution-cycle-list > button.selected {
+  border-color: #1d4f85;
+  background: #eaf2fb;
+  color: #173f73;
+  box-shadow: 0 0 0 2px rgba(29,79,133,.12);
+}
+.navigation-v8 :is(.tm-tree-panel .link-btn,.access-workspace-nav button,.tm-report-navigation > button,.defect-stage-strip button).active {
+  border-color: #9ebbd5;
+  color: #173f73;
+  background: #eaf2fb;
+  box-shadow: inset 3px 0 #1d4f85;
+}
+.navigation-v8 .main a:not(.btn):not(.nav-link) { color: #1d4f85; }
+.navigation-v8 :is(.count-pill,.tm-project-key) { color:#173f73;background:#e6eff8; }
+.navigation-v8 :is(.metric-card .value,.dashboard-page-header p,.tm-run-count.has-runs,.tm-project-card a) { color:#1d4f85; }
 .security-scan-progress { display: flex; align-items: center; gap: 12px; padding: 13px 14px; border: 1px solid #cfdceb; border-radius: 10px; background: #f7faff; }
 .security-scan-progress .api-activity-spinner { width: 22px; height: 22px; flex: 0 0 auto; }
 .security-scan-progress > div { display: grid; gap: 2px; }
