@@ -1,7 +1,7 @@
 import datetime
 import re
 from typing import Optional, List, Dict
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 RICH_TEXT_MAX_LENGTH = 10000
 
@@ -134,9 +134,16 @@ class LocalAdminUserUpdate(BaseModel):
 
 
 class DepartmentSelection(BaseModel):
-    """Ordered department selection from first-time LDAP onboarding."""
-    departments: List[str]
-    primary_department: str
+    """Exactly one primary department chosen during first-time LDAP onboarding."""
+    department: str
+
+    @field_validator("department")
+    @classmethod
+    def validate_primary_department(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Select your primary department")
+        return normalized
 
 
 class AuditLogOut(ORMModel):
@@ -182,26 +189,6 @@ class ChecklistItemOut(ORMModel):
 
 class ChecklistItemUpdate(BaseModel):
     is_complete: bool
-
-
-class WalkthroughCreate(BaseModel):
-    conducted_by: Optional[str] = None
-    participants: Optional[str] = None
-    recording_path: Optional[str] = None
-    document_path: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class WalkthroughOut(ORMModel):
-    id: int
-    session_date: datetime.datetime
-    conducted_by: Optional[str] = None
-    participants: Optional[str] = None
-    recording_path: Optional[str] = None
-    document_path: Optional[str] = None
-    qa_acknowledged_by_id: Optional[int] = None
-    qa_acknowledged_at: Optional[datetime.datetime] = None
-    notes: Optional[str] = None
 
 
 class LinkedRequestRef(ORMModel):
@@ -594,6 +581,7 @@ class FunctionalListOut(ORMModel):
     priority: Optional[str] = None
     application_name: Optional[str] = None
     epic_number: Optional[str] = None
+    cr_number: Optional[str] = None
     department: Optional[str] = None
     # Not rendered by Functional.tsx's own list table, but modules/
     # governance/SignOff.tsx's "New Sign-off Certificate" Testing Request ID
@@ -755,6 +743,50 @@ class ScanCompletionIn(BaseModel):
     logged."""
     no_findings: bool
     comments: Optional[str] = None
+
+
+class SecurityScanStartIn(BaseModel):
+    """Fortify SSC identity selected when entering the Scanning stage."""
+    application_name: str
+    application_version: str
+
+    @field_validator("application_name", "application_version")
+    @classmethod
+    def validate_scan_identity(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Application Name and Version are required")
+        return normalized
+
+
+class SecurityScanFilterOut(BaseModel):
+    title: str
+    guid: str
+    total_count: int
+    critical_count: int
+    high_count: int
+    medium_count: int
+    low_count: int
+    audit_url: Optional[str] = None
+
+
+class SecurityScanResultOut(ORMModel):
+    id: int
+    request_type: str
+    request_id: int
+    application_name: str
+    application_version: str
+    provider: str
+    provider_version_id: str
+    critical_count: int
+    high_count: int
+    medium_count: int
+    low_count: int
+    total_count: int
+    audit_url: Optional[str] = None
+    filters: List[SecurityScanFilterOut] = []
+    imported_by_id: Optional[int] = None
+    imported_at: datetime.datetime
 
 
 class CommentIn(BaseModel):
@@ -1017,6 +1049,16 @@ class DASTOut(ORMModel):
     checklist_items: List[ChecklistItemOut] = []
     # See SASTOut.suppressions above -- same idea, for DAST.
     suppressions: List[LinkedSuppressionRef] = []
+
+
+class SASTScanStartOut(BaseModel):
+    request: SASTOut
+    scan_result: SecurityScanResultOut
+
+
+class DASTScanStartOut(BaseModel):
+    request: DASTOut
+    scan_result: SecurityScanResultOut
 
 
 # ---------------- Module 4c: Performance Testing ----------------
@@ -1970,6 +2012,28 @@ class TestCaseCreate(BaseModel):
     status: str = "Draft"
     steps: List[TestStepIn] = []
 
+    @model_validator(mode="after")
+    def validate_manual_test_case(self):
+        """Manual creation must not mint an empty, unusable Draft."""
+        required_fields = {
+            "Test Type": self.test_type,
+            "Module Name": self.module_name,
+            "Test Scenario": self.test_scenario,
+            "Description": self.description,
+            "Priority": self.priority,
+        }
+        missing = [label for label, value in required_fields.items() if not (value or "").strip()]
+        if missing:
+            raise ValueError(f"Complete the mandatory fields: {', '.join(missing)}")
+        if not self.steps:
+            raise ValueError("Add at least one test step")
+        for index, step in enumerate(self.steps, start=1):
+            if not (step.step_text or "").strip():
+                raise ValueError(f"Step {index} cannot be blank")
+            if not (step.expected_result or "").strip():
+                raise ValueError(f"Expected Result for step {index} cannot be blank")
+        return self
+
 
 class TestCaseUpdate(BaseModel):
     folder_id: Optional[int] = None
@@ -2701,32 +2765,6 @@ class ProjectPortfolioOut(BaseModel):
     cycles_by_status: List[CycleStatusCountRow]
     cycle_creation_trend: List[CycleTrendPointOut]
     ownership: List[ProjectOwnershipRow]
-
-
-class NotificationOut(ORMModel):
-    """2026-08 Approval Workflow refactor section 10 -- see
-    models.Notification's own docstring."""
-    id: int
-    recipient_id: int
-    event_type: str
-    entity_type: Optional[str] = None
-    entity_id: Optional[int] = None
-    entity_key: Optional[str] = None
-    message: str
-    created_by_id: Optional[int] = None
-    created_by_name: Optional[str] = None
-    created_at: datetime.datetime
-    read_at: Optional[datetime.datetime] = None
-
-
-class ApprovalNotificationSettingsOut(BaseModel):
-    reminder_business_days: int
-    escalation_business_days: int
-
-
-class ApprovalNotificationSettingsUpdate(BaseModel):
-    reminder_business_days: int
-    escalation_business_days: int
 
 
 class StorageSettingsOut(BaseModel):

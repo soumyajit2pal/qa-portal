@@ -178,7 +178,7 @@ def delete(*keys: str) -> int:
 def try_acquire_lock(key: str, ttl_seconds: int = 300) -> bool:
     """Best-effort distributed lock (`SET key 1 NX EX ttl`) -- INF-001 runs
     multiple API worker *processes*, so any one-time startup side effect
-    (see main.py's migration/notification-sweep block) would otherwise run
+    (see main.py's startup migration block) would otherwise run
     once per worker instead of once per deployment. Returns True if the
     caller now holds the lock (i.e. should proceed with the guarded work).
 

@@ -7,7 +7,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from .. import models, schemas, pagination
 from .. import documents as doc_store
@@ -323,7 +323,22 @@ def list_requests(params: pagination.PageParams = Depends(),
     department-wide page and filtering client-side, which silently dropped
     a user's own older requests once their department's total volume for a
     request type crossed the page_size=100 ceiling (reported directly)."""
-    q = db.query(models.QARequest)
+    # Perf tuning (2026-08, reported directly: "some of the apis are taking
+    # lot of timing") -- QARequestListOut.linked_functional_requests/
+    # linked_sast_requests/linked_dast_requests/linked_performance_requests
+    # are one-to-many relationships that were previously lazy-loaded, so
+    # serializing a page of N requests issued 1 (base query) + up to 4N
+    # extra SELECTs, one per relationship per row. selectinload replaces
+    # that with exactly 4 extra queries total (one per relationship, each
+    # doing a single `WHERE qa_request_id IN (...)`), regardless of page
+    # size -- this endpoint is the busiest list in the app, so it's the
+    # highest-impact fix in this pass.
+    q = db.query(models.QARequest).options(
+        selectinload(models.QARequest.linked_functional_requests),
+        selectinload(models.QARequest.linked_sast_requests),
+        selectinload(models.QARequest.linked_dast_requests),
+        selectinload(models.QARequest.linked_performance_requests),
+    )
     q = pagination.apply_status_filter(q, params, models.QARequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
     if application_name:
@@ -348,8 +363,8 @@ def list_requests(params: pagination.PageParams = Depends(),
         q = q.filter(models.QARequest.department.in_(scope))
     # Broad "requests or IDs" search (topbar search box and the QA Requests
     # list's own search field) -- matches Request ID, Application Name, or
-    # Epic Number, not just application name.
-    q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.application_name, models.QARequest.epic_number)
+    # The consolidated CR/EPIC identifier is stored in cr_number.
+    q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.application_name, models.QARequest.cr_number)
     if not current_user.has_role(Role.ADMIN):
         # Draft and Cancelled gateways are both scratch work that was never
         # actually raised (Cancelled is only ever reached FROM Draft -- see
@@ -1096,8 +1111,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         ("Application & Change", [
             ("Application Name", obj.application_name),
             ("Application Owner", obj.application_owner),
-            ("Epic Number", obj.epic_number),
-            ("Change Request ID(s)", obj.cr_number),
+            ("CR Number/EPIC Number", obj.cr_number),
             ("Change Type", obj.change_type),
             ("Vendor / SI Partner", obj.vendor_si_partner),
             ("Technology Stack", obj.technology_stack),

@@ -502,9 +502,19 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
       })
     }, 280)
     try {
+      // Reported directly: "while uploading testcase from excel, though it's
+      // saying api timeout 30 sec, but actually upload completed, still
+      // showing error." A large workbook (many test cases, each with
+      // several step rows) can legitimately take longer than api.ts's
+      // default 30s budget to parse and create -- the browser was aborting
+      // the request and showing a timeout error for an import that kept
+      // running server-side and actually succeeded. 3 minutes gives a
+      // realistically large workbook enough room without ever getting to
+      // that false-negative state; see api.uploadForm's own timeoutMs param.
       const res = await api.uploadForm<TestCaseImportResult>(
         `/api/test-repository/projects/${projectId}/import-xlsx`,
-        { file, folder_id: targetFolder ? String(targetFolder) : undefined }
+        { file, folder_id: targetFolder ? String(targetFolder) : undefined },
+        180_000,
       )
       const remainingDisplayTime = Math.max(0, 600 - (Date.now() - startedAt))
       if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))

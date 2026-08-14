@@ -4707,3 +4707,121 @@ its own red entry). `types.ts`'s `DefectOut`/`DefectListOut` gained `not_a_defec
 **Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean;
 `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/` (only `__pycache__`/
 `uploads` runtime artifacts differed, both already excluded from the real sync).
+
+## 100. API performance tuning -- N+1 query fixes + missing indexes
+
+Reported directly: "do some api tunning, some of the apis are taking lot of timing. do some fining
+tunning." An audit across every router (list/dashboard endpoints, response schemas, and models.py's
+`@property` accessors) found two categories of real, fixable slowness -- no synthetic benchmarking, just
+the two classic causes: relationship data resolved one row at a time instead of batched, and hot filter/
+join columns with no index to use.
+
+**N+1 fixes (eager loading).** Four list endpoints were serializing computed fields that lazy-load a
+relationship *per row*, with no `joinedload`/`selectinload` -- meaning a page of N results issued 1 base
+query plus up to several *N* more, one per relationship per row:
+
+- `routers/qa_requests.py::list_requests` -- the busiest list in the app. `QARequestListOut`'s
+  `linked_functional_requests`/`linked_sast_requests`/`linked_dast_requests`/`linked_performance_requests`
+  (four one-to-many relationships) now use `selectinload`, cutting up to 4N extra queries down to a flat 4.
+- `routers/test_projects.py::list_test_projects` -- `TestProjectOut` resolves five separate `*_name`
+  fields (owner/pending_requested_by/archived_by/default_reviewer/default_qa_lead), each its own
+  many-to-one User FK. Added `joinedload` for all five (LEFT JOINs, no row-multiplication risk since
+  they're all many-to-one).
+- `routers/signoff.py::list_signoffs` -- `SignOffOut.request_department` reads
+  `source_functional_request` (a viewonly relationship matched on business ID). Added `joinedload`.
+- `routers/suppression.py::list_suppressions` -- `SuppressionOut.items` (one-to-many, `selectinload`) and
+  `.linked_request` (resolved from `sast_request`/`dast_request`, both many-to-one, `joinedload`).
+
+`dashboard.py::qa_tester_workload`'s per-tester `db.query(models.User).get(tester_id)` calls were reviewed
+too -- left as-is: each only fires once per *distinct* tester not already in the QA-team roster (the
+`if tester_id not in rows` guard already prevents repeats), so the real query count is bounded by how many
+external/historical testers exist, not by request volume -- not the N+1 pattern the other four were.
+
+**Missing indexes.** models.py already had a documented "Performance optimization indexes" pass
+(IDX-001..007) with real reasoning for what was and wasn't indexed -- but its own manual migration script,
+`backend/scripts/2026-08_add_performance_indexes.sql`, had never actually been created, so none of those
+indexes exist on a real deployment yet (only on a brand-new schema via `create_all()`). Found this gap
+first, then extended it (IDX-008) with columns that pass missed entirely: `department` on
+`SuppressionRequest`/`TestProject` (every other module's `department` already had composite coverage),
+`qa_request_id` on `FunctionalRequest`/`SASTRequest`/`DASTRequest`/`PerformanceRequest` (the FK every one
+of their own joins/relationships uses, never indexed), `QASignOff.testing_request_id` (joined against in
+`list_signoffs`), and `TestFolder.project_id` (every Test Repository folder-tree query's leading filter).
+New columns use explicit short `Index("name", ...)` objects rather than inline `index=True` where the
+table name was long enough that SQLAlchemy's auto-generated name would exceed Oracle's 30-byte identifier
+limit (e.g. `ix_qap_suppression_requests_department` is 38 bytes) -- `TestFolder.project_id` is the one
+exception, its auto-generated name lands at exactly 30 bytes.
+
+**New file:** `backend/scripts/2026-08_add_performance_indexes.sql` -- covers both the never-migrated
+IDX-001..007 set and the new IDX-008 additions, same guarded/idempotent `CREATE INDEX` pattern as this
+app's other manual migration scripts (swallows ORA-00955 "already exists" and ORA-01408 "already indexed"
+on re-run). **STILL NEEDS TO BE RUN BY HAND against the live Oracle schema before this code is deployed**
+-- a brand-new deployment gets every index automatically from `create_all()` and doesn't need it.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `rsync`+`diff -rq` confirmed
+`outputs/qa-portal/` matches `Documents/qa-portal/`.
+
+## 101. Excel test-case import -- false-negative client timeout
+
+Reported directly: "also while uploading testcase from excel, though it's saying api timeout 30 sec, but
+actually upload completed, still showing error." Root cause was entirely client-side: `frontend/src/api.ts`
+applies one flat `REQUEST_TIMEOUT_MS` (30s) `AbortController` timeout to every request uniformly, with no
+way for a caller to ask for more. `routers/test_repository.py::import_test_cases` is a single atomic
+request that parses the workbook and creates a `TestCase`/`TestCaseVersion`/`TestStep` row per step,
+row-by-row, inside one request handler with no chunking -- for a large workbook that can legitimately run
+past 30 seconds. When it did, the browser aborted the fetch and showed "The server took too long to
+respond," but FastAPI has no reason to stop mid-handler just because the client's socket closed (nothing in
+that endpoint checks `request.is_disconnected()`), so the import kept running server-side and completed
+successfully -- the user saw a hard failure for an import that had, in fact, worked.
+
+**Fix.** `api.ts`'s `RequestOptions` gained an optional `timeoutMs` override (falls back to the existing
+30s default everywhere else -- every other call site is unaffected). Threaded it through
+`api.uploadForm`'s existing signature as a third, optional parameter. `TestRepository.tsx`'s Excel import
+`submit()` now passes `180_000` (3 minutes) -- enough headroom for a realistically large workbook without
+ever hitting the false-negative state. `Admin.tsx`'s own `bulk-seed` Excel upload (Application Names) uses
+the same `uploadForm` helper and could hit an analogous edge case on a very large file, but wasn't reported
+and its rows are simpler/faster to create than a test case's multi-row step block -- left on the default
+30s rather than speculatively changed.
+
+**Verified:** `npx tsc --noEmit -p .` clean; `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches
+`Documents/qa-portal/`.
+
+## 102. "Add Test Cases to Cycle" -- N+1 refresh loop + same false-negative timeout
+
+Reported directly: "if i have 3500 testcase present, then it's allowing all in one go, then application
+going to loading stage and though it's completing the process still getting timeout error. also because of
+loading all testcases one go may be due to this system getting slow." Same underlying shape as section 101
+(Excel import), found in a different endpoint.
+
+**Backend N+1 (`routers/test_execution.py::add_test_cases_to_cycle`).** The bulk-insert itself (batched
+`IN` queries respecting Oracle's 1,000-value limit, eager-loaded, one `db.commit()`) was already reasonably
+built. What wasn't: after commit, it ran `for obj in created: db.refresh(obj)` -- one individual SELECT per
+newly created row just to repopulate server-side defaults, on top of which `TestExecutionOut` serialization
+would then lazily load `test_case`/`assigned_to`/`assigned_by`/`executed_by`/`added_by`/`runs`/
+`linked_defects` per row too, since none of that was eager-loaded going into the refresh. For a
+3,500-testcase selection that's on the order of 3,500+ extra queries -- comfortably enough to blow past
+`api.ts`'s request timeout even though the transaction had already committed successfully, matching exactly
+what was reported (the add completes, the UI times out anyway). Replaced the per-object refresh loop with a
+single Oracle-safe batched requery (reusing `_LIST_EXECUTION_EAGER_LOADS`, the same eager-load set
+`list_executions` already uses, order restored afterward since `IN` doesn't guarantee it) -- this response
+now costs a small constant number of queries regardless of selection size. While in there, found
+`_LIST_EXECUTION_EAGER_LOADS` itself was missing `added_by` even though `TestExecutionOut.added_by_name`
+reads it exactly like `assigned_by_name`/`executed_by_name` do -- added it, which also quietly speeds up the
+main paginated Test Execution list, not just this endpoint.
+
+**Frontend false-negative timeout (`api.ts`, `TestExecution.tsx`).** `api.post` had no way to override the
+flat 30s default the way `api.uploadForm` gained one in section 101. Added the same optional third
+`timeoutMs` parameter. `AddCasesModal`'s bulk "Add Selected" call now passes `180_000` (3 minutes, same
+headroom as the Excel import) -- even after the backend fix above, a few-thousand-row create is real work
+and deserves real room rather than racing the generic 30s budget meant for ordinary CRUD calls.
+
+**On "loading all testcases in one go may be...slow":** `GET .../test-cases/all` (the modal's candidate
+pool, deliberately unpaginated -- see that endpoint's own PAG-010 docstring, "Select all" needs to mean
+all of them) was already eager-loaded and filtered on `project_id` -- which is covered by section 100's
+`ix_qap_tc_proj_deleted_created` composite index, still pending the DBA-run migration script noted there.
+No further change made here; that pending index is the relevant lever for this part of the report.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean;
+`rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/`.
+> Historical implementation record: notification and walkthrough features described below
+> were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
+> part of the current application. See Alembic revision `20260814_0002` for cleanup.

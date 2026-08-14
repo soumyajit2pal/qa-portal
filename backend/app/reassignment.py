@@ -7,7 +7,7 @@ reported directly:
     assignee, the Department Head of the department the current assignee
     belongs to, or an Administrator. During reassignment: only eligible
     users for that activity shall be displayed; a reassignment reason shall
-    be mandatory; the new assignee shall receive a notification; the
+    be mandatory; the
     previous assignee shall lose action permission after reassignment; the
     record's status/history shall remain unchanged; previous assignee, new
     assignee, reassigned by, date/time, and reason shall be captured in the
@@ -47,7 +47,6 @@ from sqlalchemy.orm import Session
 
 from . import models
 from .constants import Role, QA_DEPARTMENT
-from .routers import notifications
 
 
 def department_head_roles(department: Optional[str]) -> tuple:
@@ -136,11 +135,3 @@ def record_reassignment(db: Session, entity_type: str, entity_id: int, actor: mo
         comments=reason, previous_state=previous_label, new_state=new_label,
     ))
 
-
-def notify_new_assignee(db: Session, new_assignee_id: int, entity_type: str, entity_id: int,
-                         entity_key: Optional[str], message: str, actor_id: int) -> None:
-    """"The new assignee shall receive a notification" -- delegates to the
-    same in-app Notification mechanism every other notified event in this
-    app already uses (routers/notifications.py::fire); caller's existing
-    db.commit() covers this row too, same transaction."""
-    notifications.fire(db, [new_assignee_id], "Reassigned", entity_type, entity_id, entity_key, message, actor_id)

@@ -18,8 +18,9 @@ import logging
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker
 
+from .db_base import Base
 from .logging_config import configure_logging, mask_database_url
 
 load_dotenv()  # loads backend/.env if present; real env vars still take precedence
@@ -130,9 +131,6 @@ if QUERY_TIMEOUT_MS > 0:
             logger.warning("DB driver does not support call_timeout; DB_QUERY_TIMEOUT_MS ignored.")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
 def get_db():
     db = SessionLocal()
     try:

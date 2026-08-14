@@ -13,7 +13,6 @@ from ..constants import ENVIRONMENTS, Role, DEFECT_REASSIGNABLE_STATUSES
 from ..database import get_db
 from ..deps import get_current_user, dashboard_department_scope, viewable_project_ids
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
-from . import notifications
 from .. import reassignment
 
 router = APIRouter(prefix="/api/defects", tags=["defect-management"])
@@ -57,7 +56,7 @@ CREATE_ROLES = (
 # list endpoint (QA Requests, Functional, etc.) has always worked. Who may
 # CREATE/link a defect is unaffected by this -- that's still CREATE_ROLES,
 # checked separately by _require_create_role. A single-defect deep link
-# (GET /{id}, GET /by-key/{key} -- e.g. from a notification) was already
+# (GET /{id}, GET /by-key/{key} -- e.g. from a direct link) was already
 # open to any authenticated user regardless, unchanged here.
 _DOC_MODULE = "DEFECT"
 
@@ -560,9 +559,6 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
     if execution and cycle and test_case:
         _link_to_execution(db, obj, execution, cycle, test_case, current_user)
     _audit(db, obj, current_user, "Created", f"Reported {obj.defect_key} with {obj.severity} severity and {obj.priority} priority.", new_state="New", step_name="Defect")
-    recipient_ids = [cycle.owner_id, cycle.project.default_qa_lead_id if cycle and cycle.project else None] if cycle else []
-    notifications.fire(db, recipient_ids, "Defect Created", "DEFECT", obj.id, obj.defect_key,
-                       f"{obj.defect_key} was reported" + (f" for {test_case.test_case_key}." if test_case else " and awaits execution linkage."), current_user.id)
     db.commit(); db.refresh(obj)
     return obj
 
@@ -578,8 +574,6 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
     _require_execution_link_access(db, cycle, current_user)
     _link_to_execution(db, obj, execution, cycle, test_case, current_user)
     _audit(db, obj, current_user, "Linked", f"Linked to {cycle.cycle_key} / {test_case.test_case_key} / execution #{execution.id}.", step_name="Traceability")
-    notifications.fire(db, [obj.reporter_id, obj.assignee_id], "Defect Linked", "DEFECT", obj.id, obj.defect_key,
-                       f"{obj.defect_key} was linked to {cycle.cycle_key} and {test_case.test_case_key}.", current_user.id)
     db.commit(); db.refresh(obj)
     return obj
 
@@ -742,9 +736,6 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         models.TestRunDefect.defect_key == obj.defect_key,
     ).update({models.TestRunDefect.defect_status: requested}, synchronize_session=False)
     _audit(db, obj, current_user, requested, details, previous, requested)
-    recipient_ids = [obj.reporter_id, obj.assignee_id, obj.retest_tester_id]
-    notifications.fire(db, recipient_ids, f"Defect {requested}", "DEFECT", obj.id, obj.defect_key,
-                       f"{obj.defect_key} changed from {previous} to {requested}.", current_user.id)
     db.commit(); db.refresh(obj)
     return obj
 

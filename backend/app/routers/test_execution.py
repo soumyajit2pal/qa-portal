@@ -34,6 +34,12 @@ _LIST_EXECUTION_EAGER_LOADS = [
     joinedload(models.TestExecution.assigned_to),
     joinedload(models.TestExecution.assigned_by),
     joinedload(models.TestExecution.executed_by),
+    # Perf tuning (2026-08) -- added_by was missing from this list even
+    # though TestExecutionOut.added_by_name reads it exactly like
+    # assigned_by_name/executed_by_name do; every row was still a lazy
+    # extra SELECT for this one relationship. Found while chasing the
+    # "3500 testcases, add to cycle, timeout" report below.
+    joinedload(models.TestExecution.added_by),
     selectinload(models.TestExecution.runs),
     selectinload(models.TestExecution.linked_defects),
 ]
@@ -1447,9 +1453,35 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
             ),
         ))
     db.commit()
-    for obj in created:
-        db.refresh(obj)
-    return created
+    if not created:
+        return []
+    # Perf tuning (2026-08, reported directly: "if i have 3500 testcase
+    # present, then it's allowing all in one go, then application going to
+    # loading stage and though it's completing the process still getting
+    # timeout error") -- this used to be `for obj in created: db.refresh(obj)`,
+    # one individual SELECT per created row just to repopulate server-side
+    # defaults after commit, PLUS response_model serialization then lazily
+    # loaded test_case/assigned_to/assigned_by/executed_by/added_by/runs/
+    # linked_defects on top of that (no eager-loading at all) -- for a
+    # 3,500-testcase selection that was on the order of 3,500+ extra
+    # queries, comfortably enough to blow past api.ts's request timeout even
+    # though the transaction itself had already committed successfully
+    # (matching what was reported: the add completes, but the UI times out
+    # anyway). Replaced with one Oracle-safe batched requery using the same
+    # eager-load set list_executions itself uses, so this response costs a
+    # small constant number of queries regardless of selection size.
+    created_ids = [obj.id for obj in created]
+    refreshed = []
+    for id_batch in _in_batches(created_ids):
+        refreshed.extend(
+            db.query(models.TestExecution)
+            .options(*_LIST_EXECUTION_EAGER_LOADS)
+            .filter(models.TestExecution.id.in_(id_batch))
+            .all()
+        )
+    order = {execution_id: index for index, execution_id in enumerate(created_ids)}
+    refreshed.sort(key=lambda execution: order[execution.id])
+    return refreshed
 
 
 @router.patch("/executions/{execution_id}/assign", response_model=schemas.TestExecutionOut)
@@ -1580,13 +1612,6 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
                 db, "TEST_CASE", execution.test_case_id, current_user,
                 previous_names[execution.id] or "Unassigned", target.full_name, payload.reason,
             )
-    # One notification for the whole batch (not per-row) -- target is a
-    # single person picking up however many reassigned testcases at once.
-    if previously_assigned:
-        reassignment.notify_new_assignee(
-            db, target.id, "TEST_CASE", cycle.id, cycle.cycle_key,
-            f"You have been reassigned {len(previously_assigned)} testcase(s) in {cycle.cycle_key}.", current_user.id,
-        )
     db.commit()
     for execution in ordered:
         db.refresh(execution)

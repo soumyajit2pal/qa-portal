@@ -9,6 +9,18 @@ interface RequestOptions {
   body?: unknown
   formEncoded?: boolean
   isBlob?: boolean
+  // Reported directly: "while uploading testcase from excel, though it's
+  // saying api timeout 30 sec, but actually upload completed, still showing
+  // error." The flat 30s abort below was applied to every request
+  // uniformly, including large multipart uploads whose backend processing
+  // (e.g. test_repository.py's import-xlsx, parsing + creating a row per
+  // test step) can legitimately take longer than a typical CRUD call --
+  // the browser gave up and showed a timeout error while the server kept
+  // working and finished the import anyway, so the user saw a failure for
+  // an upload that had actually succeeded. Lets a slow-by-nature call site
+  // (see api.uploadForm's own optional param) opt into a longer budget
+  // instead of raising the default for every request.
+  timeoutMs?: number
 }
 
 const REQUEST_TIMEOUT_MS = 30_000
@@ -83,7 +95,7 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
   }
 
   const controller = new AbortController()
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = window.setTimeout(() => controller.abort(), opts.timeoutMs ?? REQUEST_TIMEOUT_MS)
   let res: Response
   try {
     res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal })
@@ -195,7 +207,13 @@ function triggerDownload(blob: Blob, filename: string) {
 
 export const api = {
   get: <T = any>(path: string): Promise<T> => request<T>(path),
-  post: <T = any>(path: string, body?: unknown): Promise<T> => request<T>(path, { method: 'POST', body }),
+  // `timeoutMs` (optional, third arg) lets a caller whose POST triggers slow
+  // server-side bulk work (e.g. adding a few thousand testcases to a Test
+  // Cycle at once) raise the default 30s budget instead of racing it -- see
+  // RequestOptions.timeoutMs's own comment and api.uploadForm's matching
+  // pattern.
+  post: <T = any>(path: string, body?: unknown, timeoutMs?: number): Promise<T> =>
+    request<T>(path, { method: 'POST', body, timeoutMs }),
   put: <T = any>(path: string, body?: unknown): Promise<T> => request<T>(path, { method: 'PUT', body }),
   patch: <T = any>(path: string, body?: unknown): Promise<T> => request<T>(path, { method: 'PATCH', body }),
   del: <T = any>(path: string): Promise<T> => request<T>(path, { method: 'DELETE' }),
@@ -239,13 +257,20 @@ export const api = {
   // for endpoints that take one specific file field alongside other form
   // data (e.g. Test Repository's xlsx import, which also takes an optional
   // folder_id). Fields with an undefined/null value are omitted entirely
-  // rather than sent as the string "undefined"/"null".
-  uploadForm: <T = any>(path: string, fields: Record<string, string | Blob | undefined | null>): Promise<T> => {
+  // rather than sent as the string "undefined"/"null". `timeoutMs` lets a
+  // caller whose upload triggers slow server-side processing (e.g. a large
+  // Excel import creating many rows) raise the default 30s budget instead
+  // of racing it -- see RequestOptions.timeoutMs's own comment.
+  uploadForm: <T = any>(
+    path: string,
+    fields: Record<string, string | Blob | undefined | null>,
+    timeoutMs?: number,
+  ): Promise<T> => {
     const form = new FormData()
     Object.entries(fields).forEach(([k, v]) => {
       if (v !== undefined && v !== null) form.append(k, v)
     })
-    return request<T>(path, { method: 'POST', body: form, formEncoded: true })
+    return request<T>(path, { method: 'POST', body: form, formEncoded: true, timeoutMs })
   },
 
   // Multipart form with repeatable file fields. Used by rich comments,

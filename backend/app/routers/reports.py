@@ -71,7 +71,8 @@ def qa_request_summary(db: Session = Depends(get_db), current_user: models.User 
         )
         out.append({
             "Request ID": r.request_id, "Request Date": r.request_date, "Department": r.department,
-            "Application Name": r.application_name, "Epic Number": r.epic_number,
+            "Application Name": r.application_name,
+            "CR Number/EPIC Number": r.cr_number or r.epic_number,
             "Request Type(s)": r.request_types, "Priority / Risk (per type)": classification or None,
             "Status": r.status,
             "QA Testing Request ID": functional.request_id if functional else None,

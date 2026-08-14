@@ -7,7 +7,7 @@ from sqlalchemy import (
     Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index, UniqueConstraint, text, and_
 )
 from sqlalchemy.orm import relationship, foreign
-from .database import Base
+from .db_base import Base
 from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES
 
 # Unlike SQLite/PostgreSQL/MySQL, SQLAlchemy does NOT automatically make a
@@ -44,8 +44,8 @@ def as_aware(dt):
     fixed it by treating a naive value as already being in IST rather than
     comparing it against a UTC-derived now (see that function's own
     comment) -- this is that exact fix, extracted so every other call site
-    doing now()-based datetime math (test_reports.py, notifications.py's
-    business-day sweep, and any future one) shares one implementation
+    doing now()-based datetime math (test_reports.py and any future one)
+    shares one implementation
     instead of re-deriving it -- and re-risking forgetting it -- each time.
     Returns None unchanged; an already-aware value is returned unchanged
     too (nothing here assumes every caller's value is naive)."""
@@ -625,6 +625,9 @@ class FunctionalRequest(Base):
     # Set when auto-created from a QA Request gateway (always, for new rows --
     # standalone creation is disabled, see routers/functional.py); nullable
     # only for symmetry with the other linked-request models.
+    # Perf tuning (2026-08) -- indexed via explicit short-named Index()
+    # (ix_qap_func_qa_req) near the end of this file, not inline index=True
+    # -- see SuppressionRequest.department's own comment for why.
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
 
     created_at = Column(DateTime, default=now)
@@ -633,7 +636,6 @@ class FunctionalRequest(Base):
     requester = relationship("User", foreign_keys=[requester_id])
     qa_request = relationship("QARequest", back_populates="linked_functional_requests")
     checklist_items = relationship("ReadinessChecklistItem", back_populates="functional_request", cascade="all,delete-orphan")
-    walkthroughs = relationship("WalkthroughSession", back_populates="functional_request", cascade="all,delete-orphan")
     test_cycle_links = relationship(
         "TestCycleChildRequestLink",
         primaryjoin=lambda: and_(
@@ -778,22 +780,6 @@ class ReadinessChecklistItem(Base):
     functional_request = relationship("FunctionalRequest", back_populates="checklist_items")
 
 
-class WalkthroughSession(Base):
-    __tablename__ = "qap_walkthrough_sessions"
-    id = pk_column()
-    functional_request_id = Column(Integer, ForeignKey("qap_functional_requests.id"))
-    session_date = Column(DateTime, default=now)
-    conducted_by = Column(String(150))
-    participants = Column(Text)
-    recording_path = Column(String(255))
-    document_path = Column(String(255))
-    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    qa_acknowledged_at = Column(DateTime, nullable=True)
-    notes = Column(Text)
-
-    functional_request = relationship("FunctionalRequest", back_populates="walkthroughs")
-
-
 # ---------------------------------------------------------------------------
 # Module 4: SAST Request Management
 # ---------------------------------------------------------------------------
@@ -830,12 +816,14 @@ class SASTRequest(Base):
     # ::_sync_linked_child_requests); null for standalone SAST requests
     # raised directly through this module -- those still get their own
     # unique request_id via the default above, just with no QA Request link.
+    # Perf tuning (2026-08) -- indexed via explicit short-named Index()
+    # (ix_qap_sast_qa_req) near the end of this file, not inline index=True
+    # -- see SuppressionRequest.department's own comment for why.
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
     findings = relationship("SASTFinding", back_populates="sast_request", cascade="all,delete-orphan")
-    walkthroughs = relationship("SASTWalkthrough", back_populates="sast_request", cascade="all,delete-orphan")
     checklist_items = relationship("SASTChecklistItem", back_populates="sast_request", cascade="all,delete-orphan")
     qa_request = relationship("QARequest", back_populates="linked_sast_requests")
     # Every Suppression / False Positive request raised against this SAST
@@ -977,25 +965,6 @@ class SASTChecklistItem(Base):
     sast_request = relationship("SASTRequest", back_populates="checklist_items")
 
 
-class SASTWalkthrough(Base):
-    """Same shape as WalkthroughSession (Functional Testing's walkthrough
-    table) -- SAST previously had no walkthrough concept at all, unlike
-    every other module."""
-    __tablename__ = "qap_sast_walkthroughs"
-    id = pk_column()
-    sast_request_id = Column(Integer, ForeignKey("qap_sast_requests.id"))
-    session_date = Column(DateTime, default=now)
-    conducted_by = Column(String(150))
-    participants = Column(Text)
-    recording_path = Column(String(255))
-    document_path = Column(String(255))
-    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    qa_acknowledged_at = Column(DateTime, nullable=True)
-    notes = Column(Text)
-
-    sast_request = relationship("SASTRequest", back_populates="walkthroughs")
-
-
 # ---------------------------------------------------------------------------
 # Module 5: DAST Request Management
 # ---------------------------------------------------------------------------
@@ -1021,12 +990,14 @@ class DASTRequest(Base):
     # Set when this DAST request was auto-created because a QA Request's
     # request_types included "DAST"; null for standalone DAST requests
     # raised directly through this module.
+    # Perf tuning (2026-08) -- indexed via explicit short-named Index()
+    # (ix_qap_dast_qa_req) near the end of this file, not inline index=True
+    # -- see SuppressionRequest.department's own comment for why.
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
     findings = relationship("DASTFinding", back_populates="dast_request", cascade="all,delete-orphan")
-    walkthroughs = relationship("DASTWalkthrough", back_populates="dast_request", cascade="all,delete-orphan")
     checklist_items = relationship("DASTChecklistItem", back_populates="dast_request", cascade="all,delete-orphan")
     qa_request = relationship("QARequest", back_populates="linked_dast_requests")
     # See SASTRequest.suppressions above -- same idea, for DAST.
@@ -1172,22 +1143,40 @@ class DASTFinding(Base):
     dast_request = relationship("DASTRequest", back_populates="findings")
 
 
-class DASTWalkthrough(Base):
-    """Same shape as WalkthroughSession/SASTWalkthrough -- see SASTWalkthrough
-    for why this exists (DAST previously had no walkthrough concept either)."""
-    __tablename__ = "qap_dast_walkthroughs"
-    id = pk_column()
-    dast_request_id = Column(Integer, ForeignKey("qap_dast_requests.id"))
-    session_date = Column(DateTime, default=now)
-    conducted_by = Column(String(150))
-    participants = Column(Text)
-    recording_path = Column(String(255))
-    document_path = Column(String(255))
-    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    qa_acknowledged_at = Column(DateTime, nullable=True)
-    notes = Column(Text)
+class SecurityScanResult(Base):
+    """Immutable Fortify SSC snapshot imported when Start Scan is clicked.
 
-    dast_request = relationship("DASTRequest", back_populates="walkthroughs")
+    One shared table serves SAST and DAST because SSC exposes the same
+    project-version/filter-set result shape for both. request_type plus
+    request_id identifies the owning portal record without cross-table
+    foreign keys; prior snapshots remain available as an audit trail.
+    """
+    __tablename__ = "qap_security_scan_results"
+    id = pk_column()
+    request_type = Column(String(8), nullable=False, index=True)
+    request_id = Column(Integer, nullable=False, index=True)
+    application_name = Column(String(150), nullable=False)
+    application_version = Column(String(100), nullable=False)
+    provider = Column(String(40), nullable=False, default="Fortify SSC")
+    provider_version_id = Column(String(100), nullable=False)
+    critical_count = Column(Integer, nullable=False, default=0)
+    high_count = Column(Integer, nullable=False, default=0)
+    medium_count = Column(Integer, nullable=False, default=0)
+    low_count = Column(Integer, nullable=False, default=0)
+    total_count = Column(Integer, nullable=False, default=0)
+    audit_url = Column(String(1000))
+    filters_json = Column(Text)
+    imported_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    imported_at = Column(DateTime, default=now, nullable=False)
+
+    imported_by = relationship("User", foreign_keys=[imported_by_id])
+
+    @property
+    def filters(self):
+        try:
+            return json.loads(self.filters_json or "[]")
+        except (TypeError, ValueError):
+            return []
 
 
 # ---------------------------------------------------------------------------
@@ -1237,6 +1226,9 @@ class PerformanceRequest(Base):
     engineer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     assigned_tester_ids = Column(String(255))  # comma-separated COE - Quality Assurance QA Engineer ids
     report_path = Column(String(255))
+    # Perf tuning (2026-08) -- indexed via explicit short-named Index()
+    # (ix_qap_perf_qa_req) near the end of this file, not inline index=True
+    # -- see SuppressionRequest.department's own comment for why.
     qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
@@ -1244,8 +1236,6 @@ class PerformanceRequest(Base):
     qa_request = relationship("QARequest", back_populates="linked_performance_requests")
     checklist_items = relationship("PerformanceChecklistItem", back_populates="performance_request",
                                     cascade="all,delete-orphan")
-    walkthroughs = relationship("PerformanceWalkthrough", back_populates="performance_request",
-                                 cascade="all,delete-orphan")
 
     @property
     def department(self):
@@ -1357,24 +1347,6 @@ class ChecklistTemplateItem(Base):
     updated_at = Column(DateTime, default=now, onupdate=now)
 
 
-class PerformanceWalkthrough(Base):
-    """Walkthrough session log for a Performance Testing Request -- own
-    dedicated table, mirroring WalkthroughSession (Functional Testing's)."""
-    __tablename__ = "qap_performance_walkthroughs"
-    id = pk_column()
-    performance_request_id = Column(Integer, ForeignKey("qap_performance_requests.id"))
-    session_date = Column(DateTime, default=now)
-    conducted_by = Column(String(150))
-    participants = Column(Text)
-    recording_path = Column(String(255))
-    document_path = Column(String(255))
-    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    qa_acknowledged_at = Column(DateTime, nullable=True)
-    notes = Column(Text)
-
-    performance_request = relationship("PerformanceRequest", back_populates="walkthroughs")
-
-
 # ---------------------------------------------------------------------------
 # Module 6: False Positive / Suppression Management
 # ---------------------------------------------------------------------------
@@ -1387,6 +1359,12 @@ class SuppressionRequest(Base):
     # Auto-populated (at creation time, from whichever SAST/DAST request the
     # "Request ID" autosuggest field resolved to) rather than retyped --
     # blank when that scan has no linked QA Request (standalone scan).
+    # Perf tuning (2026-08) -- indexed via an explicit short-named Index()
+    # in the "Performance optimization indexes" block near the end of this
+    # file (ix_qap_sup_dept), not inline index=True -- this table's own
+    # name is long enough that SQLAlchemy's auto-generated
+    # `ix_qap_suppression_requests_department` name would exceed Oracle's
+    # 30-byte identifier limit (same ORA-00972 concern noted on that block).
     department = Column(String(150))
     application_owner = Column(String(150))
     # Exactly one of these is set, matching scan_type -- lets the suppression
@@ -1422,8 +1400,6 @@ class SuppressionRequest(Base):
     # finding (each finding still gets its own issue id/severity/description/
     # justification, just grouped under a single approval workflow).
     items = relationship("SuppressionItem", back_populates="suppression_request", cascade="all,delete-orphan")
-    walkthroughs = relationship("SuppressionWalkthrough", back_populates="suppression_request",
-                                 cascade="all,delete-orphan")
     sast_request = relationship("SASTRequest", back_populates="suppressions")
     dast_request = relationship("DASTRequest", back_populates="suppressions")
 
@@ -1449,27 +1425,6 @@ class SuppressionItem(Base):
     justification = Column(Text)
 
     suppression_request = relationship("SuppressionRequest", back_populates="items")
-
-
-class SuppressionWalkthrough(Base):
-    """Walkthrough session log for a Suppression / False Positive request --
-    own dedicated table, mirroring WalkthroughSession (Functional Testing's).
-    Suppression has no readiness-checklist concept (it's an approval flow,
-    not a testing-readiness flow), so it only gets Walkthroughs + History,
-    not a Checklist tab."""
-    __tablename__ = "qap_suppression_walkthroughs"
-    id = pk_column()
-    suppression_request_id = Column(Integer, ForeignKey("qap_suppression_requests.id"))
-    session_date = Column(DateTime, default=now)
-    conducted_by = Column(String(150))
-    participants = Column(Text)
-    recording_path = Column(String(255))
-    document_path = Column(String(255))
-    qa_acknowledged_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    qa_acknowledged_at = Column(DateTime, nullable=True)
-    notes = Column(Text)
-
-    suppression_request = relationship("SuppressionRequest", back_populates="walkthroughs")
 
 
 # ---------------------------------------------------------------------------
@@ -1523,35 +1478,6 @@ class ApprovalAction(Base):
     def actor_name(self):
         return self.actor.full_name if self.actor else None
 
-
-class Notification(Base):
-    """2026-08 "Test Approval Workflow" refactor, section 10 -- in-app
-    notifications (Test_Approval_Workflow_Requirements.docx). No email/SMTP
-    infrastructure exists anywhere in this app, so this is delivered purely
-    in-app: a per-recipient row created on every workflow event in the
-    spec's table (submit/return/recommend/approve/reject), plus reminder/
-    escalation rows created by a startup sweep (see
-    routers/notifications.py::sweep_overdue_approvals) once a pending item
-    has sat past the Admin-configured day thresholds (system_settings.py's
-    test_approval_reminder_days/test_approval_escalation_days keys, default
-    2/5 business days). Read-only append model from the recipient's side --
-    the only mutation allowed is setting read_at on your own row."""
-    __tablename__ = "qap_notifications"
-    id = pk_column()
-    recipient_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False, index=True)
-    event_type = Column(String(40), nullable=False)
-    entity_type = Column(String(32), index=True)
-    entity_id = Column(Integer, index=True)
-    entity_key = Column(String(40))
-    message = Column(Text, nullable=False)
-    # Who triggered it -- NULL for a system-generated reminder/escalation
-    # row (the sweep has no human actor).
-    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    created_at = Column(DateTime, default=now)
-    read_at = Column(DateTime, nullable=True)
-
-    recipient = relationship("User", foreign_keys=[recipient_id])
-    created_by = relationship("User", foreign_keys=[created_by_id])
 
     @property
     def created_by_name(self):
@@ -1636,6 +1562,14 @@ class QASignOff(Base):
     certificate_date = Column(Date, default=lambda: datetime.date.today())
     certificate_type = Column(String(32))
     testing_type = Column(String(16))
+    # Perf tuning (2026-08) -- indexed via explicit short-named Index()
+    # (ix_qap_signoff_testreq) near the end of this file, not inline
+    # index=True -- see SuppressionRequest.department's own comment for why
+    # (this table's name plus column name would also exceed the 30-byte
+    # limit as an auto-generated name). source_functional_request's own
+    # primaryjoin below and list_signoffs' department-scope join both match
+    # on this column against FunctionalRequest.request_id (already
+    # unique-indexed via its own unique=True).
     testing_request_id = Column(String(40))
     change_request_ids = Column(String(255))
     application_name = Column(String(150), nullable=False)
@@ -1751,6 +1685,10 @@ class TestProject(Base):
     project_key = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["TEST_PROJECT"]))
     name = Column(String(150), nullable=False)
     application_master_id = Column(Integer, ForeignKey("qap_application_master.id"), nullable=True)
+    # Perf tuning (2026-08) -- indexed via explicit short-named Index()
+    # (ix_qap_proj_dept) near the end of this file -- see
+    # SuppressionRequest.department's own comment for why not inline
+    # index=True.
     department = Column(String(150))
     description = Column(Text)
     is_active = Column(Boolean, default=True)
@@ -1934,7 +1872,12 @@ class TestFolder(Base):
     not mandatory."""
     __tablename__ = "qap_test_folders"
     id = pk_column()
-    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
+    # Perf tuning (2026-08) -- indexed; every Test Repository folder-tree
+    # query (list_folders and friends in test_repository.py) filters by
+    # project_id first. TestCase.project_id already has its own composite
+    # coverage (see the IDX-001..007 block near the end of this file) but
+    # TestFolder never got the equivalent.
+    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
     parent_id = Column(Integer, ForeignKey("qap_test_folders.id"), nullable=True)
     name = Column(String(150), nullable=False)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
@@ -2333,14 +2276,6 @@ class TestCaseVersion(Base):
     # assignee is the stage-specific decision maker (Admin retains oversight).
     assigned_reviewer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     assigned_qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # Section 10 reminder/escalation sweep bookkeeping -- set once a
-    # reminder/escalation Notification has been created for whichever stage
-    # this version is CURRENTLY pending in, so the sweep never double-fires
-    # for the same wait. Reset to NULL every time the version moves to a
-    # new pending stage (see _submit_draft/review_test_case), so each stage
-    # gets its own fresh reminder/escalation window.
-    reminder_sent_at = Column(DateTime, nullable=True)
-    escalated_at = Column(DateTime, nullable=True)
     # TC-005 "record the source testcase/version" on clone, and reused for
     # VER-005 version-compare's own ancestry display.
     source_version_id = Column(Integer, ForeignKey("qap_test_case_versions.id"), nullable=True)
@@ -2892,6 +2827,26 @@ Index("ix_qap_moddocs_req_uploaded", RequestDocument.module, RequestDocument.req
 Index("ix_qap_audit_actor_created", AuditLog.actor_id, AuditLog.created_at)
 Index("ix_qap_audit_target", AuditLog.target_type, AuditLog.target_id)
 Index("ix_qap_defects_assignee_upd", Defect.assignee_id, Defect.status, Defect.updated_at)
+
+# IDX-008, 2026-08 -- reported directly: "some of the apis are taking lot of
+# timing, do some fine tuning." Follow-up pass over columns the IDX-001..007
+# sweep above didn't reach: department on the two module tables that never
+# got it (Suppression, Test Projects -- QARequest/FunctionalRequest/etc.
+# already covered above), and the parent-request FK on the four child-
+# request tables (qa_request_id), which every one of their own list/join
+# queries filters or joins on and which had no index at all until now.
+# Explicit short names here rather than inline `index=True` on the column,
+# same reason as everywhere else in this block -- e.g. SQLAlchemy's default
+# auto-generated name for SuppressionRequest.department would be
+# `ix_qap_suppression_requests_department` (38 bytes), over Oracle's
+# 30-byte identifier limit this file already flags above.
+Index("ix_qap_sup_dept", SuppressionRequest.department)
+Index("ix_qap_proj_dept", TestProject.department)
+Index("ix_qap_func_qa_req", FunctionalRequest.qa_request_id)
+Index("ix_qap_sast_qa_req", SASTRequest.qa_request_id)
+Index("ix_qap_dast_qa_req", DASTRequest.qa_request_id)
+Index("ix_qap_perf_qa_req", PerformanceRequest.qa_request_id)
+Index("ix_qap_signoff_testreq", QASignOff.testing_request_id)
 
 # Deliberately NOT added, with reasons (IDX-005/IDX-006 diligence):
 #   - TestExecution(cycle_id, test_case_id): already exactly covered by the

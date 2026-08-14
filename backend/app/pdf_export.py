@@ -60,11 +60,13 @@ class SignatureValue:
     applied_at: str
     intent: str
     stage: str
+    style: str = "professional"
 
 
 _ELECTRONIC_SIGNATURE = re.compile(
     r"\[Electronic signature \| Signer: (?P<signer>.*?) \| Applied: (?P<applied_at>.*?) "
-    r"\| Signature ID: (?P<signature_id>.*?) \| Intent: (?P<intent>.*?)\]",
+    r"\| Signature ID: (?P<signature_id>.*?)(?: \| Style: (?P<style>professional|classic|handwritten))? "
+    r"\| Intent: (?P<intent>.*?)\]",
     re.S,
 )
 
@@ -74,7 +76,12 @@ def parse_electronic_signature(value: Optional[str], *, stage: str = "Approval")
     match = _ELECTRONIC_SIGNATURE.search(value or "")
     if not match:
         return None
-    return SignatureValue(stage=stage, **{key: item.strip() for key, item in match.groupdict().items()})
+    values = {
+        key: item.strip() if item else item
+        for key, item in match.groupdict().items()
+    }
+    values["style"] = values.get("style") or "professional"
+    return SignatureValue(stage=stage, **values)
 
 
 def _fmt(value: object) -> str:
@@ -243,9 +250,18 @@ def _rich_field_block(label: str, value: RichTextValue, available_width: float) 
 
 
 def _signature_block(label: str, value: SignatureValue, available_width: float) -> list:
+    signature_fonts = {
+        "professional": ("Helvetica-Bold", 14, 18),
+        "classic": ("Times-BoldItalic", 16, 19),
+        "handwritten": ("Times-Italic", 18, 21),
+    }
+    signature_font, signature_size, signature_leading = signature_fonts.get(
+        value.style, signature_fonts["professional"]
+    )
     signature_name_style = ParagraphStyle(
-        "SignatureName", parent=_body_style, fontName="Helvetica-Oblique",
-        fontSize=19, leading=22, textColor=colors.HexColor("#0b6677"),
+        "SignatureName", parent=_body_style, fontName=signature_font,
+        fontSize=signature_size, leading=signature_leading,
+        textColor=colors.HexColor("#0b6677"),
     )
     signature_meta_style = ParagraphStyle(
         "SignatureMeta", parent=_body_style, fontSize=7.8, leading=10,

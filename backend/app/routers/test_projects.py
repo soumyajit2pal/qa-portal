@@ -1,7 +1,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .. import models, schemas, pagination
 from ..database import get_db
@@ -162,7 +162,21 @@ def list_test_projects(include_inactive: bool = Query(False), params: pagination
     # (is_active desc, name) doesn't map onto apply_sort's single-column
     # + id-secondary shape, so it's kept as an explicit order_by here
     # instead of going through that helper.
-    query = db.query(models.TestProject)
+    # Perf tuning (2026-08, reported directly: "some of the apis are taking
+    # lot of timing") -- TestProjectOut resolves 5 separate *_name fields
+    # (owner/pending_requested_by/archived_by/default_reviewer/
+    # default_qa_lead), each its own many-to-one User FK, previously
+    # lazy-loaded -- up to 5 extra SELECTs per project row. joinedload is
+    # used (not selectinload) because these are all many-to-one -- a single
+    # LEFT JOIN per relationship, no row multiplication risk the way a
+    # one-to-many collection would have.
+    query = db.query(models.TestProject).options(
+        joinedload(models.TestProject.owner),
+        joinedload(models.TestProject.pending_requested_by),
+        joinedload(models.TestProject.archived_by),
+        joinedload(models.TestProject.default_reviewer),
+        joinedload(models.TestProject.default_qa_lead),
+    )
     if not include_inactive:
         query = query.filter(models.TestProject.is_active == True)  # noqa: E712
     # 2026-08 "view-only access to department/user" CR -- widened from a

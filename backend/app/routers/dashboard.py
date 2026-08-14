@@ -396,7 +396,11 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
     requests = _join_qa_department(
         _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at, date_from, date_to),
         models.FunctionalRequest, scope).all()
-    active_projects = len({r.epic_number for r in requests if r.status in ACTIVE_QA_STATUSES and r.epic_number})
+    active_projects = len({
+        r.cr_number or r.epic_number
+        for r in requests
+        if r.status in ACTIVE_QA_STATUSES and (r.cr_number or r.epic_number)
+    })
 
     sast_findings = _join_qa_department(
         _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
@@ -720,7 +724,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             models.FunctionalRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
-            "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
+            "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
             "application_name": r.application_name, "pending_stage": STAGE_LABELS.get(r.status, r.status),
             "responsible_team": r.department or "Unassigned Department",
             "pending_with": STAGE_TEAM.get(r.status, "QA"), "owner": r.application_owner,
@@ -735,7 +739,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             models.SASTRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
-            "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
+            "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
             "application_name": r.application_name,
             "pending_stage": f"SAST - {SAST_DAST_STATUS_LABELS.get(r.status, r.status)}",
             "responsible_team": r.department or "Unassigned Department",
@@ -751,7 +755,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             models.DASTRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
-            "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
+            "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
             "application_name": r.application_name or r.application_url,
             "pending_stage": f"DAST - {SAST_DAST_STATUS_LABELS.get(r.status, r.status)}",
             "responsible_team": r.department or "Unassigned Department",
@@ -767,7 +771,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
             models.PerformanceRequest, scope).all():
         age = _age_days(r.updated_at)
         items.append({
-            "project_id": r.request_id, "epic_number": r.epic_number or r.application_name,
+            "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
             "application_name": r.application_name,
             "pending_stage": f"Performance - {PERFORMANCE_STATUS_LABELS.get(r.status, r.status)}",
             "responsible_team": r.department or "Unassigned Department",

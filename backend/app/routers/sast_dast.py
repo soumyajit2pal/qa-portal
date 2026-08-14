@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 from typing import List, Optional, Tuple
 
@@ -14,6 +15,7 @@ from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
 from .. import reassignment
+from ..fortify_ssc import FortifySSCClient, FortifySSCError
 
 router = APIRouter(tags=["sast-dast"])
 
@@ -508,14 +510,49 @@ def _start_configuration(db: Session, obj, current_user):
     )
 
 
-def _start_scan(db: Session, obj, current_user):
+def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_user):
     _require(obj, "CONFIGURATION", "Start scan")
     _require_assigned_security_analyst(obj, current_user)
+    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+    try:
+        snapshot = FortifySSCClient(kind).retrieve_snapshot(
+            payload.application_name, payload.application_version,
+        )
+    except FortifySSCError as exc:
+        # Do not advance the workflow if SSC cannot resolve/import the exact
+        # application version selected by the analyst.
+        raise HTTPException(502, str(exc)) from exc
+
+    scan_result = models.SecurityScanResult(
+        request_type=kind, request_id=obj.id,
+        application_name=snapshot.application_name,
+        application_version=snapshot.application_version,
+        provider="Fortify SSC", provider_version_id=snapshot.project_version_id,
+        critical_count=snapshot.critical_count, high_count=snapshot.high_count,
+        medium_count=snapshot.medium_count, low_count=snapshot.low_count,
+        total_count=snapshot.total_count, audit_url=snapshot.audit_url,
+        filters_json=json.dumps(snapshot.filters), imported_by_id=current_user.id,
+    )
+    db.add(scan_result)
     obj.status = "SCANNING"
-    _log(db, obj, "Configuration", current_user, "Scanning Started", None)
+    _log(
+        db, obj, "Configuration", current_user, "SSC Results Imported / Scanning Started",
+        f"Fortify SSC application '{snapshot.application_name}', version '{snapshot.application_version}', "
+        f"provider version ID {snapshot.project_version_id}; {snapshot.total_count} finding(s) across filter sets.",
+    )
     db.commit()
     db.refresh(obj)
-    return obj
+    db.refresh(scan_result)
+    return obj, scan_result
+
+
+def _scan_results(db: Session, kind: str, request_id: int):
+    return (
+        db.query(models.SecurityScanResult)
+        .filter_by(request_type=kind, request_id=request_id)
+        .order_by(models.SecurityScanResult.imported_at.desc(), models.SecurityScanResult.id.desc())
+        .all()
+    )
 
 
 def _close_request(db: Session, obj, current_user):
@@ -897,10 +934,18 @@ def sast_assign_security_analyst(req_id: int, payload: schemas.AssignSecurityAna
     )
 
 
-@router.post("/api/sast-requests/{req_id}/start-scan", response_model=schemas.SASTOut)
-def sast_start_scan(req_id: int, db: Session = Depends(get_db),
+@router.post("/api/sast-requests/{req_id}/start-scan", response_model=schemas.SASTScanStartOut)
+def sast_start_scan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    return _start_scan(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
+    obj, result = _start_scan(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), payload, current_user)
+    return {"request": obj, "scan_result": result}
+
+
+@router.get("/api/sast-requests/{req_id}/scan-results", response_model=List[schemas.SecurityScanResultOut])
+def sast_scan_results(req_id: int, db: Session = Depends(get_db),
+                      current_user: models.User = Depends(get_current_user)):
+    _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    return _scan_results(db, "SAST", req_id)
 
 
 @router.post("/api/sast-requests/{req_id}/complete-scan", response_model=schemas.SASTOut)
@@ -984,8 +1029,7 @@ def export_sast(req_id: int, db: Session = Depends(get_db), current_user: models
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
-            ("Epic Number", obj.epic_number),
-            ("CR Number", obj.cr_number),
+            ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Department", obj.department),
             ("Application Owner", obj.application_owner),
         ]),
@@ -1172,39 +1216,6 @@ def update_sast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     return item
 
 
-# ---- Walkthrough sessions + workflow history -- SAST previously had neither
-# a Walkthroughs tab nor a History tab, unlike every other module. Mirrors
-# Functional's routers/functional.py walkthrough endpoints; History reuses
-# _sast_dast_history_rows() for the id-collision safety described above it. ----
-@router.get("/api/sast-requests/{req_id}/walkthroughs", response_model=List[schemas.WalkthroughOut])
-def list_sast_walkthroughs(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.SASTWalkthrough).filter_by(sast_request_id=req_id).all()
-
-
-@router.post("/api/sast-requests/{req_id}/walkthroughs", response_model=schemas.WalkthroughOut)
-def add_sast_walkthrough(req_id: int, payload: schemas.WalkthroughCreate, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(get_current_user)):
-    _get_or_404(db, models.SASTRequest, req_id, "SAST")
-    obj = models.SASTWalkthrough(sast_request_id=req_id, **payload.model_dump())
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/api/sast-requests/{req_id}/walkthroughs/{wt_id}/acknowledge", response_model=schemas.WalkthroughOut)
-def acknowledge_sast_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST, Role.QA_LEAD))):
-    obj = db.query(models.SASTWalkthrough).filter_by(id=wt_id, sast_request_id=req_id).first()
-    if not obj:
-        raise HTTPException(404, "Walkthrough session not found")
-    obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = models.now()
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
 @router.get("/api/sast-requests/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def sast_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return _sast_dast_history_rows(db, "SAST", req_id)
@@ -1373,11 +1384,18 @@ def dast_assign_security_analyst(req_id: int, payload: schemas.AssignSecurityAna
     return _dast_out(obj, current_user)
 
 
-@router.post("/api/dast-requests/{req_id}/start-scan", response_model=schemas.DASTOut)
-def dast_start_scan(req_id: int, db: Session = Depends(get_db),
+@router.post("/api/dast-requests/{req_id}/start-scan", response_model=schemas.DASTScanStartOut)
+def dast_start_scan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _start_scan(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
-    return _dast_out(obj, current_user)
+    obj, result = _start_scan(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), payload, current_user)
+    return {"request": _dast_out(obj, current_user), "scan_result": result}
+
+
+@router.get("/api/dast-requests/{req_id}/scan-results", response_model=List[schemas.SecurityScanResultOut])
+def dast_scan_results(req_id: int, db: Session = Depends(get_db),
+                      current_user: models.User = Depends(get_current_user)):
+    _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    return _scan_results(db, "DAST", req_id)
 
 
 @router.post("/api/dast-requests/{req_id}/complete-scan", response_model=schemas.DASTOut)
@@ -1471,8 +1489,7 @@ def export_dast(req_id: int, db: Session = Depends(get_db), current_user: models
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
-            ("Epic Number", obj.epic_number),
-            ("CR Number", obj.cr_number),
+            ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Department", obj.department),
             ("Application Owner", obj.application_owner),
         ]),
@@ -1654,37 +1671,6 @@ def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
     db.commit()
     db.refresh(item)
     return item
-
-
-# ---- Walkthrough sessions + workflow history -- see the equivalent SAST
-# block above for the full reasoning; identical pattern, DAST's own table. ----
-@router.get("/api/dast-requests/{req_id}/walkthroughs", response_model=List[schemas.WalkthroughOut])
-def list_dast_walkthroughs(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.DASTWalkthrough).filter_by(dast_request_id=req_id).all()
-
-
-@router.post("/api/dast-requests/{req_id}/walkthroughs", response_model=schemas.WalkthroughOut)
-def add_dast_walkthrough(req_id: int, payload: schemas.WalkthroughCreate, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(get_current_user)):
-    _get_or_404(db, models.DASTRequest, req_id, "DAST")
-    obj = models.DASTWalkthrough(dast_request_id=req_id, **payload.model_dump())
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/api/dast-requests/{req_id}/walkthroughs/{wt_id}/acknowledge", response_model=schemas.WalkthroughOut)
-def acknowledge_dast_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_db),
-                                  current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST, Role.QA_LEAD))):
-    obj = db.query(models.DASTWalkthrough).filter_by(id=wt_id, dast_request_id=req_id).first()
-    if not obj:
-        raise HTTPException(404, "Walkthrough session not found")
-    obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = models.now()
-    db.commit()
-    db.refresh(obj)
-    return obj
 
 
 @router.get("/api/dast-requests/{req_id}/history", response_model=List[schemas.ApprovalActionOut])

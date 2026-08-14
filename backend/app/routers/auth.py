@@ -166,31 +166,21 @@ def me(current_user: models.User = Depends(get_current_user)):
 @router.patch("/me", response_model=schemas.UserOut)
 def update_me(payload: schemas.DepartmentSelection, request: Request, db: Session = Depends(get_db),
               current_user: models.User = Depends(get_current_user)):
-    """Self-service -- the one field any logged-in user (not just an Admin)
-    can set on their own profile. Currently only used by the first-LDAP-login
-    department-selection popup, but written generically (validates against
-    the same active-department list as the Admin-only PATCH /users/{id}
-    below) rather than as a one-shot "first login only" endpoint, so it also
-    works if someone's department simply needs correcting later.
+    """One-time LDAP self-service selection of exactly one primary department.
 
-    The ordered selection supports multiple departments; primary_department
-    is stored first so User.primary_department and all existing consumers
-    continue to resolve the correct default scope."""
-    selected_departments = list(dict.fromkeys(department.strip() for department in payload.departments if department.strip()))
-    primary_department = payload.primary_department.strip()
-    if not selected_departments:
-        raise HTTPException(status_code=400, detail="Select at least one department")
-    if not primary_department or primary_department not in selected_departments:
-        raise HTTPException(status_code=400, detail="Primary department must be one of the selected departments")
-    for department in selected_departments:
-        _validate_department(db, department)
-    ordered_departments = [primary_department, *[department for department in selected_departments if department != primary_department]]
+    Secondary departments and every later correction are deliberately
+    Admin-only through PATCH /api/auth/users/{id}; users cannot broaden their
+    own organizational scope after onboarding.
+    """
+    if current_user.login_type != LoginType.LDAP or not current_user.needs_department_selection:
+        raise HTTPException(
+            status_code=403,
+            detail="Department self-selection is available only during first-time LDAP onboarding. Ask an Administrator to change or add departments.",
+        )
+    primary_department = payload.department.strip()
+    _validate_department(db, primary_department)
     before = user_snapshot(current_user)
-    is_first_ldap_department_selection = (
-        current_user.login_type == LoginType.LDAP
-        and current_user.needs_department_selection
-    )
-    _set_user_departments(db, current_user, ordered_departments)
+    _set_user_departments(db, current_user, [primary_department])
     current_user.needs_department_selection = False
 
     # A brand-new LDAP user is provisioned as Requester only until they pick
@@ -200,8 +190,7 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
     # or modified the account before the user completed this prompt.
     current_roles = set(current_user.roles)
     if (
-        is_first_ldap_department_selection
-        and current_user.needs_role_review
+        current_user.needs_role_review
         and current_roles == {DEFAULT_LDAP_PROVISION_ROLE}
     ):
         default_role = _ldap_default_role_for_department(primary_department)

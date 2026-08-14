@@ -20,7 +20,6 @@ from ..constants import (
     Role, TEST_CASE_PRIORITIES, TEST_CASE_STATUSES,
     TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS,
 )
-from . import notifications as notify
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 
 # PAG-005 -- every eager-load the list endpoint needs to serialize
@@ -1191,10 +1190,7 @@ def _submit_draft(db: Session, case: models.TestCase, draft: models.TestCaseVers
     "Returned by QA"/"Returned by QA Lead" resubmitting -- moves to NEW-path
     "Recommendation Pending" and is routed to the QA Group, not an
     individually-assigned Reviewer (2026-08 "Simplified Test Management
-    Review and Approval" requirement). Resets reminder_sent_at/escalated_at
-    so the reminder/escalation clock starts fresh for this wait rather than
-    carrying over a stamp from a previous stage/cycle. Fires the "Submitted"
-    notification (section 10/13's table) to whoever it's now routed to."""
+    Review and Approval" requirement)."""
     was_returned = draft.status in ("Returned", "Returned by QA", "Returned by QA Lead")
     previous_state = draft.status
     is_old_path = previous_state == "Returned"
@@ -1210,8 +1206,6 @@ def _submit_draft(db: Session, case: models.TestCase, draft: models.TestCaseVers
     draft.qa_lead_decided_by_id = None
     draft.qa_lead_decided_at = None
     draft.qa_lead_decision_comments = None
-    draft.reminder_sent_at = None
-    draft.escalated_at = None
     # Group routing is authoritative -- no individually-assigned Reviewer/QA
     # Lead in either workflow's submission path (TM's "4.3 No Reviewer
     # Selection"). Legacy per-version assignments are cleared so they cannot
@@ -1229,16 +1223,6 @@ def _submit_draft(db: Session, case: models.TestCase, draft: models.TestCaseVers
         ),
         previous_state=previous_state, new_state=draft.status,
     ))
-    recipients = (
-        _stage1_reviewer_ids(db, case.project_id, draft.author_id) if is_old_path
-        else _qa_group_ids(db, draft.author_id)
-    )
-    notify.fire(
-        db, recipients,
-        "Submitted", "TEST_CASE", case.id, case.test_case_key,
-        f"{case.test_case_key} was {'resubmitted' if was_returned else 'submitted'} to the shared QA review queue.",
-        actor_id=current_user.id,
-    )
 
 
 @router.post("/test-cases/{case_id}/submit", response_model=schemas.TestCaseOut)
@@ -1409,13 +1393,9 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.reviewed_by_id = current_user.id
             draft.reviewed_at = models.now()
             draft.review_comments = comments or "Recommended for QA Lead final approval."
-            draft.reminder_sent_at = None
-            draft.escalated_at = None
             _sync_case_mirror(obj, draft)
             action = "Recommended for approval"
             comments = draft.review_comments
-            notify.fire(db, management_ids, "Recommended", "TEST_CASE", obj.id, obj.test_case_key,
-                        f"{obj.test_case_key} completed Stage 1 and awaits QA Lead final approval.", actor_id=current_user.id)
         elif decision == "RETURN":
             if not comments:
                 raise HTTPException(400, "A reason is required when returning a test case for changes")
@@ -1423,12 +1403,8 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.reviewed_by_id = current_user.id
             draft.reviewed_at = models.now()
             draft.review_comments = comments
-            draft.reminder_sent_at = None
-            draft.escalated_at = None
             _sync_case_mirror(obj, draft)
             action = "Returned for correction"
-            notify.fire(db, [draft.author_id], "Returned", "TEST_CASE", obj.id, obj.test_case_key,
-                        f"{obj.test_case_key} was returned by a QA Group member: {comments}", actor_id=current_user.id)
         else:  # REJECT
             if not comments:
                 raise HTTPException(400, "A reason is required when rejecting a test case")
@@ -1438,8 +1414,6 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.review_comments = comments
             _sync_case_mirror(obj, draft)
             action = "Rejected"
-            notify.fire(db, [draft.author_id], "Rejected", "TEST_CASE", obj.id, obj.test_case_key,
-                        f"{obj.test_case_key} was rejected during QA review: {comments}", actor_id=current_user.id)
     elif draft.status == "QA Lead Approval Pending":
         if not current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
             raise HTTPException(403, "Final approval is available only to the QA Lead Group")
@@ -1464,11 +1438,6 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             _sync_case_mirror(obj, draft)
             action = "Approved & Activated"
             comments = draft.qa_lead_decision_comments
-            notify.fire(
-                db, [draft.author_id, draft.reviewed_by_id],
-                "Approved", "TEST_CASE", obj.id, obj.test_case_key,
-                f"{obj.test_case_key} was approved and is now active.", actor_id=current_user.id,
-            )
         elif decision == "RETURN":
             if not comments:
                 raise HTTPException(400, "A reason is required when returning a test case for changes")
@@ -1476,14 +1445,8 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
             draft.qa_lead_decision_comments = comments
-            draft.reminder_sent_at = None
-            draft.escalated_at = None
             _sync_case_mirror(obj, draft)
             action = "Returned for correction"
-            notify.fire(
-                db, [draft.author_id, draft.reviewed_by_id], "Returned", "TEST_CASE", obj.id, obj.test_case_key,
-                f"{obj.test_case_key} was returned by the QA Lead Group: {comments}", actor_id=current_user.id,
-            )
         else:  # REJECT
             if not comments:
                 raise HTTPException(400, "A reason is required when rejecting a test case")
@@ -1491,14 +1454,8 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
             draft.qa_lead_decision_comments = comments
-            draft.reminder_sent_at = None
-            draft.escalated_at = None
             _sync_case_mirror(obj, draft)
             action = "Rejected"
-            notify.fire(
-                db, [draft.author_id, draft.reviewed_by_id], "Rejected", "TEST_CASE", obj.id, obj.test_case_key,
-                f"{obj.test_case_key} was rejected: {comments}", actor_id=current_user.id,
-            )
     elif draft.status == "In Review":
         if not current_user.has_role(Role.QA_LEAD):
             raise HTTPException(403, "Stage 1 review is available only to the QA Lead group")
@@ -1512,13 +1469,9 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.reviewed_by_id = current_user.id
             draft.reviewed_at = models.now()
             draft.review_comments = comments or "Recommended for QA Lead final approval."
-            draft.reminder_sent_at = None
-            draft.escalated_at = None
             _sync_case_mirror(obj, draft)
             action = "Recommended for approval"
             comments = draft.review_comments
-            notify.fire(db, management_ids, "Recommended", "TEST_CASE", obj.id, obj.test_case_key,
-                        f"{obj.test_case_key} completed Stage 1 and awaits QA management approval.", actor_id=current_user.id)
         elif decision == "RETURN":
             if not comments:
                 raise HTTPException(400, "A reason is required when returning a test case for changes")
@@ -1526,12 +1479,8 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.reviewed_by_id = current_user.id
             draft.reviewed_at = models.now()
             draft.review_comments = comments
-            draft.reminder_sent_at = None
-            draft.escalated_at = None
             _sync_case_mirror(obj, draft)
             action = "Returned for correction"
-            notify.fire(db, [draft.author_id], "Returned", "TEST_CASE", obj.id, obj.test_case_key,
-                        f"{obj.test_case_key} was returned by the Reviewer: {comments}", actor_id=current_user.id)
         else:
             if not comments:
                 raise HTTPException(400, "A reason is required when rejecting a test case")
@@ -1541,8 +1490,6 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.review_comments = comments
             _sync_case_mirror(obj, draft)
             action = "Rejected"
-            notify.fire(db, [draft.author_id], "Rejected", "TEST_CASE", obj.id, obj.test_case_key,
-                        f"{obj.test_case_key} was rejected during QA review: {comments}", actor_id=current_user.id)
     else:  # "Review Completed" (draft.status not in the three branches above)
         require_can_give_final_approval(db, obj.project_id, current_user)
         if decision not in {"APPROVE", "RETURN", "REJECT"}:
@@ -1566,12 +1513,6 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             _sync_case_mirror(obj, draft)
             action = "Approved & Activated"
             comments = draft.qa_lead_decision_comments
-            project_qa_lead = obj.project.default_qa_lead_id if obj.project else None
-            notify.fire(
-                db, [draft.author_id, draft.reviewed_by_id, project_qa_lead],
-                "Approved", "TEST_CASE", obj.id, obj.test_case_key,
-                f"{obj.test_case_key} was approved and is now active.", actor_id=current_user.id,
-            )
         elif decision == "RETURN":
             if not comments:
                 raise HTTPException(400, "A reason is required when returning a test case for changes")
@@ -1579,14 +1520,8 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
             draft.qa_lead_decision_comments = comments
-            draft.reminder_sent_at = None
-            draft.escalated_at = None
             _sync_case_mirror(obj, draft)
             action = "Returned for correction"
-            notify.fire(
-                db, [draft.author_id, draft.reviewed_by_id], "Returned", "TEST_CASE", obj.id, obj.test_case_key,
-                f"{obj.test_case_key} was returned by the QA Lead: {comments}", actor_id=current_user.id,
-            )
         else:  # REJECT
             if not comments:
                 raise HTTPException(400, "A reason is required when rejecting a test case")
@@ -1594,14 +1529,8 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
             draft.qa_lead_decision_comments = comments
-            draft.reminder_sent_at = None
-            draft.escalated_at = None
             _sync_case_mirror(obj, draft)
             action = "Rejected"
-            notify.fire(
-                db, [draft.author_id, draft.reviewed_by_id], "Rejected", "TEST_CASE", obj.id, obj.test_case_key,
-                f"{obj.test_case_key} was rejected: {comments}", actor_id=current_user.id,
-            )
     db.add(_case_workflow_action(obj.id, current_user, action, comments,
                                  previous_state=previous_state, new_state=draft.status))
     db.commit()
@@ -2178,11 +2107,6 @@ def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprov
         _sync_case_mirror(row, draft)
         db.add(_case_workflow_action(row.id, current_user, "Approved & Activated", comments,
                                      previous_state=previous_state, new_state="Approved"))
-        notify.fire(
-            db, [draft.author_id, draft.reviewed_by_id],
-            "Approved", "TEST_CASE", row.id, row.test_case_key,
-            f"{row.test_case_key} was approved and is now active (bulk approval).", actor_id=current_user.id,
-        )
     db.commit()
     for row in rows:
         db.refresh(row)
@@ -2266,13 +2190,9 @@ def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkReco
         draft.reviewed_by_id = current_user.id
         draft.reviewed_at = models.now()
         draft.review_comments = comments or "Recommended for QA Lead final approval (bulk recommend)."
-        draft.reminder_sent_at = None
-        draft.escalated_at = None
         _sync_case_mirror(row, draft)
         db.add(_case_workflow_action(row.id, current_user, "Recommended for approval", draft.review_comments,
                                      previous_state=previous_state, new_state=new_state))
-        notify.fire(db, management_ids, "Recommended", "TEST_CASE", row.id, row.test_case_key,
-                    f"{row.test_case_key} awaits QA Lead approval (bulk).", actor_id=current_user.id)
     db.commit()
     for row in rows:
         db.refresh(row)
@@ -2368,8 +2288,6 @@ def bulk_return_test_cases(project_id: int, payload: schemas.TestCaseBulkReturn,
         draft.reviewed_by_id = current_user.id
         draft.reviewed_at = models.now()
         draft.review_comments = comments
-        draft.reminder_sent_at = None
-        draft.escalated_at = None
         if not is_stage1:
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
@@ -2377,8 +2295,6 @@ def bulk_return_test_cases(project_id: int, payload: schemas.TestCaseBulkReturn,
         _sync_case_mirror(row, draft)
         db.add(_case_workflow_action(row.id, current_user, "Returned for correction", comments,
                                      previous_state=previous_state, new_state=new_state))
-        notify.fire(db, [draft.author_id], "Returned", "TEST_CASE", row.id, row.test_case_key,
-                    f"{row.test_case_key} was returned (bulk): {comments}", actor_id=current_user.id)
     db.commit()
     for row in rows:
         db.refresh(row)
@@ -2407,8 +2323,6 @@ def bulk_reject_test_cases(project_id: int, payload: schemas.TestCaseBulkReject,
         draft.reviewed_by_id = current_user.id
         draft.reviewed_at = models.now()
         draft.review_comments = comments
-        draft.reminder_sent_at = None
-        draft.escalated_at = None
         if not is_stage1:
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
@@ -2416,8 +2330,6 @@ def bulk_reject_test_cases(project_id: int, payload: schemas.TestCaseBulkReject,
         _sync_case_mirror(row, draft)
         db.add(_case_workflow_action(row.id, current_user, "Rejected", comments,
                                      previous_state=previous_state, new_state="Rejected"))
-        notify.fire(db, [draft.author_id], "Rejected", "TEST_CASE", row.id, row.test_case_key,
-                    f"{row.test_case_key} was rejected (bulk): {comments}", actor_id=current_user.id)
     db.commit()
     for row in rows:
         db.refresh(row)

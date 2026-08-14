@@ -381,7 +381,6 @@ DEFAULT_CHECKLIST_ITEMS = [
     ("Test Environment availability (UAT / SIT)", "Business", True),
     ("Test data creation", "User dept / Dev team", False),
     ("Assess Test Scenarios", "User Dept", False),
-    ("Project walkthrough to QA", "User Dept / Dev team", False),
     ("Application builds deployed & validated", "Dev team / Business", False),
     ("Security access (VPN Proxy/URLs whitelisting/credentials/firewall)", "User dept", False),
 ]

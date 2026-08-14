@@ -950,39 +950,6 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistI
     return item
 
 
-# ---- Walkthrough sessions ----
-@router.get("/{req_id}/walkthroughs", response_model=List[schemas.WalkthroughOut])
-def list_walkthroughs(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.WalkthroughSession).filter_by(functional_request_id=req_id).all()
-
-
-@router.post("/{req_id}/walkthroughs", response_model=schemas.WalkthroughOut)
-def add_walkthrough(req_id: int, payload: schemas.WalkthroughCreate, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(
-                         Role.BUSINESS_ANALYST, Role.REQUESTER, Role.QA_ENGINEER, Role.QA_LEAD))):
-    if not db.query(models.FunctionalRequest).get(req_id):
-        raise HTTPException(404, "Functional Testing Request not found")
-    obj = models.WalkthroughSession(functional_request_id=req_id, **payload.model_dump())
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{req_id}/walkthroughs/{wt_id}/acknowledge", response_model=schemas.WalkthroughOut)
-def acknowledge_walkthrough(req_id: int, wt_id: int, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(Role.QA_ENGINEER, Role.QA_LEAD))):
-    obj = db.query(models.WalkthroughSession).filter_by(id=wt_id, functional_request_id=req_id).first()
-    if not obj:
-        raise HTTPException(404, "Walkthrough session not found")
-    import datetime
-    obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = models.now()
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
 @router.get("/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def request_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return (db.query(models.ApprovalAction)
@@ -1016,8 +983,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
-            ("Epic Number", obj.epic_number),
-            ("Change Request ID(s)", obj.cr_number),
+            ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Change Type", obj.change_type),
             ("Department", obj.department),
         ]),

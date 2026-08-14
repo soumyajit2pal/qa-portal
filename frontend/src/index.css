@@ -4565,9 +4565,9 @@ td { padding: 12px; }
    surface and a precise edge marker instead of bright or decorative colour. */
 .navigation-v8 .sidebar {
   width:258px;
-  border-right:1px solid #075566;
-  background:linear-gradient(180deg,#0c6a7b 0%,#075566 56%,#043e4c 100%);
-  box-shadow:7px 0 24px rgba(7,62,75,.16);
+  border-right:1px solid #403653;
+  background:linear-gradient(180deg,#514366 0%,#3b324f 54%,#29243d 100%);
+  box-shadow:7px 0 24px rgba(35,29,52,.22);
 }
 .navigation-v8 .sidebar .brand {
   min-height:76px;padding:13px 13px 12px 17px;
@@ -4575,7 +4575,7 @@ td { padding: 12px; }
 }
 .navigation-v8 .qualitysphere-mark {
   width:38px;height:38px;flex-basis:38px;border:1px solid rgba(242,199,53,.72);
-  border-radius:9px;background:linear-gradient(145deg,#0f7d8d 0%,#075363 58%,#043a47 100%);
+  border-radius:9px;background:linear-gradient(145deg,#6c5a84 0%,#473a5f 58%,#2b2540 100%);
   box-shadow:0 5px 13px rgba(2,40,49,.28),inset 0 0 0 1px rgba(255,255,255,.06);
 }
 .navigation-v8 .qualitysphere-mark::before { border-color:rgba(246,210,73,.9);border-left-color:transparent; }
@@ -4619,7 +4619,7 @@ td { padding: 12px; }
 .navigation-v8 .sidebar nav a:hover .nav-icon { color:#e0f1f2;background:rgba(225,243,245,.08); }
 .navigation-v8 .sidebar nav a.active {
   color:#fff;border-color:rgba(158,215,221,.24);
-  background:linear-gradient(110deg,#0d6678,#075466);
+  background:linear-gradient(110deg,#77629a,#5a4979);
   box-shadow:0 4px 12px rgba(0,27,33,.18);font-weight:760;
 }
 .navigation-v8 .sidebar nav a.active::before {
@@ -4639,8 +4639,9 @@ td { padding: 12px; }
 .navigation-v8 .user-chip .role,.navigation-v8 .user-chip .dept { color:#8eafb4; }
 .navigation-v8 .user-chip .avatar { color:#17363d;background:#f2c735; }
 .navigation-v8 .topbar {
-  min-height:64px;padding:8px 22px;border-bottom:1px solid #d7e3e5;background:rgba(255,255,255,.98);
-  box-shadow:0 3px 12px rgba(26,64,71,.04);
+  min-height:64px;padding:8px 22px;border-bottom:1px solid #b8d4d8;
+  background:linear-gradient(100deg,#e5f2f3 0%,#f1f8f8 54%,#e8f3f4 100%);
+  box-shadow:0 3px 12px rgba(13,102,120,.08);
 }
 .navigation-v8 .topbar-context { min-width:178px; }
 .navigation-v8 .topbar-context span { color:#82969a;font-size:7.5px;letter-spacing:.11em; }
@@ -5039,3 +5040,37 @@ td { padding: 12px; }
 .signoff-independent-approval strong { color: #225d6b; font-size: 11.5px; }
 .signoff-independent-approval span { color: #527781; font-size: 10px; line-height: 1.5; }
 @media (max-width: 520px) { .signoff-signature-list { grid-template-columns: 1fr; }.signoff-signature-card dl > div { grid-template-columns: 1fr; gap: 2px; } }
+
+/* SAST / DAST — Fortify SSC application-version result import. */
+.security-scan-start { position: relative; display: grid; gap: 14px; }
+.security-scan-intro { display: grid; gap: 4px; padding: 12px 14px; border: 1px solid #cfe0e5; border-radius: 10px; background: #f4f9fa; }
+.security-scan-intro strong { color: #244e58; font-size: 12px; }
+.security-scan-intro span { color: #658087; font-size: 10px; line-height: 1.5; }
+.security-scan-start .modal-actions .btn-primary { display: inline-flex; align-items: center; gap: 7px; }
+.security-scan-progress { display: flex; align-items: center; gap: 12px; padding: 13px 14px; border: 1px solid #cfdceb; border-radius: 10px; background: #f7faff; }
+.security-scan-progress .api-activity-spinner { width: 22px; height: 22px; flex: 0 0 auto; }
+.security-scan-progress > div { display: grid; gap: 2px; }
+.security-scan-progress strong { color: #334b69; font-size: 11px; }
+.security-scan-progress span { color: #718096; font-size: 9.5px; }
+.security-scan-results { margin: 0 0 16px; padding: 15px; border: 1px solid #d7e2e8; border-radius: 12px; background: linear-gradient(145deg,#fbfdfe,#f4f8fa); box-shadow: 0 3px 12px rgba(28,64,79,.05); }
+.security-scan-results > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 13px; }
+.security-scan-results > header > div { display: grid; gap: 3px; }
+.security-scan-results header small { color: #6d8790; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.security-scan-results header strong { color: #263d4a; font-size: 14px; }
+.security-scan-results header strong span { color: #5b55c4; }
+.security-scan-results header p { margin: 0; color: #8697a0; font-size: 8.5px; }
+.security-scan-severity-grid { display: grid; grid-template-columns: repeat(5,minmax(90px,1fr)); gap: 8px; }
+.security-scan-severity-grid > div { display: grid; gap: 3px; padding: 10px 11px; border: 1px solid #e0e5e9; border-radius: 9px; background: #fff; }
+.security-scan-severity-grid small { color: #788790; font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.security-scan-severity-grid strong { color: #344653; font-size: 20px; line-height: 1; }
+.security-scan-severity-grid .critical { border-left: 3px solid #b42318; }.security-scan-severity-grid .critical strong { color: #b42318; }
+.security-scan-severity-grid .high { border-left: 3px solid #e05a33; }.security-scan-severity-grid .high strong { color: #c54c28; }
+.security-scan-severity-grid .medium { border-left: 3px solid #d99818; }.security-scan-severity-grid .medium strong { color: #ae7410; }
+.security-scan-severity-grid .low { border-left: 3px solid #3488a4; }.security-scan-severity-grid .low strong { color: #286e85; }
+.security-scan-severity-grid .total { border-left: 3px solid #5b55c4; }.security-scan-severity-grid .total strong { color: #4e48ad; }
+.security-scan-filter-results { margin-top: 14px; }.security-scan-filter-results > strong { display: block; margin-bottom: 7px; color: #465964; font-size: 10px; }
+.security-scan-filter-results table { background: #fff; }.security-scan-filter-results th,.security-scan-filter-results td { padding: 7px 8px; font-size: 8.5px; }
+.security-scan-filter-results a { color: #4f46c6; font-weight: 750; }
+.security-scan-history { margin-top: 12px; color: #657a84; font-size: 9px; }.security-scan-history summary { cursor: pointer; font-weight: 750; }
+.security-scan-history > div { display: flex; justify-content: space-between; gap: 10px; padding: 7px 3px; border-bottom: 1px solid #e3eaed; }
+@media (max-width: 760px) { .security-scan-severity-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.security-scan-severity-grid .total { grid-column: 1/-1; }.security-scan-results > header { flex-direction: column; } }

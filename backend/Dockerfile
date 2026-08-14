@@ -16,6 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Alembic runs from the same immutable image as the API. Keeping its
+# configuration and complete revision history in the image lets deployment
+# run `alembic upgrade head` before any Uvicorn worker imports app.main.
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 COPY app ./app
 
 # Uploaded documents (see app/documents.py, app/routers/qa_requests.py
@@ -37,7 +42,7 @@ EXPOSE 8000
 #
 # Multiple workers means multiple separate processes -- see main.py's
 # startup-lock comment for why REDIS_URL should be set once this is above 1
-# worker, so one-time startup work (schema migration sweep, notification
+# worker, so one-time startup work (schema migration sweep and other
 # sweep) runs once per deployment rather than once per worker.
 ENV WEB_CONCURRENCY=4
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY}"]

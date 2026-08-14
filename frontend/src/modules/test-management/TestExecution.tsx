@@ -338,10 +338,19 @@ function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCa
     submittingRef.current = true
     setBusy(true); setError(null)
     try {
+      // Reported directly: "if i have 3500 testcase present, then it's
+      // allowing all in one go, then application going to loading stage and
+      // though it's completing the process still getting timeout error."
+      // Same false-negative pattern as the Excel import fix -- a selection
+      // this large legitimately takes longer than api.ts's default 30s
+      // budget to create server-side (even after the backend's own N+1 fix,
+      // see add_test_cases_to_cycle), so this specific call asks for more
+      // room instead of racing the default. 3 minutes, same headroom as the
+      // Excel import.
       const execs = await api.post<TestExecutionOut[]>(`/api/test-execution/cycles/${cycleId}/executions`, {
         test_case_ids: Array.from(selected),
         assigned_to_id: assignedTo ? Number(assignedTo) : null,
-      })
+      }, 180_000)
       onAdded(execs)
     } catch (err) { setError(err) } finally {
       submittingRef.current = false

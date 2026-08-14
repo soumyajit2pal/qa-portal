@@ -27,7 +27,7 @@ from .routers import (
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config,
-    pending_approvals, system_settings, notifications, defects,
+    pending_approvals, system_settings, defects,
 )
 
 # Reported: "Custom Fields not working" traced back to an Oracle identifier-
@@ -61,7 +61,7 @@ logger.info("Database schema verified/created successfully.")
 # imports app.main fresh. `load_storage_settings` below MUST still run in
 # every worker (it sets this worker's own in-memory upload-root config, see
 # storage_config.py) but the two sweeps and the legacy-layout migration are
-# one-time side effects (create Notification rows / move files on disk) that
+# one-time filesystem/data-maintenance side effects that
 # should only happen once per deployment, not once per worker. Gated on
 # cache.try_acquire_lock: with Redis configured, only the first worker to
 # start does this work; without Redis it's permissive (see that function's
@@ -72,12 +72,6 @@ with SessionLocal() as migration_db:
         migrated_uploads = migrate_legacy_document_layout(migration_db)
         if migrated_uploads:
             logger.info("Migrated %d upload(s) to request-first folders", migrated_uploads)
-        swept = notifications.sweep_overdue_approvals(migration_db)
-        if swept:
-            logger.info("Test approval reminder/escalation sweep: %d notification(s) created", swept)
-        overdue_defects = notifications.sweep_overdue_defects(migration_db)
-        if overdue_defects:
-            logger.info("Defect overdue sweep: %d notification(s) created", overdue_defects)
         backfilled_departments = departments.backfill_user_department_assignments(migration_db)
         if backfilled_departments:
             logger.info("Backfilled department_assignments for %d existing user(s)", backfilled_departments)
@@ -208,7 +202,6 @@ _MODULE_PATH_PREFIXES = [
     ("/api/checklist-config", "CHECKLIST_CONFIG"),
     ("/api/pending-approvals", "PENDING_APPROVAL"),
     ("/api/system-settings", "SYSTEM_SETTING"),
-    ("/api/notifications", "NOTIFICATION"),
 ]
 
 
@@ -394,7 +387,6 @@ app.include_router(audit.router)
 app.include_router(checklist_config.router)
 app.include_router(pending_approvals.router)
 app.include_router(system_settings.router)
-app.include_router(notifications.router)
 
 
 @app.get("/api/health")

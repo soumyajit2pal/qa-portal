@@ -396,6 +396,36 @@ export interface SASTFindingOut {
   status: string
 }
 
+export interface SecurityScanFilterOut {
+  title: string
+  guid: string
+  total_count: number
+  critical_count: number
+  high_count: number
+  medium_count: number
+  low_count: number
+  audit_url?: string | null
+}
+
+export interface SecurityScanResultOut {
+  id: number
+  request_type: 'SAST' | 'DAST'
+  request_id: number
+  application_name: string
+  application_version: string
+  provider: string
+  provider_version_id: string
+  critical_count: number
+  high_count: number
+  medium_count: number
+  low_count: number
+  total_count: number
+  audit_url?: string | null
+  filters: SecurityScanFilterOut[]
+  imported_by_id?: number | null
+  imported_at: string
+}
+
 // One repository row -- replaces the old design where Repository URL/
 // Branch/Commit ID/Tech Stack/Build Number were each comma-joined into a
 // single column (e.g. build_number = "1.1, 1.1"). One real DB row per

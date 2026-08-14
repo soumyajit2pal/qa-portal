@@ -3,7 +3,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload, joinedload
 
 from .. import models, schemas
 from ..database import get_db
@@ -95,7 +95,17 @@ def list_suppressions(db: Session = Depends(get_db), current_user: models.User =
     # SuppressionRequest.department is a real column (auto-populated at
     # creation time, see its own column comment in models.py), so this is a
     # plain filter, no join needed.
-    q = db.query(models.SuppressionRequest)
+    # Perf tuning (2026-08, reported directly: "some of the apis are taking
+    # lot of timing") -- SuppressionOut.items (one-to-many) and
+    # .linked_request (resolved from sast_request/dast_request, both
+    # many-to-one) were all previously lazy-loaded per row -- up to 3 extra
+    # SELECTs per suppression. selectinload for the collection (avoids a
+    # join-driven row explosion), joinedload for the two many-to-one FKs.
+    q = db.query(models.SuppressionRequest).options(
+        selectinload(models.SuppressionRequest.items),
+        joinedload(models.SuppressionRequest.sast_request),
+        joinedload(models.SuppressionRequest.dast_request),
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.filter(models.SuppressionRequest.department.in_(scope))
@@ -429,40 +439,3 @@ def delete_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(
     doc_store.delete_document(db, doc, log_entity_type="SUPPRESSION", log_entity_id=sup_id, log_actor=current_user)
     return {"ok": True}
 
-
-# ---- Walkthrough sessions ----
-# Own dedicated table (SuppressionWalkthrough), mirroring Functional's
-# WalkthroughSession -- see routers/functional.py for the same pattern.
-# Suppression has no readiness-checklist concept, so it only gets
-# Walkthroughs + History tabs on its detail page, not a Checklist tab.
-@router.get("/{sup_id}/walkthroughs", response_model=List[schemas.WalkthroughOut])
-def list_walkthroughs(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return db.query(models.SuppressionWalkthrough).filter_by(suppression_request_id=sup_id).all()
-
-
-@router.post("/{sup_id}/walkthroughs", response_model=schemas.WalkthroughOut)
-def add_walkthrough(sup_id: int, payload: schemas.WalkthroughCreate, db: Session = Depends(get_db),
-                     current_user: models.User = Depends(require_roles(
-                         Role.BUSINESS_ANALYST, Role.REQUESTER, Role.QA_ENGINEER, Role.QA_LEAD,
-                         Role.SECURITY_ANALYST))):
-    if not db.query(models.SuppressionRequest).get(sup_id):
-        raise HTTPException(404, "Suppression request not found")
-    obj = models.SuppressionWalkthrough(suppression_request_id=sup_id, **payload.model_dump())
-    db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-@router.post("/{sup_id}/walkthroughs/{wt_id}/acknowledge", response_model=schemas.WalkthroughOut)
-def acknowledge_walkthrough(sup_id: int, wt_id: int, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(
-                                 Role.SECURITY_ANALYST, Role.QA_LEAD))):
-    obj = db.query(models.SuppressionWalkthrough).filter_by(id=wt_id, suppression_request_id=sup_id).first()
-    if not obj:
-        raise HTTPException(404, "Walkthrough session not found")
-    obj.qa_acknowledged_by_id = current_user.id
-    obj.qa_acknowledged_at = models.now()
-    db.commit()
-    db.refresh(obj)
-    return obj

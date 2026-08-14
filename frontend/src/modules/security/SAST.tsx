@@ -8,8 +8,9 @@ import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import { SecurityScanDialog, SecurityScanResults } from './SecurityScan'
 
 // One "SAST component" = one repository, with its own branch/commit/tech
 // stack/build number -- the "+" adds a whole new one of these (not just
@@ -324,6 +325,9 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // this tracks which of the two triggered the pop-up currently showing (or
   // null when it's closed).
   const [scanConfirmAction, setScanConfirmAction] = useState<null | 'complete-scan' | 'rescan-decision'>(null)
+  const [showStartScan, setShowStartScan] = useState(false)
+  const [scanError, setScanError] = useState<unknown>(null)
+  const [scanResults, setScanResults] = useState<SecurityScanResultOut[]>([])
 
   const load = useCallback(async () => {
     try {
@@ -332,6 +336,9 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   }, [req.id])
 
   useEffect(() => { load() }, [load])
+  useEffect(() => {
+    api.get<SecurityScanResultOut[]>(`/api/sast-requests/${req.id}/scan-results`).then(setScanResults).catch(() => setScanResults([]))
+  }, [req.id])
   useEffect(() => { setReassignAnalystReason('') }, [req.id, req.security_analyst_id])
 
   async function toggleChecklistItem(item: ChecklistItemOut) {
@@ -351,6 +358,19 @@ function SASTDetail({ req, onClose, onChanged, users }: {
       await load()
     }
     catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  async function startScan(applicationName: string, applicationVersion: string) {
+    setBusy(true); setScanError(null)
+    try {
+      const response = await api.post<{ request: SASTOut; scan_result: SecurityScanResultOut }>(`/api/sast-requests/${req.id}/start-scan`, {
+        application_name: applicationName, application_version: applicationVersion,
+      })
+      setScanResults((current) => [response.scan_result, ...current])
+      onChanged(response.request)
+      setShowStartScan(false)
+      await load()
+    } catch (err) { setScanError(err) } finally { setBusy(false) }
   }
   // Answers the "were any findings identified?" pop-up -- Yes (no findings)
   // fast-tracks toward Security Complete/Report Ready/Closed on the backend
@@ -764,7 +784,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                   </button>
                 </>
               )}
-              {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-scan')}>Start Scan</button>}
+              {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setScanError(null); setShowStartScan(true) }}>Start Scan</button>}
               {canCompleteScan && <button className="btn btn-sm" disabled={busy} onClick={() => setScanConfirmAction('complete-scan')}>Complete Scan</button>}
               {canValidateFindings && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('validate-findings')}>Validate Findings</button>}
               {canAssignToRequester && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('assign-to-requester')}>Assign to Requester</button>}
@@ -796,6 +816,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
               onCancel={() => answerScanConfirm(false)}
             />
           )}
+          {showStartScan && <SecurityScanDialog kind="SAST" initialApplicationName={req.application_name} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
         </div>
       )}
 
@@ -864,6 +885,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'findings' && (
         <div>
+          <SecurityScanResults results={scanResults} />
           <Table rowKey="id" columns={[
             { key: 'issue_id', header: 'Issue ID' },
             { key: 'severity', header: 'Severity' },

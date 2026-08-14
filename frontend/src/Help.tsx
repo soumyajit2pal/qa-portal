@@ -255,7 +255,7 @@ export default function Help() {
               </div>
               <SopSteps items={[
                 { title: 'Sign in', text: 'Use the login method assigned to your account: Standard credentials or LDAP / Active Directory.' },
-                { title: 'Complete first-login setup', text: 'A new LDAP user selects a department and initially receives the lowest-privilege Requester role until access is reviewed.' },
+                { title: 'Complete first-login setup', text: 'A new LDAP user selects exactly one primary department. Secondary department access can be added later only by an Administrator. The account initially receives the lowest-privilege Requester role until access is reviewed.' },
                 { title: 'Check pending work', text: 'Review the login notification, Pending Approvals, and status badges before starting a new action.' },
                 { title: 'Use record IDs', text: 'Reference the full TQA ID in comments, evidence, exports, and support requests so the exact record is traceable.' },
               ]} />

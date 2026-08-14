@@ -3,7 +3,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .. import models, schemas
 from ..database import get_db
@@ -131,7 +131,13 @@ def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Dep
     # responsibilities span departments. Filter on the linked request's
     # department, not QASignOff.department (the latter is always the COE - Quality Assurance
     # approval owner and would make business privacy filtering meaningless).
-    q = db.query(models.QASignOff)
+    # Perf tuning (2026-08, reported directly: "some of the apis are taking
+    # lot of timing") -- SignOffOut.request_department reads
+    # source_functional_request (a viewonly relationship matched on business
+    # ID, not a normal FK), previously lazy-loaded once per row. joinedload
+    # here turns that into a single extra LEFT JOIN for the whole page
+    # instead of one query per certificate.
+    q = db.query(models.QASignOff).options(joinedload(models.QASignOff.source_functional_request))
     scope = dashboard_department_scope(current_user)
     if scope:
         q = (q.join(
@@ -384,7 +390,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Request Department", obj.request_department),
             ("QA Approval Department", obj.department),
             ("Testing Request ID", obj.testing_request_id),
-            ("Change Request ID(s)", obj.change_request_ids),
+            ("CR Number/EPIC Number", obj.change_request_ids),
             ("Vendor / SI Partner", obj.vendor_si_partner),
             ("Technology Stack", obj.technology_stack),
         ]),

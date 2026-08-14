@@ -1,35 +1,62 @@
 services:
+  # One-shot schema migration. The API waits for this service to finish
+  # successfully, so no web worker can start against an outdated schema.
+  # This uses the exact same image/model metadata as the backend service.
+  migrate:
+    image: qualityshield-backend:${IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    restart: "no"
+
   backend:
+    image: qualityshield-backend:${IMAGE_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:Oracle123@host.docker.internal:1521/?service_name=FREEPDB1}
-      SECRET_KEY: ${SECRET_KEY}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
       DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
       DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
       DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
-      DB_POOL_PRE_PING: ${DB_POOL_PRE_PING:true}
-      DB_QUERY_TIMEOUT_MS: ${DB_QUERY_TIMEOUT_MS:30000}
+      DB_POOL_PRE_PING: ${DB_POOL_PRE_PING:-true}
+      DB_QUERY_TIMEOUT_MS: ${DB_QUERY_TIMEOUT_MS:-30000}
       AUDIT_DB_POOL_SIZE: ${AUDIT_DB_POOL_SIZE:-5}
-      AUDIT_DB_MAX_OVERFLOW: ${AUDIT_DB_MAX_OVERFLOW:-10} 
+      AUDIT_DB_MAX_OVERFLOW: ${AUDIT_DB_MAX_OVERFLOW:-10}
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,::1/128,172.16.0.0/12}
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-6}
       CACHE_ENABLED: ${CACHE_ENABLED:-true}
-      
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
       - qa_portal_uploads:/app/app/uploads
     depends_on:
-      - redis
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)); raise SystemExit(0 if data.get('status') == 'ok' else 1)"]
+      interval: 15s
+      timeout: 7s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
     volumes:
       - qa_portal_redis:/data
@@ -48,7 +75,8 @@ services:
     ports:
       - "8080:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
