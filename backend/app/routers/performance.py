@@ -3,6 +3,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models, pagination, schemas
@@ -149,8 +150,14 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
         joinedload(models.PerformanceRequest.qa_request).joinedload(models.QARequest.application_master)
     )
     scope = dashboard_department_scope(current_user)
+    delegated_to_user = models.QARequest.delegations.any(and_(
+        models.QARequestDelegation.target_type == "PERFORMANCE",
+        models.QARequestDelegation.target_id == models.PerformanceRequest.id,
+        models.QARequestDelegation.status == "ACTIVE",
+        models.QARequestDelegation.assigned_to_id == current_user.id,
+    ))
     if scope:
-        q = q.filter(models.QARequest.department.in_(scope))
+        q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     q = pagination.apply_search(q, params, models.PerformanceRequest.request_id, models.PerformanceRequest.application_name)
     q = pagination.apply_status_filter(q, params, models.PerformanceRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
@@ -287,6 +294,8 @@ def resubmit_performance(req_id: int, db: Session = Depends(get_db), current_use
     obj = _get_or_404(db, req_id)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
+    if obj.active_delegation:
+        raise HTTPException(400, "The active delegation must be returned or recalled before resubmission")
     _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER"], "Resubmit")
     if obj.status in ("RETURNED_BY_SM", "SM_REJECTED"):
         reopening = obj.status == "SM_REJECTED"
@@ -547,11 +556,6 @@ def complete_planning(req_id: int, payload: schemas.AssignTesterIn, db: Session 
         previous_label = ", ".join(u.full_name for u in previous_users) if previous_users else "Unassigned"
         new_label = ", ".join(tester.full_name for tester in testers)
         reassignment.record_reassignment(db, "PERFORMANCE", obj.id, current_user, previous_label, new_label, payload.reason)
-        for new_id in set(tester_ids) - previous_ids:
-            reassignment.notify_new_assignee(
-                db, new_id, "PERFORMANCE", obj.id, obj.request_id,
-                f"You have been assigned as QA Tester on {obj.request_id}.", current_user.id,
-            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -689,6 +693,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
             ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Department", obj.department),
             ("Change Type", obj.change_type),
+            ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type == "Bug Fix" else None),
             ("Request Type", obj.request_type),
         ]),
         ("Test Parameters & Environment", [
@@ -761,7 +766,9 @@ def _can_upload_documents(obj: "models.PerformanceRequest", user: models.User) -
     status = obj.status
     if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED",
                   "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER", "REQUESTER_VERIFICATION"):
-        return obj.requester_id == user.id
+        delegation = obj.active_delegation
+        return (bool(delegation and delegation.assigned_to_id == user.id)
+                or (obj.requester_id == user.id and not delegation))
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
@@ -796,7 +803,9 @@ def _can_edit_details(obj: "models.PerformanceRequest", user: models.User) -> bo
         return True
     status = obj.status
     if status in ("DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER"):
-        return obj.requester_id == user.id
+        delegation = obj.active_delegation
+        return (bool(delegation and delegation.assigned_to_id == user.id)
+                or (obj.requester_id == user.id and not delegation))
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":

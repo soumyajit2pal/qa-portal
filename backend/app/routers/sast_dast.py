@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import models, pagination, schemas
@@ -233,7 +234,9 @@ def _can_upload_documents(obj, user: models.User) -> bool:
     status = obj.status
     if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED",
                   "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
-        return obj.requester_id == user.id
+        delegation = obj.active_delegation
+        return (bool(delegation and delegation.assigned_to_id == user.id)
+                or (obj.requester_id == user.id and not delegation))
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
@@ -268,7 +271,9 @@ def _can_edit_details(obj, user: models.User) -> bool:
         return True
     status = obj.status
     if status in ("DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"):
-        return obj.requester_id == user.id
+        delegation = obj.active_delegation
+        return (bool(delegation and delegation.assigned_to_id == user.id)
+                or (obj.requester_id == user.id and not delegation))
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
@@ -332,6 +337,8 @@ def _resubmit(db: Session, obj, current_user):
     back to SM_APPROVAL_PENDING for a fresh decision."""
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
+    if obj.active_delegation:
+        raise HTTPException(400, "The active delegation must be returned or recalled before resubmission")
     _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"],
              "Resubmit")
     if obj.status in ("RETURNED_BY_SM", "SM_REJECTED"):
@@ -492,11 +499,6 @@ def _assign_security_analyst(db: Session, obj, payload, current_user):
             db, entity_type, obj.id, current_user,
             previous_user.full_name if previous_user else "Unassigned", analyst.full_name, payload.reason,
         )
-        if analyst.id != previous_id:
-            reassignment.notify_new_assignee(
-                db, analyst.id, entity_type, obj.id, obj.request_id,
-                f"You have been assigned as Security Analyst on {obj.request_id}.", current_user.id,
-            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -763,8 +765,14 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
         selectinload(models.SASTRequest.findings),
     )
     scope = dashboard_department_scope(current_user)
+    delegated_to_user = models.QARequest.delegations.any(and_(
+        models.QARequestDelegation.target_type == "SAST",
+        models.QARequestDelegation.target_id == models.SASTRequest.id,
+        models.QARequestDelegation.status == "ACTIVE",
+        models.QARequestDelegation.assigned_to_id == current_user.id,
+    ))
     if scope:
-        q = q.filter(models.QARequest.department.in_(scope))
+        q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     q = pagination.apply_search(q, params, models.SASTRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.SASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
@@ -1223,7 +1231,10 @@ def sast_history(req_id: int, db: Session = Depends(get_db), current_user: model
 
 # ---------------- Module 5: DAST ----------------
 def _can_view_dast_credentials(obj: models.DASTRequest, current_user: models.User) -> bool:
-    return obj.requester_id == current_user.id or current_user.has_role(Role.SECURITY_ANALYST, Role.ADMIN)
+    delegation = obj.active_delegation
+    return (obj.requester_id == current_user.id
+            or bool(delegation and delegation.assigned_to_id == current_user.id)
+            or current_user.has_role(Role.SECURITY_ANALYST, Role.ADMIN))
 
 
 def _dast_out(obj: models.DASTRequest, current_user: models.User) -> schemas.DASTOut:
@@ -1254,8 +1265,14 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
         selectinload(models.DASTRequest.findings),
     )
     scope = dashboard_department_scope(current_user)
+    delegated_to_user = models.QARequest.delegations.any(and_(
+        models.QARequestDelegation.target_type == "DAST",
+        models.QARequestDelegation.target_id == models.DASTRequest.id,
+        models.QARequestDelegation.status == "ACTIVE",
+        models.QARequestDelegation.assigned_to_id == current_user.id,
+    ))
     if scope:
-        q = q.filter(models.QARequest.department.in_(scope))
+        q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     q = pagination.apply_search(q, params, models.DASTRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.DASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)

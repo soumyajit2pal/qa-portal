@@ -20,6 +20,11 @@ interface SearchableSelectProps {
   options: string[] | SearchableSelectOption[]
   placeholder?: string
   disabled?: boolean
+  // Open and focus the suggestion panel as soon as the control mounts. This
+  // is used by the shared Table column-filter popover: clicking the filter
+  // icon should take the user directly to searchable suggestions rather than
+  // requiring a second click on another dropdown trigger.
+  autoOpen?: boolean
   // Passed through to the root wrapper -- e.g. a toolbar dropdown that
   // isn't already inside a width-constraining Field wrapper (native
   // <select>s in the same spot would otherwise just size to content too,
@@ -39,7 +44,7 @@ function normalize(options: string[] | SearchableSelectOption[]): SearchableSele
 // Deliberately NOT used for short, fixed-size enums (Priority, Risk,
 // Status, Environment and the like) -- a search box adds a click with no
 // payoff on a 3-6 option list; those stay plain <select>s.
-export default function SearchableSelect({ value, onChange, options, placeholder, disabled, style }: SearchableSelectProps) {
+export default function SearchableSelect({ value, onChange, options, placeholder, disabled, autoOpen = false, style }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [panelPos, setPanelPos] = useState<PanelPos>({ top: 0, bottom: 'auto', left: 0, width: 0 })
@@ -61,6 +66,17 @@ export default function SearchableSelect({ value, onChange, options, placeholder
   useEffect(() => {
     if (open) inputRef.current?.focus()
   }, [open])
+
+  useEffect(() => {
+    if (!autoOpen || disabled) return
+    // Wait until the mounted trigger has a measurable viewport rectangle.
+    const frame = window.requestAnimationFrame(() => {
+      const rect = triggerRef.current?.getBoundingClientRect()
+      if (rect) setPanelPos(computePanelPos(rect))
+      setOpen(true)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [autoOpen, disabled])
 
   // Reported bug: position:fixed (see toggleOpen below) is only computed
   // once, at the moment the panel opens -- so scrolling the page (or any
@@ -120,6 +136,7 @@ export default function SearchableSelect({ value, onChange, options, placeholder
         ref={triggerRef}
         type="button"
         className="searchable-select-trigger"
+        title={current?.label}
         disabled={disabled}
         onClick={toggleOpen}
       >

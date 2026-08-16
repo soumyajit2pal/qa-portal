@@ -3,7 +3,7 @@ from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models, pagination, schemas
@@ -54,6 +54,11 @@ def _get_or_404(db: Session, req_id: int) -> "models.FunctionalRequest":
     if not obj:
         raise HTTPException(404, "Functional Testing Request not found")
     return obj
+
+
+def _is_active_delegate(obj: "models.FunctionalRequest", user: models.User) -> bool:
+    delegation = obj.active_delegation
+    return bool(delegation and delegation.assigned_to_id == user.id)
 
 
 def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> models.User:
@@ -156,8 +161,14 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
         joinedload(models.FunctionalRequest.qa_request).joinedload(models.QARequest.application_master)
     )
     scope = dashboard_department_scope(current_user)
+    delegated_to_user = models.QARequest.delegations.any(and_(
+        models.QARequestDelegation.target_type == "FUNCTIONAL",
+        models.QARequestDelegation.target_id == models.FunctionalRequest.id,
+        models.QARequestDelegation.status == "ACTIVE",
+        models.QARequestDelegation.assigned_to_id == current_user.id,
+    ))
     if scope:
-        q = q.filter(models.QARequest.department.in_(scope))
+        q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.FunctionalRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
@@ -359,6 +370,8 @@ def resubmit_request(req_id: int, db: Session = Depends(get_db),
     obj = _get_or_404(db, req_id)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
+    if obj.active_delegation:
+        raise HTTPException(400, "The active delegation must be returned or recalled before resubmission")
     _require(obj, [QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
                    QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD],
              "Resubmit")
@@ -582,11 +595,6 @@ def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = De
             db, "FUNCTIONAL_REQUEST", obj.id, current_user,
             previous_label, ", ".join(tester_names), payload.reason,
         )
-        for new_id in set(unique_ids) - previous_ids:
-            reassignment.notify_new_assignee(
-                db, new_id, "FUNCTIONAL_REQUEST", obj.id, obj.request_id,
-                f"You have been assigned as tester on {obj.request_id}.", current_user.id,
-            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -897,7 +905,49 @@ def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Se
     if payload.decision == "Accepted":
         obj.status = QAStatus.CLOSED
     elif payload.decision == "ChangesRequired":
-        obj.status = QAStatus.QA_LEAD_ASSIGNED
+        # 2026-08 -- reported directly: "on changes required it is starting
+        # the whole workflow again, and for same request generating multiple
+        # certificate. this should not be. it should enable generated QA
+        # certificate editing mode, and once QA update the changes as per
+        # request, it will go for QA lead approval, then AGM approval." This
+        # used to send the request all the way back to QA_LEAD_ASSIGNED --
+        # re-running planning/tester assignment/test design/execution from
+        # scratch just to fix wording on a certificate -- and "Request
+        # Sign-off" at QA_COMPLETED always raises a brand NEW QASignOff row
+        # (routers/signoff.py::create_signoff), so every rejected round trip
+        # left an abandoned certificate behind and the request pointing at
+        # yet another new one.
+        #
+        # Testing itself already happened and isn't in question here -- only
+        # the certificate is. Send the request back to QA_SIGNOFF_PENDING
+        # (the status right before Request Sign-off, one step short of
+        # QA_COMPLETED so "Request Sign-off" -- which always creates a new
+        # certificate -- can't be clicked again) and reopen the SAME
+        # certificate already linked via signoff_id for editing, instead of
+        # abandoning it. Mirrors SIGNOFF_EDITABLE_STATUSES' own
+        # RETURNED_BY_SM/SM_REJECTED pattern: the QA Engineer edits the
+        # certificate, then calls signoff.py::resubmit_signoff, which sends
+        # RETURNED_BY_REQUESTER back through SM_APPROVAL_PENDING (QA Lead)
+        # and then DEPT_HEAD_QA_APPROVAL_PENDING (Executive/AGM) -- the full
+        # chain again, matching "QA lead approval, then AGM approval"
+        # exactly. Once re-Issued, signoff.py's existing
+        # _sync_linked_functional_request auto-sync (it queries by
+        # `signoff_id=obj.id, status=QA_SIGNOFF_PENDING`, which is exactly
+        # the state this leaves the request in) carries it straight back to
+        # QA_SIGNED_OFF -> REQUESTER_VERIFICATION on its own, same as the
+        # very first time -- no further manual step needed.
+        if not (payload.comments or "").strip():
+            raise HTTPException(400, "A reason is required when requesting changes")
+        obj.status = QAStatus.QA_SIGNOFF_PENDING
+        cert = db.query(models.QASignOff).get(obj.signoff_id) if obj.signoff_id else None
+        if cert and cert.status == "ISSUED":
+            cert.status = "RETURNED_BY_REQUESTER"
+            db.add(models.ApprovalAction(
+                entity_type="SIGNOFF", entity_id=cert.id, step_name="Requester Verification",
+                actor_id=current_user.id, actor_role=current_user.roles_csv,
+                decision="Returned by Requester",
+                comments=f"{payload.comments} (via {obj.request_id}'s Requester Verification)",
+            ))
     else:
         raise HTTPException(400, "decision must be one of: Accepted, ChangesRequired")
     _log(db, obj.id, "Requester Verification", current_user, payload.decision, payload.comments)
@@ -985,6 +1035,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
             ("Application Name", obj.application_name),
             ("CR Number/EPIC Number", obj.cr_number or obj.epic_number),
             ("Change Type", obj.change_type),
+            ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type == "Bug Fix" else None),
             ("Department", obj.department),
         ]),
         ("Environment & Release", [
@@ -1056,7 +1107,8 @@ def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) ->
     if status in (QAStatus.DRAFT, QAStatus.SUBMITTED, QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
                   QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD,
                   QAStatus.REQUESTER_VERIFICATION):
-        return obj.requester_id == user.id
+        return (_is_active_delegate(obj, user)
+                or (obj.requester_id == user.id and not obj.active_delegation))
     if status == QAStatus.SM_APPROVAL_PENDING:
         return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
@@ -1092,7 +1144,8 @@ def _can_edit_details(obj: "models.FunctionalRequest", user: models.User) -> boo
     status = obj.status
     if status in (QAStatus.DRAFT, QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
                   QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD):
-        return obj.requester_id == user.id
+        return (_is_active_delegate(obj, user)
+                or (obj.requester_id == user.id and not obj.active_delegation))
     if status == QAStatus.SM_APPROVAL_PENDING:
         return user.has_role(Role.SM) and user.has_department(obj.department)
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:

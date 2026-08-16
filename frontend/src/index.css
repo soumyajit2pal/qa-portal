@@ -48,10 +48,10 @@ a { color: inherit; }
 
 :focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; border-radius: 4px; }
 
-/* Generated QualityShield application mark. The transparent PNG replaces
+/* Generated QualityOps application mark. The transparent PNG replaces
    the former CSS letter construction while keeping each brand lockup's
    existing spacing and accessible text label. */
-.qualityshield-app-logo {
+.qualityops-app-logo {
   width: 42px;
   height: 42px;
   flex: 0 0 42px;
@@ -59,14 +59,14 @@ a { color: inherit; }
   object-fit: contain;
   filter: drop-shadow(0 3px 7px rgba(0, 31, 38, .2));
 }
-.qualityshield-app-logo-lg {
+.qualityops-app-logo-lg {
   width: 68px;
   height: 68px;
   flex-basis: 68px;
 }
-.login-mobile-brand .qualityshield-app-logo,
-.public-help-brand .qualityshield-app-logo { width: 40px; height: 40px; flex-basis: 40px; }
-.sidebar-collapsed .qualityshield-app-logo { width: 36px; height: 36px; flex-basis: 36px; }
+.login-mobile-brand .qualityops-app-logo,
+.public-help-brand .qualityops-app-logo { width: 40px; height: 40px; flex-basis: 40px; }
+.sidebar-collapsed .qualityops-app-logo { width: 36px; height: 36px; flex-basis: 36px; }
 
 /* Reported request: the sidebar's app-name header (.brand) and its
    username/logout footer (.sidebar-bottom), plus the top .topbar (search/
@@ -560,6 +560,13 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
   font-size: 11px; white-space: nowrap; flex-shrink: 0;
 }
 .th-filter-popover-clear:hover { text-decoration: underline; }
+.th-filter-popover .searchable-select { flex: 1; min-width: 0; }
+.th-filter-popover .searchable-select-trigger {
+  min-height: 34px; padding: 5px 9px; font-size: 11.5px;
+}
+/* The searchable panel is position:fixed like its parent table-filter
+   popover, so keep its suggestions above that popover's z-index. */
+.th-filter-popover .searchable-select-panel-fixed { z-index: 1002; }
 /* Combined footer bar under every Table -- filter-summary text on the left
    (only while a filter is active), pagination controls on the right (only
    while there's more than one page, i.e. more than `pageSize` filtered
@@ -697,9 +704,12 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 /* Searchable single-select dropdown (e.g. Department) */
 .searchable-select { position: relative; }
 .searchable-select-trigger {
-  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; min-width:0; overflow:hidden; display:flex; align-items:center; justify-content:space-between; gap:8px;
   padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 13px;
   background: #fff; color: var(--text); cursor: pointer; font-family: inherit; transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.searchable-select-trigger > span:first-child {
+  min-width:0; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .searchable-select-trigger:hover { border-color: #cbd5e1; }
 .searchable-select-trigger:disabled { opacity: .6; cursor: not-allowed; }
@@ -748,7 +758,7 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .governance-filter-strip > .clearable-search-input.search-grow { min-width: 220px; flex: 1; }
 .searchable-select > .clearable-search-input { width: 100%; }
 .searchable-select-list { max-height: 220px; overflow-y: auto; }
-.searchable-select-option { padding: 8px 12px; font-size: 13px; cursor: pointer; transition: background .1s var(--ease); }
+.searchable-select-option { padding:8px 12px; overflow-wrap:anywhere; word-break:break-word; font-size:13px; cursor:pointer; transition:background .1s var(--ease); }
 .searchable-select-option:hover { background: #f1f5f9; }
 .searchable-select-option.active { background: var(--navy-50); color: var(--navy-light); font-weight: 600; }
 .searchable-select-empty { padding: 10px 12px; font-size: 13px; color: var(--muted); }
@@ -821,16 +831,20 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
   padding: 16px 18px; margin-top: 4px;
 }
 .actions-panel .section-title { margin-top: 0; }
-.workflow-decision-flow { width: 100%; display: grid; gap: 10px; margin-top: 5px; padding-top: 11px; border-top: 1px solid #e2e7ec; }
+.workflow-decision-flow { width: 100%; display: grid; gap: 14px; margin-top: 8px; padding: 18px; border: 1px solid #dce5ec; border-radius: 15px; background: linear-gradient(180deg,#f8fafc 0%,#f5f8fb 100%); }
 .workflow-decision-standalone { width: 100%; margin-top: 8px; }
-.workflow-step-number { display: grid; place-items: center; width: 23px; height: 23px; flex: 0 0 23px; border-radius: 6px; color: #fff; background: #334155; font-size: 9px; font-weight: 800; }
-.workflow-sign-step { display: flex; align-items: center; gap: 9px; max-width: 880px; padding: 9px 10px; border: 1px solid #dfe4ea; border-radius: 8px; background: #fff; }
-.workflow-sign-step.signed { border-color: #b9ddc9; background: #f3faf6; }
+.workflow-step-number { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; border-radius: 9px; color: #fff; background: #334155; box-shadow: 0 3px 8px rgba(51,65,85,.18); font-size: 11px; font-weight: 850; }
+.workflow-sign-step { display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; align-items: center; gap: 13px; width: 100%; max-width: none; padding: 17px 18px; border: 1px solid #d6e0e8; border-radius: 13px; background: #fff; box-shadow: 0 2px 7px rgba(31,49,70,.045); }
+.workflow-sign-step.signed { border-color: #add8bf; background: linear-gradient(90deg,#f2faf5,#fbfefc); box-shadow: inset 4px 0 #2f8a5b,0 2px 7px rgba(31,49,70,.04); }
 .workflow-sign-step.signed .workflow-step-number { background: #27754a; }
-.workflow-sign-copy { min-width: 0; flex: 1; display: grid; gap: 1px; }
-.workflow-sign-copy small { color: #8b95a3; font-size: 7px; font-weight: 800; letter-spacing: .09em; }
-.workflow-sign-copy strong { overflow: hidden; color: #293445; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
-.workflow-sign-copy em { color: #7c8795; font-size: 8px; font-style: normal; }
+.workflow-sign-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.workflow-sign-copy small { color: #748396; font-size: 9px; font-weight: 850; letter-spacing: .1em; }
+.workflow-sign-copy strong { overflow: hidden; color: #243247; font-size: 13px; font-weight: 760; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-sign-copy em { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px 9px; color: #728094; font-size: 10px; line-height: 1.45; font-style: normal; }
+.workflow-sign-copy code { max-width: 100%; padding: 2px 6px; overflow: hidden; border: 1px solid #dce6e9; border-radius: 5px; color: #49616a; background: rgba(255,255,255,.72); font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-step-status { justify-self: end; padding: 4px 9px; border: 1px solid #d8e0e8; border-radius: 999px; color: #68778a; background: #f5f7fa; font-size: 8.5px; font-weight: 800; letter-spacing: .03em; white-space: nowrap; }
+.workflow-step-status.complete,.workflow-step-status.ready { border-color: #b8dec8; color: #26744a; background: #ebf8f0; }
+.workflow-step-status.required,.workflow-step-status.waiting { border-color: #efd89c; color: #8a6515; background: #fff8e7; }
 .workflow-sign-step .btn { min-height: 28px; padding: 4px 9px; font-size: 9px; border-radius: 6px; }
 .workflow-sign-step .esign-trigger { min-height: 36px; padding: 7px 14px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex: 0 0 auto; border: 1px solid #075466; border-radius: 9px; color: #fff; background: linear-gradient(135deg,#168097 0%,#0d6678 55%,#075466 100%); box-shadow: 0 5px 13px rgba(7,84,102,.28),inset 0 1px 0 rgba(255,255,255,.2); font-size: 10.5px; font-weight: 800; letter-spacing: .01em; }
 .workflow-sign-step .esign-trigger svg { width: 15px; height: 15px; stroke-width: 2.25; }
@@ -839,31 +853,38 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .workflow-sign-step .esign-trigger.signed { border-color: #1d693d; background: linear-gradient(135deg,#43a76c,#237747 70%); box-shadow: 0 5px 13px rgba(35,119,71,.25),inset 0 1px 0 rgba(255,255,255,.2); }
 .workflow-sign-step .esign-trigger.signed:hover:not(:disabled) { border-color: #185f37; background: linear-gradient(135deg,#4db777,#1d693d 72%); box-shadow: 0 8px 18px rgba(35,119,71,.32),inset 0 1px 0 rgba(255,255,255,.22); }
 .esign-trigger-check { display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; color: #237747; background: #fff; font-size: 10px; font-weight: 900; }
-.workflow-decision-step { display: grid; gap: 10px; max-width: 880px; padding: 9px 10px; border: 1px solid #dfe4ea; border-radius: 8px; background: #fff; }
-.workflow-decision-heading { display: flex; align-items: center; gap: 9px; }
-.workflow-decision-heading > span:last-child { display: grid; gap: 1px; }
-.workflow-decision-heading strong { color: #293445; font-size: 10.5px; }
-.workflow-decision-heading small { color: #8993a1; font-size: 8px; }
-.workflow-decision-options { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
-.workflow-decision-card { width: auto; min-width: 0; min-height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid #cfd7e1; border-radius: 6px; background: #fff; color: #344054; text-align: left; cursor: pointer; box-shadow: 0 1px 2px rgba(16,24,40,.04); transition: box-shadow .14s ease, border-color .14s ease, background .14s ease, color .14s ease; }
-.workflow-decision-card:hover:not(:disabled) { background: #f8fafc; box-shadow: 0 2px 5px rgba(15,23,42,.08); }
-.workflow-decision-card:disabled { opacity: .52; cursor: not-allowed; box-shadow: none; }
-.workflow-decision-card > span:nth-child(2) { min-width: 0; display: block; }
-.workflow-decision-card strong { color: inherit; font-size: 10px; font-weight: 700; white-space: nowrap; }
-.workflow-decision-card small, .workflow-decision-card > i { display: none; }
-.workflow-decision-icon { display: grid; place-items: center; width: 17px; height: 17px; flex: 0 0 17px; border-radius: 4px; font-size: 9px; font-weight: 800; }
-.workflow-decision-card.approve { border-color: #75ad91; background: transparent; color: #237347; }
-.workflow-decision-card.approve .workflow-decision-icon { color: #237347; background: #e7f3eb; }
-.workflow-decision-card.approve:hover:not(:disabled) { border-color: #237347; background: #237347; color: #fff; }
-.workflow-decision-card.approve:hover:not(:disabled) .workflow-decision-icon { color: #237347; background: #fff; }
-.workflow-decision-card.return { border-color: #c8a448; background: transparent; color: #725817; }
-.workflow-decision-card.return .workflow-decision-icon { color: #725817; background: #fbf1d5; }
-.workflow-decision-card.return:hover:not(:disabled) { border-color: #a97912; background: #a97912; color: #fff; }
-.workflow-decision-card.return:hover:not(:disabled) .workflow-decision-icon { color: #80600f; background: #fff; }
-.workflow-decision-card.reject { border-color: #d6a4aa; background: transparent; color: #a6313e; }
-.workflow-decision-card.reject .workflow-decision-icon { color: #a6313e; background: #f9e8ea; }
-.workflow-decision-card.reject:hover:not(:disabled) { border-color: #a6313e; background: #a6313e; color: #fff; }
-.workflow-decision-card.reject:hover:not(:disabled) .workflow-decision-icon { color: #a6313e; background: #fff; }
+.workflow-decision-step { display: grid; gap: 13px; width: 100%; max-width: none; padding: 17px 18px 18px; border: 1px solid #d6e0e8; border-radius: 13px; background: #fff; box-shadow: 0 2px 7px rgba(31,49,70,.045); }
+.workflow-decision-heading { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 13px; }
+.workflow-decision-heading > span:nth-child(2) { display: grid; gap: 3px; }
+.workflow-decision-heading strong { color: #243247; font-size: 13px; }
+.workflow-decision-heading small { color: #748396; font-size: 9px; }
+.workflow-decision-readiness { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid #ead9a9; border-radius: 8px; background: #fff9eb; }
+.workflow-decision-readiness > span { display: grid; place-items: center; width: 20px; height: 20px; flex: 0 0 20px; border-radius: 50%; color: #fff; background: #b5841e; font-size: 10px; font-weight: 850; }
+.workflow-decision-readiness p { margin: 0; display: grid; gap: 1px; }
+.workflow-decision-readiness strong { color: #725718; font-size: 9.5px; }
+.workflow-decision-readiness small { color: #8c7542; font-size: 8.5px; line-height: 1.4; }
+.workflow-decision-readiness.ready { border-color: #c6e2d1; background: #f2faf5; }
+.workflow-decision-readiness.ready > span { background: #2d8154; }
+.workflow-decision-readiness.ready strong { color: #286344; }
+.workflow-decision-readiness.ready small { color: #668171; }
+.workflow-decision-options { display: grid; grid-template-columns: repeat(3,minmax(180px,330px)); align-items: stretch; justify-content: start; gap: 9px; }
+.workflow-decision-card { width: 100%; min-width: 0; min-height: 54px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #cfd9e3; border-radius: 9px; background: #fff; color: #344054; text-align: left; cursor: pointer; box-shadow: 0 1px 3px rgba(16,24,40,.05); transition: transform .14s ease,box-shadow .14s ease,border-color .14s ease,background .14s ease; }
+.workflow-decision-card:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(30,50,75,.1); }
+.workflow-decision-card:disabled { opacity: .56; cursor: not-allowed; box-shadow: none; }
+.workflow-decision-card > span:nth-child(2) { min-width: 0; display: grid; gap: 1px; }
+.workflow-decision-card strong { color: inherit; font-size: 10px; font-weight: 760; line-height: 1.2; }
+.workflow-decision-card small { display: block; color: #718094; font-size: 8px; line-height: 1.25; }
+.workflow-decision-card > i { display: block; color: #98a5b5; font-size: 11px; font-style: normal; }
+.workflow-decision-icon { display: grid; place-items: center; width: 24px; height: 24px; flex: 0 0 24px; border-radius: 7px; font-size: 11px; font-weight: 850; }
+.workflow-decision-card.approve { border-color: #a8d2ba; background: #f8fcfa; color: #237347; }
+.workflow-decision-card.approve .workflow-decision-icon { color: #237347; background: #e4f4ea; }
+.workflow-decision-card.approve:hover:not(:disabled) { border-color: #4d9a70; background: #f0f9f4; }
+.workflow-decision-card.return { border-color: #e2c678; background: #fffdf7; color: #725817; }
+.workflow-decision-card.return .workflow-decision-icon { color: #80600f; background: #fbf0ce; }
+.workflow-decision-card.return:hover:not(:disabled) { border-color: #bd9028; background: #fff9e9; }
+.workflow-decision-card.reject { border-color: #e1b8bd; background: #fffafb; color: #a6313e; }
+.workflow-decision-card.reject .workflow-decision-icon { color: #a6313e; background: #f9e7e9; }
+.workflow-decision-card.reject:hover:not(:disabled) { border-color: #c75b66; background: #fff3f4; }
 .workflow-blocked-message { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid #efd494; border-radius: 9px; background: #fff9e9; }
 .workflow-blocked-message b { color: #805b0b; font-size: 9.5px; }
 .workflow-blocked-message span { color: #8d7540; font-size: 8.5px; line-height: 1.4; }
@@ -881,7 +902,8 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .workflow-note-field textarea { width: 100%; min-height: 92px; resize: vertical; border: 1px solid #cedcdf; border-radius: 9px; padding: 10px; font: inherit; font-size: 11px; }
 .workflow-note-field textarea:focus { outline: 0; border-color: #168097; box-shadow: 0 0 0 3px rgba(13,102,120,.1); }
 .workflow-note-field > small { color: #859397; font-size: 8.5px; }
-@media (max-width: 760px) { .workflow-decision-options { align-items: stretch; } .workflow-decision-card { flex: 1 1 150px; justify-content: center; } }
+@media (max-width: 760px) { .workflow-decision-flow { padding: 12px; }.workflow-sign-step { grid-template-columns: auto minmax(0,1fr) auto; }.workflow-sign-step .esign-trigger { grid-column: 2 / 4; justify-self: start; }.workflow-decision-options { grid-template-columns: 1fr; }.workflow-decision-card { min-height: 52px; } }
+@media (max-width: 520px) { .workflow-step-status { display: none; }.workflow-decision-heading { grid-template-columns: auto minmax(0,1fr); }.workflow-sign-step { grid-template-columns: auto minmax(0,1fr); }.workflow-sign-step .esign-trigger { grid-column: 1 / -1; width: 100%; }.workflow-sign-copy strong { white-space: normal; } }
 
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .tabs button {
@@ -1725,10 +1747,16 @@ tbody tr:hover { background: #f8f9fc; }
 .tm-project-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr)); gap: 16px; align-items: stretch; }
 .tm-project-card { min-width: 0; min-height: 320px; height: 100%; padding: 19px; display: flex; flex-direction: column; border: 1px solid #e1e4ed; border-radius: 13px; background: #fff; box-shadow: var(--shadow-xs); transition: transform .16s var(--ease), box-shadow .16s var(--ease), border-color .16s var(--ease); }
 .tm-project-card:hover { transform: translateY(-2px); border-color: #ccd1df; box-shadow: var(--shadow-md); }
-.tm-project-card-head { display: flex; align-items: center; justify-content: space-between; }
+.tm-project-card-head { min-width:0; display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+.tm-project-card-head > span:last-child { min-width:0; flex-wrap:wrap; justify-content:flex-end; }
 .tm-project-key { padding: 3px 8px; border-radius: 6px; color: #4338ca; background: #eef2ff; font-size: 10.5px; font-weight: 750; letter-spacing: .04em; }
-.tm-project-card h3 { margin: 17px 0 6px; color: #202638; font-size: 16px; letter-spacing: -.02em; }
-.tm-project-card > p { min-height: 34px; margin: 0; color: #7c8496; font-size: 11.5px; line-height: 1.5; }
+.tm-project-card h3 {
+  min-width:0; max-width:100%; min-height:2.7em; margin:17px 0 6px;
+  display:-webkit-box; overflow:hidden; overflow-wrap:anywhere; word-break:break-word;
+  -webkit-box-orient:vertical; -webkit-line-clamp:2;
+  color:#202638; font-size:16px; line-height:1.35; letter-spacing:-.02em;
+}
+.tm-project-card > p { min-width:0; min-height:34px; margin:0; overflow:hidden; overflow-wrap:anywhere; word-break:break-word; color:#7c8496; font-size:11.5px; line-height:1.5; }
 .tm-project-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; margin: 18px 0; padding: 12px 0; border-top: 1px solid #eef0f4; border-bottom: 1px solid #eef0f4; }
 .tm-project-stats > div { min-width: 0; min-height: 45px; padding: 0 12px; border-right: 1px solid #eef0f4; display: flex; flex-direction: column; }
 .tm-project-stats > div:nth-child(3n + 1) { padding-left: 0; }
@@ -1932,6 +1960,7 @@ tbody tr:hover { background: #f8f9fc; }
 .action-error-dialog strong { display: block; margin-bottom: 7px; color: #8f1f2d; font-size: 12px; }
 .action-error-dialog span { display: block; color: #b34755; font-size: 8.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
 .action-error-dialog p { margin: 4px 0 0; color: #672d35; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-line; }
+.action-error-reference { display: block; margin-top: 7px; color: #8d5660; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8.5px; overflow-wrap: anywhere; }
 .action-error-guidance { margin: 12px 0 16px; padding: 12px 14px; border: 1px solid #e1e5ed; border-radius: 9px; background: #f8f9fc; }
 .action-error-guidance strong { display: block; margin-bottom: 4px; color: #444c60; font-size: 10px; }
 .action-error-guidance p { margin: 0; color: #687084; font-size: 10.5px; line-height: 1.55; }
@@ -2059,10 +2088,37 @@ tbody tr:hover { background: #f8f9fc; }
 .tester-capacity-note { display: flex; align-items: center; gap: 9px; margin: 0 0 14px; padding: 10px 12px; border: 1px solid #dfe2eb; border-radius: 8px; background: #f8f8fd; }
 .tester-capacity-note strong { flex: 0 0 auto; color: #4b456f; font-size: 9px; }
 .tester-capacity-note span { color: #7d8495; font-size: 8.5px; line-height: 1.45; }
+.tester-overview-modes { width: fit-content; margin: 0 0 12px; }
+.tester-contribution-filters { display: flex; align-items: center; gap: 9px; margin: 0 0 12px; padding: 11px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.tester-contribution-filters .searchable-select { flex: 1 1 320px; }
+.tester-contribution-filters select { min-width: 180px; min-height: 35px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.tester-contribution-summary { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.tester-contribution-summary > div { border-top: 3px solid var(--qo-blue-600, #2b72ae); }
+.tester-contribution-summary strong.draft, .tester-draft-count { color: #5b6478; }
+.tester-contribution-summary strong.approved, .tester-approved-count { color: #087a55; }
+.tester-contribution-summary strong.warning { color: #a15c00; }
+.tester-pending-count { color: #a15c00; }
+.tester-pending-count.is-qa-lead { color: #b42318; }
+.tester-contribution-charts { margin: 0 0 12px; }
+.tester-contribution-charts .card { min-height: 220px; }
+.tester-metric-definition { display: flex; align-items: flex-start; gap: 12px; margin: 0 0 12px; padding: 11px 13px; border: 1px solid #cdddeb; border-radius: 9px; background: #f6faff; }
+.tester-metric-definition strong { flex: 0 0 auto; color: #173d68; font-size: 10px; }
+.tester-metric-definition span { color: #617486; font-size: 9px; line-height: 1.5; }
+.tester-metric-link { display: inline-grid; place-items: center; min-width: 32px; min-height: 28px; padding: 4px 8px; border: 1px solid #bdd3e6; border-radius: 7px; color: #1d5f98; background: #eef6fd; font: inherit; font-weight: 800; cursor: pointer; }
+.tester-metric-link:hover:not(:disabled) { border-color: #2b72ae; background: #dcecf9; transform: translateY(-1px); }
+.tester-metric-link.danger { color: #a63743; border-color: #efc0c5; background: #fff1f2; }
+.tester-metric-link.warning { color: #8a5d08; border-color: #edd59b; background: #fff8e7; }
+.tester-metric-link.success { color: #237747; border-color: #b8dec7; background: #effaf3; }
+.tester-metric-link:disabled { border-color: #e1e6eb; color: #9da8b2; background: #f4f6f8; cursor: default; }
+.tester-contribution-detail { margin-top: 14px; }
+.tester-detail-tabs { margin: 0 0 12px; overflow-x: auto; }
 @media (max-width: 1000px) { .tester-workload-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 700px) {
   .tester-workload-summary { grid-template-columns: 1fr; }
   .tester-capacity-note { align-items: flex-start; flex-direction: column; }
+  .tester-contribution-filters { align-items: stretch; flex-direction: column; }
+  .tester-contribution-filters select { width: 100%; }
+  .tester-metric-definition { flex-direction: column; }
 }
 
 .muted { color: var(--muted); }
@@ -2902,16 +2958,16 @@ td { padding: 12px; }
   margin: -2px 0 14px; padding: 13px 14px; display: flex; align-items: center; justify-content: space-between; gap: 16px;
   border: 1px solid #d9e5e7; border-radius: 12px; background: linear-gradient(135deg,#f7fbfb,#fff); box-shadow: var(--shadow-xs);
 }
-.tm-repository-project-picker { min-width: 0; display: flex; align-items: center; gap: 12px; }
+.tm-repository-project-picker { min-width:0; flex:1 1 560px; display:flex; align-items:center; gap:12px; }
 .tm-repository-project-picker > div:first-child { min-width: 150px; display: flex; flex-direction: column; gap: 1px; }
 .tm-repository-project-picker small { color: #74878b; font-size: 10.5px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
 .tm-repository-project-picker strong { overflow: hidden; max-width: 260px; color: #29474e; font-size: 13.5px; text-overflow: ellipsis; white-space: nowrap; }
-.tm-repository-project-select { width: min(330px,32vw); }
+.tm-repository-project-select { width:min(330px,32vw); min-width:0; }
 .tm-repository-project-select .searchable-select-trigger { min-height: 42px; border-color: #cbdcdf; background: #fff; font-size: 12.5px; }
 .tm-project-state { padding: 4px 9px; border-radius: 999px; font-size: 10px; font-weight: 750; }
 .tm-project-state.active { color: #0b6a4b; background: #e2f5ec; }
 .tm-project-state.inactive { color: #9b2c2c; background: #feecec; }
-.tm-repository-command-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.tm-repository-command-actions { min-width:0; display:flex; flex:0 1 auto; flex-wrap:wrap; justify-content:flex-end; gap:7px; }
 .tm-new-test-case { min-width: 132px; }
 .tm-workflow-banner {
   margin-bottom: 14px; padding: 12px 14px; display: flex; align-items: flex-start; gap: 11px;
@@ -3080,6 +3136,12 @@ td { padding: 12px; }
 .tm-cycle-request-link span { color: #667b80; font-size: 9px; }
 .tm-cycle-request-link button { margin-left: 3px; padding: 2px 6px; border: 0; border-left: 1px solid #c9dade; color: #a03e48; background: transparent; font: inherit; font-size: 8px; font-weight: 700; cursor: pointer; }
 .tm-cycle-request-link button:disabled { opacity: .55; cursor: wait; }
+/* 2026-08 -- "Change link"/"Link QA Request" on a Completed (otherwise
+   read-only) cycle isn't a destructive action like the neighboring "Unlink"
+   button, so it gets its own neutral (non-red) treatment; --empty is the
+   no-link-yet case, a lone button with no preceding label to divide from. */
+.tm-cycle-request-link-action { color: #0d6678 !important; }
+.tm-cycle-request-link--empty .tm-cycle-request-link-action { margin-left: 0; border-left: 0; padding-left: 0; }
 .tm-checkin-button { border-color: #d7cda3; color: #745d12; background: #fffaf0; }
 .tm-checkin-button:hover { border-color: #b79019 !important; color: #5f4906 !important; background: #fff3c9 !important; }
 
@@ -3926,11 +3988,38 @@ td { padding: 12px; }
 .defect-evidence h4 span { padding: 2px 7px; border-radius: 999px; background: #e9f3f4; color: #176573; font-size: 10px; }
 .defect-files { display: flex; flex-wrap: wrap; gap: 8px; }
 .defect-files button { padding: 7px 10px; border: 1px solid #d6e5e7; border-radius: 8px; background: #f7fafb; color: #176573; cursor: pointer; }
-.defect-case-picker { max-height: 180px; padding: 8px; display: grid; gap: 5px; overflow: auto; border: 1px solid #dce7e9; border-radius: 9px; background: #fafcfc; }
-.defect-case-picker label { padding: 7px 8px; display: flex; align-items: flex-start; gap: 9px; border-radius: 7px; cursor: pointer; }
-.defect-case-picker label:hover { background: #eef7f8; }
-.defect-case-picker label > span { display: flex; flex-direction: column; color: #31545b; font-weight: 700; }
-.defect-case-picker small { color: #7b8f94; font-weight: 400; }
+.defect-reassignment-scope { min-height: 40px; padding: 7px 9px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; border: 1px solid #d8e4ea; border-radius: 8px; background: #f8fafc; }
+.defect-reassignment-scope span { padding: 5px 8px; border: 1px solid #d5e0e6; border-radius: 999px; background: #fff; color: #536a75; font-size: 9.5px; font-weight: 750; }
+.defect-reassignment-scope span.qa { border-color: #a8c6df; background: #eaf3fb; color: #245f91; }
+.defect-reassignment-destination { margin: 6px 0 2px; color: #617681; }
+.defect-reassignment-destination strong { color: #265d89; }
+.defect-case-picker { overflow: hidden; border: 1px solid #d7e4ea; border-radius: 12px; background: #f8fafc; }
+.defect-case-picker-head { min-height: 45px; padding: 10px 13px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-bottom: 1px solid #dde7ec; background: #f1f5f9; }
+.defect-case-picker-head span { color: #60717d; font-size: 10.5px; line-height: 1.4; }
+.defect-case-picker-head strong { flex: 0 0 auto; padding: 4px 8px; border-radius: 999px; background: #e4edf7; color: #224f7c; font-size: 9.5px; white-space: nowrap; }
+.defect-case-picker-list { max-height: 250px; padding: 9px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 7px; overflow-y: auto; overscroll-behavior: contain; }
+.defect-case-picker-list label { min-width: 0; min-height: 64px; padding: 10px 11px; display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 10px; position: relative; border: 1px solid #dbe5ea; border-radius: 9px; background: #fff; cursor: pointer; transition: border-color .15s var(--ease), background .15s var(--ease), box-shadow .15s var(--ease); }
+.defect-case-picker-list label:hover { border-color: #9ebbd5; background: #f8fbff; }
+.defect-case-picker-list label.selected { border-color: #6f9fc9; background: #f1f7fd; box-shadow: inset 3px 0 0 #2b72ae; }
+.defect-case-picker-list input[type="checkbox"] { width: 1px; height: 1px; min-height: 0; margin: 0; padding: 0; position: absolute; overflow: hidden; opacity: 0; pointer-events: none; }
+.defect-case-check { width: 19px; height: 19px; display: inline-flex; align-items: center; justify-content: center; border: 1.5px solid #aebdc5; border-radius: 5px; background: #fff; color: transparent; font-size: 11px; font-weight: 900; transition: all .15s var(--ease); }
+.defect-case-picker-list input[type="checkbox"]:focus-visible + .defect-case-check { outline: 3px solid rgba(43,114,174,.2); outline-offset: 2px; }
+.defect-case-picker-list input[type="checkbox"]:checked + .defect-case-check { border-color: #226aa5; background: #226aa5; color: #fff; }
+.defect-case-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.defect-case-copy strong { overflow: hidden; color: #264e68; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.defect-case-copy small { display: -webkit-box; overflow: hidden; color: #71838e; font-size: 10px; font-weight: 400; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.defect-case-state { padding: 4px 7px; border-radius: 999px; background: #edf2f5; color: #687b85; font-size: 8.5px; font-weight: 800; }
+.defect-case-picker-list label.selected .defect-case-state { background: #dceaf7; color: #1f5f94; }
+.defect-case-picker-empty { min-height: 72px; padding: 14px; display: flex; align-items: center; justify-content: center; gap: 10px; color: #71838e; }
+.defect-case-picker-empty > span { width: 27px; height: 27px; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; background: #e8eff3; color: #65808e; font-weight: 900; }
+.defect-case-picker-empty > div { display: flex; flex-direction: column; gap: 2px; }
+.defect-case-picker-empty strong { color: #425c69; font-size: 10.5px; }
+.defect-case-picker-empty small { color: #7b8d96; font-size: 9.5px; }
+@media (max-width: 620px) {
+  .defect-case-picker-head { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .defect-case-picker-list label { grid-template-columns: 20px minmax(0, 1fr); }
+  .defect-case-state { display: none; }
+}
 .tm-governed-defect { color: #b54708 !important; }
 .tm-cycle-defect-summary { display: flex; flex-direction: column; gap: 13px; }
 .tm-cycle-defect-summary > p { margin: 0; color: #526b71; }
@@ -4084,6 +4173,11 @@ td { padding: 12px; }
 .signoff-register-toolbar > div { display: flex; flex-direction: column; gap: 3px; }.signoff-register-toolbar > div strong { color: #294c54; font-size: 12px; }.signoff-register-toolbar > div span { color: #809297; font-size: 9px; }
 .signoff-register-toolbar label { min-width: 230px; display: flex; flex-direction: column; gap: 5px; }.signoff-register-toolbar label span { color: #60777c; font-size: 9px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }.signoff-register-toolbar select { min-width: 230px; }
 @media (max-width: 650px) { .signoff-register-toolbar { align-items: stretch; flex-direction: column; }.signoff-register-toolbar label,.signoff-register-toolbar select { width: 100%; min-width: 0; } }
+/* 2026-08 -- "where is download button?" the Certificate ID cell's Download
+   button (Issued rows only), kept compact so it doesn't force the whole
+   Certificate ID column much wider on every other row. */
+.signoff-id-cell { display: inline-flex; align-items: center; gap: 8px; }
+.signoff-id-cell .btn { padding: 2px 8px; font-size: 9px; }
 
 /* Keep the v6 navigation as the final cascade authority over legacy v2-v5
    themes retained for safe rollback. */
@@ -4129,7 +4223,7 @@ td { padding: 12px; }
 .role-group-empty { display:flex; flex-direction:column; align-items:center; gap:5px; padding:34px 16px; border:1px dashed #c9dadd; border-radius:10px; color:#677a7e; text-align:center; }
 @media (max-width: 640px) { .role-group-member { grid-template-columns:40px minmax(0, 1fr); } .role-group-member em { grid-column:2; text-align:left; } }
 
-/* Navigation v5 — QualityShield operations map.
+/* Navigation v5 — QualityOps operations map.
    Industrial control-room language: numbered zones, a continuous signal
    rail, square geometry and explicit location codes. */
 .navigation-v5 {
@@ -4310,12 +4404,13 @@ td { padding: 12px; }
 .dashboard-metric-grid .stat-card { overflow:visible; min-height:148px; }
 .stat-card-meta { display:flex; align-items:center; gap:7px; }
 .stat-card-info { position:relative; display:inline-flex; z-index:3; }
-.stat-card-info > button { width:22px; height:22px; padding:0; display:grid; place-items:center; border:1px solid #cadde0; border-radius:50%; background:#fff; color:#167487; font:800 11px/1 Georgia,serif; cursor:help; }
-.stat-card-info > button:hover,.stat-card-info > button:focus-visible { border-color:#6eb3bc; background:#eaf6f7; outline:none; box-shadow:0 0 0 3px rgba(22,116,135,.1); }
-.stat-card-tooltip { width:250px; padding:11px 12px; display:none; position:absolute; top:calc(100% + 8px); right:0; z-index:80; border:1px solid #cbdcdf; border-radius:9px; background:#173f48; color:#f5fbfb; box-shadow:0 10px 28px rgba(14,48,55,.24); font-size:10.5px; font-weight:500; line-height:1.5; }
-.stat-card-tooltip::before { content:''; position:absolute; top:-5px; right:6px; width:9px; height:9px; border-top:1px solid #cbdcdf; border-left:1px solid #cbdcdf; background:#173f48; transform:rotate(45deg); }
+.stat-card-info > button { width:22px; height:22px; padding:0; display:grid; place-items:center; border:1px solid #a5b4fc; border-radius:50%; background:#eef2ff; color:#4338ca; font:800 11px/1 Georgia,serif; cursor:help; }
+.stat-card-info > button:hover,.stat-card-info > button:focus-visible { border-color:#6366f1; background:#e0e7ff; color:#3730a3; outline:none; box-shadow:0 0 0 3px rgba(79,70,229,.14); }
+.stat-card-tooltip { width:250px; padding:11px 12px; display:none; position:absolute; top:calc(100% + 8px); right:0; z-index:80; border:1px solid #818cf8; border-radius:9px; background:#1e1b4b; color:#f8fafc; box-shadow:0 12px 30px rgba(30,27,75,.28); font-size:10.5px; font-weight:500; line-height:1.5; }
+.stat-card-tooltip::before { content:''; position:absolute; top:-5px; right:6px; width:9px; height:9px; border-top:1px solid #818cf8; border-left:1px solid #818cf8; background:#1e1b4b; transform:rotate(45deg); }
+.stat-card-tooltip b,.stat-card-tooltip strong { color:#c7d2fe; font-weight:800; }
 .stat-card-tooltip > span,.stat-card-tooltip > small { display:block; }
-.stat-card-tooltip > small { margin-top:7px; padding-top:7px; border-top:1px solid rgba(228,244,246,.16); color:#b9d2d6; font-size:9.5px; }
+.stat-card-tooltip > small { margin-top:7px; padding-top:7px; border-top:1px solid rgba(199,210,254,.22); color:#c7d2fe; font-size:9.5px; }
 .stat-card-info:hover .stat-card-tooltip,.stat-card-info:focus-within .stat-card-tooltip { display:block; }
 .dashboard-metric-grid .stat-card:nth-child(-n+2) .stat-card-tooltip { right:auto; left:0; }
 .dashboard-metric-grid .stat-card:nth-child(-n+2) .stat-card-tooltip::before { right:auto; left:6px; }
@@ -4406,7 +4501,7 @@ td { padding: 12px; }
 .tm-project-card { min-height:250px; padding:15px; border-color:#d9e5e7; border-radius:12px; box-shadow:0 4px 14px rgba(29,68,76,.045); }
 .tm-project-card:hover { transform:none; border-color:#bcd7db; box-shadow:0 8px 22px rgba(29,68,76,.075); }
 .tm-project-key { color:#086879; background:#e3f1f3; }
-.tm-project-card h3 { margin:11px 0 3px; color:#1e444d; font-size:15px; }
+.tm-project-card h3 { min-height:2.7em; margin:11px 0 3px; color:#1e444d; font-size:15px; }
 .tm-project-card > p { min-height:18px; display:-webkit-box; overflow:hidden; color:#82969a; font-size:10px; -webkit-box-orient:vertical; -webkit-line-clamp:1; }
 .tm-project-card .tm-project-stats { margin:12px 0; padding:9px 0; }
 .tm-project-card .tm-project-stats > div { min-height:36px; padding:0 9px; }
@@ -4427,7 +4522,7 @@ td { padding: 12px; }
 .tm-view-access-list { display:flex; flex-direction:column; gap:8px; max-height:260px; overflow-y:auto; }
 .tm-view-access-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 10px; border:1px solid #eef0f4; border-radius:8px; background:#fafbfc; }
 
-/* Navigation v7 — QualityShield operations console.
+/* Navigation v7 — QualityOps operations console.
    The navigation reads as a purpose-built industrial control surface: a
    narrow institutional rail, compact module rows and a single restrained
    teal selection signal. Gold remains exclusive to the bank identity. */
@@ -4846,7 +4941,7 @@ td { padding: 12px; }
 }
 .topbar-logout:hover { color:#8e3039;background:#fff4f4; }
 
-/* QualityShield identity — aligned with the approved teal/white/gold mark. */
+/* QualityOps identity — aligned with the approved teal/white/gold mark. */
 .navigation-v9 .qualitysphere-mark {
   border:1.5px solid #e5b52d;
   color:#fff;
@@ -5162,3 +5257,155 @@ td { padding: 12px; }
 .security-scan-history { margin-top: 12px; color: #657a84; font-size: 9px; }.security-scan-history summary { cursor: pointer; font-weight: 750; }
 .security-scan-history > div { display: flex; justify-content: space-between; gap: 10px; padding: 7px 3px; border-bottom: 1px solid #e3eaed; }
 @media (max-width: 760px) { .security-scan-severity-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.security-scan-severity-grid .total { grid-column: 1/-1; }.security-scan-results > header { flex-direction: column; } }
+
+/* QualityOps content-surface blue normalization ----------------------------
+   The login/brand and signed-in navigation remain the approved teal identity.
+   Older feature modules previously carried their own teal interaction palette,
+   which made the content area look like a mixture of two design systems.
+   Normalize those content-only primary/neutral accents to QualityOps blue.
+   Semantic success, warning and danger colors remain green, amber and red. */
+.navigation-v8 .main {
+  --qo-blue-900:#0c294f;
+  --qo-blue-800:#173f73;
+  --qo-blue-700:#1d4f85;
+  --qo-blue-600:#2b72ae;
+  --qo-blue-100:#dbe9f7;
+  --qo-blue-50:#eef5fc;
+  --qo-blue-border:#d8e3ef;
+  --qo-blue-text:#334b69;
+  --qo-blue-muted:#718096;
+}
+
+/* Shared primary labels, links and compact identifiers. */
+.navigation-v8 .main :is(
+  .page-eyebrow,.dashboard-insights-head > div:first-child > span,
+  .tm-report-eyebrow,.defect-command-copy > span,
+  .defect-register-head > div:first-child > span,.defect-section-label,
+  .tm-inline-run-head small,.help-toc-title svg,
+  .help-card-grid article > svg,.help-test-path > div > svg,
+  .help-callout > svg,.tm-version-link,.role-group-link,
+  .tm-activity-toggle b,.linked-defects-panel button b
+) { color:var(--qo-blue-700); }
+
+.navigation-v8 .main :is(
+  .count-pill,.tm-project-key,.role-group-link > span,
+  .help-section-heading > span,.help-role-stack span,
+  .help-comment-avatar,.defect-command-copy b,
+  .defect-queue-tabs button.active b,.linked-defects-panel > div:first-child span,
+  .tm-inline-run-head b
+) { color:var(--qo-blue-800);background:var(--qo-blue-50); }
+
+/* Primary controls that retained hard-coded teal gradients. */
+.navigation-v8 .main :is(
+  .workflow-sign-step .esign-trigger,.clearable-search-button,
+  .tm-inline-run-panel .tm-inline-result-options button.selected,
+  .tm-project-actions > button:first-child,.role-group-avatar
+) {
+  border-color:var(--qo-blue-800);
+  color:#fff;
+  background:linear-gradient(135deg,var(--qo-blue-600),var(--qo-blue-700) 55%,var(--qo-blue-800));
+  box-shadow:0 5px 13px rgba(12,41,79,.22);
+}
+.navigation-v8 .main :is(
+  .workflow-sign-step .esign-trigger,.clearable-search-button,
+  .tm-inline-run-panel .tm-inline-result-options button.selected,
+  .tm-project-actions > button:first-child,.role-group-avatar
+):hover:not(:disabled) {
+  border-color:var(--qo-blue-900);
+  color:#fff;
+  background:linear-gradient(135deg,#357fbc,#194778 55%,var(--qo-blue-900));
+}
+.navigation-v8 .main .workflow-sign-step .esign-trigger:focus-visible,
+.navigation-v8 .main .clearable-search-button:focus-visible {
+  outline-color:rgba(43,114,174,.28);
+}
+/* A completed signature is a semantic success and intentionally stays green. */
+.navigation-v8 .main .workflow-sign-step .esign-trigger.signed {
+  border-color:#1d693d;background:linear-gradient(135deg,#43a76c,#237747 70%);
+}
+
+/* Inputs, selections and signature style choices. */
+.navigation-v8 .main :is(
+  .workflow-note-field textarea,.esign-style-options label,
+  .tm-list-toolbar input,.tm-list-toolbar select
+):focus,
+.navigation-v8 .main .esign-style-options label.selected {
+  border-color:var(--qo-blue-600);
+  box-shadow:0 0 0 3px rgba(43,114,174,.12);
+}
+.navigation-v8 .main :is(.esign-style-options input,.esign-style-sample) { accent-color:var(--qo-blue-700);color:var(--qo-blue-700); }
+.navigation-v8 .main .esign-style-options label.selected { background:var(--qo-blue-50); }
+.navigation-v8 .main .esign-preview {
+  border-color:var(--qo-blue-border);color:var(--qo-blue-text);
+  background:linear-gradient(135deg,#fbfdff,var(--qo-blue-50));
+}
+.navigation-v8 .main .esign-preview::after { background:#9ebbd5; }
+.navigation-v8 .main .esign-preview > strong,
+.navigation-v8 .main .signoff-signature-mark { color:var(--qo-blue-700); }
+
+/* Test Case Management surfaces. */
+.navigation-v8 .main :is(
+  .tm-project-toolbar,.tm-version-details,.tm-version-detail-grid > div,
+  .tm-version-steps > div,.tm-inline-run-head,.tm-report-navigation,
+  .tm-report-population-note,.tm-project-card,.tm-workflow-banner,
+  .tm-checkout-guide
+) { border-color:var(--qo-blue-border); }
+.navigation-v8 .main :is(
+  .tm-project-toolbar,.tm-version-details,.tm-inline-run-head,
+  .tm-report-navigation,.tm-report-population-note
+) { background:#f7faff; }
+.navigation-v8 .main :is(
+  .tm-project-card h3,.tm-project-card .tm-project-stats strong,
+  .tm-report-content-head h3,.tm-report-grid h4,.tm-report-panel h4,
+  .tm-inline-run-head strong
+) { color:var(--qo-blue-text); }
+.navigation-v8 .main :is(
+  .tm-project-more[open] > summary,.tm-project-more > div button.primary
+) { border-color:#9ebbd5;color:var(--qo-blue-700);background:var(--qo-blue-50); }
+.navigation-v8 .main :is(.tm-report-bar-fill,.tm-report-bar-fill.tone-primary) { background:var(--qo-blue-600); }
+.navigation-v8 .main .tm-report-stat::before,
+.navigation-v8 .main .my-execution-overview > div::before { background:var(--qo-blue-600); }
+.navigation-v8 .main .tm-version-row:hover,
+.navigation-v8 .main .tm-diff-header { background:var(--qo-blue-50); }
+.navigation-v8 .main .tm-version-row:focus-visible { outline-color:var(--qo-blue-600); }
+
+/* Defect workspace primary navigation and neutral panels. */
+.navigation-v8 .main :is(
+  .defect-health-strip,.defect-workspace-card,.defect-form-section,
+  .defect-trace-grid button,.defect-files button
+) { border-color:var(--qo-blue-border); }
+.navigation-v8 .main :is(
+  .defect-queue-tabs,.defect-form-section,.defect-trace-grid button,
+  .defect-files button
+) { background:#f7faff; }
+.navigation-v8 .main :is(
+  .defect-command-copy h2,.defect-health-strip strong,
+  .defect-form-section-heading strong,.defect-trace-grid button,
+  .defect-files button,.tm-cycle-defect-counts strong
+) { color:var(--qo-blue-text); }
+.navigation-v8 .main :is(
+  .defect-stage-strip button:hover,.defect-stage-strip button.active,
+  .defect-queue-tabs button:hover,.defect-queue-tabs button.active
+) { border-color:#9ebbd5;color:var(--qo-blue-700);background:var(--qo-blue-50); }
+.navigation-v8 .main .defect-queue-tabs button.active { border-bottom-color:var(--qo-blue-600); }
+.navigation-v8 .main .defect-lifecycle :is(.complete,.current) { color:var(--qo-blue-700) !important; }
+.navigation-v8 .main .defect-lifecycle .complete i { border-color:#79a7ce;background:var(--qo-blue-50); }
+.navigation-v8 .main .defect-lifecycle .current i { border-color:var(--qo-blue-700);background:var(--qo-blue-700);color:#fff; }
+.navigation-v8 .main .defect-form-section-heading > span { color:var(--qo-blue-700);background:var(--qo-blue-50); }
+
+/* Dashboard, lifecycle and Help content accents. */
+.navigation-v8 .main .dashboard-metric-grid .stat-card-blue {
+  border-top-color:var(--qo-blue-600);background:linear-gradient(145deg,#fff 58%,var(--qo-blue-50) 100%);
+}
+.navigation-v8 .main .dashboard-metric-grid .stat-card-blue .chip-tag { color:var(--qo-blue-800);background:var(--qo-blue-50); }
+.navigation-v8 .main .lifecycle-distribution-summary strong { color:var(--qo-blue-700); }
+.navigation-v8 .main .lifecycle-stage-row.stage-3 { --stage-color:var(--qo-blue-600); }
+.navigation-v8 .main :is(
+  .help-quick-links > a,.help-sop-steps li > span,.help-role-stack span,
+  .help-comment-avatar
+) { border-color:var(--qo-blue-border); }
+.navigation-v8 .main .help-quick-links > a { color:var(--qo-blue-700); }
+.navigation-v8 .main .help-quick-links > a:hover { border-color:#9ebbd5;box-shadow:0 7px 17px rgba(12,41,79,.09); }
+.navigation-v8 .main .help-toc nav a:hover { color:var(--qo-blue-700);background:var(--qo-blue-50); }
+.navigation-v8 .main .help-sop-steps li > span { color:var(--qo-blue-700);background:var(--qo-blue-50); }
+.navigation-v8 .main .badge-teal { color:var(--qo-blue-800);background:var(--qo-blue-100); }

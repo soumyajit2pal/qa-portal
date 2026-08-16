@@ -24,6 +24,7 @@ import ConfirmModal from "../../components/ConfirmModal";
 import JiraActivity from "../../components/JiraActivity";
 import ClearableSearchInput from "../../components/ClearableSearchInput";
 import RoleGroupLink from "../../components/RoleGroupLink";
+import ChildRequestDelegation from "../../components/ChildRequestDelegation";
 import {
   QA_STATUSES,
   QA_STATUS_LABELS,
@@ -40,6 +41,7 @@ import {
   validEnvironmentPromotion,
   canManageReadinessEvidence,
   QA_DEPARTMENT,
+  SIGNOFF_STATUS_LABELS,
 } from "../../constants";
 import {
   FunctionalOut,
@@ -119,7 +121,10 @@ function FunctionalFormModal({
   // inside it need their own explicit identity+status check (see
   // canManageReadinessEvidence's isOwner param) rather than assuming the
   // status alone means this particular viewer may attach/remove evidence.
-  const isRequesterModal = editing.requester_id === user?.id || isAdmin;
+  const isActiveDelegateModal = editing.active_delegation?.status === "ACTIVE" && editing.active_delegation.assigned_to_id === user?.id;
+  const isRequesterModal = isActiveDelegateModal || isAdmin || (
+    editing.requester_id === user?.id && !editing.active_delegation
+  );
   const sameDeptModal = hasDepartment(user, editing.department);
   const canSMDecideModal = hasRole(user, "SM") && editing.status === "SM_APPROVAL_PENDING" && sameDeptModal;
   const canDeptHeadDecideModal =
@@ -708,6 +713,13 @@ function FunctionalDetail({
   const [history, setHistory] = useState<ApprovalActionOut[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [comments, setComments] = useState("");
+  // 2026-08 -- dedicated from the shared `comments` state above (which is
+  // only ever populated by the unrelated "What was the behaviour earlier?"
+  // Readiness Verification textarea, and was empty at this later stage) so
+  // the Requester can actually give a reason for "Changes Required" -- see
+  // the backend's own mandatory-reason check in
+  // routers/functional.py::requester_decision.
+  const [requesterComments, setRequesterComments] = useState("");
   const [selectedQALead, setSelectedQALead] = useState("");
   const [selectedTesters, setSelectedTesters] = useState<string[]>([]);
   // 2026-08 Reassignment CR -- a reason is mandatory when this is a genuine
@@ -765,6 +777,7 @@ function FunctionalDetail({
       );
       onChanged(updated);
       setComments("");
+      setRequesterComments("");
       await load();
     } catch (err) {
       if (isReadinessPass) setReadinessPassError(err);
@@ -845,6 +858,8 @@ function FunctionalDetail({
 
   const isAdmin = hasRole(user, "ADMIN");
   const isRequester = req.requester_id === user?.id || isAdmin;
+  const isActiveDelegate = req.active_delegation?.status === "ACTIVE" && req.active_delegation.assigned_to_id === user?.id;
+  const requesterInputEditor = isActiveDelegate || isAdmin || (isRequester && !req.active_delegation);
   const isRequesterVerifier = isRequester || hasRole(user, "APPLICATION_OWNER");
 
   const status = req.status;
@@ -870,7 +885,7 @@ function FunctionalDetail({
   // action instead of being a dead end (see resubmitLabel below for the
   // button's own wording).
   const canResubmit =
-    isRequester &&
+    isRequester && !req.active_delegation &&
     [
       "RETURNED_BY_SM",
       "SM_REJECTED",
@@ -940,7 +955,7 @@ function FunctionalDetail({
     isAdmin ||
     (status === "SM_APPROVAL_PENDING" ? canSMDecide :
     status === "DEPARTMENT_HEAD_APPROVAL_PENDING" ? canDepartmentHeadDecide :
-    isRequester);
+    requesterInputEditor);
   // Document and Evidence Access Control Based on Workflow Stage: exactly 3
   // upload stages, then a hard lock -- (1) the requester while it's Draft/
   // Submitted/Returned-by-*/Rejected/back for final verification, (2) the
@@ -954,7 +969,7 @@ function FunctionalDetail({
     isAdmin ||
     (["DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD",
       "RETURNED_BY_QA_LEAD", "REQUESTER_VERIFICATION"].includes(status)
-      ? isRequester
+      ? requesterInputEditor
       : status === "SM_APPROVAL_PENDING"
       ? canSMDecide
       : status === "DEPARTMENT_HEAD_APPROVAL_PENDING"
@@ -1084,7 +1099,7 @@ function FunctionalDetail({
   // stages.
   const canEditDetails =
     isAdmin ||
-    (isRequester &&
+    (requesterInputEditor &&
       [
         "DRAFT",
         "RETURNED_BY_SM",
@@ -1174,6 +1189,11 @@ function FunctionalDetail({
             <DetailField label="Change Type">
               {req.change_type || "—"}
             </DetailField>
+            {req.change_type === "Bug Fix" && (
+              <DetailField label="Previous Completed Request ID">
+                {req.bug_fix_source_request_id || "—"}
+              </DetailField>
+            )}
             <DetailField label="Department">
               {req.department || "—"}
             </DetailField>
@@ -1232,6 +1252,22 @@ function FunctionalDetail({
                   {(isAssignedTester || isAssignedQALead) && <button type="button" className="btn btn-sm" style={{ marginLeft: 8 }} disabled={!!busyAction} onClick={() => unlinkTestCycle(cycle)}>{busyAction === `unlink-cycle-${cycle.id}` ? "Unlinking…" : "Unlink"}</button>}
                 </DetailField>
               ))}
+            </DetailSection>
+          )}
+
+          {req.signoff_certificate_id && (
+            // 2026-08 -- reported directly: "LINK THE CERTIFICATE ONCE
+            // GENERATED" -- this request previously had no visible link to
+            // its own QA Sign-off certificate. Mirrors the "Linked Test
+            // Cycle" section above; deep-links via SignOff.tsx's existing
+            // `?open=<certificate_id>` pattern.
+            <DetailSection title="Linked Sign-off Certificate">
+              <DetailField label={req.signoff_certificate_id}>
+                <Link className="linked-cycle-link" to={`/signoff?open=${req.signoff_certificate_id}`}>
+                  <strong>{req.signoff_certificate_id}</strong>
+                </Link>{" "}
+                · <Badge status={req.signoff_certificate_status} label={(req.signoff_certificate_status && SIGNOFF_STATUS_LABELS[req.signoff_certificate_status]) || req.signoff_certificate_status} />
+              </DetailField>
             </DetailSection>
           )}
 
@@ -1322,6 +1358,15 @@ function FunctionalDetail({
                   Edit Details
                 </button>
               )}
+              <ChildRequestDelegation
+                targetType="FUNCTIONAL"
+                request={req}
+                users={users}
+                onChanged={async (updated) => {
+                  onChanged(updated);
+                  await load();
+                }}
+              />
               {canSubmit && (
                 <button
                   className="btn btn-primary btn-sm"
@@ -1598,13 +1643,29 @@ function FunctionalDetail({
 
               {canRequesterDecide && (
                 <>
+                  <div className="form-field" style={{ width: "100%" }}>
+                    <label htmlFor="requester-decision-comments">
+                      Comments{" "}
+                      <small className="muted">
+                        (required for Changes Required)
+                      </small>
+                    </label>
+                    <textarea
+                      id="requester-decision-comments"
+                      rows={3}
+                      value={requesterComments}
+                      onChange={(e) => setRequesterComments(e.target.value)}
+                      placeholder="If requesting changes, describe what still needs to be fixed…"
+                      disabled={!!busyAction}
+                    />
+                  </div>
                   <button
                     className="btn btn-success btn-sm"
                     disabled={!!busyAction}
                     onClick={() =>
                       act("requester-decision", {
                         decision: "Accepted",
-                        comments,
+                        comments: requesterComments,
                       })
                     }
                   >
@@ -1612,11 +1673,16 @@ function FunctionalDetail({
                   </button>
                   <button
                     className="btn btn-danger btn-sm"
-                    disabled={!!busyAction}
+                    disabled={!!busyAction || !requesterComments.trim()}
+                    title={
+                      !requesterComments.trim()
+                        ? "Describe what needs to change before submitting"
+                        : undefined
+                    }
                     onClick={() =>
                       act("requester-decision", {
                         decision: "ChangesRequired",
-                        comments,
+                        comments: requesterComments,
                       })
                     }
                   >
@@ -1845,9 +1911,7 @@ export default function Functional() {
       <PageHeader
         title="Functional QA Requests"
         count={total}
-        subtitle="Combined Functional Testing, Regression Testing, Sanity Testing and UAT Support workflow --
-                   raised via a QA Request (include any of these in its request types), then tracked here
-                   through Department Head approval, readiness verification, execution and sign-off."
+        subtitle="Functional, Regression, Sanity Testing and UAT Support are raised through a QA Request and tracked here from approval to sign-off."
       />
       {/* <div className="toolbar">
         <select

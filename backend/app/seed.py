@@ -4,12 +4,12 @@ DAST requests, or other dummy records. Run with:
 
     python -m app.seed
 """
-from .database import SessionLocal, Base, engine
+from .database import SessionLocal
 from . import models
 from .auth import hash_password
 from .constants import Role, LoginType, SEED_DEPARTMENTS
 
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
 
 DEMO_PASSWORD = "Password@123"
 

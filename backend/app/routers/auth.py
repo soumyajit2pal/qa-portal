@@ -400,6 +400,23 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
     if new_roles is not None:
         _validate_roles(new_roles)
         new_roles = _dedupe_roles(new_roles)
+
+    # An administrator must never be able to lock themselves out of the
+    # administration boundary.  This check belongs on the API (not only in
+    # Admin.tsx), because the endpoint can also be called directly.  Another
+    # administrator may still remove this user's ADMIN role or deactivate
+    # the account, which preserves the requested two-person control.
+    is_self_admin_update = user.id == current_user.id and user.has_role(Role.ADMIN)
+    if is_self_admin_update and new_roles is not None and Role.ADMIN not in new_roles:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot remove your own Administrator access. Another Administrator must make this change.",
+        )
+    if is_self_admin_update and data.get("is_active") is False:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot deactivate your own Administrator account. Another Administrator must make this change.",
+        )
     # 2026-08 CR -- `departments` (plural), if the caller sent it at all
     # (even as an empty list), takes priority over the legacy singular
     # `department`. Popped out of `data` so the generic setattr loop below

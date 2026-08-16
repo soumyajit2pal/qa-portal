@@ -262,17 +262,25 @@ def resubmit_signoff(signoff_id: int, db: Session = Depends(get_db), current_use
     SM_* status names). Reported directly: a Rejected-by-QA-Lead certificate
     used to be a dead end; it's now reopenable the same way a Return is:
     edit details, then call this to send it straight back to
-    SM_APPROVAL_PENDING for a fresh decision. A return from Executive 
+    SM_APPROVAL_PENDING for a fresh decision. A return from Executive
     goes straight back to their own queue (QA Lead already approved it
     once) -- the direct return goes back to Executive  rather than
-    repeating QA Lead approval."""
+    repeating QA Lead approval.
+
+    RETURNED_BY_REQUESTER (2026-08) is the same idea from a third
+    direction: functional.py::requester_decision reopens an already-Issued
+    certificate into this status when the Requester picks "Changes
+    Required" at Requester Verification, instead of abandoning it and
+    letting a new one be created. Per the report -- "it will go for QA
+    lead approval, then AGM approval" -- it re-enters the SAME chain as a
+    QA-Lead return/reopen, one full pass through QA Lead then Executive."""
     obj = _get_or_404(db, signoff_id)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this certificate")
-    _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"], "Resubmit")
+    _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"], "Resubmit")
     _validate_rich_text_before_progress(obj)
-    if obj.status in ("RETURNED_BY_SM", "SM_REJECTED"):
-        reopening = obj.status == "SM_REJECTED"
+    if obj.status in ("RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_REQUESTER"):
+        reopening = obj.status in ("SM_REJECTED", "RETURNED_BY_REQUESTER")
         obj.status = "SM_APPROVAL_PENDING"
         _log(db, obj.id, "QA Lead Approval", current_user,
              "Reopened" if reopening else "Resubmitted",
@@ -419,10 +427,20 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     history_rows = (db.query(models.ApprovalAction)
                      .filter_by(entity_type="SIGNOFF", entity_id=signoff_id)
                      .order_by(models.ApprovalAction.created_at).all())
-    signatures = [
-        signature for row in history_rows
-        if (signature := parse_electronic_signature(row.comments, stage=row.step_name or "Approval"))
-    ]
+    # Reported directly: "multiple signatures are coming, instead of this
+    # what ever latest show and in download pdf as well" -- a certificate
+    # signed more than once at the same checkpoint (e.g. re-signed by QA
+    # Lead after a return/resubmit) previously listed every past signature
+    # for that stage. history_rows is ordered oldest-first, so folding into
+    # a dict keyed by stage and letting later rows overwrite earlier ones
+    # keeps only the most recent signature per stage -- same fix as
+    # SignOff.tsx's own `signatures` (the modal view this PDF mirrors).
+    signatures_by_stage: dict = {}
+    for row in history_rows:
+        signature = parse_electronic_signature(row.comments, stage=row.step_name or "Approval")
+        if signature:
+            signatures_by_stage[signature.stage] = signature
+    signatures = list(signatures_by_stage.values())
     if signatures:
         sections.append(("Electronic Signatures", [
             (f"{signature.stage} - Signature {index}", signature)
@@ -465,7 +483,7 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
     if user.has_role(Role.ADMIN):
         return True
     status = obj.status
-    if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"):
+    if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
         return user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA) and user.has_department(QA_DEPARTMENT)

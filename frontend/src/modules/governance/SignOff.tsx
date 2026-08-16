@@ -544,6 +544,21 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
     } catch (err) { setError(err) } finally { setBusyAction(null) }
   }
 
+  // Reported directly ("still not working" / "nothing happens") -- this
+  // button's onClick used to call api.downloadFile() directly with no
+  // await/catch, so any failure (expired session, 404, a backend error)
+  // became an unhandled promise rejection: nothing rendered, no error
+  // shown, the click just appeared to do nothing. Routed through the same
+  // busyAction/error state every other action on this modal already uses,
+  // so a failure is now visible instead of silent.
+  async function downloadCertificate() {
+    setError(null)
+    setBusyAction('download')
+    try {
+      await api.downloadFile(`/api/signoffs/${item.id}/export`, `${item.certificate_id}.pdf`)
+    } catch (err) { setError(err) } finally { setBusyAction(null) }
+  }
+
   const isRequester = item.requester_id === user?.id || hasRole(user, 'ADMIN')
   const status = item.status
   const isAdmin = hasRole(user, 'ADMIN')
@@ -553,8 +568,16 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   // SM_REJECTED ("Rejected by QA Lead" here) included alongside RETURNED_BY_*
   // -- reported directly, a rejected certificate is now reopenable (edit +
   // resubmit) instead of a dead end.
-  const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status)
-  const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Certificate' : 'Re-submit'
+  // RETURNED_BY_REQUESTER (2026-08) added -- reported directly: "qa edit
+  // the required requested thing, but how to submit !! there is no such
+  // submit !!" -- SIGNOFF_EDITABLE_STATUSES already let the QA Engineer
+  // edit a certificate in this status (routers/signoff.py::update_signoff),
+  // but this button's own status list was never updated to match, so there
+  // was genuinely no way to submit the edit -- editing worked, resubmitting
+  // didn't. resubmit_signoff (backend) already accepts this status and
+  // routes it to SM_APPROVAL_PENDING (QA Lead), same as a reopen.
+  const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER'].includes(status)
+  const resubmitLabel = (status === 'SM_REJECTED' || status === 'RETURNED_BY_REQUESTER') ? 'Reopen Certificate' : 'Re-submit'
   // Reported directly: a person who raised this certificate but also
   // separately holds QA Lead/Executive  must not be able to approve
   // their own certificate -- someone else holding that role must decide it
@@ -578,7 +601,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   // exclusively to whoever it's actually sitting with now, matching the
   // backend's own (now-exclusive) _can_upload_documents (signoff.py).
   const canManageDocuments = isAdmin || (
-    ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE'].includes(status) ? isRequester :
+    ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER'].includes(status) ? isRequester :
     status === 'SM_APPROVAL_PENDING' ? canQALeadDecide :
     status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? canExecutiveCoeDecide :
     false
@@ -587,7 +610,23 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
   // routers/signoff.py::update_signoff.
   const canEditDetails = (isRequester && SIGNOFF_EDITABLE_STATUSES.includes(status))
     || (hasRole(user, ...QA_LEAD_GROUP_ROLES) && status === 'SM_APPROVAL_PENDING' && isQADepartment)
-  const signatures = useMemo(() => history.map(recordedSignature).filter((entry): entry is RecordedElectronicSignature => !!entry), [history])
+  // Reported directly: "multiple signatures are coming, instead of this
+  // what ever latest show" -- a certificate returned and re-signed more
+  // than once at the same checkpoint (e.g. QA Lead approves, it's
+  // returned, QA Lead approves again after resubmission) left every past
+  // signature for that stage on display, not just the one that's actually
+  // still valid. `history` comes back ordered oldest-first
+  // (routers/signoff.py::signoff_history), so folding into a Map keyed by
+  // stage and letting later entries overwrite earlier ones leaves exactly
+  // the most recent signature per stage.
+  const signatures = useMemo(() => {
+    const byStage = new Map<string, RecordedElectronicSignature>()
+    for (const item of history) {
+      const signature = recordedSignature(item)
+      if (signature) byStage.set(signature.stage, signature)
+    }
+    return Array.from(byStage.values())
+  }, [history])
 
   return (
     <Modal title={item.certificate_id} onClose={onClose} wide>
@@ -623,8 +662,19 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
       </div>
 
       <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
-        <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/signoffs/${item.id}/export`, `${item.certificate_id}.pdf`)}>
-          Export PDF
+        {/* Reported directly: "'Export PDF' is too much generic, once
+            certificate issue it should be like download certificate." It's
+            only actually a finished certificate once Issued -- before that
+            this is exporting an in-progress draft, so the generic label
+            stays for every earlier status and only flips (label + styling)
+            once the real thing exists to download. Same export endpoint
+            either way, just the label/emphasis changes. */}
+        <button
+          className={item.status === 'ISSUED' ? 'btn btn-sm btn-primary' : 'btn btn-sm'}
+          disabled={!!busyAction}
+          onClick={downloadCertificate}
+        >
+          {busyAction === 'download' ? 'Downloading…' : item.status === 'ISSUED' ? 'Download Certificate' : 'Export PDF'}
         </button>
         {canEditDetails && <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setEditing(true)}>Edit Details</button>}
         {canSubmit && <button className="btn btn-primary btn-sm" disabled={!!busyAction} onClick={() => act('submit')}>Submit for QA Lead Approval</button>}
@@ -700,10 +750,25 @@ export default function SignOff() {
   const [departmentFilter, setDepartmentFilter] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
+  // Reported directly ("still not working" / "nothing happens") -- the
+  // register's Download button previously called api.downloadFile()
+  // directly with no await/catch, so a failure (expired session, 404, a
+  // backend error) became a silent unhandled promise rejection instead of
+  // anything the user could see. downloadingId also disables the button
+  // mid-flight so a slow response can't be double-clicked.
+  const [downloadingId, setDownloadingId] = useState<number | null>(null)
 
   const load = useCallback(async () => {
     try { setRows(await api.get<SignOffOut[]>('/api/signoffs')) } catch (err) { setError(err) }
   }, [])
+
+  async function downloadCertificate(row: SignOffOut) {
+    setError(null)
+    setDownloadingId(row.id)
+    try {
+      await api.downloadFile(`/api/signoffs/${row.id}/export`, `${row.certificate_id}.pdf`)
+    } catch (err) { setError(err) } finally { setDownloadingId(null) }
+  }
   useEffect(() => { load() }, [load])
   useEffect(() => {
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names just stay empty */ })
@@ -747,7 +812,31 @@ export default function SignOff() {
           <label><span>Request Department</span><select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option value="">All departments</option>{departments.map((department) => <option key={department} value={department}>{department}</option>)}</select></label>
         </div>
         <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
-          { key: 'certificate_id', header: 'Certificate ID' },
+          // Reported directly: "where is download button?" -- it was added
+          // as the LAST of 11 columns (see the removed 'download' column
+          // this replaced), which on a wide register requires scrolling all
+          // the way right to even see, let alone use -- easy to miss
+          // entirely, and blank/unlabeled column headers don't help. Moved
+          // into the Certificate ID cell instead -- the first column, so
+          // it's visible at the register's default (unscrolled) position no
+          // matter how many other columns are showing. Still only rendered
+          // once Issued (see the original comment on this, preserved
+          // below); e.stopPropagation() so clicking Download doesn't also
+          // open the row's detail modal underneath it.
+          {
+            key: 'certificate_id', header: 'Certificate ID',
+            render: (r) => (
+              <span className="signoff-id-cell">
+                <span>{r.certificate_id}</span>
+                {r.status === 'ISSUED' && (
+                  <button type="button" className="btn btn-sm btn-primary" disabled={downloadingId === r.id} onClick={(e) => { e.stopPropagation(); downloadCertificate(r) }}>
+                    {downloadingId === r.id ? 'Downloading…' : 'Download'}
+                  </button>
+                )}
+              </span>
+            ),
+            filterValue: (r) => r.certificate_id,
+          },
           { key: 'application_name', header: 'Application' },
           { key: 'request_department', header: 'Department', render: (r) => r.request_department || '—' },
           { key: 'requester_id', header: 'Requested By', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },

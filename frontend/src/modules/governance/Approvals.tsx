@@ -29,14 +29,6 @@ export default function Approvals() {
     api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(setError)
   }, [])
 
-  // SRS 7.2 pagination rollout -- this is the one consumer of the approval
-  // feed that genuinely browses it page by page (see
-  // routers/approvals.py::list_approval_history's own docstring for why
-  // every other entity_type+entity_id-scoped consumer stays on the plain,
-  // unpaginated `GET /api/approvals`). `total`/`total_pages` are capped at
-  // that endpoint's existing 500-row ceiling, same limitation this page
-  // already lived with before (it used to fetch all 500 in one shot and
-  // paginate 5-per-page client-side; now the server does the paging).
   const {
     items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
     loading, setPage, setPageSize,

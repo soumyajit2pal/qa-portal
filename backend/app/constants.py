@@ -838,21 +838,40 @@ RISK_TIERS = ["Tier 1 (Critical)", "Tier 2 (High)", "Tier 3 (Medium)", "Tier 4 (
 SIGNOFF_STATUSES = [
     "DRAFT", "SUBMITTED", "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
     "DEPT_HEAD_QA_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "DEPT_HEAD_COE_REJECTED",
-    "ISSUED",
+    "ISSUED", "RETURNED_BY_REQUESTER",
 ]
 # SM_REJECTED ("Rejected by QA Lead" here -- see SIGNOFF_STATUS_LABELS)
 # deliberately NOT here -- reported directly, it's reopenable by the
 # requester (edit details + resubmit, same path as RETURNED_BY_SM) rather
 # than a dead end. DEPT_HEAD_COE_REJECTED is untouched/still terminal --
 # only SM/QA-Lead-tier rejection was asked to become reopenable.
+#
+# ISSUED stays listed here for the Sign-off module's OWN internal transition
+# engine (dashboards/counts/"open" queues, and there is deliberately no
+# generic resubmit/reopen button offered on an Issued certificate from
+# within this module) -- but it's no longer a true dead end. 2026-08,
+# reported directly: "on changes required it is starting the whole workflow
+# again, and for same request generating multiple certificate. this should
+# not be. it should enable generated QA certificate editing mode." A
+# Requester rejecting an ISSUED certificate at Functional Testing's own
+# Requester Verification step (routers/functional.py::requester_decision)
+# now moves THAT SAME certificate to RETURNED_BY_REQUESTER instead of the
+# Functional Request abandoning it and restarting the whole
+# QA-Lead-assignment-through-execution lifecycle to raise a brand new one --
+# see that function's own comment for the full reasoning.
 SIGNOFF_TERMINAL_STATUSES = ["ISSUED", "DEPT_HEAD_COE_REJECTED"]
 # QA requester's own editable statuses (Draft, or returned/rejected back to
 # them for changes). QA Lead additionally gets an edit window while a
 # certificate is freshly SM_APPROVAL_PENDING (legacy internal code; QA Lead
 # review) -- see routers/signoff.py::update_signoff, not folded into this
 # list since it's a different actor/condition, not a third
-# "requester-editable" status.
-SIGNOFF_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE"]
+# "requester-editable" status. RETURNED_BY_REQUESTER (see above) is editable
+# the same way RETURNED_BY_SM already is -- the QA Engineer revises the
+# certificate, then resubmits it (routers/signoff.py::resubmit_signoff)
+# straight back into SM_APPROVAL_PENDING, i.e. QA Lead approval first, then
+# Executive -- the full chain again, same as any other Return, per the
+# report's own "it will go for QA lead approval, then AGM approval."
+SIGNOFF_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"]
 SIGNOFF_STATUS_LABELS = {
     "DRAFT": "Draft",
     "SUBMITTED": "Submitted",
@@ -863,6 +882,7 @@ SIGNOFF_STATUS_LABELS = {
     "RETURNED_BY_DEPT_HEAD_COE": "Returned by Executive",
     "DEPT_HEAD_COE_REJECTED": "Rejected by Executive",
     "ISSUED": "Issued",
+    "RETURNED_BY_REQUESTER": "Returned by Requester",
 }
 
 # ---- Module 10: Test Management (Project Management / Test Repository / Test Execution) ----

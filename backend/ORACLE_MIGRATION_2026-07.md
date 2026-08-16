@@ -726,10 +726,12 @@ completely rather than litigate whether any individual gap was "technically" pre
    default notification target and the "Pending with" display (`TestCaseOut.pending_with_user_id/name`,
    `TestCaseVersion.pending_with_user_id/name`, computed from current status). Confirmed by the independent
    review pass below that the auth checks never consult these fields.
-4. **Cycle readiness validation (spec section 7).** `test_execution.py::_validate_cycle_ready` now checks all
-   5 conditions before a cycle may transition into `Ready` — wired into `update_cycle` so it validates the
-   **fully-updated** cycle object (after link changes in the same request), not stale pre-update
-   state; a `Rejected` test case in the cycle is one of the blocking conditions.
+4. **Cycle readiness validation (spec section 7).** `test_execution.py::_validate_cycle_ready` validates the
+   execution scope before a cycle may transition into `Ready` — wired into `update_cycle` so it validates the
+   **fully-updated** cycle object (after link changes in the same request), not stale pre-update state. Tester
+   assignment is no longer a readiness prerequisite; assignment is required before recording each testcase's
+   execution. A `Rejected` test case in the cycle remains one of the blocking conditions, and cycle completion
+   remains blocked until every testcase has an execution result.
 5. **In-app notifications (spec section 10).** New `Notification` model + `routers/notifications.py`
    (`fire()`, `sweep_overdue_approvals()` for configurable reminder/escalation business-day thresholds,
    default 2/5, Admin-configurable via `GET/PATCH /system-settings/approval-notifications`). **In-app only —
@@ -4822,6 +4824,211 @@ No further change made here; that pending index is the relevant lever for this p
 
 **Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean;
 `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/`.
+
+## 103. Completed Test Cycle -- allow linking/changing the QA Request while otherwise staying locked
+
+Reported directly: "once test cycle completed, then test cycle is locked to edit. that is okay, but give
+option to link QA request." The lock itself (`_require_open_cycle`, "This Test Cycle is Completed and
+read-only. No further changes are allowed.") stays exactly as-is for everything else -- this only carves out
+one narrow exception.
+
+**Backend (`routers/test_execution.py::update_cycle`).** The existing gate already had one precedent for a
+narrow exception on an otherwise-locked cycle: a Blocked cycle may ONLY resume (`set(data) == {"status"}`),
+nothing else. Added a parallel case for Completed: if the cycle is Completed and the request changes ONLY
+`linked_request_type`/`linked_request_id` (`set(data) <= {"linked_request_type", "linked_request_id"}`), the
+`_require_open_cycle` call is skipped for that request; any other field present alongside the link, on a
+Completed cycle, still hits the existing lock exactly as before. No changes needed further down the
+function -- the existing link-set/clear logic and its own "Request Linked"/"Request Unlinked"
+`ApprovalAction` audit entry already don't care about cycle status, they just needed to be reachable.
+
+**Frontend (`TestExecution.tsx`).** `CycleModal` (the full "Edit Cycle" form) stays hidden for a Completed
+cycle, same as before -- exposing it would let a user fill in name/dates/owner/etc. only to have the
+backend reject the request the moment anything beyond the link changed. Instead, added a new, narrower
+`LinkCycleRequestModal` -- just the one field, matching the backend's own restricted shape -- reachable via
+a new "Link QA Request" / "Change link" button that appears specifically when `status === 'Completed'`
+(not Blocked, which still has no exception per the report's own scoping to "once completed"). Submitting
+with the picker blank clears the link (same PATCH shape, `linked_request_type`/`linked_request_id` both
+`null`), so this one control also covers unlinking -- the existing dedicated "Unlink" button stays hidden
+on a Completed cycle as before, unchanged. Updated the "This cycle is Completed and read-only" banner copy
+to note the one exception. New `.tm-cycle-request-link-action`/`--empty` CSS rules give the new button(s) a
+neutral (non-red) treatment distinct from the existing "Unlink" button's danger styling, since this isn't a
+destructive action.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean;
+`rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/`.
+
+## 104. QA Sign-off certificate -- clearer download once Issued
+
+Reported directly: "ONCE certificate issued, give to download the certificate. also inside of this 'Export
+PDF' is too much generic, once certificate issue it should be like download certificate." Purely a frontend
+labeling/discoverability change -- `GET /api/signoffs/{id}/export` (the PDF export endpoint itself) was
+already correct and unchanged; both fixes below just call it more clearly.
+
+**`SignOff.tsx`.** The detail modal's button (`SignOffDetail`) was always labeled "Export PDF" regardless of
+certificate status. It's only actually a finished certificate once `status === 'Issued'` -- before that,
+"exporting" is really pulling a snapshot of an in-progress draft, so the generic label and plain styling
+stay for every earlier status. Once Issued, the same button now reads "Download Certificate" and switches
+to `btn-primary` so it reads as the primary action once there's a real certificate to hand someone.
+
+Also added a "Download" action directly in the Certificate Register table (new `download` column, same
+`e.stopPropagation()` pattern this app's other action columns already use, e.g. `MyExecutions.tsx`) --
+previously the only way to reach the PDF was opening the detail modal first. The button only renders for
+`status === 'Issued'` rows; every earlier status shows nothing in that column, since there's nothing to
+download yet.
+
+**Verified:** `npx tsc --noEmit -p .` clean; `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches
+`Documents/qa-portal/`.
+
+## 105. Sign-off certificate download -- fix silent failure (unhandled promise rejection)
+
+Reported directly: "still not working" / the Download button in section 104 does nothing when clicked. Root
+cause: both the modal's download button and the new register-table Download button called
+`api.downloadFile(...)` directly inside `onClick` with no `await`/`.catch()` -- pre-existing behavior on the
+original "Export PDF" button too, just never surfaced before because nothing had reason to fail on a
+low-traffic manual click. Any failure (expired session, a 404/403, a backend error building the PDF) became
+an unhandled promise rejection: nothing rendered, no error text, no console-visible feedback to the user --
+the click just silently did nothing, exactly as reported.
+
+**Fix (`SignOff.tsx`).** Both call sites now go through an explicit async function with real try/catch:
+`SignOffDetail`'s new `downloadCertificate()` reuses the modal's existing `busyAction`/`error` state (same
+pattern as `act()`, its other actions), showing "Downloading…" while in flight and rendering any failure
+through the modal's already-present `<ErrorText>`. The register table's `downloadCertificate(row)` does the
+same at the page level, with a new `downloadingId` state so only the row actually downloading shows
+"Downloading…" and a failure surfaces through the page's own already-present `<ErrorText>`. No backend
+change -- `routers/signoff.py::export_signoff` was not touched; the goal here was making a real failure (if
+one occurs) visible so it can actually be diagnosed, rather than silently swallowed.
+
+**Note:** if the deployed environment serves a separately-built `frontend/dist/` (as opposed to the Vite dev
+server), this fix -- like every source change in this session -- needs that bundle rebuilt/redeployed
+before it's live (raised earlier this session when `frontend/dist/` was found stale; that directory does
+not currently exist in this checkout, so it isn't the cause here, but worth ruling out in whatever
+environment is actually being tested against).
+
+**Verified:** `npx tsc --noEmit -p .` clean; `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches
+`Documents/qa-portal/`.
+
+**Follow-up, same section:** reported directly, "where is download buuton?" -- section 104's Download
+button was added as the 11th (last) column in the Certificate Register, which on a wide table requires
+scrolling all the way right to even see -- easy to miss entirely, and a blank/unlabeled column header didn't
+help discoverability either. Moved it into the Certificate ID cell instead (first column, `.signoff-id-cell`
+in `index.css`) so it's visible at the register's default, unscrolled position regardless of how many other
+columns are showing -- still Issued-only, `e.stopPropagation()` preserved so it doesn't also open the row's
+detail modal. Column count is back to 10 (was 11 with the separate trailing column).
+
+**Second follow-up -- the actual bug:** reported directly again, "you do testing as well, i dont see button
+still now." The column move above was real but insufficient -- the button's own visibility condition was
+wrong. Every status check elsewhere in this file correctly compares against the raw backend value (all
+caps: `'DRAFT'`, `'SM_APPROVAL_PENDING'`, `'DEPT_HEAD_QA_APPROVAL_PENDING'`, etc. -- see
+`SIGNOFF_STATUS_LABELS` in `constants.ts`, which maps `ISSUED` to the display label `'Issued'` shown in the
+Badge). All three of this feature's own checks (`SignOffDetail`'s button, and the Certificate ID cell's
+Download button) compared `item.status`/`r.status` against the display label `'Issued'` instead of the raw
+value `'ISSUED'` -- a certificate's real status is never the string `'Issued'`, so the condition never
+matched and the button never rendered, on any row, regardless of the column-position fix above. Caught by
+grepping every other status comparison in this same file for the actual convention they use, then fixing
+all three to `=== 'ISSUED'` to match.
+
+**Verified:** `npx tsc --noEmit -p .` clean; `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches
+`Documents/qa-portal/`.
+
+## 106. Functional Request -- link the Sign-off certificate + stop "Changes Required" from restarting the whole workflow and duplicating certificates
+
+Reported directly: "LINK THE CERTIFICATE ONCE GENERATED. and on changes required it is starting the whole
+workflow again, and for same request generating multiple certificate. this should not be. it should enable
+generated QA certificate editing mode, and once QA update the changes as per request, it will go for QA lead
+approval, then AGM approval this should be the process." Two related problems in one report.
+
+**Problem 1 -- no visible link to the certificate.** A Functional Request has always carried a `signoff_id`
+column once a certificate exists, but nothing in the request's own detail view surfaced it -- the only way to
+find the certificate was to go hunting in the separate Sign-off module.
+
+**Problem 2 -- "Changes Required" re-ran the entire lifecycle and orphaned/duplicated certificates.**
+`requester_decision`'s `ChangesRequired` branch sent the request's status all the way back to
+`QA_LEAD_ASSIGNED` -- a very early stage, before Planning, Tester Assignment, Test Design, and Execution.
+Testing had already happened; only the certificate needed a correction. Worse, `canRequestSignoff` in
+`Functional.tsx` allows "Request Sign-off" (which always calls `create_signoff` and makes a brand-new
+`QASignOff` row) any time status is `QA_COMPLETED` -- which the request would eventually cycle back through
+on its way through the replayed lifecycle -- so every rejected round trip abandoned the previous certificate
+and created another one, exactly as reported ("generating multiple certificate").
+
+**Fix.**
+
+- New `QASignOff` status `RETURNED_BY_REQUESTER` (`constants.py` / `constants.ts` --
+  `SIGNOFF_STATUSES`/`SIGNOFF_EDITABLE_STATUSES`/`SIGNOFF_STATUS_LABELS`/`SIGNOFF_PENDING_WITH`), editable
+  like `RETURNED_BY_SM`/`SM_REJECTED`/`RETURNED_BY_DEPT_HEAD_COE`.
+- `routers/functional.py::requester_decision`'s `ChangesRequired` branch now: requires a non-blank
+  `comments` (400 if blank -- there was previously no mandatory reason, and no UI field to even give one, see
+  below), looks up the linked certificate via `obj.signoff_id`, and if it's `ISSUED` flips it to
+  `RETURNED_BY_REQUESTER` (logged as its own `ApprovalAction` against the `SIGNOFF` entity, quoting the
+  requester's reason) instead of leaving it untouched and abandoned. The request itself now goes to
+  `QA_SIGNOFF_PENDING` (one step short of `QA_COMPLETED`) rather than `QA_LEAD_ASSIGNED` -- testing doesn't
+  re-run, and `canRequestSignoff` (gated on `QA_COMPLETED` only) can no longer fire, so a second certificate
+  can't be created for the same request.
+- `routers/signoff.py::resubmit_signoff` now also accepts `RETURNED_BY_REQUESTER`, routing it through the
+  same first branch as `RETURNED_BY_SM`/`SM_REJECTED` -- straight to `SM_APPROVAL_PENDING` (QA Lead), which
+  on approval continues to `DEPT_HEAD_QA_APPROVAL_PENDING` (Executive/AGM) same as any other certificate --
+  matching "it will go for QA lead approval, then AGM approval" exactly. The QA Engineer edits the SAME
+  certificate (already permitted once `RETURNED_BY_REQUESTER` was added to `SIGNOFF_EDITABLE_STATUSES`, no
+  change needed in `update_signoff` itself) and resubmits it through this same endpoint.
+- Once the SAME certificate reaches `ISSUED` again, the existing auto-sync in
+  `signoff.py::_sync_linked_functional_request` (queries `signoff_id=obj.id, status=QA_SIGNOFF_PENDING` --
+  exactly the state this leaves the request in) picks it up on its own and carries the request forward to
+  `QA_SIGNED_OFF` then `REQUESTER_VERIFICATION`, same as the very first issuance -- no extra manual step.
+- `models.py`'s `FunctionalRequest` gained a `signoff` relationship plus delegated `signoff_certificate_id`/
+  `signoff_certificate_status` properties (same pattern as `application_name`/`department`/
+  `application_owner` on the same class); exposed on `schemas.FunctionalOut` and `types.ts`'s `FunctionalOut`.
+- `Functional.tsx` gained a new "Linked Sign-off Certificate" `DetailSection` (mirrors the existing "Linked
+  Test Cycle" section), deep-linking to `/signoff?open=<certificate_id>` -- the same `?open=` pattern
+  `SignOff.tsx` already uses to jump straight to one record.
+- The Requester Verification action bar previously had no comments field at all -- the shared `comments`
+  state it silently reused was only ever populated by an unrelated Readiness Verification textarea further
+  up the same form (empty by the time a request reaches this later stage). Added a dedicated, always-visible
+  textarea plus its own `requesterComments` state; "Changes Required" is now disabled until it's non-empty,
+  matching the backend's new mandatory-reason check.
+- `Common.tsx`'s `Badge` color map gained `RETURNED_BY_REQUESTER: "badge-red"` (consistent with the other
+  Returned/Rejected statuses) so the new status doesn't fall back to the generic gray/neutral color.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean;
+`rsync`+`diff -q` confirmed all nine changed files (`functional.py`, `signoff.py`, `models.py`, `schemas.py`,
+`constants.py`, `constants.ts`, `types.ts`, `Common.tsx`, `Functional.tsx`) match between
+`Documents/qa-portal/` and `outputs/qa-portal/`.
+
+**Follow-up, same section:** reported directly right after -- "Returned By Requester then what? qa edit the
+required requested thing, but how to submit !! there is no such submit !! this should go in same workflow
+right." Correct: `update_signoff` already let the QA Engineer edit a certificate in `RETURNED_BY_REQUESTER`
+(it's in `SIGNOFF_EDITABLE_STATUSES`), and `resubmit_signoff` already accepted that status server-side -- but
+`SignOff.tsx`'s own `canResubmit`/`resubmitLabel` (the button that calls `resubmit`) and `canManageDocuments`
+still only checked the original three statuses (`RETURNED_BY_SM`, `SM_REJECTED`, `RETURNED_BY_DEPT_HEAD_COE`)
+and were never updated when `RETURNED_BY_REQUESTER` was introduced -- editing worked, but the button to
+submit the edit genuinely never rendered. The backend's matching `_can_upload_documents` gate had the same
+gap. Fixed by adding `RETURNED_BY_REQUESTER` to all four: `SignOff.tsx`'s `canResubmit` (now shows "Reopen
+Certificate", same label as `SM_REJECTED`, since it's reopening an already-Issued certificate) and
+`canManageDocuments`, and `signoff.py`'s `_can_upload_documents`. Clicking it calls the same
+`resubmit_signoff` endpoint fixed above, which sends it to `SM_APPROVAL_PENDING` -- QA Lead first, then
+Executive/AGM -- confirming "this should go in same workflow" now actually holds end to end.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean;
+`rsync`+`diff -q` confirmed `signoff.py` and `SignOff.tsx` match between `Documents/qa-portal/` and
+`outputs/qa-portal/`.
+
+**Second follow-up, same section:** reported directly -- "multiple signatures are coming, instead of this
+what ever latest show and in download pdf as well." Root cause: every QA Lead/Executive approval writes its
+own electronic-signature block into a new `ApprovalAction.comments` row (see `Common.tsx`'s signature-capture
+flow), and a certificate re-signed at the same checkpoint more than once -- which the `RETURNED_BY_*` /
+`RETURNED_BY_REQUESTER` reopen-and-resubmit paths above make routine -- left every past signature for that
+stage on display alongside the current one, in both the certificate detail modal and the downloaded PDF.
+Neither the modal's `signatures` (`SignOff.tsx`) nor the PDF's (`routers/signoff.py::export_signoff`) had
+ever deduplicated by stage -- they just listed every matching `ApprovalAction` row found. Fixed both the same
+way: history rows come back ordered oldest-first, so folding them into a map/dict keyed by stage (`"QA Lead
+Approval"`, `"Executive Approval"`) and letting later rows overwrite earlier ones for the same key leaves
+exactly the most recent signature per stage. No backend schema change -- `parse_electronic_signature` and the
+underlying `ApprovalAction` audit rows are untouched (the full signing history still exists and is visible in
+the certificate's Activity/history log further down the modal; only the "Electronic Signatures" summary
+section and the PDF's matching section now show one card per stage instead of one per past signing).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean;
+`rsync`+`diff -q` confirmed `signoff.py` and `SignOff.tsx` match between `Documents/qa-portal/` and
+`outputs/qa-portal/`.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.

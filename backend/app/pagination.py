@@ -92,6 +92,9 @@ class Page(BaseModel, Generic[T]):
     total_pages: int
     has_next: bool
     has_previous: bool
+    # Present for keyset/cursor-backed lists. Existing offset clients can
+    # ignore it and keep using the same response envelope.
+    next_cursor: Optional[int] = None
 
 
 class PaginationResult:
@@ -176,4 +179,34 @@ def to_page_response(result: PaginationResult, params: PageParams) -> dict:
         "total_pages": result.total_pages,
         "has_next": params.page < result.total_pages,
         "has_previous": params.page > 1,
+        "next_cursor": None,
+    }
+
+
+def paginate_by_id(query: SAQuery, params: PageParams, id_column, cursor: Optional[int]) -> dict:
+    """Oracle-friendly keyset pagination for growth-unbounded tables.
+
+    Cursor mode deliberately orders on the stable numeric primary key. It
+    fetches one extra row to determine ``has_next`` and never uses OFFSET.
+    An exact total is retained for the existing table footer; consumers that
+    no longer need totals can later move that aggregate to a cached summary.
+    """
+    total = query.order_by(None).count()
+    descending = params.sort_order == "desc"
+    if cursor is not None:
+        query = query.filter(id_column < cursor if descending else id_column > cursor)
+    direction = desc if descending else asc
+    rows = query.order_by(None).order_by(direction(id_column)).limit(params.page_size + 1).all()
+    has_next = len(rows) > params.page_size
+    items = rows[:params.page_size]
+    total_pages = max(1, -(-total // params.page_size)) if params.page_size else 1
+    return {
+        "items": items,
+        "page": params.page,
+        "page_size": params.page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_next": has_next,
+        "has_previous": params.page > 1,
+        "next_cursor": items[-1].id if has_next and items else None,
     }

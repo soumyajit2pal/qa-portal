@@ -62,7 +62,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
     keywords: 'readiness checklist self declaration evidence attachment document approve return reject comment reason popup error',
   },
   {
-    id: 'test-management', number: '08', title: 'Test management',
+    id: 'test-management', number: '08', title: 'Test case management',
     summary: 'Projects, sharing, repository, testcase versions, cycles, assignment, execution, defects, and export.',
     keywords: 'project shared with you view access view only repository folder tag testcase test case version major minor superseded compare details bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete my executions qa group runner assign reassign reason change attempt defect rejected duplicate not a defect blocked checkout checkin export actual result image',
   },
@@ -187,7 +187,7 @@ export default function Help() {
       <div className="help-hero">
         <div className="help-hero-icon"><IconHelp /></div>
         <div className="help-hero-copy">
-          <span>QualityShield · Operating Guide</span>
+          <span>QualityOps · Operating Guide</span>
           <h1>What do you need help with?</h1>
           <p>Search by task, role, workflow, error code, or module name. This guide follows the portal’s current access controls and approval stages.</p>
           <label className="help-search">
@@ -262,7 +262,7 @@ export default function Help() {
               <h3 className="help-subheading">Working efficiently in lists and details</h3>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Use the Columns control on portal data tables to add API fields or hide columns. The original designed columns remain the default and your choices are saved for that table.</li>
-                <li><IconCheckCircle />Use the filter icon beside a column heading to filter that field; tables paginate automatically.</li>
+                <li><IconCheckCircle />Use the filter icon beside a column heading, type to search the suggested values, then select one; tables paginate automatically.</li>
                 <li><IconCheckCircle />Request drawers open expanded. They remain open until Close is selected; use the expand control to switch between expanded and standard width.</li>
                 <li><IconCheckCircle />Dashboard keeps operational items on the landing view. Open Insights for focused Security, Suppression, or 3W analysis.</li>
               </ul>
@@ -339,14 +339,21 @@ export default function Help() {
             <ManualSection {...topic('qa-request')}>
               <SopSteps items={[
                 { title: 'Prepare before opening the form', text: 'Collect the change reference, application, environments, release date, contacts, testing scope, repository or URL details, risk, and readiness evidence.' },
-                { title: 'Select required testing', text: 'Choose Functional, SAST, DAST, and/or Performance. The form displays the correct detail and self-declaration section for each selection.' },
+                { title: 'Select required testing', text: 'Choose Functional, Sanity, Regression, UAT Support, Performance, SAST, and/or DAST. The form displays the correct detail and self-declaration section for each selection.' },
                 { title: 'Complete readiness self-declaration', text: 'Confirm each applicable criterion and attach its evidence during request creation. Evidence is expected before the request reaches approvers or QA readiness.' },
                 { title: 'Save Draft or Submit', text: 'Draft keeps the gateway editable. Submit validates mandatory data and raises linked request records when any required application-name approval is complete.' },
+                { title: 'Delegate for input when needed', text: 'Whenever a request is with the requester for drafting or corrections, the requester can assign any active user—even from another department—to edit it and upload documents. The requester remains the owner and workflow progression stays locked until the assignee returns it or the requester recalls it.' },
                 { title: 'Track linked records', text: 'Open the gateway details to see each generated TQA-FUNC, TQA-SAST, TQA-DAST, or TQA-PERF ID and its independent status.' },
                 { title: 'Correct returned requests', text: 'Read the approver’s reason, edit details, attach requested evidence, comment with the correction, and resubmit.' },
               ]} />
               <Callout title="The QA Request is the intake gateway">
                 After it is raised, operational approvals and testing progress live on the linked Functional, SAST, DAST, and Performance records—not on the gateway itself.
+              </Callout>
+              <Callout title="Bug Fix traceability">
+                When Change Type is Bug Fix, you may optionally select an earlier completed request for the same application and department. This records where the original implementation was tested and completed.
+              </Callout>
+              <Callout title="Delegation is temporary input access">
+                Use Delegate for Input while drafting or whenever SM, Department Head, QA Lead, Security Lead, or Performance QA returns the request for correction. The assignee can edit details, attach evidence, upload documents, and then Return to Requester with mandatory comments. They cannot submit, resubmit, cancel, approve, or change the request department. Assignment, return, and recall are recorded in Activity.
               </Callout>
               <Callout title="Lifecycle paths reflect actual movement">
                 Returned requests show Requester Action as the current destination. Rejected or cancelled requests that close early connect directly to Closed without marking unreached QA or Sign-off stages as complete.
@@ -409,8 +416,8 @@ export default function Help() {
                 { title: 'Select an active project', text: 'A project requires a Department selected from the system list. Selecting an Application automatically uses and locks its mapped Department. Create folders and subfolders for release, module, epic, or test scope.' },
                 { title: 'Create or import test cases', text: 'Complete the ID-linked hierarchy and all fields including epic, CR, module, priority, pre-condition, scenario, steps, expected result, and data.' },
                 { title: 'Review import results', text: 'The completion dialog identifies created and skipped rows and gives a reason for each issue. The uploaded xlsx is parsed in memory; the source workbook is not retained in document storage.' },
-                { title: 'Submit for Reviewer recommendation', text: 'A new or materially updated testcase first moves to Pending Reviewer Recommendation and cannot be used in a cycle.' },
-                { title: 'Two-stage group approval', text: 'Submission automatically enters the shared Stage 1 queue for every eligible QA reviewer except the author. The first valid action wins. After Stage 1 approval, CM QA and AGM QA receive Stage 2 simultaneously; either may approve, return, or reject. Approved cases become Active.' },
+                { title: 'Submit for QA recommendation', text: 'A new or materially updated testcase moves to Pending QA Recommendation and cannot be used in a cycle until final approval.' },
+                { title: 'Two-stage group approval', text: 'Stage 1 is shared by the eligible QA Group except the author. After recommendation, Stage 2 moves to the QA Lead Group for final approval, return, or rejection. The status filter shows this current workflow; retired reviewer-assignment statuses remain visible only on historical records.' },
                 { title: 'Use check-out for editing', text: 'Check Out reserves the case so others know it is being edited. Save the work, then Check In to release the editing reservation.' },
                 { title: 'Maintain in bulk', text: 'Use tags to filter matching test cases. Bulk update can change Test Type, Folder, Module Name, and Priority. Confirm the selected count before bulk update or delete.' },
               ]} />
@@ -429,14 +436,15 @@ export default function Help() {
               ]} />
               <h3 className="help-subheading">Execution SOP</h3>
               <SopSteps items={[
-                { title: 'Create or edit a test cycle', text: 'Choose an active project, define cycle scope and dates, and optionally link the cycle to a child Functional, SAST, DAST, or Performance request ID. Existing cycles can be edited.' },
-                { title: 'Add approved test cases', text: 'Use Select all, column filters, pagination, and configurable columns in Add Test Cases to Cycle. Already-linked and unapproved cases are excluded.' },
-                { title: 'Assign runners', text: 'Any COE - Quality Assurance QA Engineer or QA Lead can assign or reassign cases to an active COE - Quality Assurance QA Engineer or QA Lead.' },
-                { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. An In Progress cycle can be blocked with a mandatory reason and resumed. Completion is allowed only after every testcase has an execution result; Completed is final.' },
+                { title: 'Create or edit a test cycle', text: 'Choose an active project and provide the mandatory start and end dates. You can also define the cycle scope and optionally link it to a child Functional, SAST, DAST, or Performance request ID. Existing cycles can be edited.' },
+                { title: 'Add approved test cases', text: 'Open Add Test Cases to load approved candidates on demand. Search and move through cursor-based pages, select individual rows, or use Select all matching. Already-linked and unapproved cases are excluded by the database.' },
+                { title: 'Mark the cycle ready', text: 'A cycle can move from Draft to Ready once it has at least one approved testcase and valid dates. Testcases do not all need to be assigned at this stage.' },
+                { title: 'Assign runners', text: 'While the cycle is Ready, assign each testcase before its execution attempt. Any COE - Quality Assurance QA Engineer or QA Lead can assign or reassign cases to an eligible active QA Engineer or QA Lead.' },
+                { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. An In Progress cycle can be blocked with a mandatory reason and resumed. Completion remains blocked until every testcase has an execution result; Completed is final.' },
                 { title: 'Execute an attempt', text: 'While the cycle is In Progress, the assigned runner opens the test case, reviews all repository details, and records status, actual result, comments, and evidence.' },
                 { title: 'Use rich Actual Result', text: 'Format text, add bullets, paste images, or upload supported images. Keep results specific enough for another person to reproduce.' },
                 { title: 'Link defects', text: 'For Fail or Blocked outcomes, add the defect reference and explain the observed behavior. Use a new execution attempt for retest history rather than overwriting evidence.' },
-                { title: 'Operate in bulk', text: 'Use bulk assignment, bulk execution, bulk removal from the cycle, or export after validating the selected cases and confirmation summary.' },
+                { title: 'Operate in bulk', text: 'Use bulk assignment, execution, or removal after checking the confirmation summary. Adding more than 500 testcases, Excel imports, and lifecycle/repository exports run as background jobs so the page does not wait on one long API request.' },
                 { title: 'Maintain request links', text: 'Link or unlink a child request from either Functional Request details or Test Lifecycle while the cycle remains active.' },
               ]} />
               <Callout title="My Executions is a QA-only personal queue">
@@ -512,14 +520,15 @@ export default function Help() {
                 <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request ID. Approval Workflow Log supports server-side search and entity filtering across the decision trail.</p></article>
               </div>
               <h3 className="help-subheading">QA Tester Overview: who worked on which request</h3>
+              <p><strong>Contribution & Coverage</strong> is the default management view. It reports original testcases created, governed defects raised, governed defect retests, retained execution attempts, distinct Test Projects with actual activity, current execution assignments, and the tester's last activity in the selected period. Testcase versions do not inflate authoring totals.</p>
               <SopSteps items={[
                 { title: 'Choose a period', text: 'Use All time, Last 3 days, Last 15 days, Last month, or Custom. For Custom, enter From and To dates; the To date includes the complete selected day.' },
-                { title: 'Review current assignments', text: 'Current Functional, Performance, SAST, and DAST assignments remain visible regardless of the selected historical period so ongoing ownership is never hidden.' },
-                { title: 'Review completed work', text: 'The period applies to requests completed during that window. This answers which QA Tester or Security Analyst worked on a request within the selected reporting period.' },
-                { title: 'Open the request ledger', text: 'Select a tester row to see request ID, module, application, current status, assignment state, and relevant activity/completion timing.' },
+                { title: 'Filter the management view', text: 'Search for a tester or filter by department and project. Summary cards, charts, the table, and CSV export all follow the visible filtered set.' },
+                { title: 'Open contribution evidence', text: 'Select a tester or any metric count to inspect testcases, defects, retests, execution attempts, projects, or current execution assignments. Select an evidence row to open its source record.' },
+                { title: 'Review capacity separately', text: 'Switch to Capacity & Occupancy for current Functional, Performance, SAST, and DAST assignment load and the completed-request ledger.' },
               ]} />
               <Callout title="What does “period” mean?">
-                The selected period filters completed-work history by completion time. It does not remove currently assigned work merely because that assignment began before the period. This keeps the dashboard useful for both historical reporting and today’s ownership tracking.
+                The selected period uses the authoritative timestamp for each contribution: testcase creation, defect reporting, defect retest, or execution time. It filters completed-request history by completion time. Current assignments remain visible even when they began before the period.
               </Callout>
               <h3 className="help-subheading">How occupancy is calculated</h3>
               <p>Occupancy is an explainable estimate of concurrent QA workload, not timesheet utilization. Each active assignment contributes lifecycle-weighted points. Eight points equal 100%, and shared Functional or Performance work is divided equally among its assigned testers.</p>
@@ -551,7 +560,7 @@ export default function Help() {
               </ul>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Use module filters and status badges to narrow operational lists.</li>
-                <li><IconCheckCircle />Use Reports & Export Centre for governed summaries and audit evidence exports.</li>
+                <li><IconCheckCircle />Use Reports & Export Centre for the QA request register, cycle execution summary, defect/retest register, performance and security registers, testcase approval backlog, application scorecard, QA sign-off register, and approval audit evidence.</li>
                 <li><IconCheckCircle />Use Repository and Test Execution exports for detailed test assets and run results.</li>
                 <li><IconCheckCircle />Inactive projects remain discoverable through the project status filter but cannot accept new repository or execution changes until reactivated.</li>
                 <li><IconCheckCircle />QA Certificate validation notes, defect review, and residual-risk sections support rich text, lists, and tables; exported PDFs preserve the formatted content.</li>

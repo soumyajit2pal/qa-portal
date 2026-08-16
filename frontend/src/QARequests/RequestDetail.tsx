@@ -36,6 +36,7 @@ import { AddDocuments } from "./AddDocuments";
 import JiraActivity from "../components/JiraActivity";
 import ConfirmModal from "../components/ConfirmModal";
 import LinkedDefects from "../components/LinkedDefects";
+import UserAssignSelect from "../components/UserAssignSelect";
 
 interface RequestDetailProps {
   req: QARequestOut;
@@ -97,6 +98,13 @@ export function RequestDetail({
   // closes this whole modal too, since there's nothing left here for that
   // viewer to look at.
   const [appNameDecisionNotice, setAppNameDecisionNotice] = useState<string | null>(null);
+  const [showAssign, setShowAssign] = useState(false);
+  const [delegateUserId, setDelegateUserId] = useState("");
+  const [delegateReason, setDelegateReason] = useState("");
+  const [showReturn, setShowReturn] = useState(false);
+  const [returnComments, setReturnComments] = useState("");
+  const [showRecall, setShowRecall] = useState(false);
+  const [recallComments, setRecallComments] = useState("");
 
   // Every readiness checklist is Admin-configurable now (see
   // backend checklist_config.py) -- fetched live instead of the old
@@ -182,8 +190,47 @@ export function RequestDetail({
     }
   }
 
+  async function delegationAction(
+    action: "assign" | "return" | "recall",
+    path: string,
+    payload: Record<string, unknown>
+  ) {
+    setError(null);
+    setBusyAction(action);
+    try {
+      const updated = await api.post<QARequestOut>(
+        `/api/qa-requests/${req.id}/${path}`,
+        payload
+      );
+      onChanged(updated);
+      if (action === "return") {
+        // Access to a private Draft ends as soon as it is returned. Close the
+        // drawer instead of issuing document/history refreshes the former
+        // assignee is no longer authorized to make.
+        onClose();
+        return;
+      }
+      await load();
+      setShowAssign(false);
+      setShowReturn(false);
+      setShowRecall(false);
+      setDelegateUserId("");
+      setDelegateReason("");
+      setReturnComments("");
+      setRecallComments("");
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   const isAdmin = hasRole(user, "ADMIN");
-  const isRequester = req.requester_id === user?.id || isAdmin;
+  const ownsRequest = req.requester_id === user?.id;
+  const isRequester = ownsRequest || isAdmin;
+  const activeDelegation = req.active_delegation;
+  const hasActiveDelegation = activeDelegation?.status === "ACTIVE";
+  const isActiveDelegate = hasActiveDelegation && activeDelegation?.assigned_to_id === user?.id;
   const status = req.status;
   // Reported directly: "Request Raised with new application name... it must
   // be at master request level, not on individual request level of childs."
@@ -280,7 +327,8 @@ export function RequestDetail({
   // see checklist_config.py) block Raise the same way.
   const requestTypeList = (req.request_types || "")
     .split(",")
-    .map((t) => t.trim());
+    .map((t) => t.trim())
+    .filter((t) => t && t !== "Others");
 
   const pendingMandatory: string[] = [];
 
@@ -395,14 +443,24 @@ export function RequestDetail({
   // too so the requester sees why up front instead of only after clicking
   // Submit and getting a 400.
   const applicationNameRejected = req.application_master_status === "REJECTED";
-  const canSubmit = isRequester && status === "DRAFT";
+  const canSubmit = isRequester && status === "DRAFT" && !hasActiveDelegation;
   // Mirrors backend GATEWAY_CANCELLABLE_STATUSES -- the gateway can only be
   // cancelled while still Draft (i.e. before it's ever been raised).
   const canCancel =
-    isRequester && GATEWAY_CANCELLABLE_STATUSES.includes(status);
+    isRequester && !hasActiveDelegation && GATEWAY_CANCELLABLE_STATUSES.includes(status);
   // Mirrors backend GATEWAY_EDITABLE_STATUSES.
-  const canEditRequest =
-    isRequester && GATEWAY_EDITABLE_STATUSES.includes(status);
+  const canEditRequest = GATEWAY_EDITABLE_STATUSES.includes(status) && (
+    isAdmin || isActiveDelegate || (ownsRequest && !hasActiveDelegation)
+  );
+  const canAssignForInput = isRequester && !hasActiveDelegation && status === "DRAFT";
+  const canRecallDelegation = isRequester && !!hasActiveDelegation;
+  const canReturnToRequester = !!isActiveDelegate;
+  const canUploadDocuments = status !== "CANCELLED" && (
+    isAdmin || isActiveDelegate || (ownsRequest && !hasActiveDelegation)
+  );
+  const delegateCandidates = users.filter((candidate) =>
+    candidate.is_active && candidate.id !== req.requester_id
+  );
 
   const hasLinked =
     req.linked_functional_requests?.length > 0 ||
@@ -487,6 +545,18 @@ export function RequestDetail({
         <div>
           <GatewayPreview activeIndex={gatewayStageIndex(req.status)} />
 
+          {hasActiveDelegation && (
+            <div className="info-banner warning" style={{ marginBottom: 16 }}>
+              <strong>Delegated for input to {activeDelegation?.assigned_to_name || "assigned user"}</strong>
+              <div className="small" style={{ marginTop: 4 }}>
+                {activeDelegation?.assignment_reason}
+              </div>
+              <div className="muted small" style={{ marginTop: 4 }}>
+                The request remains owned by the requester. Only the assigned user can edit it while this delegation is active; workflow submission stays locked until it is returned or recalled.
+              </div>
+            </div>
+          )}
+
           {/* Gated on status !== "DRAFT" -- application_master_id/status get
               set on the ApplicationMaster row the moment a brand-new "Other"
               name is typed (see _resolve_application_name's own docstring: it
@@ -516,8 +586,7 @@ export function RequestDetail({
               {classificationSummary(req)}
             </DetailField>
             <DetailField label="Request Type(s)">
-              {req.request_types || "—"}
-              {req.request_type_other ? ` (${req.request_type_other})` : ""}
+              {requestTypeList.join(", ") || "—"}
             </DetailField>
             <DetailField label="Created">
               {new Date(req.created_at).toLocaleString()}
@@ -599,6 +668,11 @@ export function RequestDetail({
             <DetailField label="Change Type">
               {req.change_type || "—"}
             </DetailField>
+            {req.change_type === "Bug Fix" && (
+              <DetailField label="Previous Completed Request ID">
+                {req.bug_fix_source_request_id || "—"}
+              </DetailField>
+            )}
             <DetailField label="Vendor / SI Partner">
               {req.vendor_si_partner || "—"}
             </DetailField>
@@ -743,6 +817,33 @@ export function RequestDetail({
                   Edit Request
                 </button>
               )}
+              {canAssignForInput && (
+                <button
+                  className="btn btn-primary btn-sm"
+                  disabled={!!busyAction}
+                  onClick={() => setShowAssign(true)}
+                >
+                  Delegate for Input
+                </button>
+              )}
+              {canReturnToRequester && (
+                <button
+                  className="btn btn-primary btn-sm"
+                  disabled={!!busyAction}
+                  onClick={() => setShowReturn(true)}
+                >
+                  Return to Requester
+                </button>
+              )}
+              {canRecallDelegation && (
+                <button
+                  className="btn btn-sm"
+                  disabled={!!busyAction}
+                  onClick={() => setShowRecall(true)}
+                >
+                  Recall Delegation
+                </button>
+              )}
               {canSubmit && (
                 <button
                   className="btn btn-primary btn-sm"
@@ -768,12 +869,12 @@ export function RequestDetail({
                   Cancel Request
                 </button>
               )}
-              {!canEditRequest && !canSubmit && !canCancel && (
+              {!canEditRequest && !canAssignForInput && !canReturnToRequester && !canRecallDelegation && !canSubmit && !canCancel && (
                 <span className="muted small">
                   No gateway actions available — this request has been{" "}
                   {(GATEWAY_STATUS_LABELS[status] || status).toLowerCase()}.
                   {status === "SUBMITTED" &&
-                    " Its Application Name is a brand-new entry awaiting Application Owner approval (see above) — no linked request has been generated yet."}
+                    "This new Application Name is awaiting approval; no linked request has been created yet."}
                   {hasLinked &&
                     " Manage progress on each linked request's own page from here."}
                 </span>
@@ -817,7 +918,7 @@ export function RequestDetail({
                     >
                       Download
                     </button>
-                    {(isAdmin || d.uploaded_by_id === user?.id) && (
+                    {canUploadDocuments && (isAdmin || d.uploaded_by_id === user?.id) && (
                       <button
                         className="btn btn-sm btn-danger"
                         onClick={() => setPendingDeleteDoc(d)}
@@ -831,9 +932,11 @@ export function RequestDetail({
             ]}
             rows={documents}
           />
-          {status === "CANCELLED" ? (
+          {!canUploadDocuments ? (
             <p className="muted small" style={{ marginTop: 14 }}>
-              Documents cannot be added — this request has been cancelled.
+              {status === "CANCELLED"
+                ? "Documents cannot be added — this request has been cancelled."
+                : "Documents are read-only while this request is delegated to another user."}
             </p>
           ) : (
             <AddDocuments reqId={req.id} onAdded={load} />
@@ -893,6 +996,7 @@ export function RequestDetail({
       {editingReq && (
         <NewRequestModal
           editing={req}
+          delegatedEditing={!!isActiveDelegate}
           onClose={() => {
             setEditingReq(false);
             // Evidence attach/remove inside the wizard's checklist steps
@@ -910,6 +1014,87 @@ export function RequestDetail({
             if (updated.status === "DRAFT") setDraftNotice(true);
           }}
         />
+      )}
+
+      {showAssign && (
+        <Modal title="Delegate for Input" onClose={() => setShowAssign(false)} variant="dialog" preventBackdropClose>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Select any active user. Department does not restrict this temporary assignment, and ownership remains with the requester.
+          </p>
+          <label className="form-field">
+            <span>Assign to *</span>
+            <UserAssignSelect
+              value={delegateUserId}
+              onChange={setDelegateUserId}
+              users={delegateCandidates}
+              placeholder="Search and select a user..."
+              disabled={busyAction === "assign"}
+            />
+          </label>
+          <label className="form-field" style={{ marginTop: 14 }}>
+            <span>Assignment reason *</span>
+            <textarea
+              value={delegateReason}
+              maxLength={1000}
+              rows={4}
+              onChange={(event) => setDelegateReason(event.target.value)}
+              placeholder="Describe the information or document update required..."
+            />
+          </label>
+          <ErrorText error={error} />
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={busyAction === "assign" || !delegateUserId || !delegateReason.trim()}
+              onClick={() => delegationAction("assign", "delegations", {
+                assigned_to_id: Number(delegateUserId),
+                reason: delegateReason.trim(),
+              })}
+            >
+              {busyAction === "assign" ? "Assigning..." : "Assign for Input"}
+            </button>
+            <button type="button" className="btn" disabled={busyAction === "assign"} onClick={() => setShowAssign(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+
+      {showReturn && (
+        <Modal title="Return to Requester" onClose={() => setShowReturn(false)} variant="dialog" preventBackdropClose>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Confirm what you updated. After return, your edit and upload access will end and the requester can continue the workflow.
+          </p>
+          <label className="form-field">
+            <span>Return comments *</span>
+            <textarea value={returnComments} maxLength={1000} rows={4} onChange={(event) => setReturnComments(event.target.value)} />
+          </label>
+          <ErrorText error={error} />
+          <div className="modal-actions">
+            <button type="button" className="btn btn-primary" disabled={busyAction === "return" || !returnComments.trim()} onClick={() => delegationAction("return", "delegations/return", { comments: returnComments.trim() })}>
+              {busyAction === "return" ? "Returning..." : "Return to Requester"}
+            </button>
+            <button type="button" className="btn" disabled={busyAction === "return"} onClick={() => setShowReturn(false)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+
+      {showRecall && (
+        <Modal title="Recall Delegation" onClose={() => setShowRecall(false)} variant="dialog" preventBackdropClose>
+          <p className="muted small" style={{ marginTop: 0 }}>
+            Recall immediately removes the assigned user's edit and upload access and returns control to the requester.
+          </p>
+          <label className="form-field">
+            <span>Recall reason *</span>
+            <textarea value={recallComments} maxLength={1000} rows={4} onChange={(event) => setRecallComments(event.target.value)} />
+          </label>
+          <ErrorText error={error} />
+          <div className="modal-actions">
+            <button type="button" className="btn btn-danger" disabled={busyAction === "recall" || !recallComments.trim()} onClick={() => delegationAction("recall", "delegations/recall", { comments: recallComments.trim() })}>
+              {busyAction === "recall" ? "Recalling..." : "Recall Delegation"}
+            </button>
+            <button type="button" className="btn" disabled={busyAction === "recall"} onClick={() => setShowRecall(false)}>Cancel</button>
+          </div>
+        </Modal>
       )}
 
       {confirmCancel && (

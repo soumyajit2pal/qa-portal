@@ -38,7 +38,7 @@ import os
 import threading
 from typing import Any, Optional
 
-logger = logging.getLogger("qa_portal")
+logger = logging.getLogger("qa_portal.cache")
 
 REDIS_URL = os.getenv("REDIS_URL")
 # Escape hatch to force caching off even with REDIS_URL set (e.g. to isolate

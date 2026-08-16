@@ -1,83 +1,152 @@
-"""Centralized logging setup for the backend.
+"""Centralized, environment-controlled logging for the backend.
 
-The app previously had no durable record of startup failures. Every
-informational message anywhere in the backend was a bare `print()`
-(database.py's "Using DATABASE_URL: ..." line, main.py's "Migrated N
-upload(s)..." line) -- console-only, gone the moment the terminal is closed
-or the process is run under a supervisor that doesn't capture stdout. There
-was no log file, no global exception handler logging full tracebacks, and a
-startup-time crash in Base.metadata.create_all() would only ever be visible
-to whoever happened to be staring at the terminal at that exact moment.
+``DEEP_LOGGING=false`` is the production default: application INFO events,
+warnings, errors, Uvicorn access records and full unhandled-exception
+tracebacks are retained without logging every database/request detail.
 
-configure_logging() below sets up both a rotating file handler (so a crash
-last night is still readable this morning) and a console handler (so local
-`uvicorn --reload` development still shows everything live, unchanged from
-before). Call this once, as the very first thing main.py does -- before any
-other import that might log anything (e.g. database.py's DATABASE_URL line),
-so nothing is missed.
+``DEEP_LOGGING=true`` is a temporary diagnostic mode: application DEBUG
+events, correlated API request timings, SQL text (with bind values hidden)
+and SQLAlchemy pool activity are added.  Request bodies, authorization
+headers, cookies and SQL bind values are deliberately never logged.
 """
+from __future__ import annotations
+
+import contextvars
 import logging
 import logging.handlers
 import os
+from pathlib import Path
 
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
-LOG_FILE = os.path.join(LOG_DIR, "app.log")
+from dotenv import load_dotenv
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+# main.py configures logging before database.py is imported, so logging must
+# load the backend .env itself or DEEP_LOGGING in that file would be ignored.
+load_dotenv(BACKEND_DIR / ".env")
+
+_configured_log_dir = Path(os.getenv("LOG_DIR", str(BACKEND_DIR / "logs")))
+LOG_DIR = str(_configured_log_dir if _configured_log_dir.is_absolute() else BACKEND_DIR / _configured_log_dir)
+LOG_FILE = os.path.join(LOG_DIR, os.getenv("LOG_FILE_NAME", "app.log"))
 
 _configured = False
+_request_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "qa_portal_request_id", default="-"
+)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def deep_logging_enabled() -> bool:
+    return _env_bool("DEEP_LOGGING", False)
+
+
+def bind_request_id(request_id: str):
+    """Bind a request id to all log records in the current request context."""
+    return _request_id.set(request_id)
+
+
+def reset_request_id(token) -> None:
+    _request_id.reset(token)
+
+
+class _RequestContextFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = _request_id.get()
+        return True
+
+
+def _add_handler_once(target: logging.Logger, handler: logging.Handler) -> None:
+    if handler not in target.handlers:
+        target.addHandler(handler)
 
 
 def configure_logging() -> logging.Logger:
-    """Idempotent -- safe to call more than once (e.g. under --reload, which
-    re-executes main.py's module body on every code change)."""
+    """Configure the shared logger once per worker process."""
     global _configured
     logger = logging.getLogger("qa_portal")
     if _configured:
         return logger
 
     os.makedirs(LOG_DIR, exist_ok=True)
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    deep = deep_logging_enabled()
+    application_level = logging.DEBUG if deep else logging.INFO
 
     formatter = logging.Formatter(
-        "%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+        "%(asctime)s %(levelname)-8s [%(name)s] "
+        "[pid=%(process)d request_id=%(request_id)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    context_filter = _RequestContextFilter()
 
-    # 10 MB per file, keep the last 5 -- plenty for a departmental app, and
-    # bounded so a crash-looping process can never fill the disk.
     file_handler = logging.handlers.RotatingFileHandler(
-        LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        LOG_FILE,
+        maxBytes=max(1, _env_int("LOG_MAX_BYTES", 10 * 1024 * 1024)),
+        backupCount=max(1, _env_int("LOG_BACKUP_COUNT", 5)),
+        encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
+    file_handler.addFilter(context_filter)
+    file_handler.setLevel(application_level)
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(context_filter)
+    console_handler.setLevel(application_level)
 
-    logger.setLevel(level)
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    logger.setLevel(application_level)
+    _add_handler_once(logger, file_handler)
+    _add_handler_once(logger, console_handler)
     logger.propagate = False
 
-    # uvicorn's own loggers (uvicorn.error, uvicorn.access) already print to
-    # console by default -- also route them into the same log file, so
-    # startup crashes uvicorn itself reports (e.g. "address already in use",
-    # or a worker that failed to boot) land in one place instead of only
-    # ever being visible in whatever terminal launched the process.
-    for uv_logger_name in ("uvicorn.error", "uvicorn.access"):
-        uv_logger = logging.getLogger(uv_logger_name)
-        uv_logger.addHandler(file_handler)
+    # Uvicorn retains its own console handlers. Add only the rotating file
+    # destination here to avoid duplicate console lines.
+    for name in ("uvicorn.error", "uvicorn.access"):
+        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger.setLevel(logging.DEBUG if deep else logging.INFO)
+        _add_handler_once(uvicorn_logger, file_handler)
+
+    # SQL and pool diagnostics are intentionally opt-in. Engine creation uses
+    # hide_parameters=True as a second safety boundary, so even deep mode logs
+    # SQL structure but never passwords, comments, tokens, or other bind data.
+    for name in ("sqlalchemy.engine", "sqlalchemy.pool"):
+        sql_logger = logging.getLogger(name)
+        sql_logger.setLevel(
+            (logging.DEBUG if name == "sqlalchemy.pool" else logging.INFO)
+            if deep else logging.WARNING
+        )
+        _add_handler_once(sql_logger, file_handler)
+        _add_handler_once(sql_logger, console_handler)
+        sql_logger.propagate = False
 
     _configured = True
-    logger.info("Logging configured -- level=%s, file=%s", level_name, LOG_FILE)
+    logger.info(
+        "Logging configured -- mode=%s level=%s file=%s",
+        "DEEP" if deep else "BASIC",
+        logging.getLevelName(application_level),
+        LOG_FILE,
+    )
+    if deep:
+        logger.warning(
+            "Deep logging is enabled; use it temporarily for diagnosis and disable it after collection."
+        )
     return logger
 
 
 def mask_database_url(url: str) -> str:
-    """Never write a raw DB connection string (which embeds the password) to
-    a log file that -- unlike an ephemeral terminal -- persists on disk and
-    may be more widely readable/backed-up. Masks the password only; scheme,
-    username, host, port, and service name are left visible since they're
-    needed to diagnose connection issues."""
+    """Mask the password embedded in a database connection string."""
     if "://" not in url or "@" not in url:
         return url
     scheme, rest = url.split("://", 1)

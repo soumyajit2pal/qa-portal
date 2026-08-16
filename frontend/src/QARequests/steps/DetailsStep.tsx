@@ -20,11 +20,20 @@ interface Props {
   // stays enforced server-side too, see routers/qa_requests.py::
   // _resolve_requester_department).
   departmentOptions: string[];
+  departmentLocked?: boolean;
+}
+
+interface BugFixSourceOption {
+  request_id: string;
+  functional_request_id: string;
+  application_name: string;
+  cr_number?: string | null;
+  completed_at?: string | null;
 }
 
 // First wizard step -- the core "Application & Change Details" and
 // "Release & Environment" fields, shared by every request type.
-export function DetailsStep({ form, set, departmentOptions }: Props) {
+export function DetailsStep({ form, set, departmentOptions, departmentLocked = false }: Props) {
   // An already-Draft request's saved department might not be in the
   // requester's CURRENT department list any more (e.g. an Admin later
   // removed that department from their profile) -- keep it selectable
@@ -44,6 +53,7 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
     []
   );
   const [showOther, setShowOther] = useState(false);
+  const [bugFixSources, setBugFixSources] = useState<BugFixSourceOption[]>([]);
 
   useEffect(() => {
     api
@@ -64,6 +74,33 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
     );
     if (!isApproved) setShowOther(true);
   }, [approvedNames, form.application_name]);
+
+  // A Bug Fix may optionally point back to the completed Functional Testing
+  // request where the original implementation was verified. The endpoint
+  // already narrows candidates to this application and department, so the
+  // shared searchable picker stays compact even when the portal has a large
+  // request history.
+  useEffect(() => {
+    if (form.change_type !== "Bug Fix" || !form.application_name || !form.department) {
+      setBugFixSources([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({
+        application_name: form.application_name,
+        department: form.department,
+      });
+      api
+        .get<BugFixSourceOption[]>(`/api/qa-requests/bug-fix-source-options?${params}`)
+        .then((rows) => { if (!cancelled) setBugFixSources(rows); })
+        .catch(() => { if (!cancelled) setBugFixSources([]); });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [form.change_type, form.application_name, form.department]);
 
   return (
     <>
@@ -105,11 +142,8 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
                   style={{ marginTop: 6 }}
                 />
                 <p className="muted small" style={{ margin: "4px 0 0" }}>
-                  Automatically capitalised. A new name needs approval from an
-                  Application Owner, then an SM, both in your department,
-                  before it appears in this dropdown for everyone else --
-                  your request isn't blocked on that, it just shows as
-                  "Pending Approval" until then.
+                New names are automatically capitalized and remain “Pending Approval” until approved by 
+                your department’s Application Owner and SM. Your request can proceed during approval.
                 </p>
               </>
             )}
@@ -129,9 +163,12 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
               onChange={(v) => set("department", v)}
               options={departmentSelectOptions}
               placeholder="Select department..."
+              disabled={departmentLocked}
             />
             <p className="muted small" style={{ margin: "4px 0 0" }}>
-              {departmentSelectOptions.length > 1
+              {departmentLocked
+                ? "Department is fixed while this request is delegated for input."
+                : departmentSelectOptions.length > 1
                 ? "Defaults to your primary department -- pick any department you're assigned to."
                 : "Fixed to your registered department. Contact an Administrator to add more."}
             </p>
@@ -171,7 +208,11 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
           <Field label="Change Type *">
             <select
               value={form.change_type}
-              onChange={(e) => set("change_type", e.target.value)}
+              onChange={(e) => {
+                const value = e.target.value;
+                set("change_type", value);
+                if (value !== "Bug Fix") set("bug_fix_source_request_id", "");
+              }}
             >
               {CHANGE_TYPES.map((o) => (
                 <option key={o} value={o}>
@@ -180,6 +221,25 @@ export function DetailsStep({ form, set, departmentOptions }: Props) {
               ))}
             </select>
           </Field>
+          {form.change_type === "Bug Fix" && (
+            <Field label="Previous Completed Request ID (optional)">
+              <SearchableSelect
+                value={form.bug_fix_source_request_id}
+                onChange={(value) => set("bug_fix_source_request_id", value)}
+                placeholder="Select the original completed request..."
+                options={[
+                  { value: "", label: "No previous request" },
+                  ...bugFixSources.map((source) => ({
+                    value: source.request_id,
+                    label: `${source.request_id} · ${source.functional_request_id}${source.cr_number ? ` · ${source.cr_number}` : ""}`,
+                  })),
+                ]}
+              />
+              <p className="muted small" style={{ margin: "4px 0 0" }}>
+                Use this to trace the bug fix back to the earlier request whose Functional Testing was completed.
+              </p>
+            </Field>
+          )}
           <Field label="Vendor / SI Partner">
             <input
               value={form.vendor_si_partner}

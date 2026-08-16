@@ -16,6 +16,7 @@ import Dashboard from './Dashboard'
 import QARequests from './QARequests'
 import ModuleBoundary from './components/ModuleBoundary'
 import ApiActivityIndicator from './components/ApiActivityIndicator'
+import GlobalButtonTooltips from './components/GlobalButtonTooltips'
 
 const Help = lazy(() => import('./Help'))
 
@@ -143,9 +144,9 @@ function PublicHelp() {
     <div className="public-help-shell">
       <div className="public-help-topbar">
         <Link to="/help" className="public-help-brand">
-          <img className="qualityshield-app-logo" src="/qualityshield-logo.png" alt="" aria-hidden="true" />
+          <img className="qualityops-app-logo" src="/qualityops-logo.png" alt="" aria-hidden="true" />
           <div>
-            <strong>Quality<em>Shield</em></strong>
+            <strong>Quality<em>Ops</em></strong>
             <img className="bank-wordmark public-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
         </Link>
@@ -175,6 +176,7 @@ function ModuleFallback() {
 export default function App() {
   return (
     <>
+      <GlobalButtonTooltips />
       <ApiActivityIndicator />
       <Suspense fallback={<ModuleFallback />}>
         <Routes>

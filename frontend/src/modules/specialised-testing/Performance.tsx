@@ -9,6 +9,7 @@ import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { IconCheckCircle } from '../../components/Icons'
 import RoleGroupLink from '../../components/RoleGroupLink'
+import ChildRequestDelegation from '../../components/ChildRequestDelegation'
 import {
   PRIORITIES, RISK_RATINGS, ENVIRONMENTS, DEPLOYMENT_ENVIRONMENTS,
   PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, hasDepartment, canManageReadinessEvidence,
@@ -55,7 +56,8 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
   // Same identity check as the detail view's isRequester/canSMDecide/
   // canDeptHeadDecide -- this modal only opens via canEditDetails, but the
   // checklist evidence controls inside it need their own explicit check.
-  const isRequesterModal = editing.requester_id === user?.id || isAdmin
+  const isActiveDelegateModal = editing.active_delegation?.status === 'ACTIVE' && editing.active_delegation.assigned_to_id === user?.id
+  const isRequesterModal = isActiveDelegateModal || isAdmin || (editing.requester_id === user?.id && !editing.active_delegation)
   const sameDeptModal = hasDepartment(user, editing.department)
   const canSMDecideModal = hasRole(user, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
   const canDeptHeadDecideModal = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
@@ -351,12 +353,14 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   // SM_REJECTED included alongside the RETURNED_BY_* statuses -- reported
   // directly, a rejected request is now reopenable (edit + resubmit)
   // instead of a dead end.
+  const isActiveDelegate = req.active_delegation?.status === 'ACTIVE' && req.active_delegation.assigned_to_id === user?.id
+  const requesterInputEditor = isActiveDelegate || isAdmin || (isRequester && !req.active_delegation)
   const canEditDetails = hasRole(user, 'ADMIN')
-    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status))
+    || (requesterInputEditor && ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status))
     || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
     || (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   const canSubmit = isRequester && status === 'DRAFT'
-  const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status)
+  const canResubmit = isRequester && !req.active_delegation && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status)
   const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Request' : 'Re-submit'
   // Blocks Sign/Approve on both the SM and Department Head decision panels
   // below while this request's Application Name is still PENDING/REJECTED
@@ -389,7 +393,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   const evidenceOwner = isAdmin || (
     status === 'SM_APPROVAL_PENDING' ? canSMDecide :
     status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecide :
-    isRequester
+    requesterInputEditor
   )
   // Document and Evidence Access Control Based on Workflow Stage: exactly 3
   // upload stages, then a hard lock -- (1) the requester while it's Draft/
@@ -401,7 +405,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   // exactly. Used for the general Documents tab; evidenceOwner above
   // covers the same 3 stages for checklist evidence.
   const canManageDocuments = isAdmin || (
-    ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER', 'REQUESTER_VERIFICATION'].includes(status) ? isRequester :
+    ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER', 'REQUESTER_VERIFICATION'].includes(status) ? requesterInputEditor :
     status === 'SM_APPROVAL_PENDING' ? canSMDecide :
     status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecide :
     false
@@ -520,6 +524,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
             <DetailField label="Department">{req.department || '—'}</DetailField>
             <DetailField label="Application Owner">{req.application_owner || '—'}</DetailField>
             <DetailField label="Change Type">{req.change_type || '—'}</DetailField>
+            {req.change_type === 'Bug Fix' && <DetailField label="Previous Completed Request ID">{req.bug_fix_source_request_id || '—'}</DetailField>}
             <DetailField label="Request Type">{req.request_type || '—'}</DetailField>
           </DetailSection>
 
@@ -579,6 +584,12 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
               Export PDF
             </button>
             {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
+            <ChildRequestDelegation
+              targetType="PERFORMANCE"
+              request={req}
+              users={users}
+              onChanged={async (updated) => { onChanged(updated); await loadExtras() }}
+            />
             {canSubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
             {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('resubmit')}>{resubmitLabel}</button>}
             {canSMDecide && (
@@ -830,7 +841,7 @@ export default function Performance() {
       <ErrorText error={error} />
       <PageHeader
         title="Performance Testing Requests" count={total}
-        subtitle="Load/performance testing requests, from submission through baseline, load test execution, and sign-off. Raised via a QA Request (include Performance Testing in its request types) -- not created standalone here."
+        subtitle="Load/performance testing requests, from submission through baseline, load test execution, and sign-off. Raised via a QA Request (include Performance Testing in its request types)."
       />
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}

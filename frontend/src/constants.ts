@@ -42,6 +42,18 @@ export const ROLE_LABELS: Record<string, string> = {
 
 export const ALL_ROLES = Object.keys(ROLE_LABELS)
 
+// Selection-aware wording for actions that share the same backend endpoint
+// for one or many records. The UI should call an operation "Bulk" only when
+// the user has actually selected more than one record.
+export function selectionActionLabel(count: number, action: string): string {
+  const label = count > 1 ? `bulk ${action}` : action
+  return label.charAt(0).toUpperCase() + label.slice(1)
+}
+
+export function selectionActionPhrase(count: number, action: string): string {
+  return count > 1 ? `bulk ${action}` : action
+}
+
 // Mirror backend/app/constants.py's DEPARTMENT_ADMIN_ASSIGNABLE_ROLES /
 // QA_ADMIN_ASSIGNABLE_ROLES exactly -- the working-level roles a local admin
 // may assign to users in their own department via DepartmentAdmin.tsx,
@@ -668,6 +680,15 @@ export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
   RETURNED_BY_DEPT_HEAD_COE: 'Returned by Executive',
   DEPT_HEAD_COE_REJECTED: 'Rejected by Executive',
   ISSUED: 'Issued',
+  // 2026-08, reported directly: "on changes required it is starting the
+  // whole workflow again, and for same request generating multiple
+  // certificate." A Requester rejecting an ISSUED certificate at Functional
+  // Testing's own Requester Verification step (routers/functional.py::
+  // requester_decision) now returns THAT SAME certificate here instead of
+  // the Functional Request restarting its whole lifecycle to raise a new
+  // one -- see SIGNOFF_EDITABLE_STATUSES below, and that backend function's
+  // own comment for the full reasoning.
+  RETURNED_BY_REQUESTER: 'Returned by Requester',
   // No entries for the old pre-rollout literal "Draft"/"Issued" values --
   // those keys would collide with SUPPRESSION_STATUS_LABELS.Draft in the
   // shared ALL_STATUS_LABELS merge (see components/Common.tsx). The Oracle
@@ -677,7 +698,10 @@ export const SIGNOFF_STATUS_LABELS: Record<string, string> = {
 // SM_REJECTED ("Rejected by QA Lead" -- see SIGNOFF_STATUS_LABELS above)
 // included alongside RETURNED_BY_SM/RETURNED_BY_DEPT_HEAD_COE -- reopenable
 // by the requester (edit + resubmit) rather than a dead end.
-export const SIGNOFF_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE']
+// RETURNED_BY_REQUESTER (see SIGNOFF_STATUS_LABELS above) is editable the
+// same way -- resubmit sends it back to SM_APPROVAL_PENDING (QA Lead first,
+// then Executive), same as RETURNED_BY_SM/SM_REJECTED.
+export const SIGNOFF_EDITABLE_STATUSES: string[] = ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER']
 export const SIGNOFF_TERMINAL_STATUSES: string[] = ['ISSUED', 'DEPT_HEAD_COE_REJECTED']
 // "Pending With" -- who needs to act next, for the list table column of the
 // same name. Derived from each transition's require_roles() gate in
@@ -688,7 +712,7 @@ export const SIGNOFF_PENDING_WITH: Record<string, string> = {
   DRAFT: 'Tester', SUBMITTED: 'QA Lead',
   SM_APPROVAL_PENDING: 'QA Lead', RETURNED_BY_SM: 'Tester', SM_REJECTED: '—',
   DEPT_HEAD_QA_APPROVAL_PENDING: 'Executive', RETURNED_BY_DEPT_HEAD_COE: 'Tester', DEPT_HEAD_COE_REJECTED: '—',
-  ISSUED: '—',
+  ISSUED: '—', RETURNED_BY_REQUESTER: 'Tester',
 }
 
 // Admin section: account authentication type (must mirror backend LoginType).
@@ -700,7 +724,7 @@ export const LOGIN_TYPE_LABELS: Record<string, string> = {
 
 export const REQUEST_TYPES: string[] = [
   'Functional Testing', 'Sanity Testing', 'Regression Testing', 'UAT Support',
-  'Performance Testing', 'SAST', 'DAST', 'Others',
+  'Performance Testing', 'SAST', 'DAST',
 ]
 
 export const PRIORITIES: string[] = ['Critical', 'High', 'Medium', 'Low']
@@ -775,18 +799,22 @@ export interface ReportDef {
   key: string
   label: string
   group: string
+  description: string
 }
 
 export const REPORTS: ReportDef[] = [
-  { key: 'qa-request-summary', label: 'QA Request Summary', group: 'Operational' },
-  { key: 'sast-scan', label: 'SAST Scan Report', group: 'Security' },
-  { key: 'dast-scan', label: 'DAST Scan Report', group: 'Security' },
-  { key: 'vulnerability-trend', label: 'Vulnerability Trend Report', group: 'Security' },
-  { key: 'severity-distribution', label: 'Severity-wise Distribution', group: 'Security' },
-  { key: 'suppression-register', label: 'Suppression Register', group: 'Security' },
-  { key: 'monthly-qa-kpi', label: 'Monthly QA KPI Report', group: 'Management' },
-  { key: 'application-quality-scorecard', label: 'Application-wise Quality Scorecard', group: 'Management' },
-  { key: 'audit-evidence', label: 'Audit Evidence Report', group: 'Management' },
+  { key: 'qa-request-summary', label: 'QA Request Register', group: 'Operational', description: 'Gateway requests with child Functional status and per-type priority/risk.' },
+  { key: 'test-cycle-summary', label: 'Test Cycle Execution Summary', group: 'Operational', description: 'Cycle scope, assignment coverage, completion and latest execution results.' },
+  { key: 'defect-retest-register', label: 'Defect & Retest Register', group: 'Operational', description: 'Governed defect lifecycle, ownership, resolution and retest evidence.' },
+  { key: 'performance-testing', label: 'Performance Testing Register', group: 'Operational', description: 'Performance requests, workload target, environment, assignment and report state.' },
+  { key: 'sast-scan', label: 'SAST Scan Register', group: 'Security', description: 'SAST requests, application/build, workflow state and finding volume.' },
+  { key: 'dast-scan', label: 'DAST Scan Register', group: 'Security', description: 'DAST requests, target environment, workflow state and finding volume.' },
+  { key: 'severity-distribution', label: 'Security Finding Severity Distribution', group: 'Security', description: 'Combined SAST and DAST finding counts by severity.' },
+  { key: 'suppression-register', label: 'Suppression Register', group: 'Security', description: 'Finding-level suppression requests and all governed decisions.' },
+  { key: 'testcase-approval-summary', label: 'Testcase Approval Backlog', group: 'Management', description: 'Draft, recommendation, QA Lead approval and approved counts by project.' },
+  { key: 'application-quality-scorecard', label: 'Application Quality Scorecard', group: 'Management', description: 'Cross-module request, testing, defect and issued sign-off position by application.' },
+  { key: 'qa-signoff-register', label: 'QA Sign-off Register', group: 'Management', description: 'Certificate workflow, validity, signatories and final issuance status.' },
+  { key: 'audit-evidence', label: 'Approval Audit Evidence', group: 'Management', description: 'Chronological workflow decisions with actor, role, comments and timestamp.' },
 ]
 
 // ---- Test Management (Project Management / Test Repository / Test Execution) ----
@@ -826,6 +854,21 @@ export const TEST_CASE_NEW_STATUSES: string[] = [
   'Recommendation Pending', 'QA Lead Approval Pending', 'Returned by QA', 'Returned by QA Lead',
 ]
 TEST_CASE_STATUSES.push(...TEST_CASE_NEW_STATUSES)
+// Normal filters show only the workflow used by every new/current testcase.
+// The three retired individually-assigned workflow states remain in
+// TEST_CASE_STATUSES for rendering historical records and are still included
+// by the combined Review/Final Approval queue buttons, but they no longer
+// clutter the primary status selector or duplicate current labels.
+export const TEST_CASE_CURRENT_STATUSES: string[] = [
+  'Draft',
+  'Recommendation Pending',
+  'QA Lead Approval Pending',
+  'Returned by QA',
+  'Returned by QA Lead',
+  'Approved',
+  'Rejected',
+  'Archived',
+]
 export const TEST_CASE_STATUS_LABELS: Record<string, string> = {
   Draft: 'Draft',
   'In Review': 'Pending Reviewer Recommendation',
@@ -895,7 +938,7 @@ const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed']
 //    Deferred/Closed), every status is blocked -- the execution is fully
 //    locked until the defect(s) clear.
 // 2. Once clear (or nothing was ever linked), but this slot has EVER
-//    recorded a 'Fail': 'Pass'/'NA' are permanently blocked for the rest of
+//    recorded a 'Fail' or 'Blocked': 'Pass'/'NA' are permanently blocked for the rest of
 //    its history -- a defect-corrected pass is always 'Retest Passed'.
 //    'Fail' (failed again on retest) requires a Defect Key to be entered
 //    (defectKeyInput) -- the backend additionally verifies that key
@@ -906,6 +949,7 @@ export function executionStatusGate(
   runs: { status: string }[] | undefined,
   status: string,
   defectKeyInput?: string,
+  currentStatus?: string,
 ): string | null {
   if (!['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed'].includes(status)) return null
   const activeDefects = (linkedDefects || []).filter((d) => !DEFECT_RETEST_CLEAR_STATUSES.includes(d.status))
@@ -913,13 +957,30 @@ export function executionStatusGate(
     const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
     return `this test case previously failed and has an active linked defect (${names}). The execution status cannot be changed until all linked defects are Closed or Deferred.`
   }
-  const hasPriorFail = (runs || []).some((run) => run.status === 'Fail')
-  if (!hasPriorFail) return null
+  // currentStatus is a compatibility fallback for executions recorded
+  // before immutable attempt history existed. A genuinely new slot is
+  // 'Not Executed', so it cannot satisfy this condition.
+  const hasPriorFailedOrBlocked = (runs || []).some((run) => ['Fail', 'Blocked'].includes(run.status))
+    || ((runs || []).length === 0 && ['Fail', 'Blocked'].includes(currentStatus || ''))
+  if (status === 'Retest Passed' && !hasPriorFailedOrBlocked) {
+    return "'Retest Passed' is available only after this testcase has a previous Failed or Blocked execution attempt."
+  }
+  if (!hasPriorFailedOrBlocked) return null
   if (status === 'Pass' || status === 'NA') {
-    return `this test case failed earlier in its history -- '${status}' is no longer available. The linked defect has been Closed or Deferred: select 'Retest Passed' if it passes now, or 'Fail' if it fails again.`
+    return `this test case failed or was blocked earlier in its history -- '${status}' is no longer available. The linked defect has been Closed or Deferred: select 'Retest Passed' if it passes now, or 'Fail' if it fails again.`
   }
   if (status === 'Fail' && !(defectKeyInput || '').trim()) {
     return 'this test case is failing again after a resolved defect -- reopen the existing defect, link another active defect, or create a new defect in Defect Management, then reference its Defect Key here before recording this Fail.'
   }
   return null
+}
+
+// Used to remove Retest Passed from result pickers until it is a valid
+// transition. The backend independently enforces the same rule.
+export function hasRetestEligibleHistory(
+  runs: { status: string }[] | undefined,
+  currentStatus?: string,
+): boolean {
+  return (runs || []).some((run) => ['Fail', 'Blocked'].includes(run.status))
+    || ((runs || []).length === 0 && ['Fail', 'Blocked'].includes(currentStatus || ''))
 }

@@ -315,7 +315,7 @@ def _page_footer(canvas, doc) -> None:
     canvas.line(doc.leftMargin, 10.5 * mm, A4[0] - doc.rightMargin, 10.5 * mm)
     canvas.setFillColor(colors.HexColor("#71868b"))
     canvas.setFont("Helvetica", 7.5)
-    canvas.drawString(doc.leftMargin, 7 * mm, "QualityShield - Controlled PDF export")
+    canvas.drawString(doc.leftMargin, 7 * mm, "QualityOps - Controlled PDF export")
     canvas.drawRightString(A4[0] - doc.rightMargin, 7 * mm, f"Page {doc.page}")
     canvas.restoreState()
 

@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session, joinedload
 
 from .. import documents as doc_store
 from .. import models, schemas, pagination
-from ..constants import ENVIRONMENTS, Role, DEFECT_REASSIGNABLE_STATUSES
+from ..constants import (
+    ENVIRONMENTS, Role, DEFECT_REASSIGNABLE_STATUSES,
+    TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS,
+)
 from ..database import get_db
 from ..deps import get_current_user, dashboard_department_scope, viewable_project_ids
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
@@ -26,14 +29,14 @@ RESOLUTION_TYPES = (
 )
 TRANSITIONS = {
     "New": {"Assigned", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
-    "Assigned": {"In Progress", "Duplicate", "Not a Defect","Deferred"},
-    "In Progress": {"Resolved", "Deferred"},
+    "Assigned": {"In Progress", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
+    "In Progress": {"Resolved", "Rejected", "Duplicate", "Deferred"},
     "Resolved": {"Retest"},
     "Retest": {"Closed", "Reopened"},
     "Reopened": {"Assigned"},
     "Deferred": {"Assigned"},
     "Closed": {"Reopened"},
-    "Rejected": set(),
+    "Rejected": {"Reopened"},
     "Duplicate": set(),
     "Not a Defect": set(),
 }
@@ -112,13 +115,15 @@ def _can_touch_defect(db: Session, obj: models.Defect, user: models.User) -> boo
     sibling module's own _can_upload_documents (functional.py, sast_dast.py,
     performance.py, etc.), which all gate on the current stage's actual
     actor. True for anyone with a real stake in this specific defect: the
-    reporter, the current assignee, the retest tester, or a manager (Admin/
-    QA Lead/Chief Manager QA/this defect's own Project Lead or Owner, via
-    _is_manager)."""
+    reporter, current assignee, the assignee's Department Head, retest
+    tester, or a manager. Department Heads need this access because they can
+    now decide or reopen Rejected/Duplicate outcomes and may need to provide
+    the supporting evidence required by those decisions."""
     return (
         _is_manager(db, obj, user)
         or obj.reporter_id == user.id
         or obj.assignee_id == user.id
+        or _is_assignee_department_head(db, obj, user)
         or obj.retest_tester_id == user.id
     )
 
@@ -143,6 +148,44 @@ def _can_assign(db: Session, obj: models.Defect, user: models.User) -> bool:
 
 def _is_assignee(obj: models.Defect, user: models.User) -> bool:
     return obj.assignee_id == user.id
+
+
+def _is_assignee_department_head(db: Session, obj: models.Defect, user: models.User) -> bool:
+    """Return whether ``user`` heads any department of the current assignee.
+
+    The assignee's live department memberships are authoritative because a
+    defect can be routed outside the QA Request's department. Role mapping is
+    shared with reassignment: QA departments use CHIEF_MANAGER_QA/AGM_QA;
+    other departments use DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM.
+    """
+    if not obj.assignee_id:
+        return False
+    assigned_user = db.query(models.User).get(obj.assignee_id)
+    if not assigned_user:
+        return False
+    departments = assigned_user.departments or ([obj.assigned_team] if obj.assigned_team else [])
+    return any(
+        department
+        and user.has_department(department)
+        and bool(set(user.roles) & set(reassignment.department_head_roles(department)))
+        for department in departments
+    )
+
+
+def _valid_defect_reassignment_departments(obj: models.Defect, previous_assignee: Optional[models.User],
+                                           new_assignee: models.User) -> set:
+    """Destination departments shared by the allowed pool and target user.
+
+    The allowed pool is the current assignee's teammate department(s) plus
+    every configured QA/Test Management department. Returning the actual
+    intersection also guarantees the persisted ``assigned_team`` belongs to
+    the selected user.
+    """
+    previous_departments = set(previous_assignee.departments if previous_assignee else [])
+    if not previous_departments and obj.assigned_team:
+        previous_departments.add(obj.assigned_team)
+    eligible_departments = previous_departments | set(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
+    return eligible_departments & set(new_assignee.departments)
 
 
 def _is_tester(obj: models.Defect, user: models.User) -> bool:
@@ -620,9 +663,16 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     tester = _is_tester(obj, current_user)
     if requested == "Assigned" and not _can_assign(db, obj, current_user):
         raise HTTPException(403, "Only a QA Engineer, QA Lead, Project Lead, or Administrator can assign a defect")
-    if requested in {"Rejected", "Duplicate", "Not a Defect"} and not (
-        manager or obj.reporter_id == current_user.id
+    if requested in {"Rejected", "Duplicate"} and not (
+        manager or obj.reporter_id == current_user.id or assignee
+        or _is_assignee_department_head(db, obj, current_user)
     ):
+        raise HTTPException(
+            403,
+            "Only the Defect Reporter, current assignee, the Department Head of the assignee, "
+            "a QA Lead, or an Administrator can perform this action",
+        )
+    if requested == "Not a Defect" and not (manager or obj.reporter_id == current_user.id):
         raise HTTPException(403, "Only the Defect Reporter, a QA Lead, or an Administrator can perform this action")
     if requested == "Deferred" and not _can_defer(db, obj, current_user):
         raise HTTPException(403, "Only a QA Lead, Project Lead, Application Owner, or Administrator can defer a defect")
@@ -646,6 +696,15 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
             raise HTTPException(403, "Only the reporter, a QA Lead, or an Administrator can reopen a Closed defect")
         if obj.status == "Retest" and not (tester or manager):
             raise HTTPException(403, "Only the assigned tester or an authorized lead can reopen this defect")
+        if obj.status == "Rejected" and not (
+            manager or obj.reporter_id == current_user.id or assignee
+            or _is_assignee_department_head(db, obj, current_user)
+        ):
+            raise HTTPException(
+                403,
+                "Only the Defect Reporter, current assignee, the Department Head of the assignee, "
+                "a QA Lead, or an Administrator can reopen a Rejected defect",
+            )
 
     previous = obj.status
     remarks = (payload.remarks or "").strip()
@@ -704,7 +763,14 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         obj.reopen_reason = _required(payload.reopen_reason, "Reopening Reason")
         if not doc_store.list_documents(db, _DOC_MODULE, obj.id):
             raise HTTPException(400, "Supporting evidence must be attached before reopening a defect")
-        obj.retest_result = "Failed"; obj.retest_at = models.now(); obj.reopen_count += 1; details = obj.reopen_reason
+        # Reopening from Retest/Closed means a validation failure. Reopening
+        # a Rejected defect reverses an investigation decision, not a retest,
+        # so do not manufacture a misleading failed-retest result for it.
+        if previous != "Rejected":
+            obj.retest_result = "Failed"
+            obj.retest_at = models.now()
+        obj.reopen_count += 1
+        details = f"Rejection reopened: {obj.reopen_reason}" if previous == "Rejected" else obj.reopen_reason
     elif requested == "Deferred":
         obj.deferral_reason = _required(payload.deferral_reason, "Deferral Reason")
         obj.deferral_approved_by = _required(payload.deferral_approved_by, "Approved By")
@@ -759,24 +825,36 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
     new_assignee = db.query(models.User).get(payload.assignee_id)
     if not new_assignee or not new_assignee.is_active:
         raise HTTPException(404, "Selected assignee was not found or is inactive")
-    if payload.assigned_team:
-        department = db.query(models.Department).filter(
-            models.Department.name == payload.assigned_team,
-            models.Department.is_active == True,  # noqa: E712
-        ).first()
-        if not department:
-            raise HTTPException(400, "Select a valid active Department")
-        obj.assigned_team = department.name
+    # Reassignment pool: teammates of the current assignee plus configured
+    # QA teams. A developer can therefore hand the defect to another member
+    # of their own team or directly to QA without browsing unrelated
+    # departments. Validate this server-side as well as filtering the UI so
+    # a crafted request cannot route the defect elsewhere or submit a team
+    # that the selected user does not actually belong to.
+    valid_destinations = _valid_defect_reassignment_departments(obj, previous_assignee, new_assignee)
+    if not valid_destinations:
+        raise HTTPException(
+            400,
+            "Select a teammate of the current assignee or a member of the QA team",
+        )
+    destination = payload.assigned_team if payload.assigned_team in valid_destinations else None
+    if not destination:
+        destination = next(
+            (department for department in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS if department in valid_destinations),
+            sorted(valid_destinations)[0],
+        )
+    department = db.query(models.Department).filter(
+        models.Department.name == destination,
+        models.Department.is_active == True,  # noqa: E712
+    ).first()
+    if not department:
+        raise HTTPException(400, "The selected user's destination Department is not active")
+    obj.assigned_team = department.name
     previous_label = previous_assignee.full_name if previous_assignee else (obj.assignee_name or "Unassigned")
     obj.assignee_id = new_assignee.id
     obj.assigned_by_id = current_user.id
     obj.assigned_at = models.now()
     reassignment.record_reassignment(db, "DEFECT", obj.id, current_user, previous_label, new_assignee.full_name, reason)
-    if not previous_assignee or new_assignee.id != previous_assignee.id:
-        reassignment.notify_new_assignee(
-            db, new_assignee.id, "DEFECT", obj.id, obj.defect_key,
-            f"You have been reassigned {obj.defect_key}.", current_user.id,
-        )
     db.commit(); db.refresh(obj)
     return obj
 
@@ -794,7 +872,7 @@ def upload_attachments(defect_id: int, files: List[UploadFile] = File(...), db: 
     # real "who can upload" check (_can_upload_documents in functional.py/
     # sast_dast.py/performance.py/etc.); this brings Defects in line.
     if not _can_touch_defect(db, obj, current_user):
-        raise HTTPException(403, "Only the reporter, assignee, retest tester, or an authorized lead can attach evidence to this defect")
+        raise HTTPException(403, "Only the reporter, assignee, assignee's Department Head, retest tester, or an authorized lead can attach evidence to this defect")
     return doc_store.save_documents(db, _DOC_MODULE, obj.id, obj.defect_key, files, current_user.id,
                                     log_entity_type="DEFECT", log_entity_id=obj.id,
                                     log_actor=current_user, log_label="defect evidence")

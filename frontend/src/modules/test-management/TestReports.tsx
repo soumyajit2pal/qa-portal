@@ -264,6 +264,7 @@ export default function TestReports() {
     <div className="tm-page">
       <ErrorText error={error} />
       <PageHeader
+        eyebrow="Test Case Management · Design · Organize · Execute · Trace"
         title="Test Reports"
         subtitle="Operational insight across repository quality, execution, defects, versions and project delivery."
       />

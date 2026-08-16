@@ -27,7 +27,7 @@ load_dotenv()  # loads backend/.env if present; real env vars still take precede
 configure_logging()  # first import in the chain (main.py imports this module
                       # before anything else that might log) -- see
                       # logging_config.py's own docstring for why this exists.
-logger = logging.getLogger("qa_portal")
+logger = logging.getLogger("qa_portal.database")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 # Was a bare print() of the RAW connection string (username:password@host) --
@@ -102,6 +102,7 @@ logger.info(
 
 engine = create_engine(
     DATABASE_URL,
+    hide_parameters=True,
     pool_pre_ping=POOL_PRE_PING,
     pool_size=POOL_SIZE,
     max_overflow=MAX_OVERFLOW,
@@ -167,6 +168,7 @@ logger.info(
 
 audit_engine = create_engine(
     DATABASE_URL,
+    hide_parameters=True,
     pool_pre_ping=POOL_PRE_PING,
     pool_size=AUDIT_POOL_SIZE,
     max_overflow=AUDIT_MAX_OVERFLOW,

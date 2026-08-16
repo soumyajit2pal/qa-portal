@@ -138,8 +138,7 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
       display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
     }}>
       <span>
-        <strong>New Application Name Pending {tierLabel} Approval:</strong> {applicationName || '—'} -- this
-        was introduced as a new "Other" entry on the QA Request and needs your decision{isAppOwnerTier
+        <strong>New Application Name "{applicationName || '—'}" Pending "{tierLabel}"" Approval:</strong>  -- needs your decision{isAppOwnerTier
           ? ' before it becomes a selectable option for everyone else and the linked request can move on to SM for readiness verification.'
           : ' before it becomes a selectable option for everyone else.'}
       </span>

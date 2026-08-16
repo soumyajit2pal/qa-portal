@@ -27,6 +27,7 @@ export default function QARequests() {
   const searchParams = new URLSearchParams(location.search);
   const [users, setUsers] = useState<UserOut[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
+  const [assignedOnly, setAssignedOnly] = useState(false);
   const [search, setSearch] = useState(
     searchParams.get("search") || searchParams.get("application_name") || ""
   );
@@ -52,6 +53,7 @@ export default function QARequests() {
   } = usePaginatedList<QARequestListOut>("/api/qa-requests", {
     search,
     status: statusFilter ? [statusFilter] : undefined,
+    extra: { assigned_to_me: assignedOnly ? "true" : undefined },
   });
 
   useEffect(() => {
@@ -153,6 +155,14 @@ export default function QARequests() {
             </option>
           ))}
         </select>
+        <div className="tabs" style={{ margin: 0 }}>
+          <button type="button" className={!assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(false)}>
+            All Requests
+          </button>
+          <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>
+            Assigned to Me
+          </button>
+        </div>
       </div>
 
       <Card>
@@ -180,6 +190,12 @@ export default function QARequests() {
               header: "Requester",
               render: (r) => userName(users, r.requester_id) || "—",
               filterValue: (r) => userName(users, r.requester_id) || "",
+            },
+            {
+              key: "assigned_to",
+              header: "Assigned To",
+              render: (r) => r.active_delegation?.assigned_to_name || "—",
+              filterValue: (r) => r.active_delegation?.assigned_to_name || "",
             },
             {
               key: "priority",

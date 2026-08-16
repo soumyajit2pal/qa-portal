@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api } from '../../api'
+import { api, waitForJob } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge, InfoTooltip, WorkflowDecisionPanel } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import {
-  hasRole, TEST_CASE_TYPES, TEST_CASE_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES,
+  hasRole, TEST_CASE_TYPES, TEST_CASE_CURRENT_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES,
   TEST_CASE_PENDING_DECISION_STATUSES, TEST_CASE_TERMINAL_STATUSES, TEST_CASE_REVIEW_ACTION_LABELS,
-  TEST_CASE_REVIEW_MANDATORY_COMMENT_DECISIONS, QA_LEAD_GROUP_ROLES,
+  TEST_CASE_REVIEW_MANDATORY_COMMENT_DECISIONS, QA_LEAD_GROUP_ROLES, selectionActionLabel, selectionActionPhrase,
 } from '../../constants'
 import {
   TestProjectOut, TestFolderOut, TestCaseOut, TestCaseListOut, TestCaseSummaryOut, TestStepIn, TestCaseImportResult, ApprovalActionOut,
@@ -511,11 +511,13 @@ function ImportModal({ projectId, folders, folderId, onClose, onImported }: {
       // running server-side and actually succeeded. 3 minutes gives a
       // realistically large workbook enough room without ever getting to
       // that false-negative state; see api.uploadForm's own timeoutMs param.
-      const res = await api.uploadForm<TestCaseImportResult>(
-        `/api/test-repository/projects/${projectId}/import-xlsx`,
+      const queued = await api.uploadForm<{ id: string }>(
+        `/api/test-repository/projects/${projectId}/import-xlsx/jobs`,
         { file, folder_id: targetFolder ? String(targetFolder) : undefined },
-        180_000,
       )
+      setProgressMessage('Import queued; processing rows in the background…')
+      const completed = await waitForJob<TestCaseImportResult>(queued.id)
+      const res = completed.result!
       const remainingDisplayTime = Math.max(0, 600 - (Date.now() - startedAt))
       if (remainingDisplayTime) await new Promise((resolve) => window.setTimeout(resolve, remainingDisplayTime))
       window.clearInterval(timer)
@@ -785,8 +787,8 @@ function BulkArchiveModal({ projectId, selectedIds, onClose, onArchived }: {
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
   const title = stage === 'archiving' ? 'Archiving testcases'
-    : stage === 'success' ? 'Bulk archive completed'
-      : stage === 'error' ? 'Bulk archive failed'
+    : stage === 'success' ? `${selectionActionLabel(archiveIds.length, 'archive')} completed`
+      : stage === 'error' ? `${selectionActionLabel(archiveIds.length, 'archive')} failed`
         : `Archive ${archiveIds.length} test case${archiveIds.length !== 1 ? 's' : ''}?`
 
   return (
@@ -800,7 +802,7 @@ function BulkArchiveModal({ projectId, selectedIds, onClose, onArchived }: {
           </Field>
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className="btn btn-primary">Archive all</button>
+            <button className="btn btn-primary">{archiveIds.length > 1 ? 'Archive all' : 'Archive testcase'}</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -809,7 +811,7 @@ function BulkArchiveModal({ projectId, selectedIds, onClose, onArchived }: {
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk archive progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(archiveIds.length, 'archive')} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>{progress < 100 ? 'Archive is being recorded atomically' : 'Archived testcases are now removed from active lists'}</span><strong>{progress}%</strong></div>
           {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
         </div>
@@ -818,7 +820,7 @@ function BulkArchiveModal({ projectId, selectedIds, onClose, onArchived }: {
         <div className="tm-operation-state error" role="alert">
           <div className="tm-operation-icon">!</div>
           <strong>Nothing was archived</strong>
-          <p className="muted small">The bulk archive is atomic, so all selected testcases remain Approved.</p>
+          <p className="muted small">The {selectionActionPhrase(archiveIds.length, 'archive')} is atomic, so all selected testcases remain Approved.</p>
           <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
           <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
             <button className="btn btn-primary" onClick={() => archive()}>Try again</button>
@@ -884,8 +886,8 @@ function BulkApproveModal({ projectId, selectedIds, onClose, onApproved }: {
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
   const title = stage === 'approving' ? 'Approving testcases'
-    : stage === 'success' ? 'Bulk approval completed'
-      : stage === 'error' ? 'Bulk approval failed'
+    : stage === 'success' ? `${selectionActionLabel(approvalIds.length, 'approval')} completed`
+      : stage === 'error' ? `${selectionActionLabel(approvalIds.length, 'approval')} failed`
         : `Approve ${approvalIds.length} pending testcase${approvalIds.length !== 1 ? 's' : ''}?`
 
   return (
@@ -900,7 +902,7 @@ function BulkApproveModal({ projectId, selectedIds, onClose, onApproved }: {
           <p className="muted small">This one message will be signed by you and recorded in every selected testcase’s activity history.</p>
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className="btn btn-primary">Verify and approve all</button>
+            <button className="btn btn-primary">Verify and approve{approvalIds.length > 1 ? ' all' : ''}</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -909,7 +911,7 @@ function BulkApproveModal({ projectId, selectedIds, onClose, onApproved }: {
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk approval progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(approvalIds.length, 'approval')} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>{progress < 100 ? 'Approval is being recorded atomically' : 'Approved testcases are now available for cycles'}</span><strong>{progress}%</strong></div>
           {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
         </div>
@@ -918,7 +920,7 @@ function BulkApproveModal({ projectId, selectedIds, onClose, onApproved }: {
         <div className="tm-operation-state error" role="alert">
           <div className="tm-operation-icon">!</div>
           <strong>Nothing was approved</strong>
-          <p className="muted small">The bulk approval is atomic, so all selected testcases remain pending.</p>
+          <p className="muted small">The {selectionActionPhrase(approvalIds.length, 'approval')} is atomic, so all selected testcases remain pending.</p>
           <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
           <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
             <button className="btn btn-primary" onClick={() => approve()}>Try again</button>
@@ -983,8 +985,8 @@ function BulkRecommendModal({ project, selectedCases, onClose, onRecommended }: 
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
   const title = stage === 'recommending' ? 'Recommending testcases'
-    : stage === 'success' ? 'Bulk recommendation completed'
-      : stage === 'error' ? 'Bulk recommendation failed'
+    : stage === 'success' ? `${selectionActionLabel(recommendIds.length, 'recommendation')} completed`
+      : stage === 'error' ? `${selectionActionLabel(recommendIds.length, 'recommendation')} failed`
         : `Recommend ${recommendIds.length} pending testcase${recommendIds.length !== 1 ? 's' : ''} for approval?`
 
   return (
@@ -1000,7 +1002,7 @@ function BulkRecommendModal({ project, selectedCases, onClose, onRecommended }: 
           <p className="muted small">This message (if any) will be signed by you and recorded in every selected testcase's activity history.</p>
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className="btn btn-primary">Recommend all</button>
+            <button className="btn btn-primary">Recommend{recommendIds.length > 1 ? ' all' : ''}</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -1009,7 +1011,7 @@ function BulkRecommendModal({ project, selectedCases, onClose, onRecommended }: 
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk recommend progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(recommendIds.length, 'recommend')} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>{progress < 100 ? 'Recommendation is being recorded atomically' : 'Recommended testcases now await QA Lead approval'}</span><strong>{progress}%</strong></div>
           {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
         </div>
@@ -1018,7 +1020,7 @@ function BulkRecommendModal({ project, selectedCases, onClose, onRecommended }: 
         <div className="tm-operation-state error" role="alert">
           <div className="tm-operation-icon">!</div>
           <strong>Nothing was recommended</strong>
-          <p className="muted small">The bulk recommendation is atomic, so all selected testcases remain pending.</p>
+          <p className="muted small">The {selectionActionPhrase(recommendIds.length, 'recommendation')} is atomic, so all selected testcases remain pending.</p>
           <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
           <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
             <button className="btn btn-primary" onClick={() => recommend()}>Try again</button>
@@ -1096,8 +1098,8 @@ function BulkDecisionModal({ action, project, selectedCases, onClose, onDone }: 
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
   const title = stage === 'working' ? `${verbGerund} testcases`
-    : stage === 'success' ? `Bulk ${verb} completed`
-      : stage === 'error' ? `Bulk ${verb} failed`
+    : stage === 'success' ? `${selectionActionLabel(ids.length, verb)} completed`
+      : stage === 'error' ? `${selectionActionLabel(ids.length, verb)} failed`
         : `${action === 'return' ? 'Return' : 'Reject'} ${ids.length} pending testcase${ids.length !== 1 ? 's' : ''}?`
 
   return (
@@ -1114,7 +1116,7 @@ function BulkDecisionModal({ action, project, selectedCases, onClose, onDone }: 
           <p className="muted small">This one reason will be signed by you and recorded in every selected testcase's activity history.</p>
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className={`btn ${action === 'reject' ? 'btn-danger' : 'btn-primary'}`}>{action === 'return' ? 'Return all' : 'Reject all'}</button>
+            <button className={`btn ${action === 'reject' ? 'btn-danger' : 'btn-primary'}`}>{action === 'return' ? `Return${ids.length > 1 ? ' all' : ''}` : `Reject${ids.length > 1 ? ' all' : ''}`}</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -1123,7 +1125,7 @@ function BulkDecisionModal({ action, project, selectedCases, onClose, onDone }: 
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label={`Bulk ${verb} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(ids.length, verb)} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>{progress < 100 ? `${verbGerund} is being recorded atomically` : `Testcases have been ${verbPast}`}</span><strong>{progress}%</strong></div>
           {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
         </div>
@@ -1132,7 +1134,7 @@ function BulkDecisionModal({ action, project, selectedCases, onClose, onDone }: 
         <div className="tm-operation-state error" role="alert">
           <div className="tm-operation-icon">!</div>
           <strong>Nothing was {verbPast}</strong>
-          <p className="muted small">The bulk {verb} is atomic, so all selected testcases remain pending.</p>
+          <p className="muted small">The {selectionActionPhrase(ids.length, verb)} is atomic, so all selected testcases remain pending.</p>
           <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
           <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
             <button className="btn btn-primary" onClick={() => run()}>Try again</button>
@@ -1199,8 +1201,8 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
   const title = stage === 'submitting' ? 'Submitting testcases'
-    : stage === 'success' ? 'Bulk submit completed'
-      : stage === 'error' ? 'Bulk submit failed'
+    : stage === 'success' ? `${selectionActionLabel(submitIds.length, 'submit')} completed`
+      : stage === 'error' ? `${selectionActionLabel(submitIds.length, 'submit')} failed`
         : `Submit ${submitIds.length} testcase${submitIds.length !== 1 ? 's' : ''} for review?`
 
   return (
@@ -1208,8 +1210,9 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
       {stage === 'confirm' && (
         <form onSubmit={doSubmit}>
           <div className="tm-bulk-confirm-count"><strong>{submitIds.length}</strong><span>Draft / Returned testcase{submitIds.length !== 1 ? 's' : ''} will move to review</span></div>
-          <p>Each one is checked for complete steps (TC-003) before anything is changed -- if any selected testcase isn't ready, none of them are submitted.</p>
-          <div className="info-banner">Stage 1 is automatically shared with every eligible reviewer -- system QA Lead for a testcase already mid-review under the pre-existing workflow, or the whole QA Group for a fresh submission. After Stage 1 is complete, Stage 2 is shared with CM QA/AGM QA (pre-existing items) or the whole QA Lead Group (new submissions).</div>
+          <p>If any selected testcase isn't ready, none of them are submitted.</p>
+          <div className="info-banner">Stage 1 is assigned to the QA Lead for existing reviews or the QA Group for new submissions. 
+            Stage 2 goes to CM/AGM QA or the QA Lead Group, respectively.</div>
           <p className="muted small">Group routing sends work to the appropriate approval queue -- there's no individual reviewer/QA Lead to assign. The testcase author is excluded from acting on their own submission at every stage.</p>
           <Field label="Note for the Reviewer (optional)">
             <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional context shared on every selected testcase…" />
@@ -1226,7 +1229,7 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk submit progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(submitIds.length, 'submit')} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>{progress < 100 ? 'Submission is being recorded atomically' : 'Submitted testcases now await Reviewer recommendation'}</span><strong>{progress}%</strong></div>
           {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
         </div>
@@ -1235,7 +1238,7 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
         <div className="tm-operation-state error" role="alert">
           <div className="tm-operation-icon">!</div>
           <strong>Nothing was submitted</strong>
-          <p className="muted small">The bulk submit is atomic, so all selected testcases remain unchanged.</p>
+          <p className="muted small">The {selectionActionPhrase(submitIds.length, 'submit')} is atomic, so all selected testcases remain unchanged.</p>
           <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
           <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
             <button className="btn btn-primary" onClick={() => doSubmit()}>Try again</button>
@@ -1551,8 +1554,8 @@ function BulkRestoreFromArchiveModal({ projectId, selectedIds, onClose, onRestor
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
   const title = stage === 'restoring' ? 'Restoring testcases'
-    : stage === 'success' ? 'Bulk restore completed'
-      : stage === 'error' ? 'Bulk restore failed'
+    : stage === 'success' ? `${selectionActionLabel(restoreIds.length, 'restore')} completed`
+      : stage === 'error' ? `${selectionActionLabel(restoreIds.length, 'restore')} failed`
         : `Restore ${restoreIds.length} test case${restoreIds.length !== 1 ? 's' : ''} from archive?`
 
   return (
@@ -1572,7 +1575,7 @@ function BulkRestoreFromArchiveModal({ projectId, selectedIds, onClose, onRestor
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk restore progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(restoreIds.length, 'restore')} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>{progress < 100 ? 'Restore is being recorded atomically' : 'Restored testcases are now available for cycles'}</span><strong>{progress}%</strong></div>
           {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
         </div>
@@ -1581,7 +1584,7 @@ function BulkRestoreFromArchiveModal({ projectId, selectedIds, onClose, onRestor
         <div className="tm-operation-state error" role="alert">
           <div className="tm-operation-icon">!</div>
           <strong>Nothing was restored</strong>
-          <p className="muted small">The bulk restore is atomic, so all selected testcases remain archived.</p>
+          <p className="muted small">The {selectionActionPhrase(restoreIds.length, 'restore')} is atomic, so all selected testcases remain archived.</p>
           <div className="tm-operation-error"><strong>Reason</strong><p>{errorReason}</p></div>
           <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
             <button className="btn btn-primary" onClick={() => restore()}>Try again</button>
@@ -2254,10 +2257,10 @@ function BulkUpdateModal({ projectId, selectedCases, folders, onClose, onUpdated
   }
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
-  const title = stage === 'confirm' ? 'Confirm bulk update'
+  const title = stage === 'confirm' ? `Confirm ${totalSelected > 1 ? 'bulk ' : ''}update`
     : stage === 'updating' ? 'Updating test cases'
-      : stage === 'success' ? 'Bulk update completed'
-        : stage === 'error' ? 'Bulk update failed'
+      : stage === 'success' ? `${selectionActionLabel(totalSelected, 'update')} completed`
+        : stage === 'error' ? `${selectionActionLabel(totalSelected, 'update')} failed`
           : `Update ${totalSelected} test case${totalSelected !== 1 ? 's' : ''}`
 
   return (
@@ -2327,7 +2330,7 @@ function BulkUpdateModal({ projectId, selectedCases, folders, onClose, onUpdated
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk update progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(totalSelected, 'update')} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
             <span style={{ width: `${progress}%` }} />
           </div>
           <div className="tm-progress-meta"><span>{progress < 100 ? 'Please keep this dialog open' : 'All changes are now visible in the repository'}</span><strong>{progress}%</strong></div>
@@ -2340,7 +2343,7 @@ function BulkUpdateModal({ projectId, selectedCases, folders, onClose, onUpdated
           <div className="tm-operation-icon">!</div>
           <strong>Update stopped</strong>
           <p className="muted small">No selected test cases were changed. The operation stopped while {failurePoint}.</p>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk update stopped progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(totalSelected, 'update')} stopped progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
             <span style={{ width: `${progress}%` }} />
           </div>
           <div className="tm-progress-meta"><span>Stopped while {failurePoint}</span><strong>{progress}%</strong></div>
@@ -2458,7 +2461,7 @@ function RecycleBinPanel({
       </div>
       <ErrorText error={error} />
       {selectedIds.size > 0 && (
-        <div className="tm-bulk-bar" role="region" aria-label="Recycle Bin bulk actions">
+        <div className="tm-bulk-bar" role="region" aria-label={selectedIds.size > 1 ? 'Recycle Bin bulk actions' : 'Recycle Bin testcase actions'}>
           <strong>{selectedIds.size} test case{selectedIds.size !== 1 ? 's' : ''} selected</strong>
           {canRestore && <button className="btn btn-sm btn-primary" disabled={bulkBusy} onClick={restoreSelected}>Restore selected ({selectedIds.size})</button>}
           {canPurge && <button className="btn btn-sm btn-danger" disabled={bulkBusy} onClick={() => setConfirmBulkPurge(true)}>Empty selected ({selectedIds.size})</button>}
@@ -2629,8 +2632,10 @@ export default function TestRepository() {
     if (!projectId || !selectedProject) return
     setExportingRepository(true); setError(null)
     try {
+      const queued = await api.post<{ id: string }>(`/api/test-repository/projects/${projectId}/export-xlsx/jobs`)
+      await waitForJob(queued.id)
       await api.downloadFile(
-        `/api/test-repository/projects/${projectId}/export-xlsx`,
+        `/api/jobs/${queued.id}/download`,
         `${selectedProject.project_key}_test_repository.xlsx`,
       )
     } catch (err) { setError(err) } finally { setExportingRepository(false) }
@@ -2719,6 +2724,7 @@ export default function TestRepository() {
         tag: tagFilter || undefined,
       },
     },
+    { cursor: !isRecycleBinView },
   )
   const refreshCases = useCallback(() => {
     reloadCases()
@@ -3060,6 +3066,7 @@ export default function TestRepository() {
     <div className="tm-page">
       <ErrorText error={error} />
       <PageHeader
+        eyebrow="Test Case Management · Design · Organize · Execute · Trace"
         title="Test Repository" count={summary?.total ?? 0}
         subtitle="Design and organize reusable test cases using the Epic → Feature → Story hierarchy from your Excel template."
         actions={canAuthor && projectId && projectIsActive ? (
@@ -3195,7 +3202,7 @@ export default function TestRepository() {
             <div className="tm-list-toolbar">
               <ClearableSearchInput value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear test case search" wrapperClassName="search-grow" placeholder="Search cases, epics, features, or stories…" />
               <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}><option value="">All priorities</option>{TEST_CASE_PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select>
-              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="">All statuses</option>{TEST_CASE_STATUSES.map((s) => <option key={s} value={s}>{TEST_CASE_STATUS_LABELS[s] || s}</option>)}</select>
+              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="">All current statuses</option>{TEST_CASE_CURRENT_STATUSES.map((s) => <option key={s} value={s}>{TEST_CASE_STATUS_LABELS[s] || s}</option>)}</select>
               <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}><option value="">All tags</option>{availableTags.map((tag) => <option key={tag}>{tag}</option>)}</select>
               {(canReview || canQAGroupNewPath) && (
                 <button
@@ -3223,7 +3230,7 @@ export default function TestRepository() {
               <InfoTooltip label="About safe editing" content={<><b>Start editing</b> reserves and opens the test case for you. When finished, use <b>Finish editing</b> to release it for another QA user.</>} />
             </div>
             {selectedCount > 0 && canSelectCases && projectIsActive && (
-              <div className="tm-bulk-bar" role="region" aria-label="Bulk test case actions">
+              <div className="tm-bulk-bar" role="region" aria-label={selectedCount > 1 ? 'Bulk test case actions' : 'Test case actions'}>
                 <strong>{selectedCount} test case{selectedCount !== 1 ? 's' : ''} selected</strong>
                 {canAuthor && submittableSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkSubmit(true)}>Submit for review ({submittableSelectedIds.length})</button>}
                 {/* 2026-08 fix: recommendSelectedIds/finalApproveSelectedIds already
@@ -3233,19 +3240,19 @@ export default function TestRepository() {
                     approval queue" filter buttons above did already -- so a QA Group/
                     QA Lead Group member with no old-path project access could select
                     an eligible NEW-path testcase and never see a button to act on it. */}
-                {(canReview || canQAGroupNewPath) && recommendSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRecommend(true)}>Bulk recommend pending ({recommendSelectedIds.length})</button>}
-                {(canGiveFinalApproval || canManageRepoGovernance) && finalApproveSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkApprove(true)}>Bulk approve pending ({finalApproveSelectedIds.length})</button>}
+                {(canReview || canQAGroupNewPath) && recommendSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRecommend(true)}>{selectionActionLabel(recommendSelectedIds.length, 'Recommend')} ({recommendSelectedIds.length})</button>}
+                {(canGiveFinalApproval || canManageRepoGovernance) && finalApproveSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkApprove(true)}>{selectionActionLabel(finalApproveSelectedIds.length, 'Approve')} ({finalApproveSelectedIds.length})</button>}
                 {/* 2026-08 -- bulk counterparts to the single-case "Return for Correction"/"Reject" decisions,
                     NEW-path only (see returnRejectSelectedIds above and bulk_return_test_cases/
                     bulk_reject_test_cases on the backend). */}
-                {(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkReturn(true)}>Bulk return for correction ({returnRejectSelectedIds.length})</button>}
-                {(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkReject(true)}>Bulk reject ({returnRejectSelectedIds.length})</button>}
-                {canOpenBulkUpdate && <button className="btn btn-sm" onClick={() => setShowBulkUpdate(true)}>Bulk update</button>}
+                {(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkReturn(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Return For Correction')} ({returnRejectSelectedIds.length})</button>}
+                {(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkReject(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Reject')} ({returnRejectSelectedIds.length})</button>}
+                {canOpenBulkUpdate && <button className="btn btn-sm" onClick={() => setShowBulkUpdate(true)}>{selectionActionLabel(selectedCount, 'update')}</button>}
                 {/* 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement": Delete only ever
                     targets deletableSelectedIds (never-governed cases) -- an Approved/Archived/Rejected case in
                     the same selection is silently excluded from the delete count/payload rather than blocking
                     the whole batch, and is instead offered "Archive Selected" alongside it. */}
-                {canAuthor && deletableSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkDelete(true)}>Bulk delete ({deletableSelectedIds.length})</button>}
+                {canAuthor && deletableSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkDelete(true)}>{selectionActionLabel(deletableSelectedIds.length, 'Delete')} ({deletableSelectedIds.length})</button>}
                 {archivableSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkArchive(true)}>Archive selected ({archivableSelectedIds.length})</button>}
                 {restorableSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRestore(true)}>Restore selected ({restorableSelectedIds.length})</button>}
                 {governedSelectedIds.length > 0 && deletableSelectedIds.length === 0 && archivableSelectedIds.length === 0 && (

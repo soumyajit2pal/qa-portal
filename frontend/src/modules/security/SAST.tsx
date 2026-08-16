@@ -7,6 +7,7 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
+import ChildRequestDelegation from '../../components/ChildRequestDelegation'
 import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
 import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
@@ -65,7 +66,8 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   // Same identity check as the detail view's isRequester/canSMDecide/
   // canDeptHeadDecide -- this modal only opens via that same gate, but the
   // checklist evidence controls inside it need their own explicit check.
-  const isRequesterModal = editing.requester_id === user?.id || isAdmin
+  const isActiveDelegateModal = editing.active_delegation?.status === 'ACTIVE' && editing.active_delegation.assigned_to_id === user?.id
+  const isRequesterModal = isActiveDelegateModal || isAdmin || (editing.requester_id === user?.id && !editing.active_delegation)
   const sameDeptModal = hasDepartment(user, editing.department)
   const canSMDecideModal = hasRole(user, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
   const canDeptHeadDecideModal = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
@@ -435,8 +437,10 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // SM_REJECTED included alongside the RETURNED_BY_* statuses -- reported
   // directly, a rejected request is now reopenable (edit + resubmit)
   // instead of a dead end.
+  const isActiveDelegate = req.active_delegation?.status === 'ACTIVE' && req.active_delegation.assigned_to_id === user?.id
+  const requesterInputEditor = isActiveDelegate || isAdmin || (isRequester && !req.active_delegation)
   const canEditDetails = hasRole(user, 'ADMIN')
-    || (isRequester && ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status))
+    || (requesterInputEditor && ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status))
     || (hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && sameDept)
     || (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDept)
   // Blocks Sign/Approve on both the SM and Department Head decision panels
@@ -456,7 +460,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
       ? "This request's Application Name was rejected -- the requester needs to pick a different name before this request can be approved."
       : "Application Name is still pending your decision -- decide it from this request's QA Request page before approving this request."
   const canSubmit = isRequester && status === 'DRAFT'
-  const canResubmit = isRequester && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
+  const canResubmit = isRequester && !req.active_delegation && ['RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status)
   const resubmitLabel = status === 'SM_REJECTED' ? 'Reopen Request' : 'Re-submit'
   // Reported directly: a person who raised this request but also separately
   // holds SM/Department Head for the same department must not be able to
@@ -473,7 +477,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const evidenceOwner = isAdmin || (
     status === 'SM_APPROVAL_PENDING' ? canSMDecide :
     status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecide :
-    isRequester
+    requesterInputEditor
   )
   // Document and Evidence Access Control Based on Workflow Stage: exactly 3
   // upload stages, then a hard lock -- (1) the requester while it's Draft/
@@ -485,7 +489,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // _can_upload_documents exactly. Used for the general Documents tab;
   // evidenceOwner above covers the same 3 stages for checklist evidence.
   const canManageDocuments = isAdmin || (
-    ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status) ? isRequester :
+    ['DRAFT', 'SUBMITTED', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_LEAD'].includes(status) ? requesterInputEditor :
     status === 'SM_APPROVAL_PENDING' ? canSMDecide :
     status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' ? canDeptHeadDecide :
     false
@@ -648,6 +652,12 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                 Export PDF
               </button>
               {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
+              <ChildRequestDelegation
+                targetType="SAST"
+                request={req}
+                users={users}
+                onChanged={async (updated) => { onChanged(updated); await load() }}
+              />
               {canSubmit && (
                 <button className="btn btn-primary btn-sm" disabled={busy || pendingSelfDeclare.length > 0}
                         onClick={() => act('submit')}>
@@ -968,7 +978,7 @@ export default function SAST() {
       <ErrorText error={error} />
       <PageHeader
         title="SAST Requests" count={total}
-        subtitle="Static Application Security Testing requests, from submission through findings and report sign-off. Raised via a QA Request (include SAST in its request types) -- not created standalone here."
+        subtitle="Static Application Security Testing(SAST) requests, from submission through findings and report sign-off. Raised via a QA Request (include SAST in its request types)."
       />
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}

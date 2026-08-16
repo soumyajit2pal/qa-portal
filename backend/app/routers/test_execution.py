@@ -1,13 +1,15 @@
+import asyncio
 import os
 from typing import List, Optional
 from urllib.parse import urlparse
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import func
+from sqlalchemy import and_, exists, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import models, schemas, pagination
 from ..database import get_db
+from ..database import SessionLocal
 from ..deps import (
     get_current_user, require_roles, viewable_project_ids,
     require_can_execute_project, require_can_manage_execution_governance,
@@ -16,6 +18,7 @@ from ..deps import (
 from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
 from .. import documents as doc_store
 from .. import reassignment
+from . import jobs
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 
 # PAG-005-adjacent -- list_executions below keeps the full TestExecutionOut
@@ -64,6 +67,44 @@ def _in_batches(values: List[int], size: int = _ORACLE_IN_BATCH_SIZE):
     """Yield Oracle-safe slices while preserving the caller's order."""
     for start in range(0, len(values), size):
         yield values[start:start + size]
+
+
+def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
+                           search: Optional[str] = None, priority: Optional[str] = None):
+    """Approved project testcases not already present in ``cycle``.
+
+    The correlated NOT EXISTS is intentionally resolved by Oracle. It
+    replaces the former pair of unrestricted client downloads (every
+    project testcase plus every cycle testcase id).
+    """
+    already_in_cycle = exists().where(and_(
+        models.TestExecution.cycle_id == cycle.id,
+        models.TestExecution.test_case_id == models.TestCase.id,
+    ))
+    query = (
+        db.query(models.TestCase)
+        .join(
+            models.TestCaseVersion,
+            models.TestCaseVersion.id == models.TestCase.current_approved_version_id,
+        )
+        .filter(
+            models.TestCase.project_id == cycle.project_id,
+            models.TestCase.is_deleted == False,  # noqa: E712
+            models.TestCaseVersion.status == "Approved",
+            ~already_in_cycle,
+        )
+    )
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        query = query.filter(or_(
+            models.TestCase.test_case_key.ilike(like),
+            models.TestCase.test_scenario.ilike(like),
+            models.TestCase.module_name.ilike(like),
+            models.TestCase.test_type.ilike(like),
+        ))
+    if priority and priority.strip():
+        query = query.filter(models.TestCase.priority == priority.strip())
+    return query
 
 
 def _get_cycle_or_404(db: Session, cycle_id: int) -> models.TestCycle:
@@ -189,12 +230,14 @@ _CYCLE_ITEM_NOT_READY_STATUSES = ("Draft", "In Review", "Review Completed", "Ret
 
 
 def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_date) -> None:
-    """2026-08 "Test Approval Workflow" refactor, section 7 -- "A cycle may
-    become Ready only when" its five listed conditions all hold. Called
-    only on a transition INTO "Ready" (see update_cycle below), not on
+    """Validate that a cycle has a usable execution scope before it becomes
+    Ready. Tester assignment is intentionally not a readiness prerequisite:
+    assignments can be completed while the cycle is Ready, but each testcase
+    still needs an eligible runner before an execution result can be recorded.
+    Called only on a transition INTO "Ready" (see update_cycle below), not on
     every save, so a cycle can otherwise be edited freely while still being
-    assembled. Item statuses are re-checked against each execution's
-    PINNED version specifically (not just "was Approved when added") --
+    assembled. Item statuses are re-checked against each execution's PINNED
+    version specifically (not just "was Approved when added") --
     add-to-cycle already only accepts an Approved version (CYC-003/004),
     but archiving a testcase after it was pinned retroactively changes that
     exact version's own status to Archived (see archive_test_case), so this
@@ -202,13 +245,6 @@ def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_
     executions = cycle.executions
     if not executions:
         raise HTTPException(400, "A cycle needs at least one test case before it can become Ready")
-    unassigned = [e for e in executions if not e.assigned_to_id]
-    if unassigned:
-        raise HTTPException(
-            400,
-            f"{len(unassigned)} test case(s) in this cycle have no assigned tester -- "
-            "every planned execution needs an assignee before the cycle can become Ready",
-        )
     if not start_date or not end_date:
         raise HTTPException(400, "Both a start date and an end date are required before the cycle can become Ready")
     if start_date > end_date:
@@ -379,21 +415,27 @@ _DEFECT_RETEST_CLEAR_STATUSES = ("Deferred", "Closed")
 
 
 def _execution_lock_state(db: Session, execution_id: int):
-    """Returns (active_defects, has_prior_fail) for _execution_status_gate.
+    """Returns (active_defects, has_prior_failed_or_blocked) for the status gate.
     active_defects -- every governed Defect (defects.py) linked to this slot
     (Defect.execution_id) whose own status is not yet Deferred/Closed; a
-    non-empty list here is what drives the full lock. has_prior_fail -- True
+    non-empty list here is what drives the full lock. The second value is True
     if any attempt ever recorded on this slot (TestExecutionRun.status) was
-    'Fail', which drives the permanent 'Pass'/'NA' block for the rest of
-    this slot's history, regardless of whether a defect is linked right
-    now."""
+    'Fail' or 'Blocked'. It enables Retest Passed and drives the permanent
+    'Pass'/'NA' block for the rest of this slot's history, regardless of
+    whether a defect is linked right now. The mirrored current status is a
+    compatibility fallback for results saved before run history existed."""
     defects = db.query(models.Defect).filter(models.Defect.execution_id == execution_id).all()
     active_defects = [d for d in defects if d.status not in _DEFECT_RETEST_CLEAR_STATUSES]
-    has_prior_fail = db.query(models.TestExecutionRun.id).filter(
+    has_prior_failed_or_blocked = db.query(models.TestExecutionRun.id).filter(
         models.TestExecutionRun.execution_id == execution_id,
-        models.TestExecutionRun.status == "Fail",
+        models.TestExecutionRun.status.in_(("Fail", "Blocked")),
     ).first() is not None
-    return active_defects, has_prior_fail
+    if not has_prior_failed_or_blocked:
+        legacy_status = db.query(models.TestExecution.status).filter(
+            models.TestExecution.id == execution_id,
+        ).scalar()
+        has_prior_failed_or_blocked = legacy_status in ("Fail", "Blocked")
+    return active_defects, has_prior_failed_or_blocked
 
 
 def _execution_status_gate(db: Session, execution_id: int, status_value: str,
@@ -411,8 +453,11 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
        including for a fresh 'Fail' -- while a defect is open, the defect is
        what needs attention, not another execution attempt.
 
-    2. Once every linked defect clears (or none was ever linked), but this
-       slot has EVER recorded a 'Fail': 'Pass'/'NA' are permanently blocked
+    2. 'Retest Passed' is never a first-attempt/general result. It requires
+       at least one earlier 'Fail' or 'Blocked' attempt on the same slot.
+
+    3. Once every linked defect clears (or none was ever linked), but this
+       slot has EVER recorded a 'Fail' or 'Blocked': 'Pass'/'NA' are permanently blocked
        for the rest of this slot's history (a defect-corrected pass is
        always 'Retest Passed', never 'Pass' -- keeps "clean first try" and
        "passed after a fix" distinguishable in reporting). 'Retest Passed'
@@ -429,18 +474,23 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
     Returns a human-readable reason, or None if nothing blocks status_value."""
     if status_value not in ("Pass", "Fail", "Blocked", "NA", "Retest Passed"):
         return None
-    active_defects, has_prior_fail = _execution_lock_state(db, execution_id)
+    active_defects, has_prior_failed_or_blocked = _execution_lock_state(db, execution_id)
     if active_defects:
         names = ", ".join(f"{d.defect_key} ({d.status})" for d in active_defects)
         return (
             f"this test case previously failed and has an active linked defect ({names}). The execution "
             "status cannot be changed until all linked defects are Closed or Deferred."
         )
-    if not has_prior_fail:
+    if status_value == "Retest Passed" and not has_prior_failed_or_blocked:
+        return (
+            "'Retest Passed' is available only after this testcase has a previous Failed or "
+            "Blocked execution attempt."
+        )
+    if not has_prior_failed_or_blocked:
         return None
     if status_value in ("Pass", "NA"):
         return (
-            f"this test case failed earlier in its history -- '{status_value}' is no longer available. "
+            f"this test case failed or was blocked earlier in its history -- '{status_value}' is no longer available. "
             "The linked defect has been Closed or Deferred: select 'Retest Passed' if it passes now, or "
             "'Fail' if it fails again."
         )
@@ -672,7 +722,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Cycle name cannot be blank")
-    if payload.start_date and payload.end_date and payload.start_date > payload.end_date:
+    if payload.start_date > payload.end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     if payload.owner_id:
         owner = db.query(models.User).get(payload.owner_id)
@@ -803,9 +853,22 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     # A Blocked cycle is frozen except for its one valid lifecycle action:
     # Resume Execution. It cannot smuggle metadata changes through alongside
     # that transition.
+    link_only_change = data and set(data) <= {"linked_request_type", "linked_request_id"}
     if previous_status == "Blocked" and transition_action:
         if set(data) != {"status"}:
             raise HTTPException(400, "A Blocked Test Cycle can only be resumed; no other fields can be changed")
+    elif previous_status == "Completed" and link_only_change:
+        # 2026-08 -- reported directly: "once test cycle completed, then
+        # test cycle is locked to edit. that is okay, but give option to
+        # link QA request." Everything else about a Completed cycle stays
+        # frozen (still routes through _require_open_cycle below for any
+        # other field, same as before) -- this is narrowly scoped to a
+        # request that changes ONLY the linked_request_type/
+        # linked_request_id pair, so it can't be used to smuggle other
+        # edits through alongside a link change. Re-linking (or clearing)
+        # the QA Request a completed cycle is filed against stays useful
+        # for traceability/reporting even though execution itself is done.
+        pass
     else:
         _require_open_cycle(obj)
     if "owner_id" in data and data["owner_id"] is not None:
@@ -826,7 +889,9 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         owner_reason = reassignment.require_reason(payload.reason)
     start_date = data.get("start_date", obj.start_date)
     end_date = data.get("end_date", obj.end_date)
-    if start_date and end_date and start_date > end_date:
+    if start_date is None or end_date is None:
+        raise HTTPException(400, "Start date and end date are required")
+    if start_date > end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     entering_ready = data.get("status") == "Ready" and obj.status != "Ready"
     link_changed = "linked_request_type" in data or "linked_request_id" in data
@@ -911,11 +976,6 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
             new_owner.full_name if new_owner else "Unassigned",
             owner_reason, step_name="Owner Reassignment",
         )
-        if new_owner and new_owner.id != previous_owner_id:
-            reassignment.notify_new_assignee(
-                db, new_owner.id, "TEST_CYCLE", obj.id, obj.cycle_key,
-                f"You have been assigned as owner of test cycle {obj.cycle_key}.", current_user.id,
-            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -1026,6 +1086,8 @@ def list_executions(
     assignment: Optional[str] = Query(
         None, description="'mine', 'unassigned', or omitted for no extra assignment filter",
     ),
+    cursor_mode: bool = Query(False, description="Use primary-key cursor pagination instead of OFFSET"),
+    cursor: Optional[int] = Query(None, ge=0),
     params: pagination.PageParams = Depends(),
     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
 ):
@@ -1045,6 +1107,8 @@ def list_executions(
     elif assignment == "unassigned":
         q = q.filter(models.TestExecution.assigned_to_id.is_(None))
     q = pagination.apply_status_filter(q, params, models.TestExecution.status)
+    if cursor_mode:
+        return pagination.paginate_by_id(q, params, models.TestExecution.id, cursor)
     q = pagination.apply_sort(
         q, params, sortable={"status": models.TestExecution.status},
         default_column=models.TestExecution.id, id_column=models.TestExecution.id,
@@ -1137,7 +1201,41 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
     ]
 
 
-@router.get("/cycles/{cycle_id}/executions/case-ids", response_model=List[int])
+@router.get("/cycles/{cycle_id}/candidate-test-cases", response_model=schemas.TestCaseCandidatePage)
+def list_cycle_candidate_test_cases(
+    cycle_id: int,
+    cursor: Optional[int] = Query(None, ge=0),
+    page_size: int = Query(25, ge=5, le=100),
+    search: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Cursor-paginated approved testcases eligible for this cycle.
+
+    The result is computed entirely in Oracle with a correlated NOT EXISTS;
+    neither the full repository nor the cycle's full execution-id set is
+    transferred to the browser.
+    """
+    cycle = _get_cycle_or_404(db, cycle_id)
+    require_can_execute_project(db, cycle.project_id, current_user)
+    base = _cycle_candidate_query(db, cycle, search, priority)
+    total = base.order_by(None).count()
+    page_query = base
+    if cursor is not None:
+        page_query = page_query.filter(models.TestCase.id > cursor)
+    rows = page_query.order_by(models.TestCase.id.asc()).limit(page_size + 1).all()
+    has_more = len(rows) > page_size
+    items = rows[:page_size]
+    return {
+        "items": items,
+        "total": total,
+        "next_cursor": items[-1].id if has_more and items else None,
+        "has_more": has_more,
+    }
+
+
+@router.get("/cycles/{cycle_id}/executions/case-ids", response_model=List[int], deprecated=True)
 def list_execution_case_ids(cycle_id: int, db: Session = Depends(get_db),
                              current_user: models.User = Depends(get_current_user)):
     """PAG-010 -- deliberately NOT paginated, same reasoning as Test Cases'
@@ -1364,6 +1462,29 @@ def export_test_cycle(
     return workbook_response(workbook, f"{cycle.cycle_key}_test_lifecycle.xlsx")
 
 
+@router.post("/cycles/{cycle_id}/export-xlsx/jobs")
+def queue_test_cycle_export(
+    cycle_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    cycle = _get_cycle_or_404(db, cycle_id)
+    filename = f"{cycle.cycle_key}_test_lifecycle.xlsx"
+    user_id = current_user.id
+
+    def build(job_id: str):
+        with SessionLocal() as worker_db:
+            worker_user = worker_db.query(models.User).get(user_id)
+            if not worker_user:
+                raise RuntimeError("The user who started this export no longer exists")
+            jobs.update(job_id, progress=15)
+            response = export_test_cycle(cycle_id, worker_db, worker_user)
+            return asyncio.run(jobs.save_streaming_response(job_id, response, filename))
+
+    return jobs.enqueue(background_tasks, "TEST_CYCLE_EXPORT", user_id, build)
+
+
 @router.post("/cycles/{cycle_id}/executions", response_model=List[schemas.TestExecutionOut])
 def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db: Session = Depends(get_db),
                              current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
@@ -1380,11 +1501,17 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
     if payload.assigned_to_id is not None:
         _require_qa_assignment_manager(current_user)
         assigned_runner = _runner_or_404(db, payload.assigned_to_id)
-    already = {
-        e.test_case_id for e in
-        db.query(models.TestExecution.test_case_id).filter_by(cycle_id=cycle_id).all()
-    }
     requested_ids = list(dict.fromkeys(payload.test_case_ids))
+    already = set()
+    # Only inspect requested IDs. The previous query loaded every testcase
+    # already in a large cycle even when the user selected a single row.
+    for id_batch in _in_batches(requested_ids):
+        already.update(
+            row[0] for row in db.query(models.TestExecution.test_case_id).filter(
+                models.TestExecution.cycle_id == cycle_id,
+                models.TestExecution.test_case_id.in_(id_batch),
+            ).all()
+        )
     # Do not put the whole UI selection into one IN clause: Oracle limits an
     # IN expression to 1,000 values (ORA-01795). Query bounded batches and
     # merge them into the same identity map used by the validation/creation
@@ -1484,6 +1611,75 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
     return refreshed
 
 
+@router.post("/cycles/{cycle_id}/executions/from-selection", response_model=schemas.TestExecutionAddResult)
+def add_test_cases_from_server_selection(
+    cycle_id: int,
+    payload: schemas.TestExecutionCandidateSelection,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(*_EXEC_ROLES)),
+):
+    """Add explicit IDs or every testcase matching the server-side filter.
+
+    ``all_matching`` keeps the HTTP payload small and avoids Oracle's
+    1,000-expression IN limit. Explicit exclusions are applied as several
+    Oracle-safe NOT IN predicates before IDs are materialized server-side.
+    """
+    cycle = _get_cycle_or_404(db, cycle_id)
+    _require_active_project(db, cycle.project_id)
+    require_can_execute_project(db, cycle.project_id, current_user)
+    if payload.selection_mode == "all_matching":
+        query = _cycle_candidate_query(db, cycle, payload.search, payload.priority)
+        for id_batch in _in_batches(list(dict.fromkeys(payload.excluded_ids))):
+            query = query.filter(~models.TestCase.id.in_(id_batch))
+        selected_ids = [row[0] for row in query.with_entities(models.TestCase.id).order_by(models.TestCase.id).all()]
+    else:
+        selected_ids = list(dict.fromkeys(payload.test_case_ids))
+    if not selected_ids:
+        raise HTTPException(400, "Pick at least one test case")
+    if len(selected_ids) > 500:
+        user_id = current_user.id
+        assigned_to_id = payload.assigned_to_id
+
+        def add_in_background(job_id: str):
+            with SessionLocal() as worker_db:
+                worker_user = worker_db.query(models.User).get(user_id)
+                if not worker_user:
+                    raise RuntimeError("The user who started this job no longer exists")
+                jobs.update(job_id, progress=15)
+                created_rows = add_test_cases_to_cycle(
+                    cycle_id,
+                    schemas.TestExecutionAdd(
+                        test_case_ids=selected_ids,
+                        assigned_to_id=assigned_to_id,
+                    ),
+                    worker_db,
+                    worker_user,
+                )
+                return {
+                    "created_count": len(created_rows),
+                    "skipped_count": len(selected_ids) - len(created_rows),
+                }
+
+        job = jobs.enqueue(background_tasks, "ADD_TESTCASES_TO_CYCLE", user_id, add_in_background)
+        return {
+            "created_count": 0,
+            "skipped_count": 0,
+            "job_id": job["id"],
+            "status": job["status"],
+        }
+    created = add_test_cases_to_cycle(
+        cycle_id,
+        schemas.TestExecutionAdd(
+            test_case_ids=selected_ids,
+            assigned_to_id=payload.assigned_to_id,
+        ),
+        db,
+        current_user,
+    )
+    return {"created_count": len(created), "skipped_count": len(selected_ids) - len(created)}
+
+
 @router.patch("/executions/{execution_id}/assign", response_model=schemas.TestExecutionOut)
 def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
                      db: Session = Depends(get_db),
@@ -1541,11 +1737,6 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
             db, "TEST_CASE", obj.test_case_id, current_user,
             previous_name or "Unassigned", target.full_name if target else "Unassigned", payload.reason,
         )
-        if target and target.id != previous_id:
-            reassignment.notify_new_assignee(
-                db, target.id, "TEST_CASE", obj.test_case_id, test_case_label,
-                f"You have been assigned to run {test_case_label} in {cycle.cycle_key}.", current_user.id,
-            )
     db.commit()
     db.refresh(obj)
     return obj
@@ -1705,6 +1896,7 @@ def bulk_update_execution_results(
         raise HTTPException(400, "Select at least one testcase for bulk execution")
     if len(execution_ids) > 100:
         raise HTTPException(400, "Bulk execution supports at most 100 testcases at a time")
+    operation_label = "Bulk execution" if len(execution_ids) > 1 else "Execution"
 
     from ..constants import TEST_EXECUTION_STATUSES
     if payload.status not in TEST_EXECUTION_STATUSES or payload.status == "Not Executed":
@@ -1736,7 +1928,7 @@ def bulk_update_execution_results(
     if missing:
         raise HTTPException(
             404,
-            f"Bulk execution stopped. Execution record(s) not found: {', '.join(missing)}. No attempt was saved.",
+            f"{operation_label} stopped. Execution record(s) not found: {', '.join(missing)}. No attempt was saved.",
         )
     wrong_cycle = [
         execution for execution in found
@@ -1749,7 +1941,7 @@ def bulk_update_execution_results(
         )
         raise HTTPException(
             400,
-            f"Bulk execution stopped. These testcases do not belong to the selected cycle: {labels}. No attempt was saved.",
+            f"{operation_label} stopped. These testcases do not belong to the selected cycle: {labels}. No attempt was saved.",
         )
 
     ordered = [found_by_id[execution_id] for execution_id in execution_ids]
@@ -1760,7 +1952,7 @@ def bulk_update_execution_results(
     if unpinned:
         raise HTTPException(
             400,
-            "Bulk execution stopped. These testcase slots have no pinned approved version: "
+            f"{operation_label} stopped. These testcase slots have no pinned approved version: "
             f"{', '.join(unpinned)}. No attempt was saved.",
         )
 
@@ -1776,7 +1968,7 @@ def bulk_update_execution_results(
     if defect_blocked:
         raise HTTPException(
             400,
-            f"Bulk execution stopped. Cannot record '{payload.status}': "
+            f"{operation_label} stopped. Cannot record '{payload.status}': "
             f"{'; '.join(defect_blocked)}. No attempt was saved.",
         )
 
@@ -1799,7 +1991,7 @@ def bulk_update_execution_results(
         if blockers:
             raise HTTPException(
                 403,
-                "Bulk execution stopped because only the assigned runner can record an attempt; "
+                f"{operation_label} stopped because only the assigned runner can record an attempt; "
                 + "; ".join(blockers)
                 + ". Reassign those testcases or select only your assignments. No attempt was saved.",
             )
@@ -2096,6 +2288,7 @@ def bulk_remove_executions(
         raise HTTPException(400, "Select at least one testcase to remove from the cycle")
     if len(execution_ids) > 100:
         raise HTTPException(400, "Bulk removal supports at most 100 testcases at a time")
+    operation_label = "Bulk removal" if len(execution_ids) > 1 else "Removal"
 
     found = db.query(models.TestExecution).filter(models.TestExecution.id.in_(execution_ids)).all()
     found_by_id = {execution.id: execution for execution in found}
@@ -2103,7 +2296,7 @@ def bulk_remove_executions(
     if missing:
         raise HTTPException(
             404,
-            f"Bulk removal stopped. Execution record(s) not found: {', '.join(missing)}. Nothing was removed.",
+            f"{operation_label} stopped. Execution record(s) not found: {', '.join(missing)}. Nothing was removed.",
         )
     ordered = [found_by_id[execution_id] for execution_id in execution_ids]
     wrong_cycle = [execution for execution in ordered if execution.cycle_id != cycle_id]
@@ -2114,7 +2307,7 @@ def bulk_remove_executions(
         )
         raise HTTPException(
             400,
-            f"Bulk removal stopped. These testcases do not belong to the selected cycle: {labels}. Nothing was removed.",
+            f"{operation_label} stopped. These testcases do not belong to the selected cycle: {labels}. Nothing was removed.",
         )
     ineligible = [
         (execution, reason) for execution in ordered
@@ -2128,7 +2321,7 @@ def bulk_remove_executions(
         suffix = f" and {len(ineligible) - 5} more" if len(ineligible) > 5 else ""
         raise HTTPException(
             403,
-            f"Bulk removal stopped. These testcase(s) cannot be removed by you right now: {labels}{suffix}. "
+            f"{operation_label} stopped. These testcase(s) cannot be removed by you right now: {labels}{suffix}. "
             "Nothing was removed.",
         )
 

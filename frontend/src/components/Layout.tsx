@@ -61,7 +61,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
       ],
     },
     {
-      label: 'Test Management',
+      label: 'Test Case Management',
       items: [
         { to: '/test-projects', label: 'Projects', icon: IconApps },
         { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
@@ -279,9 +279,9 @@ export default function Layout({ children }: { children?: ReactNode }) {
       <button className={`sidebar-backdrop ${sidebarOpen ? 'visible' : ''}`} aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
       <aside className={`sidebar ${sidebarOpen ? 'sidebar-open' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} aria-label="Primary navigation">
         <div className="brand">
-          <img className="qualityshield-app-logo" src="/qualityshield-logo.png" alt="" aria-hidden="true" />
+          <img className="qualityops-app-logo" src="/qualityops-logo.png" alt="" aria-hidden="true" />
           <div className="brand-copy">
-            <h1>Quality<span>Shield</span></h1>
+            <h1>Quality<span>Ops</span></h1>
             <img className="bank-wordmark sidebar-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
           <button className="sidebar-collapse-control" onClick={toggleSidebarSize} aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'} title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>
@@ -341,7 +341,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
         <div className="topbar">
           <button className="mobile-nav-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open navigation"><span /><span /><span /></button>
           <div className="topbar-context">
-            <span><b>QualityShield</b><i>/</i>{activeGroup?.label || 'Workspace'}</span>
+            <span><b>QualityOps</b><i>/</i>{activeGroup?.label || 'Workspace'}</span>
             <strong>{activeItem?.label || 'Dashboard'}</strong>
           </div>
           <form className="search-box" onSubmit={submitSearch}>

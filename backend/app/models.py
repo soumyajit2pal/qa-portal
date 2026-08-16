@@ -4,7 +4,8 @@ from typing import List
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index, UniqueConstraint, text, and_
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index,
+    UniqueConstraint, CheckConstraint, text, and_
 )
 from sqlalchemy.orm import relationship, foreign
 from .db_base import Base
@@ -374,7 +375,14 @@ class ApplicationMaster(Base):
     # traceability/display (e.g. "requested via TQA-REQ-..."), nullable since
     # a REJECTED name that gets proposed again later re-links to whichever
     # QA Request triggered that.
-    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True)
+    # Intentional cycle: ApplicationMaster traces the introducing QARequest,
+    # while QARequest points back to its resolved ApplicationMaster. Tell
+    # SQLAlchemy/Alembic to add this side after both tables exist so metadata
+    # sorting is deterministic (and Oracle never sees an inline FK to a table
+    # that has not been created yet).
+    qa_request_id = Column(Integer, ForeignKey(
+        "qap_requests.id", name="fk_qap_app_master_qa_req", use_alter=True,
+    ), nullable=True)
     # Application Owner's own decision -- the only tier that decides a NEW
     # name (2026-08 v2). Populated whenever an Application Owner decides,
     # Approved or Rejected; either outcome is terminal, so both this tier's
@@ -436,6 +444,15 @@ class QARequest(Base):
     cr_number = Column(String(64))
     epic_number = Column(String(150))
     change_type = Column(String(32))              # New / Enhancement / Bug Fix -- see constants.CHANGE_TYPES
+    # Optional traceability for a Bug Fix back to the earlier gateway whose
+    # Functional Testing workflow reached CLOSED. The business request ID is
+    # stable and unique, so it is stored directly and protected by a
+    # self-referencing FK; routers/qa_requests.py additionally verifies that
+    # the referenced request belongs to the same application/department and
+    # is actually completed.
+    bug_fix_source_request_id = Column(
+        String(40), ForeignKey("qap_requests.request_id"), nullable=True,
+    )
     vendor_si_partner = Column(String(150))
     technology_stack = Column(String(150))
     release_version = Column(String(64))
@@ -443,6 +460,9 @@ class QARequest(Base):
     environment = Column(String(32))              # "Deployment Environment" -- SIT/UAT/Pre-Production/Production
     target_promotion_environment = Column(String(32))
     request_types = Column(String(255))          # comma-separated from REQUEST_TYPES
+    # Retained only for non-destructive compatibility with historical rows;
+    # "Others" is no longer an accepted Request Type and this legacy column
+    # is not exposed by create/update/output schemas.
     request_type_other = Column(String(150))
     # Priority/Risk used to be a single shared "Classification" pair here,
     # collected once regardless of which request type(s) were selected. Moved
@@ -494,6 +514,22 @@ class QARequest(Base):
     linked_sast_requests = relationship("SASTRequest", back_populates="qa_request")
     linked_dast_requests = relationship("DASTRequest", back_populates="qa_request")
     linked_performance_requests = relationship("PerformanceRequest", back_populates="qa_request")
+    delegations = relationship(
+        "QARequestDelegation", back_populates="qa_request", cascade="all,delete-orphan",
+        order_by="QARequestDelegation.assigned_at.desc()",
+    )
+    # Read only filtered relationship used by permission checks and list/detail
+    # responses. Keeping it separate avoids loading the complete historical
+    # delegation collection on every paginated QA Request row.
+    active_delegation = relationship(
+        "QARequestDelegation",
+        primaryjoin="and_(QARequest.id == foreign(QARequestDelegation.qa_request_id), "
+                    "QARequestDelegation.target_type == 'QA_REQUEST', "
+                    "QARequestDelegation.target_id == QARequest.id, "
+                    "QARequestDelegation.status == 'ACTIVE')",
+        uselist=False,
+        viewonly=True,
+    )
 
     def _draft_details(self) -> dict:
         """Parses draft_child_details (see the column comment above) --
@@ -551,6 +587,51 @@ class QARequest(Base):
     @property
     def application_master_status(self):
         return self.application_master.status if self.application_master else None
+
+class QARequestDelegation(Base):
+    """Temporary, request-specific editing access granted by the requester.
+
+    This does not change QARequest.requester_id, department, or workflow
+    status. ACTIVE grants the selected user access to this one Draft only;
+    RETURNED and RECALLED are immutable history retained for audit evidence.
+    """
+    __tablename__ = "qap_request_delegations"
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE','RETURNED','RECALLED')", name="ck_qap_del_status"),
+        CheckConstraint(
+            "target_type IN ('QA_REQUEST','FUNCTIONAL','SAST','DAST','PERFORMANCE')",
+            name="ck_qap_del_target_type",
+        ),
+    )
+    id = pk_column()
+    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=False)
+    target_type = Column(String(24), nullable=False, default="QA_REQUEST")
+    target_id = Column(Integer, nullable=False)
+    assigned_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False)
+    assigned_to_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False)
+    assignment_reason = Column(Text, nullable=False)
+    status = Column(String(16), nullable=False, default="ACTIVE")
+    assigned_at = Column(DateTime, default=now, nullable=False)
+    closed_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    returned_at = Column(DateTime, nullable=True)
+    return_comments = Column(Text, nullable=True)
+
+    qa_request = relationship("QARequest", back_populates="delegations")
+    assigned_by = relationship("User", foreign_keys=[assigned_by_id])
+    assigned_to = relationship("User", foreign_keys=[assigned_to_id])
+    closed_by = relationship("User", foreign_keys=[closed_by_id])
+
+    @property
+    def assigned_by_name(self):
+        return self.assigned_by.full_name if self.assigned_by else None
+
+    @property
+    def assigned_to_name(self):
+        return self.assigned_to.full_name if self.assigned_to else None
+
+    @property
+    def closed_by_name(self):
+        return self.closed_by.full_name if self.closed_by else None
 
 
 class QARequestDocument(Base):
@@ -636,6 +717,7 @@ class FunctionalRequest(Base):
     requester = relationship("User", foreign_keys=[requester_id])
     qa_request = relationship("QARequest", back_populates="linked_functional_requests")
     checklist_items = relationship("ReadinessChecklistItem", back_populates="functional_request", cascade="all,delete-orphan")
+    signoff = relationship("QASignOff", foreign_keys=[signoff_id])
     test_cycle_links = relationship(
         "TestCycleChildRequestLink",
         primaryjoin=lambda: and_(
@@ -648,6 +730,19 @@ class FunctionalRequest(Base):
     @property
     def linked_test_cycles(self):
         return [link.cycle for link in self.test_cycle_links if link.cycle]
+
+    # 2026-08 -- reported directly: "LINK THE CERTIFICATE ONCE GENERATED" --
+    # this request's detail view had no way to see the QA Sign-off
+    # certificate it's linked to (signoff_id above) even after one existed.
+    # Delegated the same way as application_name/department/application_owner
+    # above rather than adding duplicate columns.
+    @property
+    def signoff_certificate_id(self):
+        return self.signoff.certificate_id if self.signoff else None
+
+    @property
+    def signoff_certificate_status(self):
+        return self.signoff.status if self.signoff else None
 
     # Delegated (read-only) lookups from the parent gateway QA Request --
     # see the class docstring above for why these aren't duplicated columns.
@@ -711,6 +806,10 @@ class FunctionalRequest(Base):
         return self.qa_request.change_type if self.qa_request else None
 
     @property
+    def bug_fix_source_request_id(self):
+        return self.qa_request.bug_fix_source_request_id if self.qa_request else None
+
+    @property
     def environment(self):
         return self.qa_request.environment if self.qa_request else None
 
@@ -745,6 +844,15 @@ class FunctionalRequest(Base):
     @property
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
+
+    @property
+    def active_delegation(self):
+        """Temporary input assignment scoped to this Functional request."""
+        if not self.qa_request:
+            return None
+        return next((item for item in self.qa_request.delegations
+                     if item.target_type == "FUNCTIONAL" and item.target_id == self.id
+                     and item.status == "ACTIVE"), None)
 
     # Always None here -- Functional Testing uses risk_rating (above), not
     # risk_category. Exists purely so schemas.LinkedRequestRef (the generic
@@ -892,6 +1000,14 @@ class SASTRequest(Base):
     @property
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
+
+    @property
+    def active_delegation(self):
+        if not self.qa_request:
+            return None
+        return next((item for item in self.qa_request.delegations
+                     if item.target_type == "SAST" and item.target_id == self.id
+                     and item.status == "ACTIVE"), None)
 
     # PAG-005 -- the paginated list view (SASTListOut) shows a findings
     # count, not the full findings list; routers/sast_dast.py's list_sast
@@ -1089,6 +1205,14 @@ class DASTRequest(Base):
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
 
+    @property
+    def active_delegation(self):
+        if not self.qa_request:
+            return None
+        return next((item for item in self.qa_request.delegations
+                     if item.target_type == "DAST" and item.target_id == self.id
+                     and item.status == "ACTIVE"), None)
+
     # See SASTRequest.findings_count above -- same idea, for DAST.
     @property
     def findings_count(self):
@@ -1242,6 +1366,10 @@ class PerformanceRequest(Base):
         return self.qa_request.department if self.qa_request else None
 
     @property
+    def bug_fix_source_request_id(self):
+        return self.qa_request.bug_fix_source_request_id if self.qa_request else None
+
+    @property
     def application_owner(self):
         return self.qa_request.application_owner if self.qa_request else None
 
@@ -1261,6 +1389,14 @@ class PerformanceRequest(Base):
     @property
     def application_master_id(self):
         return self.qa_request.application_master_id if self.qa_request else None
+
+    @property
+    def active_delegation(self):
+        if not self.qa_request:
+            return None
+        return next((item for item in self.qa_request.delegations
+                     if item.target_type == "PERFORMANCE" and item.target_id == self.id
+                     and item.status == "ACTIVE"), None)
 
 
 class PerformanceChecklistItem(Base):
@@ -1966,8 +2102,16 @@ class TestCase(Base):
     # circular INSERT dependency with TestCaseVersion.test_case_id below (a
     # version can't be inserted until its TestCase exists, but TestCase's
     # pointer to that version is only known after the version is inserted).
-    current_approved_version_id = Column(Integer, ForeignKey("qap_test_case_versions.id"), nullable=True)
-    current_draft_version_id = Column(Integer, ForeignKey("qap_test_case_versions.id"), nullable=True)
+    # Intentional cycle: versions belong to a testcase, while the testcase
+    # keeps pointers to its current draft/approved versions. Defer these two
+    # pointer constraints until both tables exist; TestCaseVersion.test_case_id
+    # remains the normal inline parent FK.
+    current_approved_version_id = Column(Integer, ForeignKey(
+        "qap_test_case_versions.id", name="fk_qap_tc_current_approved", use_alter=True,
+    ), nullable=True)
+    current_draft_version_id = Column(Integer, ForeignKey(
+        "qap_test_case_versions.id", name="fk_qap_tc_current_draft", use_alter=True,
+    ), nullable=True)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
@@ -2801,6 +2945,10 @@ class DefectTestCaseLink(Base):
 # manual `CREATE INDEX` statements (same convention already used for new
 # columns needing manual `ALTER TABLE`).
 Index("ix_qap_req_dept_status_created", QARequest.department, QARequest.status, QARequest.created_at)
+Index("ix_qap_req_bugfix_source", QARequest.bug_fix_source_request_id)
+Index("ix_qap_del_req_status", QARequestDelegation.qa_request_id, QARequestDelegation.status)
+Index("ix_qap_del_user_status", QARequestDelegation.assigned_to_id, QARequestDelegation.status)
+Index("ix_qap_del_target_status", QARequestDelegation.target_type, QARequestDelegation.target_id, QARequestDelegation.status)
 Index("ix_qap_func_status_created", FunctionalRequest.status, FunctionalRequest.created_at)
 Index("ix_qap_sast_status_created", SASTRequest.status, SASTRequest.created_at)
 Index("ix_qap_dast_status_created", DASTRequest.status, DASTRequest.created_at)
@@ -2822,6 +2970,18 @@ Index("ix_qap_tc_proj_folder_created", TestCase.project_id, TestCase.folder_id, 
 # rather than a subset of it.
 Index("ix_qap_tc_proj_deleted_created", TestCase.project_id, TestCase.is_deleted, TestCase.created_at)
 Index("ix_qap_cyc_proj_status_created", TestCycle.project_id, TestCycle.status, TestCycle.created_at)
+# Cursor/candidate access paths. Kept as explicit short names for Oracle's
+# identifier limit and mirrored by Alembic revision 20260815_0001.
+Index("ix_qap_tc_proj_del_id", TestCase.project_id, TestCase.is_deleted, TestCase.id)
+Index("ix_qap_te_cyc_id", TestExecution.cycle_id, TestExecution.id)
+Index("ix_qap_te_cyc_stat_id", TestExecution.cycle_id, TestExecution.status, TestExecution.id)
+Index("ix_qap_te_cyc_asgn_id", TestExecution.cycle_id, TestExecution.assigned_to_id, TestExecution.id)
+# Management contribution dashboard access paths. These pair the actor used
+# for aggregation with the period timestamp used by every dashboard query.
+Index("ix_qap_tc_author_created", TestCase.created_by_id, TestCase.created_at)
+Index("ix_qap_run_actor_executed", TestExecutionRun.executed_by_id, TestExecutionRun.executed_at)
+Index("ix_qap_def_reporter_at", Defect.reporter_id, Defect.reported_at)
+Index("ix_qap_def_retester_at", Defect.retest_tester_id, Defect.retest_at)
 Index("ix_qap_readiness_func_req", ReadinessChecklistItem.functional_request_id)
 Index("ix_qap_moddocs_req_uploaded", RequestDocument.module, RequestDocument.request_id, RequestDocument.uploaded_at)
 Index("ix_qap_audit_actor_created", AuditLog.actor_id, AuditLog.created_at)

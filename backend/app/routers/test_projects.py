@@ -246,6 +246,8 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
     name = payload.name.strip()
     if not name:
         raise HTTPException(400, "Project name cannot be blank")
+    if len(name) > 150:
+        raise HTTPException(400, "Project name cannot exceed 150 characters")
     _require_unique_project_name(db, name)
 
     department = payload.department.strip()
@@ -335,6 +337,8 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
         data["name"] = data["name"].strip()
         if not data["name"]:
             raise HTTPException(400, "Project name cannot be blank")
+        if len(data["name"]) > 150:
+            raise HTTPException(400, "Project name cannot exceed 150 characters")
         if data["name"].lower() != obj.name.lower():
             _require_unique_project_name(db, data["name"], exclude_id=obj.id)
     if "department" in data:

@@ -1,6 +1,6 @@
 import datetime
 import re
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 RICH_TEXT_MAX_LENGTH = 10000
@@ -326,6 +326,7 @@ class QARequestCreate(BaseModel):
     cr_number: Optional[str] = None
     epic_number: Optional[str] = None
     change_type: Optional[str] = None
+    bug_fix_source_request_id: Optional[str] = None
     vendor_si_partner: Optional[str] = None
     technology_stack: Optional[str] = None
     release_version: Optional[str] = None
@@ -333,7 +334,6 @@ class QARequestCreate(BaseModel):
     environment: Optional[str] = None
     target_promotion_environment: Optional[str] = None
     request_types: List[str] = []
-    request_type_other: Optional[str] = None
     target_release_date: Optional[datetime.date] = None
     supporting_doc_path: Optional[str] = None
     remarks: Optional[str] = None
@@ -421,6 +421,33 @@ class QARequestUpdate(QARequestCreate):
     application_name: Optional[str] = None
 
 
+class QARequestDelegationCreate(BaseModel):
+    assigned_to_id: int
+    reason: str
+
+
+class QARequestDelegationClose(BaseModel):
+    comments: str
+
+
+class QARequestDelegationOut(ORMModel):
+    id: int
+    qa_request_id: int
+    target_type: str
+    target_id: int
+    assigned_by_id: int
+    assigned_to_id: int
+    assigned_by_name: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+    assignment_reason: str
+    status: str
+    assigned_at: datetime.datetime
+    closed_by_id: Optional[int] = None
+    closed_by_name: Optional[str] = None
+    returned_at: Optional[datetime.datetime] = None
+    return_comments: Optional[str] = None
+
+
 class QARequestOut(ORMModel):
     """The QA Request is a pure intake/gateway record -- `status` here is just
     Draft/Submitted/Raised/Cancelled (see constants.GatewayStatus). The real
@@ -439,6 +466,7 @@ class QARequestOut(ORMModel):
     cr_number: Optional[str] = None
     epic_number: Optional[str] = None
     change_type: Optional[str] = None
+    bug_fix_source_request_id: Optional[str] = None
     vendor_si_partner: Optional[str] = None
     technology_stack: Optional[str] = None
     release_version: Optional[str] = None
@@ -446,7 +474,6 @@ class QARequestOut(ORMModel):
     environment: Optional[str] = None
     target_promotion_environment: Optional[str] = None
     request_types: Optional[str] = None
-    request_type_other: Optional[str] = None
     target_release_date: Optional[datetime.date] = None
     supporting_doc_path: Optional[str] = None
     remarks: Optional[str] = None
@@ -460,6 +487,7 @@ class QARequestOut(ORMModel):
     # the UI point an SM's Approve/Reject action at the right master row.
     application_master_id: Optional[int] = None
     application_master_status: Optional[str] = None
+    active_delegation: Optional[QARequestDelegationOut] = None
     # Auto-linked child requests generated because this request's
     # request_types included the matching type (see _sync_linked_child_requests).
     linked_functional_requests: List[LinkedRequestRef] = []
@@ -508,6 +536,7 @@ class QARequestListOut(ORMModel):
     created_at: datetime.datetime
     updated_at: datetime.datetime
     application_master_status: Optional[str] = None
+    active_delegation: Optional[QARequestDelegationOut] = None
     linked_functional_requests: List[LinkedRequestRef] = []
     linked_sast_requests: List[LinkedRequestRef] = []
     linked_dast_requests: List[LinkedRequestRef] = []
@@ -613,9 +642,12 @@ class FunctionalOut(ORMModel):
     qa_lead_id: Optional[int] = None
     assigned_tester_ids: Optional[str] = None
     signoff_id: Optional[int] = None
+    signoff_certificate_id: Optional[str] = None      # 2026-08 -- "LINK THE CERTIFICATE ONCE GENERATED"
+    signoff_certificate_status: Optional[str] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     qa_request: Optional[LinkedRequestRef] = None
+    active_delegation: Optional[QARequestDelegationOut] = None
     # Delegated from the linked QA Request gateway.
     application_name: Optional[str] = None
     epic_number: Optional[str] = None
@@ -625,6 +657,7 @@ class FunctionalOut(ORMModel):
     target_release_date: Optional[datetime.date] = None
     cr_number: Optional[str] = None
     change_type: Optional[str] = None
+    bug_fix_source_request_id: Optional[str] = None
     environment: Optional[str] = None
     target_promotion_environment: Optional[str] = None
     release_version: Optional[str] = None
@@ -912,6 +945,7 @@ class SASTOut(ORMModel):
     linked_request_type: Optional[str] = None
     linked_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
+    active_delegation: Optional[QARequestDelegationOut] = None
     # Read-only lookups (via the linked QA Request, if any) -- lets the
     # Suppression "Request ID" autosuggest auto-populate Department/Owner.
     department: Optional[str] = None
@@ -1015,6 +1049,7 @@ class DASTOut(ORMModel):
     # raised directly through this module.
     qa_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
+    active_delegation: Optional[QARequestDelegationOut] = None
     # Read-only lookups (via the linked QA Request, if any) -- lets the
     # Suppression "Request ID" autosuggest auto-populate Department/Owner.
     department: Optional[str] = None
@@ -1159,6 +1194,7 @@ class PerformanceOut(ORMModel):
     priority: Optional[str] = None
     request_type: Optional[str] = None
     change_type: Optional[str] = None
+    bug_fix_source_request_id: Optional[str] = None
     vendor_si_partner: Optional[str] = None
     technology_stack: Optional[str] = None
     release_version: Optional[str] = None
@@ -1177,6 +1213,7 @@ class PerformanceOut(ORMModel):
     updated_at: datetime.datetime
     qa_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
+    active_delegation: Optional[QARequestDelegationOut] = None
     department: Optional[str] = None
     application_owner: Optional[str] = None
     # See models.ApplicationMaster / QARequest.application_master_status --
@@ -2386,8 +2423,8 @@ class TestCaseImportResult(ORMModel):
 class TestCycleCreate(BaseModel):
     name: str
     description: Optional[str] = None
-    start_date: Optional[datetime.date] = None
-    end_date: Optional[datetime.date] = None
+    start_date: datetime.date
+    end_date: datetime.date
     # Reported: "failure in test lifecycle and testcases, basically on test
     # management" -- routers/test_execution.py::create_cycle unconditionally
     # reads payload.linked_request_id/linked_request_type (added alongside
@@ -2466,6 +2503,47 @@ class TestExecutionAdd(BaseModel):
     Not-Executed TestExecution row for each (see routers/test_execution.py)."""
     test_case_ids: List[int]
     assigned_to_id: Optional[int] = None
+
+
+class TestCaseCandidateOut(ORMModel):
+    """Compact cycle-candidate row. Full testcase/version content is loaded
+    only when a user opens a testcase, never for the bulk picker."""
+    id: int
+    test_case_key: str
+    test_scenario: Optional[str] = None
+    test_type: Optional[str] = None
+    priority: Optional[str] = None
+    module_name: Optional[str] = None
+    version: str = "1.0"
+
+
+class TestCaseCandidatePage(BaseModel):
+    items: List[TestCaseCandidateOut]
+    total: int
+    next_cursor: Optional[int] = None
+    has_more: bool = False
+
+
+class TestExecutionCandidateSelection(BaseModel):
+    """Server-side selection used by the Add Test Cases modal.
+
+    ``all_matching`` represents the current database filter plus a small set
+    of rows the user explicitly unchecked. It therefore remains a constant-
+    size request even when tens of thousands of testcases match.
+    """
+    selection_mode: Literal["ids", "all_matching"] = "ids"
+    test_case_ids: List[int] = []
+    excluded_ids: List[int] = []
+    search: Optional[str] = None
+    priority: Optional[str] = None
+    assigned_to_id: Optional[int] = None
+
+
+class TestExecutionAddResult(BaseModel):
+    created_count: int
+    skipped_count: int = 0
+    job_id: Optional[str] = None
+    status: Optional[str] = None
 
 
 class TestExecutionUpdate(BaseModel):

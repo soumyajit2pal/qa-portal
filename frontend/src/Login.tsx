@@ -45,23 +45,23 @@ export default function Login() {
       <div className="login-ambient login-ambient-one" />
       <div className="login-ambient login-ambient-two" />
 
-      <section className="login-shell" aria-label="QualityShield sign in">
+      <section className="login-shell" aria-label="QualityOps sign in">
         <aside className="login-brand">
           <div className="login-brand-top">
             <div className="qualitysphere-identity">
-              <img className="qualityshield-app-logo qualityshield-app-logo-lg" src="/qualityshield-logo.png" alt="" aria-hidden="true" />
+              <img className="qualityops-app-logo qualityops-app-logo-lg" src="/qualityops-logo.png" alt="" aria-hidden="true" />
               <div className="brand-name">
-                <strong>Quality<em>Shield</em></strong>
-                <small>Enterprise quality assurance</small>
+                <strong>Quality<em>Ops</em></strong>
+                <small>Enterprise quality operations</small>
               </div>
             </div>
             <img className="bank-wordmark login-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
 
           <div className="login-brand-copy">
-            <div className="eyebrow"><span /> Built for confident releases</div>
-            <h1>Quality, governed<br />from start to sign-off.</h1>
-            <p>One secure workspace for QA requests, testing, evidence, approvals, and release readiness.</p>
+            <div className="eyebrow"><span /> Plan · Test · Secure · Approve</div>
+            <h1>Quality operations,<br />governed end to end.</h1>
+            <p>One secure workspace for QA requests, test case management, execution, security assurance, approvals, and release readiness.</p>
 
             <div className="login-capabilities">
               <div><span><IconWorkflow /></span><strong>Orchestrated workflows</strong><small>Track every request through a clear, governed lifecycle.</small></div>
@@ -78,8 +78,8 @@ export default function Login() {
 
         <div className="login-card">
           <div className="login-mobile-brand">
-            <img className="qualityshield-app-logo" src="/qualityshield-logo.png" alt="" aria-hidden="true" />
-            <div><strong>Quality<em>Shield</em></strong><img className="bank-wordmark mobile-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" /></div>
+            <img className="qualityops-app-logo" src="/qualityops-logo.png" alt="" aria-hidden="true" />
+            <div><strong>Quality<em>Ops</em></strong><img className="bank-wordmark mobile-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" /></div>
           </div>
 
           <div className="login-card-head">
@@ -116,7 +116,7 @@ export default function Login() {
             />
 
             <button className="login-submit" type="submit" disabled={busy}>
-              <span>{busy ? 'Signing you in…' : 'Sign in to QualityShield'}</span>
+              <span>{busy ? 'Signing you in…' : 'Sign in to QualityOps'}</span>
               {!busy && <span aria-hidden="true">→</span>}
             </button>
           </form>
@@ -130,7 +130,7 @@ export default function Login() {
             </select>
           </div>
 
-          <p className="login-help">Need access? Contact your QualityShield administrator.</p>
+          <p className="login-help">Need access? Contact your QualityOps administrator.</p>
           {/* Reported directly: "Help & user Manual should come on login page
               as well, without login atleast user can read" -- links to the
               same /help route signed-in users use, which now also works

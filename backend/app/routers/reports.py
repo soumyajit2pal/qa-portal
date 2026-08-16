@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy import case, func, or_
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import models
 from ..database import get_db
-from ..deps import get_current_user, dashboard_department_scope, resolve_entity_department
-from ..constants import SUPPRESSION_TERMINAL_STATUSES, QAStatus, GatewayStatus, Role
+from ..deps import (
+    get_current_user, dashboard_department_scope, resolve_entity_department,
+    viewable_project_ids,
+)
+from ..constants import QAStatus, GatewayStatus, REQUEST_TYPES, Role
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -44,6 +47,36 @@ def _visible_qa_requests(db: Session, current_user: models.User):
     return q
 
 
+def _visible_test_projects(db: Session, current_user: models.User):
+    q = db.query(models.TestProject)
+    project_ids = viewable_project_ids(db, current_user)
+    if project_ids is not None:
+        q = q.filter(models.TestProject.id.in_(project_ids))
+    return q
+
+
+def _visible_defects(db: Session, current_user: models.User):
+    """Report-centre equivalent of Defect Management's visibility scope."""
+    q = db.query(models.Defect)
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        project_ids = viewable_project_ids(db, current_user)
+        q = (q.join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
+             .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
+             .filter(or_(
+                 models.QARequest.department.in_(scope),
+                 models.TestCycle.project_id.in_(project_ids or []),
+             )))
+    return q
+
+
+def _user_name_map(db: Session, ids) -> dict[int, str]:
+    clean_ids = sorted({int(value) for value in ids if value})
+    if not clean_ids:
+        return {}
+    return {user.id: user.full_name for user in db.query(models.User).filter(models.User.id.in_(clean_ids)).all()}
+
+
 # ---------------- 4.10.1 Operational Reports ----------------
 @router.get("/qa-request-summary")
 def qa_request_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -51,7 +84,12 @@ def qa_request_summary(db: Session = Depends(get_db), current_user: models.User 
     for its own Draft/Submitted/Raised/Cancelled status). "QA Testing Status"
     additionally surfaces the linked Functional Testing Request's own Draft ->
     ... -> Closed status, if one was raised alongside it."""
-    rows = _visible_qa_requests(db, current_user).all()
+    rows = _visible_qa_requests(db, current_user).options(
+        selectinload(models.QARequest.linked_functional_requests),
+        selectinload(models.QARequest.linked_sast_requests),
+        selectinload(models.QARequest.linked_dast_requests),
+        selectinload(models.QARequest.linked_performance_requests),
+    ).all()
     out = []
     for r in rows:
         functional = next(iter(r.linked_functional_requests), None)
@@ -73,12 +111,117 @@ def qa_request_summary(db: Session = Depends(get_db), current_user: models.User 
             "Request ID": r.request_id, "Request Date": r.request_date, "Department": r.department,
             "Application Name": r.application_name,
             "CR Number/EPIC Number": r.cr_number or r.epic_number,
-            "Request Type(s)": r.request_types, "Priority / Risk (per type)": classification or None,
+            "Previous Completed Request ID": r.bug_fix_source_request_id if r.change_type == "Bug Fix" else None,
+            "Request Type(s)": ",".join(
+                value for value in (r.request_types or "").split(",") if value in REQUEST_TYPES
+            ),
+            "Priority / Risk (per type)": classification or None,
             "Status": r.status,
             "QA Testing Request ID": functional.request_id if functional else None,
             "QA Testing Status": functional.status if functional else None,
         })
     return out
+
+
+@router.get("/test-cycle-summary")
+def test_cycle_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """One compact row per visible cycle; avoids exporting every execution attempt."""
+    q = (db.query(
+            models.TestCycle.cycle_key, models.TestCycle.name, models.TestCycle.status,
+            models.TestCycle.start_date, models.TestCycle.end_date,
+            models.TestProject.project_key, models.TestProject.name.label("project_name"),
+            func.count(models.TestExecution.id).label("total"),
+            func.sum(case((models.TestExecution.assigned_to_id.isnot(None), 1), else_=0)).label("assigned"),
+            func.sum(case((models.TestExecution.status == "Not Executed", 1), else_=0)).label("not_executed"),
+            func.sum(case((models.TestExecution.status == "Pass", 1), else_=0)).label("passed"),
+            func.sum(case((models.TestExecution.status == "Fail", 1), else_=0)).label("failed"),
+            func.sum(case((models.TestExecution.status == "Blocked", 1), else_=0)).label("blocked"),
+            func.sum(case((models.TestExecution.status == "NA", 1), else_=0)).label("na_count"),
+            func.sum(case((models.TestExecution.status == "Retest Passed", 1), else_=0)).label("retest_passed"),
+        ).join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+         .outerjoin(models.TestExecution, models.TestExecution.cycle_id == models.TestCycle.id))
+    project_ids = viewable_project_ids(db, current_user)
+    if project_ids is not None:
+        q = q.filter(models.TestProject.id.in_(project_ids))
+    rows = q.group_by(
+        models.TestCycle.cycle_key, models.TestCycle.name, models.TestCycle.status,
+        models.TestCycle.start_date, models.TestCycle.end_date,
+        models.TestProject.project_key, models.TestProject.name,
+    ).order_by(models.TestCycle.start_date.desc(), models.TestCycle.cycle_key).all()
+    out = []
+    for row in rows:
+        total = int(row.total or 0)
+        not_executed = int(row.not_executed or 0)
+        assigned = int(row.assigned or 0)
+        out.append({
+            "Project": f"{row.project_key} — {row.project_name}",
+            "Cycle ID": row.cycle_key, "Cycle Name": row.name, "Status": row.status,
+            "Start Date": row.start_date, "End Date": row.end_date,
+            "Total Testcases": total, "Assigned": assigned, "Unassigned": total - assigned,
+            "Not Executed": not_executed,
+            "Completion %": round((total - not_executed) / total * 100) if total else 0,
+            "Pass": int(row.passed or 0), "Fail": int(row.failed or 0),
+            "Blocked": int(row.blocked or 0), "NA": int(row.na_count or 0),
+            "Retest Passed": int(row.retest_passed or 0),
+        })
+    return out
+
+
+@router.get("/defect-retest-register")
+def defect_retest_register(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    rows = (_visible_defects(db, current_user).options(
+        joinedload(models.Defect.qa_request), joinedload(models.Defect.reporter),
+        joinedload(models.Defect.assignee), joinedload(models.Defect.retest_tester),
+        joinedload(models.Defect.primary_test_case),
+        joinedload(models.Defect.cycle).joinedload(models.TestCycle.project),
+    ).order_by(models.Defect.reported_at.desc()).all())
+    return [{
+        "Defect ID": item.defect_key, "Title": item.title,
+        "QA Request": item.qa_request_key,
+        "Project": (f"{item.cycle.project.project_key} — {item.cycle.project.name}"
+                    if item.cycle and item.cycle.project else None),
+        "Cycle": item.cycle_key, "Test Case": item.test_case_key,
+        "Application": item.application_name, "Module / Feature": item.module_feature,
+        "Environment": item.environment, "Severity": item.severity,
+        "Priority": item.priority, "Status": item.status,
+        "Reporter": item.reporter_name, "Assignee": item.assignee_name,
+        "Reported At": item.reported_at, "Resolution Type": item.resolution_type,
+        "Resolved At": item.resolved_at,
+        "Retest Tester": item.retest_tester.full_name if item.retest_tester else None,
+        "Retest Result": item.retest_result, "Retest At": item.retest_at,
+        "Reopen Count": item.reopen_count,
+    } for item in rows]
+
+
+@router.get("/testcase-approval-summary")
+def testcase_approval_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    projects = _visible_test_projects(db, current_user).order_by(models.TestProject.name).all()
+    project_ids = [project.id for project in projects]
+    grouped = (db.query(models.TestCase.project_id, models.TestCase.status, func.count(models.TestCase.id))
+               .filter(
+                   models.TestCase.project_id.in_(project_ids),
+                   models.TestCase.is_deleted.is_(False),
+               )
+               .group_by(models.TestCase.project_id, models.TestCase.status).all()) if project_ids else []
+    counts: dict[int, dict[str, int]] = {}
+    for project_id, status, count in grouped:
+        counts.setdefault(int(project_id), {})[status or "Unknown"] = int(count)
+    return [{
+        "Project ID": project.project_key, "Project Name": project.name,
+        "Department": project.department,
+        "Project Status": "Archived" if project.is_archived else "Active" if project.is_active else "Inactive",
+        "Total Testcases": sum(counts.get(project.id, {}).values()),
+        "Draft": counts.get(project.id, {}).get("Draft", 0),
+        "Recommendation Pending": sum(counts.get(project.id, {}).get(status, 0)
+                                      for status in ("In Review", "Recommendation Pending")),
+        "QA Lead Approval Pending": sum(counts.get(project.id, {}).get(status, 0)
+                                        for status in ("Review Completed", "QA Lead Approval Pending")),
+        "Approved": counts.get(project.id, {}).get("Approved", 0),
+        "Returned": sum(counts.get(project.id, {}).get(status, 0)
+                        for status in ("Returned", "Returned by QA", "Returned by QA Lead")),
+        "Rejected": counts.get(project.id, {}).get("Rejected", 0),
+        "Archived": counts.get(project.id, {}).get("Archived", 0),
+    } for project in projects]
 
 
 # ---------------- 4.10.2 Security Reports ----------------
@@ -89,7 +232,7 @@ def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
     # as list_sast in routers/sast_dast.py -- standalone SAST requests (no
     # qa_request_id) are excluded by this inner join for a scoped user, same
     # as they already resolve to department=None today.
-    q = db.query(models.SASTRequest)
+    q = db.query(models.SASTRequest).options(selectinload(models.SASTRequest.findings))
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
@@ -104,7 +247,7 @@ def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
 @router.get("/dast-scan")
 def dast_scan_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # See sast_scan_report's matching comment just above -- identical reasoning.
-    q = db.query(models.DASTRequest)
+    q = db.query(models.DASTRequest).options(selectinload(models.DASTRequest.findings))
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
@@ -116,8 +259,38 @@ def dast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
     } for r in rows]
 
 
-@router.get("/vulnerability-trend")
-def vulnerability_trend(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@router.get("/performance-testing")
+def performance_testing_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    q = db.query(models.PerformanceRequest).options(joinedload(models.PerformanceRequest.qa_request))
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = (q.join(models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id)
+             .filter(models.QARequest.department.in_(scope)))
+    rows = q.order_by(models.PerformanceRequest.created_at.desc()).all()
+    tester_ids = set()
+    for item in rows:
+        tester_ids.add(item.engineer_id)
+        tester_ids.update(int(value) for value in (item.assigned_tester_ids or "").split(",") if value.strip().isdigit())
+    names = _user_name_map(db, tester_ids)
+    return [{
+        "Request ID": item.request_id, "Application": item.application_name,
+        "CR Number/EPIC Number": item.cr_number or item.epic_number,
+        "Previous Completed Request ID": item.bug_fix_source_request_id if item.change_type == "Bug Fix" else None,
+        "Department": item.department, "Request Type": item.request_type,
+        "Environment": item.environment,
+        "Target Promotion Environment": item.target_promotion_environment,
+        "Target Load": item.target_load, "Tool": item.tool_used,
+        "Priority": item.priority, "Risk": item.risk_category,
+        "Status": item.status, "QA Lead": names.get(item.engineer_id),
+        "Assigned Testers": ", ".join(names.get(int(value), f"User #{value}")
+                                      for value in (item.assigned_tester_ids or "").split(",")
+                                      if value.strip().isdigit()),
+        "Report Available": "Yes" if item.report_path else "No",
+        "Created At": item.created_at, "Last Updated": item.updated_at,
+    } for item in rows]
+
+
+def _security_severity_counts(db: Session, current_user: models.User):
     # SASTFinding/DASTFinding have no department of their own -- scope via
     # their parent SAST/DAST request's own department, same join pattern as
     # sast_scan_report/dast_scan_report above.
@@ -138,7 +311,8 @@ def vulnerability_trend(db: Session = Depends(get_db), current_user: models.User
 
 @router.get("/severity-distribution")
 def severity_distribution(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return vulnerability_trend(db=db, current_user=current_user)
+    counts = _security_severity_counts(db=db, current_user=current_user)
+    return [{"Severity": severity, "Finding Count": count} for severity, count in sorted(counts.items())]
 
 
 @router.get("/suppression-register")
@@ -148,7 +322,7 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
     # same pattern as test-case-execution/defect-summary used to.
     # SuppressionRequest.department is a real column, so a direct .filter()
     # is enough, same as list_suppressions in routers/suppression.py.
-    q = db.query(models.SuppressionRequest)
+    q = db.query(models.SuppressionRequest).options(selectinload(models.SuppressionRequest.items))
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.filter(models.SuppressionRequest.department.in_(scope))
@@ -169,61 +343,95 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
 
 
 # ---------------- 4.10.3 Management Reports ----------------
-@router.get("/monthly-qa-kpi")
-def monthly_kpi(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    total_requests = _visible_qa_requests(db, current_user).count()
-    scope = dashboard_department_scope(current_user)
-    # "Completed" is measured on the linked Functional Testing Request (the
-    # QA Request gateway's own status is just Draft/Submitted/Raised/Cancelled
-    # -- see constants.GatewayStatus). department is a delegated property
-    # here (reads through .qa_request), so scoping needs a join, same as
-    # list_functional in routers/functional.py.
-    completed_q = db.query(models.FunctionalRequest).filter(models.FunctionalRequest.status == QAStatus.CLOSED)
-    if scope:
-        completed_q = completed_q.join(
-            models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id
-        ).filter(models.QARequest.department.in_(scope))
-    open_suppressions_q = db.query(models.SuppressionRequest).filter(
-        models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
-    if scope:
-        # SuppressionRequest.department is a real column -- direct filter.
-        open_suppressions_q = open_suppressions_q.filter(models.SuppressionRequest.department.in_(scope))
-    return [{
-        "Total QA Requests": total_requests, "Completed Requests": completed_q.count(),
-        "Open Suppressions": open_suppressions_q.count(),
-    }]
-
-
 @router.get("/application-quality-scorecard")
 def quality_scorecard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    # apps is already confined to the caller's department via
-    # _visible_qa_requests' own scoping above -- the per-app SAST count below
-    # is additionally scoped too (rather than relying on "same app name
-    # implies same department"), since a standalone SAST request raised
-    # directly (no linked QA Request) could otherwise share an application
-    # name across departments and leak another department's scan count.
+    """Cross-module position by application, restricted through visible gateway IDs."""
+    from collections import Counter
+
     visible = _visible_qa_requests(db, current_user).all()
-    apps = {r.application_name for r in visible if r.application_name}
+    request_ids = [item.id for item in visible]
+    if not request_ids:
+        return []
+    app_by_request = {item.id: item.application_name for item in visible}
+    qa_counts = Counter(item.application_name for item in visible if item.application_name)
+
+    functional_rows = db.query(
+        models.FunctionalRequest.qa_request_id, models.FunctionalRequest.request_id,
+        models.FunctionalRequest.status,
+    ).filter(models.FunctionalRequest.qa_request_id.in_(request_ids)).all()
+    sast_rows = db.query(models.SASTRequest.qa_request_id).filter(models.SASTRequest.qa_request_id.in_(request_ids)).all()
+    dast_rows = db.query(models.DASTRequest.qa_request_id).filter(models.DASTRequest.qa_request_id.in_(request_ids)).all()
+    performance_rows = db.query(models.PerformanceRequest.qa_request_id).filter(
+        models.PerformanceRequest.qa_request_id.in_(request_ids)).all()
+    open_defect_rows = db.query(models.Defect.qa_request_id).filter(
+        models.Defect.qa_request_id.in_(request_ids),
+        models.Defect.status.notin_(("Closed", "Rejected", "Duplicate", "Not a Defect")),
+    ).all()
+
+    functional_counts = Counter(app_by_request.get(row.qa_request_id) for row in functional_rows)
+    closed_counts = Counter(app_by_request.get(row.qa_request_id) for row in functional_rows if row.status == QAStatus.CLOSED)
+    sast_counts = Counter(app_by_request.get(row.qa_request_id) for row in sast_rows)
+    dast_counts = Counter(app_by_request.get(row.qa_request_id) for row in dast_rows)
+    performance_counts = Counter(app_by_request.get(row.qa_request_id) for row in performance_rows)
+    open_defect_counts = Counter(app_by_request.get(row.qa_request_id) for row in open_defect_rows)
+
+    functional_request_app = {
+        row.request_id: app_by_request.get(row.qa_request_id) for row in functional_rows if row.request_id
+    }
+    issued_counts = Counter()
+    if functional_request_app:
+        issued_rows = db.query(models.QASignOff.testing_request_id).filter(
+            models.QASignOff.testing_request_id.in_(list(functional_request_app)),
+            models.QASignOff.status == "ISSUED",
+        ).all()
+        issued_counts.update(functional_request_app.get(row.testing_request_id) for row in issued_rows)
+
+    return [{
+        "Application": app,
+        "QA Requests": qa_counts[app],
+        "Functional Requests": functional_counts[app],
+        "Functional Closed": closed_counts[app],
+        "SAST Requests": sast_counts[app],
+        "DAST Requests": dast_counts[app],
+        "Performance Requests": performance_counts[app],
+        "Open Defects": open_defect_counts[app],
+        "Issued Sign-offs": issued_counts[app],
+    } for app in sorted(qa_counts)]
+
+
+@router.get("/qa-signoff-register")
+def qa_signoff_register(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    q = db.query(models.QASignOff).options(joinedload(models.QASignOff.source_functional_request))
     scope = dashboard_department_scope(current_user)
-    out = []
-    for app in apps:
-        reqs = [r for r in visible if r.application_name == app]
-        completed = 0
-        for r in reqs:
-            functional = next(iter(r.linked_functional_requests), None)
-            if functional and functional.status == QAStatus.CLOSED:
-                completed += 1
-        sast_q = db.query(models.SASTRequest).filter(models.SASTRequest.application_name == app)
-        if scope:
-            sast_q = sast_q.join(
-                models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id
-            ).filter(models.QARequest.department.in_(scope))
-        out.append({
-            "Application": app, "QA Requests": len(reqs),
-            "Completed": completed,
-            "SAST Requests": sast_q.count(),
-        })
-    return out
+    if scope:
+        q = (q.join(models.FunctionalRequest,
+                    models.FunctionalRequest.request_id == models.QASignOff.testing_request_id)
+             .join(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id)
+             .filter(models.QARequest.department.in_(scope)))
+    rows = q.order_by(models.QASignOff.created_at.desc()).all()
+    names = _user_name_map(db, [
+        user_id for item in rows
+        for user_id in (item.requester_id, item.reviewed_by_id, item.approved_by_id)
+    ])
+    return [{
+        "Certificate ID": item.certificate_id,
+        "Certificate Date": item.certificate_date,
+        "Testing Request ID": item.testing_request_id,
+        "Application": item.application_name,
+        "Request Department": item.request_department,
+        "CR Number/EPIC Number": item.change_request_ids,
+        "Certificate Type": item.certificate_type,
+        "Testing Type": item.testing_type,
+        "Environment Tested": item.environment_tested,
+        "Target Promotion Environment": item.target_promotion_environment,
+        "Risk Tier": item.risk_tier,
+        "Status": item.status,
+        "Requested By": names.get(item.requester_id),
+        "QA Lead Approver": names.get(item.reviewed_by_id),
+        "Executive Approver": names.get(item.approved_by_id),
+        "Validity From": item.validity_from, "Validity To": item.validity_to,
+        "Created At": item.created_at, "Last Updated": item.updated_at,
+    } for item in rows]
 
 
 @router.get("/audit-evidence")
@@ -237,12 +445,12 @@ def audit_evidence(db: Session = Depends(get_db), current_user: models.User = De
     scope = dashboard_department_scope(current_user)
     if scope:
         rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]
+    names = _user_name_map(db, [row.actor_id for row in rows])
     out = []
     for a in rows:
-        u = db.query(models.User).get(a.actor_id) if a.actor_id else None
         out.append({
             "Entity Type": a.entity_type, "Entity ID": a.entity_id, "Step": a.step_name,
-            "Decision": a.decision, "Actor": u.full_name if u else None, "Role": a.actor_role,
+            "Decision": a.decision, "Actor": names.get(a.actor_id), "Role": a.actor_role,
             "Comments": a.comments, "Timestamp": a.created_at,
         })
     return out
@@ -250,12 +458,15 @@ def audit_evidence(db: Session = Depends(get_db), current_user: models.User = De
 
 REPORT_REGISTRY = {
     "qa-request-summary": qa_request_summary,
+    "test-cycle-summary": test_cycle_summary,
+    "defect-retest-register": defect_retest_register,
+    "performance-testing": performance_testing_report,
     "sast-scan": sast_scan_report,
     "dast-scan": dast_scan_report,
-    "vulnerability-trend": vulnerability_trend,
     "severity-distribution": severity_distribution,
     "suppression-register": suppression_register,
-    "monthly-qa-kpi": monthly_kpi,
+    "testcase-approval-summary": testcase_approval_summary,
     "application-quality-scorecard": quality_scorecard,
+    "qa-signoff-register": qa_signoff_register,
     "audit-evidence": audit_evidence,
 }

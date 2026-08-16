@@ -75,7 +75,7 @@ class FortifySSCClient:
             return self._token
         response = self._request(
             "POST", "tokens", auth=f"Basic {self.basic_auth}",
-            payload={"description": "QualityShield scan result import", "type": "UnifiedLoginToken"},
+            payload={"description": "QualityOps scan result import", "type": "UnifiedLoginToken"},
         )
         token = (response.get("data") or {}).get("token")
         if not token:

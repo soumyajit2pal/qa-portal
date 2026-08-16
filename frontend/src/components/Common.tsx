@@ -15,7 +15,8 @@ import {
   PERFORMANCE_STATUS_LABELS,
 } from "../constants";
 import { IconFolder, IconFilter, IconEdit } from "./Icons";
-import { api } from "../api";
+import SearchableSelect from "./SearchableSelect";
+import { api, HttpError } from "../api";
 import { useAuth } from "../context/AuthContext";
 import type { RequestDocumentOut, ChecklistItemDocumentOut } from "../types";
 
@@ -81,6 +82,7 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     SM_APPROVAL_PENDING: "badge-yellow",
     RETURNED_BY_SM: "badge-red",
     SM_REJECTED: "badge-red",
+    RETURNED_BY_REQUESTER: "badge-red",  // 2026-08 -- QASignOff status, reopened via Requester's "Changes Required"
     DEPARTMENT_HEAD_APPROVAL_PENDING: "badge-yellow",
     RETURNED_BY_DEPARTMENT_HEAD: "badge-red",
     DEPARTMENT_HEAD_REJECTED: "badge-red",
@@ -192,6 +194,7 @@ export function applicationNameAwareStatusLabel(
 
 interface PageHeaderProps {
   title: ReactNode;
+  eyebrow?: ReactNode;
   subtitle?: ReactNode;
   count?: number;
   actions?: ReactNode;
@@ -203,6 +206,7 @@ interface PageHeaderProps {
 // <Card title="X (N)"> pairing that varied slightly page to page.
 export function PageHeader({
   title,
+  eyebrow = "Quality workspace",
   subtitle,
   count,
   actions,
@@ -211,7 +215,7 @@ export function PageHeader({
   return (
     <div className="page-header">
       <div className="titles">
-        <span className="page-eyebrow">Quality workspace</span>
+        <span className="page-eyebrow">{eyebrow}</span>
         <h2>
           {title}
           {typeof count === "number" && (
@@ -503,9 +507,19 @@ export function SignField({
     <div className={`workflow-sign-step${signed ? " signed" : ""}`}>
       <span className="workflow-step-number">1</span>
       <span className="workflow-sign-copy">
-        <small>ELECTRONIC SIGNATURE</small>
+        <small>STEP 1 · IDENTITY VERIFICATION</small>
         <strong>{signed ? `Signed by ${signature.signer}` : userName || "Unknown user"}</strong>
-        <em>{signed ? `${new Date(signature.signedAt).toLocaleString()} · ${signature.signatureId.slice(0, 18)}…` : "Review and apply your logged-in identity before approving."}</em>
+        <em>
+          {signed ? (
+            <>
+              <span>{new Date(signature.signedAt).toLocaleString()}</span>
+              <code title={signature.signatureId}>{signature.signatureId}</code>
+            </>
+          ) : "Confirm your authenticated identity before an approval can be submitted."}
+        </em>
+      </span>
+      <span className={`workflow-step-status${signed ? " complete" : " required"}`}>
+        {signed ? "Complete" : "Required"}
       </span>
       <button
         type="button"
@@ -513,7 +527,7 @@ export function SignField({
         disabled={disabled || !userName}
         onClick={() => { setConsented(false); setDialogOpen(true); }}
       >
-        {signed ? <><span className="esign-trigger-check" aria-hidden="true">✓</span><span>E-signed</span></> : <><IconEdit /><span>Add e-signature</span></>}
+        {signed ? <><span className="esign-trigger-check" aria-hidden="true">✓</span><span>Review signature</span></> : <><IconEdit /><span>Verify &amp; sign</span></>}
       </button>
       {dialogOpen && (
         <Modal title="Apply electronic signature" onClose={() => setDialogOpen(false)} variant="dialog" preventBackdropClose>
@@ -522,7 +536,7 @@ export function SignField({
             <div className="esign-preview" aria-label={`Electronic signature preview for ${userName}`}>
               <small>SIGNATURE PREVIEW</small>
               <strong className={`signature-style-${signatureStyle}`}>{userName}</strong>
-              <span>QualityShield electronic approval</span>
+              <span>QualityOps electronic approval</span>
             </div>
             <fieldset className="esign-style-picker">
               <legend>Choose signature style</legend>
@@ -658,19 +672,29 @@ export function ApprovalDecisionButtons({
           <div className="workflow-decision-heading">
             <span className="workflow-step-number">2</span>
             <span className="workflow-sign-copy">
-              <small>WORKFLOW DECISION</small>
-              <strong>Choose a decision</strong>
-              <em>Select one outcome for this workflow stage.</em>
+              <small>STEP 2 · WORKFLOW OUTCOME</small>
+              <strong>Select the next action</strong>
+              <em>Review the consequence of each choice before continuing.</em>
+            </span>
+            <span className={`workflow-step-status${signature ? " ready" : " waiting"}`}>
+              {signature ? "Ready" : "Complete step 1"}
             </span>
           </div>
+          <div className={`workflow-decision-readiness${signature ? " ready" : " waiting"}`}>
+            <span>{signature ? "✓" : "i"}</span>
+            <p>
+              <strong>{signature ? "Identity verified" : "Approval requires a signature"}</strong>
+              <small>{signature ? "Approval is enabled. Return and Reject remain available without a signature." : "Verify and sign above to enable Approve. You can still Return or Reject without signing."}</small>
+            </p>
+          </div>
           <div className="workflow-decision-options">
-            <button className="workflow-decision-card approve" disabled={busy || !signature || signBlocked} onClick={handleApproveClick} title={!signature ? "Add your electronic signature first" : approveLabel}>
+            <button type="button" className="workflow-decision-card approve" disabled={busy || !signature || signBlocked} onClick={handleApproveClick} title={!signature ? "Verify and sign first to enable approval" : approveLabel}>
               <span className="workflow-decision-icon">✓</span><span><strong>{approveLabel}</strong><small>Accept and move to the next stage</small></span><i>→</i>
             </button>
-            <button className="workflow-decision-card return" disabled={busy} onClick={() => openDecision("return")}>
+            <button type="button" className="workflow-decision-card return" disabled={busy} onClick={() => openDecision("return")}>
               <span className="workflow-decision-icon">↩</span><span><strong>{returnLabel}</strong><small>Send back for corrections and resubmission</small></span><i>→</i>
             </button>
-            <button className="workflow-decision-card reject" disabled={busy} onClick={() => openDecision("reject")}>
+            <button type="button" className="workflow-decision-card reject" disabled={busy} onClick={() => openDecision("reject")}>
               <span className="workflow-decision-icon">×</span><span><strong>{rejectLabel}</strong><small>Stop and close this approval path</small></span><i>→</i>
             </button>
           </div>
@@ -991,6 +1015,11 @@ export function RepeatableRows<T>({
 
 function correctiveGuidance(message: string): string {
   const normalized = message.toLowerCase();
+  if (normalized.includes("http 502") || normalized.includes("http 503") || normalized.includes("http 504")
+    || normalized.includes("temporarily unavailable") || normalized.includes("could not connect"))
+    return "Wait a moment and try again. If the service remains unavailable, contact the portal administrator and provide the technical reference shown above, if available.";
+  if (normalized.includes("too long to respond") || normalized.includes("http 408") || normalized.includes("timeout"))
+    return "The operation may be under heavy load. Wait briefly, refresh the page, and try again. Avoid submitting the same data repeatedly.";
   if (normalized.includes("checklist") || normalized.includes("readiness"))
     return "Review the readiness checklist, complete every item identified in the reason, and try the action again.";
   if (normalized.includes("required") || normalized.includes("cannot be blank") || normalized.includes("choose") || normalized.includes("select"))
@@ -1017,14 +1046,16 @@ export function ErrorText({ error, title = "Action could not be completed", guid
   useEffect(() => setVisible(Boolean(error)), [error]);
   if (!error || !visible) return null;
   const message = error instanceof Error ? error.message : String(error);
+  const httpError = error instanceof HttpError ? error : null;
   return (
     <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose>
       <div className="action-error-dialog" role="alert">
         <div className="action-error-dialog-icon">!</div>
         <div>
           <strong>The requested action was stopped</strong>
-          <span>Reason</span>
+          <span>{httpError?.status ? `Reason · HTTP ${httpError.status}` : "Reason"}</span>
           <p>{message}</p>
+          {httpError?.reference && <small className="action-error-reference">Technical reference: {httpError.reference}</small>}
         </div>
       </div>
       <div className="action-error-guidance">
@@ -1248,7 +1279,17 @@ export function Table<T extends Record<string, any>>({
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") setOpenFilterKey(null);
     }
-    function onReposition() {
+    function onScroll(e: Event) {
+      // The searchable value picker has its own scrollable suggestion list.
+      // Window receives that non-bubbling scroll through this capture-phase
+      // listener, but scrolling within the active filter must not dismiss the
+      // filter itself. External page/table scrolling can still close it so a
+      // fixed-position popover is never left detached from its column icon.
+      const target = e.target;
+      if (target instanceof Node && popoverRef.current?.contains(target)) return;
+      setOpenFilterKey(null);
+    }
+    function onResize() {
       setOpenFilterKey(null);
     }
     document.addEventListener("mousedown", onDocMouseDown);
@@ -1256,13 +1297,13 @@ export function Table<T extends Record<string, any>>({
     // Closing on scroll/resize (rather than tracking + repositioning) keeps
     // this simple -- a filter popover doesn't need to survive the page
     // moving underneath it.
-    window.addEventListener("scroll", onReposition, true);
-    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
     return () => {
       document.removeEventListener("mousedown", onDocMouseDown);
       document.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("scroll", onReposition, true);
-      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
     };
   }, [openFilterKey]);
 
@@ -1576,19 +1617,16 @@ export function Table<T extends Record<string, any>>({
               style={{ top: popoverPos.top, left: popoverPos.left, width: popoverPos.width }}
               onClick={(e) => e.stopPropagation()}
             >
-              <select
-                autoFocus
-                className="table-filter-input"
+              <SearchableSelect
+                autoOpen
                 value={filters[col.key] || ""}
-                onChange={(e) =>
-                  setFilters((f) => ({ ...f, [col.key]: e.target.value }))
-                }
-              >
-                <option value="">All values</option>
-                {values.map((value) => (
-                  <option key={value} value={value}>{value}</option>
-                ))}
-              </select>
+                onChange={(value) => setFilters((f) => ({ ...f, [col.key]: value }))}
+                placeholder="All values"
+                options={[
+                  { value: "", label: "All values" },
+                  ...values.map((value) => ({ value, label: value })),
+                ]}
+              />
               {filters[col.key] && (
                 <button
                   type="button"

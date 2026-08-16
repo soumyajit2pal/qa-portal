@@ -25,7 +25,7 @@ interface RequestOptions {
 
 const REQUEST_TIMEOUT_MS = 30_000
 const GET_CACHE_TTL_MS = 8_000
-const RETRYABLE_STATUSES = new Set([502, 503, 504])
+const RETRYABLE_STATUSES = new Set([408, 502, 503, 504])
 const inFlightGets = new Map<string, Promise<unknown>>()
 const completedGets = new Map<string, { value: unknown; expiresAt: number }>()
 let cacheGeneration = 0
@@ -51,10 +51,46 @@ export function subscribeToApiMutations(listener: (path: string) => void): () =>
   return () => mutationListeners.delete(listener)
 }
 
-class HttpError extends Error {
-  constructor(message: string, readonly status: number) {
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly reference?: string,
+  ) {
     super(message)
+    this.name = 'HttpError'
   }
+}
+
+const STATUS_MESSAGES: Record<number, string> = {
+  400: 'The request could not be processed. Review the entered information and try again.',
+  401: 'Your session has expired or is no longer valid. Sign in again and retry the action.',
+  403: 'Your account does not have permission to perform this action.',
+  404: 'The requested record or service endpoint could not be found.',
+  408: 'The server took too long to respond. Please wait a moment and try again.',
+  409: 'The record changed while you were working. Refresh it and try again.',
+  413: 'The submitted file or request is too large.',
+  422: 'Some submitted information is invalid or incomplete.',
+  429: 'Too many requests were received. Wait a moment before trying again.',
+  500: 'The application service encountered an unexpected error.',
+  502: 'QualityOps cannot reach the application service right now. The service may be restarting.',
+  503: 'The application service is temporarily unavailable.',
+  504: 'The application service did not respond before the gateway timeout.',
+}
+
+function looksLikeHtml(value: string, contentType: string): boolean {
+  const normalized = value.trim().toLowerCase()
+  return contentType.toLowerCase().includes('text/html')
+    || normalized.startsWith('<!doctype html')
+    || normalized.startsWith('<html')
+    || /<body[\s>]/i.test(value)
+}
+
+function statusMessage(status: number, statusText: string): string {
+  return STATUS_MESSAGES[status]
+    || (status >= 500
+      ? 'The application service could not complete the request.'
+      : statusText || `The request failed with HTTP status ${status}.`)
 }
 
 function formatBackendReason(detail: unknown): string {
@@ -101,30 +137,40 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
     res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error('The server took too long to respond. Please try again.')
+      throw new HttpError(STATUS_MESSAGES[408], 408)
     }
-    throw error
+    throw new HttpError(
+      'QualityOps could not connect to the application service. Check your network connection and try again.',
+      0,
+    )
   } finally {
     window.clearTimeout(timeout)
   }
 
   if (!res.ok) {
-    let detail: unknown = res.statusText || `Request failed (${res.status})`
+    let detail: unknown = null
+    let reference = res.headers.get('x-request-id') || res.headers.get('x-audit-request-id') || undefined
     try {
       const responseBody = await res.text()
       if (responseBody) {
         try {
           const errJson = JSON.parse(responseBody)
           detail = errJson.detail ?? errJson.message ?? errJson.reason ?? errJson.error ?? errJson
+          reference = errJson.request_id || reference
         } catch {
-          // Some services return a plain-text reason instead of JSON. Keep it
-          // verbatim so the popup never replaces a useful backend explanation
-          // with a generic HTTP status.
-          detail = responseBody
+          // Reverse proxies commonly return branded/full HTML error pages.
+          // Never expose that markup to users. Genuine short plain-text API
+          // explanations are retained for non-5xx responses only.
+          const contentType = res.headers.get('content-type') || ''
+          if (!looksLikeHtml(responseBody, contentType) && res.status < 500) {
+            detail = responseBody.trim().slice(0, 2_000)
+          }
         }
       }
     } catch (e) { /* ignore */ }
-    throw new HttpError(formatBackendReason(detail) || res.statusText || `Request failed (${res.status})`, res.status)
+    const backendReason = formatBackendReason(detail)
+    const message = backendReason || statusMessage(res.status, res.statusText)
+    throw new HttpError(message, res.status, reference)
   }
 
   if (isBlob) return (res.blob() as unknown) as Promise<T>
@@ -170,7 +216,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
         // A single safe retry handles brief proxy/backend restarts. Mutations
         // are never retried because doing so could submit data twice.
         const retryable = method === 'GET' &&
-          (!(error instanceof HttpError) || RETRYABLE_STATUSES.has(error.status))
+          (!(error instanceof HttpError) || error.status === 0 || RETRYABLE_STATUSES.has(error.status))
         if (!retryable) throw error
         await new Promise((resolve) => window.setTimeout(resolve, 350))
         const result = await executeRequest<T>(path, opts)
@@ -289,6 +335,24 @@ export const api = {
     files.forEach((file) => form.append(fileField, file))
     return request<T>(path, { method: 'POST', body: form, formEncoded: true })
   },
+}
+
+export interface BackgroundJob<T = Record<string, unknown>> {
+  id: string
+  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+  progress: number
+  result?: T | null
+  error?: string | null
+  artifact_name?: string | null
+}
+
+export async function waitForJob<T = Record<string, unknown>>(jobId: string): Promise<BackgroundJob<T>> {
+  for (;;) {
+    const job = await api.get<BackgroundJob<T>>(`/api/jobs/${jobId}?poll=${Date.now()}`)
+    if (job.status === 'FAILED') throw new Error(job.error || 'The background operation failed')
+    if (job.status === 'COMPLETED') return job
+    await new Promise((resolve) => window.setTimeout(resolve, 1000))
+  }
 }
 
 export function setToken(token: string | null | undefined): void {

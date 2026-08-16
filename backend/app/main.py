@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 import uuid
 
@@ -10,14 +11,19 @@ from sqlalchemy import text as sqlalchemy_text
 from starlette.background import BackgroundTask, BackgroundTasks
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .logging_config import configure_logging
+from .logging_config import (
+    bind_request_id,
+    configure_logging,
+    deep_logging_enabled,
+    reset_request_id,
+)
 configure_logging()  # must run before `from .database import ...` below, since
                       # database.py itself logs its (masked) DATABASE_URL at
                       # import time -- configure_logging() is idempotent, so
                       # this and database.py's own call are both harmless.
-logger = logging.getLogger("qa_portal")
+logger = logging.getLogger("qa_portal.main")
 
-from .database import Base, engine, SessionLocal, AuditSessionLocal
+from .database import SessionLocal, AuditSessionLocal
 from . import cache, models  # noqa: F401  (models ensures models are registered before create_all)
 from .auth import decode_access_token
 from .audit_service import write_audit
@@ -27,7 +33,7 @@ from .routers import (
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config,
-    pending_approvals, system_settings, defects,
+    pending_approvals, system_settings, defects, jobs,
 )
 
 # Reported: "Custom Fields not working" traced back to an Oracle identifier-
@@ -44,16 +50,16 @@ from .routers import (
 # backend/logs/app.log first, so this exact "why is nothing working, no
 # error anywhere" situation is diagnosable after the fact instead of only
 # live in a terminal someone happened to be watching at that exact moment.
-try:
-    Base.metadata.create_all(bind=engine)
-except Exception:
-    logger.critical(
-        "Database schema creation (Base.metadata.create_all) failed -- the "
-        "application cannot start until this is resolved. Full traceback follows.",
-        exc_info=True,
-    )
-    raise
-logger.info("Database schema verified/created successfully.")
+# try:
+#     Base.metadata.create_all(bind=engine)
+# except Exception:
+#     logger.critical(
+#         "Database schema creation (Base.metadata.create_all) failed -- the "
+#         "application cannot start until this is resolved. Full traceback follows.",
+#         exc_info=True,
+#     )
+#     raise
+# logger.info("Database schema verified/created successfully.")
 
 # INF-001 -- with multiple API worker processes, this module (everything
 # above `app = FastAPI(...)` below) runs once per worker, not once per
@@ -79,9 +85,9 @@ with SessionLocal() as migration_db:
         logger.info("Skipping legacy-layout migration/overdue sweeps -- another worker already holds the startup lock.")
 
 app = FastAPI(
-    title="QualityShield API",
-    description="Backend for the Bank of Maharashtra QualityShield platform "
-                 "(Change Request: Centralized QA Portal Creation, FY 2026-27).",
+    title="QualityOps API",
+    description="Backend for the Bank of Maharashtra QualityOps Enterprise "
+                "Quality Operations Platform.",
     version="1.0.0",
 )
 
@@ -325,8 +331,11 @@ async def application_audit_middleware(request, call_next):
 
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     request.state.audit_request_id = request_id
+    request_log_token = bind_request_id(request_id)
     started = time.perf_counter()
     skip_audit = request.url.path in {"/api/auth/login", "/api/auth/logout"}
+    if deep_logging_enabled():
+        logger.debug("API request started method=%s path=%s", request.method, request.url.path)
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -336,6 +345,14 @@ async def application_audit_middleware(request, call_next):
                 round((time.perf_counter() - started) * 1000, 2),
                 type(exc).__name__,
             )
+        logger.error(
+            "API request failed method=%s path=%s duration_ms=%s error=%s",
+            request.method,
+            request.url.path,
+            round((time.perf_counter() - started) * 1000, 2),
+            type(exc).__name__,
+        )
+        reset_request_id(request_log_token)
         raise
 
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -363,6 +380,22 @@ async def application_audit_middleware(request, call_next):
         response.background = BackgroundTasks(
             [task for task in (response.background, audit_task) if task is not None]
         )
+    if deep_logging_enabled():
+        logger.debug(
+            "API request completed method=%s path=%s status=%s duration_ms=%s",
+            request.method, request.url.path, response.status_code, duration_ms,
+        )
+    else:
+        try:
+            slow_request_ms = max(1, int(os.getenv("SLOW_REQUEST_MS", "2000")))
+        except ValueError:
+            slow_request_ms = 2000
+        if duration_ms >= slow_request_ms:
+            logger.warning(
+                "Slow API request method=%s path=%s status=%s duration_ms=%s threshold_ms=%s",
+                request.method, request.url.path, response.status_code, duration_ms, slow_request_ms,
+            )
+    reset_request_id(request_log_token)
     return response
 
 app.include_router(auth.router)
@@ -387,6 +420,7 @@ app.include_router(audit.router)
 app.include_router(checklist_config.router)
 app.include_router(pending_approvals.router)
 app.include_router(system_settings.router)
+app.include_router(jobs.router)
 
 
 @app.get("/api/health")

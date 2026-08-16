@@ -1,6 +1,6 @@
 # Oracle schema migrations with Alembic
 
-Alembic now tracks QualityShield schema changes in `qap_alembic_version`.
+Alembic tracks QualityOps schema changes in `qap_alembic_version`.
 The connection URL always comes from the same `DATABASE_URL` used by the API;
 credentials are never stored in `alembic.ini`.
 

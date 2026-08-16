@@ -26,12 +26,13 @@ export interface PaginatedListFilters {
 
 const DEFAULT_PAGE_SIZE = 5
 
-export function usePaginatedList<T>(path: string, filters: PaginatedListFilters = {}) {
+export function usePaginatedList<T>(path: string, filters: PaginatedListFilters = {}, options: { cursor?: boolean } = {}) {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [data, setData] = useState<PageOut<T> | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
+  const [cursorByPage, setCursorByPage] = useState<Record<number, number | null>>({ 1: null })
   // Guards against an earlier, slower request's response overwriting a
   // later one's (e.g. typing quickly in a search box outruns the network) --
   // only the response matching the most recently issued request is applied.
@@ -45,8 +46,9 @@ export function usePaginatedList<T>(path: string, filters: PaginatedListFilters 
   // now-nonexistent page instead of the first, most relevant matches.
   useEffect(() => {
     setPage(1)
+    setCursorByPage({ 1: null })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.search, statusKey, filters.department, filters.sortBy, filters.sortOrder, pageSize, path])
+  }, [filters.search, statusKey, filters.department, filters.sortBy, filters.sortOrder, extraKey, pageSize, path])
 
   const load = useCallback(() => {
     // Some lists are scoped to a parent the caller may not have selected yet
@@ -66,6 +68,11 @@ export function usePaginatedList<T>(path: string, filters: PaginatedListFilters 
     const qs = new URLSearchParams()
     qs.set('page', String(page))
     qs.set('page_size', String(pageSize))
+    if (options.cursor) {
+      qs.set('cursor_mode', 'true')
+      const cursor = cursorByPage[page]
+      if (cursor != null) qs.set('cursor', String(cursor))
+    }
     if (filters.search) qs.set('search', filters.search)
     ;(filters.status || []).forEach((value) => qs.append('status', value))
     if (filters.department) qs.set('department', filters.department)
@@ -82,6 +89,11 @@ export function usePaginatedList<T>(path: string, filters: PaginatedListFilters 
       .then((result) => {
         if (thisRequest !== requestId.current) return
         setData(result)
+        if (options.cursor && result.next_cursor != null) {
+          setCursorByPage((current) => current[page + 1] === result.next_cursor
+            ? current
+            : { ...current, [page + 1]: result.next_cursor! })
+        }
         setError(null)
       })
       .catch((err) => {
@@ -92,7 +104,7 @@ export function usePaginatedList<T>(path: string, filters: PaginatedListFilters 
         if (thisRequest === requestId.current) setLoading(false)
       })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, page, pageSize, filters.search, statusKey, filters.department, filters.sortBy, filters.sortOrder, extraKey])
+  }, [path, page, pageSize, filters.search, statusKey, filters.department, filters.sortBy, filters.sortOrder, extraKey, options.cursor, cursorByPage[page]])
 
   useEffect(() => { load() }, [load])
 
@@ -106,7 +118,9 @@ export function usePaginatedList<T>(path: string, filters: PaginatedListFilters 
     hasPrevious: data?.has_previous || false,
     loading,
     error,
-    setPage,
+    setPage: (nextPage: number) => {
+      if (!options.cursor || nextPage <= page || cursorByPage[nextPage] !== undefined) setPage(nextPage)
+    },
     setPageSize,
     reload: load,
   }

@@ -4,9 +4,9 @@ import shutil
 import uuid
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from .. import models, schemas, pagination
@@ -16,7 +16,8 @@ from ..database import get_db
 from ..deps import get_current_user, require_roles, dashboard_department_scope
 from ..constants import (
     Role,
-    FUNCTIONAL_BUCKET_TYPES, GatewayStatus, GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
+    REQUEST_TYPES, FUNCTIONAL_BUCKET_TYPES, QAStatus, GatewayStatus,
+    GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
     POST_SIT_ENVIRONMENTS,
     validate_environment_promotion, validate_target_release_date,
 )
@@ -94,7 +95,13 @@ def _promote_draft_upload_folder(db: Session, req: "models.QARequest") -> None:
 
 
 _GATEWAY_PRIVATE_STATUSES = (GatewayStatus.DRAFT, GatewayStatus.CANCELLED)
-
+_BUG_FIX_SOURCE_STATUSES = (
+    QAStatus.QA_COMPLETED,
+    QAStatus.QA_SIGNOFF_PENDING,
+    QAStatus.QA_SIGNED_OFF,
+    QAStatus.REQUESTER_VERIFICATION,
+    QAStatus.CLOSED,
+)
 
 def _can_view_gateway(obj: "models.QARequest", user: models.User) -> bool:
     """Reported bug (follow-up to the Draft-only version of this check):
@@ -110,7 +117,62 @@ def _can_view_gateway(obj: "models.QARequest", user: models.User) -> bool:
     every other request type in this app."""
     if obj.status not in _GATEWAY_PRIVATE_STATUSES:
         return True
-    return obj.requester_id == user.id or user.has_role(Role.ADMIN)
+    delegation = obj.active_delegation
+    return (obj.requester_id == user.id or user.has_role(Role.ADMIN)
+            or bool(delegation and delegation.assigned_to_id == user.id))
+
+
+def _is_active_delegate(obj: "models.QARequest", user: models.User) -> bool:
+    delegation = obj.active_delegation
+    return bool(delegation and delegation.assigned_to_id == user.id)
+
+
+def _can_edit_draft(obj: "models.QARequest", user: models.User) -> bool:
+    if obj.status != GatewayStatus.DRAFT:
+        return False
+    if user.has_role(Role.ADMIN):
+        return True
+    delegation = obj.active_delegation
+    if delegation:
+        return delegation.assigned_to_id == user.id
+    return obj.requester_id == user.id
+
+
+def _validate_request_types(request_types: list[str]) -> None:
+    unknown = sorted({value for value in request_types if value not in REQUEST_TYPES})
+    if unknown:
+        raise HTTPException(400, f"Unsupported Request Type(s): {', '.join(unknown)}")
+
+
+def _validated_bug_fix_source(db: Session, source_request_id: Optional[str], change_type: Optional[str],
+                              application_name: Optional[str], department: Optional[str]) -> Optional[str]:
+    """Normalize and validate the optional Bug Fix traceability reference.
+
+    Only a raised gateway for the same application/department whose linked
+    Functional Testing workflow reached CLOSED is eligible. Changing away
+    from Bug Fix clears any stale reference automatically.
+    """
+    if change_type != "Bug Fix":
+        return None
+    source = (source_request_id or "").strip().upper()
+    if not source:
+        return None
+    match = (db.query(models.QARequest.id)
+             .join(models.FunctionalRequest,
+                   models.FunctionalRequest.qa_request_id == models.QARequest.id)
+             .filter(
+                 models.QARequest.request_id == source,
+                 models.QARequest.department == department,
+                 func.upper(models.QARequest.application_name) == (application_name or "").strip().upper(),
+                 models.FunctionalRequest.status.in_(_BUG_FIX_SOURCE_STATUSES),
+             ).first())
+    if not match:
+        raise HTTPException(
+            400,
+            "Previous Completed Request ID must reference a Functional Testing request where testing is completed "
+            "for the same application and department.",
+        )
+    return source
 
 
 def _raise_child_to_sm(db: Session, child, entity_type: str, qa_request: "models.QARequest", current_user: models.User):
@@ -310,6 +372,7 @@ def _unstash_draft_details(raw: Optional[str]):
 def list_requests(params: pagination.PageParams = Depends(),
                    application_name: Optional[str] = None,
                    requester_id: Optional[int] = None,
+                   assigned_to_me: bool = False,
                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """SRS 7.2 (PAG-001..009) -- server-side paginated, database-filtered
     list. `application_name` stays as its own module-specific param (an
@@ -338,7 +401,15 @@ def list_requests(params: pagination.PageParams = Depends(),
         selectinload(models.QARequest.linked_sast_requests),
         selectinload(models.QARequest.linked_dast_requests),
         selectinload(models.QARequest.linked_performance_requests),
+        selectinload(models.QARequest.active_delegation).selectinload(models.QARequestDelegation.assigned_by),
+        selectinload(models.QARequest.active_delegation).selectinload(models.QARequestDelegation.assigned_to),
+        selectinload(models.QARequest.active_delegation).selectinload(models.QARequestDelegation.closed_by),
     )
+    delegated_to_user = models.QARequest.delegations.any(and_(
+        models.QARequestDelegation.status == "ACTIVE",
+        models.QARequestDelegation.target_type == "QA_REQUEST",
+        models.QARequestDelegation.assigned_to_id == current_user.id,
+    ))
     q = pagination.apply_status_filter(q, params, models.QARequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
     if application_name:
@@ -360,7 +431,9 @@ def list_requests(params: pagination.PageParams = Depends(),
     # include only records the current user is authorized to access" holds.
     scope = dashboard_department_scope(current_user)
     if scope:
-        q = q.filter(models.QARequest.department.in_(scope))
+        q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
+    if assigned_to_me:
+        q = q.filter(delegated_to_user)
     # Broad "requests or IDs" search (topbar search box and the QA Requests
     # list's own search field) -- matches Request ID, Application Name, or
     # The consolidated CR/EPIC identifier is stored in cr_number.
@@ -374,6 +447,7 @@ def list_requests(params: pagination.PageParams = Depends(),
         q = q.filter(or_(
             models.QARequest.status.notin_(_GATEWAY_PRIVATE_STATUSES),
             models.QARequest.requester_id == current_user.id,
+            delegated_to_user,
         ))
     q = pagination.apply_sort(q, params, sortable={
         "created_at": models.QARequest.created_at,
@@ -386,14 +460,335 @@ def list_requests(params: pagination.PageParams = Depends(),
     return pagination.to_page_response(result, params)
 
 
+@router.get("/bug-fix-source-options")
+def bug_fix_source_options(application_name: str = Query(..., min_length=1),
+                           department: str = Query(..., min_length=1),
+                           limit: int = Query(100, ge=1, le=200),
+                           db: Session = Depends(get_db),
+                           current_user: models.User = Depends(get_current_user)):
+    """Recent completed Functional requests eligible as a Bug Fix source.
+
+    This compact endpoint exists specifically for the shared searchable
+    selector; it does not load documents, checklists, findings, or other
+    child collections from the full QA Request detail payload.
+    """
+    q = (db.query(models.QARequest, models.FunctionalRequest)
+         .join(models.FunctionalRequest,
+               models.FunctionalRequest.qa_request_id == models.QARequest.id)
+         .filter(
+             models.QARequest.request_id.isnot(None),
+             func.upper(models.QARequest.application_name) == application_name.strip().upper(),
+             models.QARequest.department == department,
+             models.FunctionalRequest.status.in_(_BUG_FIX_SOURCE_STATUSES),
+         ))
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        q = q.filter(models.QARequest.department.in_(scope))
+    rows = q.order_by(models.FunctionalRequest.updated_at.desc()).limit(limit).all()
+    return [{
+        "request_id": gateway.request_id,
+        "functional_request_id": functional.request_id,
+        "application_name": gateway.application_name,
+        "cr_number": gateway.cr_number,
+        "completed_at": functional.updated_at,
+    } for gateway, functional in rows]
+
+
 @router.get("/{req_id}", response_model=schemas.QARequestOut)
 def get_request(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.QARequest).get(req_id)
+    obj = (db.query(models.QARequest).options(
+        selectinload(models.QARequest.active_delegation).selectinload(models.QARequestDelegation.assigned_by),
+        selectinload(models.QARequest.active_delegation).selectinload(models.QARequestDelegation.assigned_to),
+        selectinload(models.QARequest.active_delegation).selectinload(models.QARequestDelegation.closed_by),
+    ).filter(models.QARequest.id == req_id).first())
     if not obj:
         raise HTTPException(404, "QA Request not found")
     if not _can_view_gateway(obj, current_user):
         raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
     return obj
+
+
+@router.post("/{req_id}/delegations", response_model=schemas.QARequestOut)
+def assign_for_input(req_id: int, payload: schemas.QARequestDelegationCreate,
+                     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # Serialize assignment changes on the parent request so two near-simultaneous
+    # clicks cannot both observe "no active delegation" and create duplicates.
+    obj = (db.query(models.QARequest)
+           .filter(models.QARequest.id == req_id)
+           .with_for_update()
+           .first())
+    if not obj:
+        raise HTTPException(404, "QA Request not found")
+    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Only the requester or an admin can delegate this request")
+    if obj.status != GatewayStatus.DRAFT:
+        raise HTTPException(400, "Only a Draft QA Request gateway can be delegated here")
+    if obj.active_delegation:
+        raise HTTPException(400, "This request already has an active delegation")
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(400, "Assignment reason is required")
+    if len(reason) > 1000:
+        raise HTTPException(400, "Assignment reason cannot exceed 1,000 characters")
+    assignee = db.query(models.User).filter(
+        models.User.id == payload.assigned_to_id,
+        models.User.is_active == True,  # noqa: E712
+    ).first()
+    if not assignee:
+        raise HTTPException(400, "Select an active user")
+    if assignee.id == obj.requester_id:
+        raise HTTPException(400, "The requester already owns this request; select another user")
+    delegation = models.QARequestDelegation(
+        qa_request_id=obj.id,
+        target_type="QA_REQUEST",
+        target_id=obj.id,
+        assigned_by_id=current_user.id,
+        assigned_to_id=assignee.id,
+        assignment_reason=reason,
+        status="ACTIVE",
+    )
+    db.add(delegation)
+    obj.updated_at = models.now()
+    _log(db, obj.id, "Delegation", current_user, "Assigned for Input",
+         f"Assigned to {assignee.full_name}. Reason: {reason}")
+    db.commit()
+    return get_request(req_id, db, current_user)
+
+
+@router.post("/{req_id}/delegations/return", response_model=schemas.QARequestOut)
+def return_delegated_request(req_id: int, payload: schemas.QARequestDelegationClose,
+                             db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = (db.query(models.QARequest)
+           .filter(models.QARequest.id == req_id)
+           .with_for_update()
+           .first())
+    if not obj:
+        raise HTTPException(404, "QA Request not found")
+    delegation = obj.active_delegation
+    if not delegation or delegation.assigned_to_id != current_user.id:
+        raise HTTPException(403, "Only the currently assigned user can return this request")
+    comments = (payload.comments or "").strip()
+    if not comments:
+        raise HTTPException(400, "Return comments are required")
+    if len(comments) > 1000:
+        raise HTTPException(400, "Return comments cannot exceed 1,000 characters")
+    delegation.status = "RETURNED"
+    delegation.closed_by_id = current_user.id
+    delegation.returned_at = models.now()
+    delegation.return_comments = comments
+    obj.updated_at = models.now()
+    _log(db, obj.id, "Delegation", current_user, "Returned to Requester", comments)
+    db.commit()
+    # The assignee's private-Draft access intentionally ends at this commit,
+    # so a normal get_request() would now reject them. Returning the already
+    # authorized action target lets the UI acknowledge the handoff once and
+    # then close the detail drawer.
+    db.refresh(obj)
+    return obj
+
+
+@router.post("/{req_id}/delegations/recall", response_model=schemas.QARequestOut)
+def recall_delegated_request(req_id: int, payload: schemas.QARequestDelegationClose,
+                             db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = (db.query(models.QARequest)
+           .filter(models.QARequest.id == req_id)
+           .with_for_update()
+           .first())
+    if not obj:
+        raise HTTPException(404, "QA Request not found")
+    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Only the requester or an admin can recall this delegation")
+    delegation = obj.active_delegation
+    if not delegation:
+        raise HTTPException(400, "This request has no active delegation")
+    comments = (payload.comments or "").strip()
+    if not comments:
+        raise HTTPException(400, "Recall reason is required")
+    if len(comments) > 1000:
+        raise HTTPException(400, "Recall reason cannot exceed 1,000 characters")
+    delegation.status = "RECALLED"
+    delegation.closed_by_id = current_user.id
+    delegation.returned_at = models.now()
+    delegation.return_comments = comments
+    obj.updated_at = models.now()
+    _log(db, obj.id, "Delegation", current_user, "Delegation Recalled", comments)
+    db.commit()
+    return get_request(req_id, db, current_user)
+
+
+# Child-workflow delegation is deliberately separate from the gateway's
+# Draft delegation above.  It targets the exact returned request, so an
+# assignment on a Functional request cannot leak edit permission into a
+# sibling SAST/DAST/Performance request sharing the same gateway.
+_CHILD_DELEGATION_TARGETS = {
+    "FUNCTIONAL": (
+        models.FunctionalRequest,
+        {QAStatus.DRAFT, QAStatus.RETURNED_BY_SM, QAStatus.SM_REJECTED,
+         QAStatus.RETURNED_BY_DEPARTMENT_HEAD, QAStatus.RETURNED_BY_QA_LEAD},
+        "FUNCTIONAL_REQUEST",
+    ),
+    "SAST": (
+        models.SASTRequest,
+        {"DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"},
+        "SAST",
+    ),
+    "DAST": (
+        models.DASTRequest,
+        {"DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD"},
+        "DAST",
+    ),
+    "PERFORMANCE": (
+        models.PerformanceRequest,
+        {"DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_ENGINEER"},
+        "PERFORMANCE",
+    ),
+}
+
+
+def _child_delegation_target(db: Session, qa_request_id: int, target_type: str,
+                             target_id: int, *, lock: bool = False):
+    normalized = target_type.strip().upper()
+    config = _CHILD_DELEGATION_TARGETS.get(normalized)
+    if not config:
+        raise HTTPException(400, "Delegation target must be Functional, SAST, DAST, or Performance")
+    model, requester_statuses, audit_entity_type = config
+    query = db.query(model).filter(model.id == target_id, model.qa_request_id == qa_request_id)
+    if lock:
+        query = query.with_for_update()
+    target = query.first()
+    if not target:
+        raise HTTPException(404, f"{normalized.title()} request not found under this QA Request")
+    return normalized, target, requester_statuses, audit_entity_type
+
+
+def _active_child_delegation(db: Session, target_type: str, target_id: int, *, lock: bool = False):
+    query = db.query(models.QARequestDelegation).filter(
+        models.QARequestDelegation.target_type == target_type,
+        models.QARequestDelegation.target_id == target_id,
+        models.QARequestDelegation.status == "ACTIVE",
+    )
+    if lock:
+        query = query.with_for_update()
+    return query.first()
+
+
+def _log_child_delegation(db: Session, entity_type: str, entity_id: int,
+                          user: models.User, decision: str, comments: str) -> None:
+    db.add(models.ApprovalAction(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        step_name="Delegation",
+        actor_id=user.id,
+        actor_role=user.roles_csv,
+        decision=decision,
+        comments=comments,
+    ))
+
+
+@router.post("/{qa_request_id}/child-delegations/{target_type}/{target_id}",
+             response_model=schemas.QARequestDelegationOut)
+def assign_child_for_input(qa_request_id: int, target_type: str, target_id: int,
+                           payload: schemas.QARequestDelegationCreate,
+                           db: Session = Depends(get_db),
+                           current_user: models.User = Depends(get_current_user)):
+    normalized, target, requester_statuses, audit_entity_type = _child_delegation_target(
+        db, qa_request_id, target_type, target_id, lock=True,
+    )
+    if target.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Only the requester or an admin can delegate this request")
+    if target.status not in requester_statuses:
+        raise HTTPException(400, "Delegation is available only while this request is with the requester for input or correction")
+    if _active_child_delegation(db, normalized, target.id, lock=True):
+        raise HTTPException(400, "This request already has an active delegation")
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(400, "Assignment reason is required")
+    if len(reason) > 1000:
+        raise HTTPException(400, "Assignment reason cannot exceed 1,000 characters")
+    assignee = db.query(models.User).filter(
+        models.User.id == payload.assigned_to_id,
+        models.User.is_active == True,  # noqa: E712
+    ).first()
+    if not assignee:
+        raise HTTPException(400, "Select an active user")
+    if assignee.id == target.requester_id:
+        raise HTTPException(400, "The requester already owns this request; select another user")
+    delegation = models.QARequestDelegation(
+        qa_request_id=qa_request_id,
+        target_type=normalized,
+        target_id=target.id,
+        assigned_by_id=current_user.id,
+        assigned_to_id=assignee.id,
+        assignment_reason=reason,
+        status="ACTIVE",
+    )
+    db.add(delegation)
+    target.updated_at = models.now()
+    _log_child_delegation(
+        db, audit_entity_type, target.id, current_user, "Assigned for Input",
+        f"Assigned to {assignee.full_name}. Reason: {reason}",
+    )
+    db.commit()
+    db.refresh(delegation)
+    return delegation
+
+
+@router.post("/{qa_request_id}/child-delegations/{target_type}/{target_id}/return",
+             response_model=schemas.QARequestDelegationOut)
+def return_child_delegation(qa_request_id: int, target_type: str, target_id: int,
+                            payload: schemas.QARequestDelegationClose,
+                            db: Session = Depends(get_db),
+                            current_user: models.User = Depends(get_current_user)):
+    normalized, target, _, audit_entity_type = _child_delegation_target(
+        db, qa_request_id, target_type, target_id, lock=True,
+    )
+    delegation = _active_child_delegation(db, normalized, target.id, lock=True)
+    if not delegation or delegation.assigned_to_id != current_user.id:
+        raise HTTPException(403, "Only the currently assigned user can return this request")
+    comments = (payload.comments or "").strip()
+    if not comments:
+        raise HTTPException(400, "Return comments are required")
+    if len(comments) > 1000:
+        raise HTTPException(400, "Return comments cannot exceed 1,000 characters")
+    delegation.status = "RETURNED"
+    delegation.closed_by_id = current_user.id
+    delegation.returned_at = models.now()
+    delegation.return_comments = comments
+    target.updated_at = models.now()
+    _log_child_delegation(db, audit_entity_type, target.id, current_user, "Returned to Requester", comments)
+    db.commit()
+    db.refresh(delegation)
+    return delegation
+
+
+@router.post("/{qa_request_id}/child-delegations/{target_type}/{target_id}/recall",
+             response_model=schemas.QARequestDelegationOut)
+def recall_child_delegation(qa_request_id: int, target_type: str, target_id: int,
+                            payload: schemas.QARequestDelegationClose,
+                            db: Session = Depends(get_db),
+                            current_user: models.User = Depends(get_current_user)):
+    normalized, target, _, audit_entity_type = _child_delegation_target(
+        db, qa_request_id, target_type, target_id, lock=True,
+    )
+    if target.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Only the requester or an admin can recall this delegation")
+    delegation = _active_child_delegation(db, normalized, target.id, lock=True)
+    if not delegation:
+        raise HTTPException(400, "This request has no active delegation")
+    comments = (payload.comments or "").strip()
+    if not comments:
+        raise HTTPException(400, "Recall reason is required")
+    if len(comments) > 1000:
+        raise HTTPException(400, "Recall reason cannot exceed 1,000 characters")
+    delegation.status = "RECALLED"
+    delegation.closed_by_id = current_user.id
+    delegation.returned_at = models.now()
+    delegation.return_comments = comments
+    target.updated_at = models.now()
+    _log_child_delegation(db, audit_entity_type, target.id, current_user, "Delegation Recalled", comments)
+    db.commit()
+    db.refresh(delegation)
+    return delegation
 
 
 def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", request_types: list,
@@ -671,6 +1066,7 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # primary (first-assigned) one when the client doesn't send a choice.
     data["department"] = _resolve_requester_department(current_user, payload.department)
     request_types = data.pop("request_types", [])
+    _validate_request_types(request_types)
     checked_items = set(data.pop("checked_items", []) or [])
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself
     # -- they're stashed (see draft_child_details) until submit time, when
@@ -713,6 +1109,13 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # resolved after flush, once this row has an id to link back to.
     application_name_in = data.pop("application_name")
     name_upper = (application_name_in or "").strip().upper()
+    data["bug_fix_source_request_id"] = _validated_bug_fix_source(
+        db,
+        data.get("bug_fix_source_request_id"),
+        data.get("change_type"),
+        name_upper,
+        data.get("department"),
+    )
     # Target Promotion Environment must sit strictly later than Deployment
     # Environment in the SIT -> UAT -> Pre-Production -> Production pipeline
     # -- reported directly (e.g. Deployment=UAT must force
@@ -750,8 +1153,10 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        raise HTTPException(403, "Only the requester or an admin can edit this request")
+    if not _can_edit_draft(obj, current_user):
+        if obj.active_delegation and obj.requester_id == current_user.id:
+            raise HTTPException(403, "This request is delegated and locked for editing until it is returned or recalled")
+        raise HTTPException(403, "Only the requester, active delegate, or an admin can edit this Draft")
     if obj.status not in GATEWAY_EDITABLE_STATUSES:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
     # GATEWAY_EDITABLE_STATUSES is Draft-only, so no linked child request
@@ -765,8 +1170,15 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     # plain re-save of an unrelated field leaves it untouched, same pattern
     # as application_name_in below).
     if "department" in data:
-        data["department"] = _resolve_requester_department(current_user, data["department"])
+        if _is_active_delegate(obj, current_user) and not current_user.has_role(Role.ADMIN):
+            if (data["department"] or "").strip() != (obj.department or "").strip():
+                raise HTTPException(403, "A delegated user cannot change the request department")
+            data["department"] = obj.department
+        else:
+            data["department"] = _resolve_requester_department(current_user, data["department"])
     request_types = data.pop("request_types", None)
+    if request_types is not None:
+        _validate_request_types(request_types)
     checked_items = data.pop("checked_items", None)
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself
     # -- merge them into the stashed draft_child_details below instead of
@@ -799,6 +1211,17 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     # untouched entirely (re-resolving an unchanged, already-APPROVED name
     # would be a harmless no-op anyway, but there's no reason to bother).
     application_name_in = data.pop("application_name", None)
+    final_application_name = ((application_name_in or "").strip().upper()
+                              if application_name_in is not None else obj.application_name)
+    final_change_type = data.get("change_type", obj.change_type)
+    final_bug_fix_source = data.get("bug_fix_source_request_id", obj.bug_fix_source_request_id)
+    data["bug_fix_source_request_id"] = _validated_bug_fix_source(
+        db,
+        final_bug_fix_source,
+        final_change_type,
+        final_application_name,
+        data.get("department", obj.department),
+    )
     # Same Deployment/Target Promotion Environment ordering rule as
     # create_request -- resolved against whichever of the two fields wasn't
     # part of this particular (partial, exclude_unset=True) edit, since
@@ -869,6 +1292,8 @@ def cancel_request(req_id: int, db: Session = Depends(get_db), current_user: mod
         raise HTTPException(404, "QA Request not found")
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can cancel this request")
+    if obj.active_delegation:
+        raise HTTPException(400, "Recall the active delegation before cancelling this request")
     # The gateway can only be cancelled while still in Draft (i.e. before it's
     # ever been raised) -- once raised, its linked child request(s) have their
     # own independent workflows and are each cancelled/rejected on their own.
@@ -937,6 +1362,8 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "QA Request not found")
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this request")
+    if obj.active_delegation:
+        raise HTTPException(400, "The assigned user must return the request, or the requester must recall it, before submission")
     if obj.status != GatewayStatus.DRAFT:
         raise HTTPException(400, f"'Submit' requires status 'DRAFT' (currently '{obj.status}')")
     if obj.application_master_status == "REJECTED":
@@ -952,12 +1379,20 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
             f"Cannot raise -- the Application Name '{obj.application_name}' was rejected. Edit this request "
             "and choose a different Application Name before raising.",
         )
+    request_types = obj.request_types.split(",") if obj.request_types else []
+    _validate_request_types(request_types)
+    obj.bug_fix_source_request_id = _validated_bug_fix_source(
+        db,
+        obj.bug_fix_source_request_id,
+        obj.change_type,
+        obj.application_name,
+        obj.department,
+    )
     # The one and only place request_id is ever assigned -- see its column
     # comment on models.QARequest. A Draft that gets cancelled instead of
     # raised never reaches this line, so it never burns a real ID.
     if not obj.request_id:
         obj.request_id = models.gen_id(models.BUSINESS_ID_PREFIXES["QA_REQUEST"], db)
-    request_types = obj.request_types.split(",") if obj.request_types else []
     # This is the one and only point where linked child request(s) actually
     # get created -- everything collected on the wizard's SAST/DAST/
     # Performance steps (and the readiness-checklist self-declaration ticks)
@@ -1113,6 +1548,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
             ("Application Owner", obj.application_owner),
             ("CR Number/EPIC Number", obj.cr_number),
             ("Change Type", obj.change_type),
+            ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type == "Bug Fix" else None),
             ("Vendor / SI Partner", obj.vendor_si_partner),
             ("Technology Stack", obj.technology_stack),
         ]),
@@ -1124,8 +1560,9 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
             ("Target Release Date", obj.target_release_date),
         ]),
         ("Request Details", [
-            ("Request Type(s)", obj.request_types),
-            ("Other Request Type", obj.request_type_other),
+            ("Request Type(s)", ",".join(
+                value for value in (obj.request_types or "").split(",") if value in REQUEST_TYPES
+            )),
             ("Remarks", obj.remarks),
             ("Raised On", obj.created_at),
         ]),
@@ -1172,10 +1609,8 @@ def _draft_request_for_evidence(db: Session, req_id: int, current_user: models.U
     if not _can_view_gateway(req, current_user):
         raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
     if require_editable:
-        if req.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-            raise HTTPException(403, "Only the requester or an admin can attach checklist evidence")
-        if req.status != GatewayStatus.DRAFT:
-            raise HTTPException(400, "Checklist evidence can only be changed while the QA Request is in Draft")
+        if not _can_edit_draft(req, current_user):
+            raise HTTPException(403, "Only the current Draft editor can change checklist evidence")
     return req
 
 
@@ -1297,8 +1732,11 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
-    if req.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        raise HTTPException(403, "Only this request's own requester or an admin can upload documents")
+    can_upload = (current_user.has_role(Role.ADMIN)
+                  or _is_active_delegate(req, current_user)
+                  or (req.requester_id == current_user.id and not req.active_delegation))
+    if not can_upload:
+        raise HTTPException(403, "Only the requester, active delegate, or an admin can upload documents")
     # Reported bug: uploads were still accepted on a Cancelled gateway, which
     # has no further workflow at all -- there's nothing left to attach
     # evidence to. Raised (and Draft/Submitted) still allow it, matching
@@ -1367,6 +1805,13 @@ def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
     # can't call doc_store.delete_document() -- only reuses doc_store's
     # can_delete_document() for the permission check, which is duck-typed
     # (just needs .uploaded_by_id) and applies here unchanged.
+    req = db.query(models.QARequest).get(req_id)
+    if not req:
+        raise HTTPException(404, "QA Request not found")
+    if req.active_delegation and req.requester_id == current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "This request is delegated and read-only until it is returned or recalled")
+    if not _can_view_gateway(req, current_user):
+        raise HTTPException(403, "You do not have access to this request")
     doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
     if not doc:
         raise HTTPException(404, "Document not found")

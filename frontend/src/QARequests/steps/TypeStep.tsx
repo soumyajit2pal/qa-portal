@@ -33,14 +33,6 @@ export function TypeStep({ form, set }: Props) {
           )
         })}
       </div>
-      {form.request_types.includes('Others') && (
-        <input
-          placeholder="Please specify other request type"
-          value={form.request_type_other}
-          onChange={(e) => set('request_type_other', e.target.value)}
-          style={{ marginTop: 10 }}
-        />
-      )}
       {form.request_types.length > 0 && (
         <p className="muted small" style={{ marginTop: 10 }}>
           This QA Request is only an intake form. 

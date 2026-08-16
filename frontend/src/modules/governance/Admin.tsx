@@ -194,8 +194,8 @@ function ResetPasswordModal({ userRow, onClose, onDone }: { userRow: UserOut; on
   )
 }
 
-function ManageUserAccessModal({ userRow, departmentOptions, onClose, onDone }: {
-  userRow: UserOut; departmentOptions: string[]; onClose: () => void; onDone: () => void
+function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onClose, onDone }: {
+  userRow: UserOut; currentUserId: number; departmentOptions: string[]; onClose: () => void; onDone: () => void
 }) {
   const [departments, setDepartments] = useState<string[]>(userRow.departments?.length ? userRow.departments : (userRow.department ? [userRow.department] : []))
   const [roles, setRoles] = useState<string[]>(userRow.roles || [])
@@ -204,6 +204,7 @@ function ManageUserAccessModal({ userRow, departmentOptions, onClose, onDone }: 
   const [departmentSearch, setDepartmentSearch] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
+  const isOwnAdminAccount = userRow.id === currentUserId && (userRow.roles || []).includes('ADMIN')
 
   async function save(e: React.FormEvent) {
     e.preventDefault()
@@ -224,6 +225,7 @@ function ManageUserAccessModal({ userRow, departmentOptions, onClose, onDone }: 
   }
 
   function toggleRole(role: string) {
+    if (isOwnAdminAccount && role === 'ADMIN') return
     setRoles((values) => values.includes(role) ? values.filter((value) => value !== role) : [...values, role])
   }
 
@@ -248,11 +250,15 @@ function ManageUserAccessModal({ userRow, departmentOptions, onClose, onDone }: 
       </section>
       <section className="access-picker-panel">
         <header><div><small>02 · Permission profile</small><h3>Roles</h3><p>Assign the responsibilities this user can perform.</p></div><strong>{roles.length} selected</strong></header>
-        <div className="access-role-options">{ALL_ROLES.map((role) => <label className={roles.includes(role) ? 'selected' : ''} key={role}><input type="checkbox" checked={roles.includes(role)} disabled={busy} onChange={() => toggleRole(role)} /><span>{ROLE_LABELS[role] || role}</span></label>)}</div>
+        {isOwnAdminAccount && <p className="muted small">Your own Administrator access is protected. Only another Administrator can remove it or deactivate this account.</p>}
+        <div className="access-role-options">{ALL_ROLES.map((role) => {
+          const protectedSelfAdminRole = isOwnAdminAccount && role === 'ADMIN'
+          return <label className={`${roles.includes(role) ? 'selected' : ''} ${protectedSelfAdminRole ? 'disabled' : ''}`} key={role} title={protectedSelfAdminRole ? 'Another Administrator must remove your Administrator access.' : undefined}><input type="checkbox" checked={roles.includes(role)} disabled={busy || protectedSelfAdminRole} onChange={() => toggleRole(role)} /><span>{ROLE_LABELS[role] || role}</span></label>
+        })}</div>
       </section>
       <div className="access-manage-controls">
         <label><input type="checkbox" checked={adminManagedOnly} onChange={(event) => setAdminManagedOnly(event.target.checked)} disabled={busy} /><span><strong>Admin-managed account</strong><small>Hide from local department coordinator rosters.</small></span></label>
-        <label><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} disabled={busy} /><span><strong>Active account</strong><small>User can sign in and access permitted modules.</small></span></label>
+        <label title={isOwnAdminAccount ? 'Another Administrator must deactivate your account.' : undefined}><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} disabled={busy || isOwnAdminAccount} /><span><strong>Active account</strong><small>{isOwnAdminAccount ? 'Another Administrator must deactivate your account.' : 'User can sign in and access permitted modules.'}</small></span></label>
       </div>
       <ErrorText error={error} />
       <div className="modal-actions access-manage-actions"><span>Changes apply after saving.</span><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save access'}</button></div>
@@ -373,7 +379,7 @@ function UploadStorageCard() {
       </p>
       <form onSubmit={save} className="storage-setting-form">
         <Field label="Upload directory path">
-          <input required value={path} onChange={(e) => { setPath(e.target.value); setSaved(false) }} placeholder="/data/qa-portal/uploads" />
+          <input required value={path} onChange={(e) => { setPath(e.target.value); setSaved(false) }} placeholder="/data/qualityops/uploads" />
         </Field>
         <div className="storage-setting-actions">
           <button type="submit" className="btn btn-primary" disabled={busy || !path.trim() || path.trim() === settings?.upload_path}>
@@ -759,7 +765,7 @@ export default function Admin() {
           departmentOptions={departmentOptions}
         />
       )}
-      {accessTarget && <ManageUserAccessModal userRow={accessTarget} departmentOptions={departmentOptions} onClose={() => setAccessTarget(null)} onDone={() => { setAccessTarget(null); refreshUsers() }} />}
+      {accessTarget && <ManageUserAccessModal userRow={accessTarget} currentUserId={user!.id} departmentOptions={departmentOptions} onClose={() => setAccessTarget(null)} onDone={() => { setAccessTarget(null); refreshUsers() }} />}
       {resetTarget && (
         <ResetPasswordModal
           userRow={resetTarget}

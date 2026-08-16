@@ -32,17 +32,5 @@ VOLUME ["/app/app/uploads"]
 
 EXPOSE 8000
 
-# INF-001 -- worker count is configurable via WEB_CONCURRENCY (default 4, a
-# reasonable starting point for a departmental app; tune per deployment
-# based on CPU cores and DB_POOL_SIZE -- each worker gets its own DB
-# connection pool, see database.py's own pool-sizing comment). Shell form
-# (not exec-form array) so the env var actually expands; `exec` keeps
-# uvicorn as PID 1 so it still receives SIGTERM directly for a clean
-# shutdown, same as the previous exec-form CMD.
-#
-# Multiple workers means multiple separate processes -- see main.py's
-# startup-lock comment for why REDIS_URL should be set once this is above 1
-# worker, so one-time startup work (schema migration sweep and other
-# sweep) runs once per deployment rather than once per worker.
 ENV WEB_CONCURRENCY=4
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY}"]

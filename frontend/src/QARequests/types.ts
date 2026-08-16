@@ -43,10 +43,9 @@ export function blankDastComponent(): DastComponent {
 // pre-filled from an existing request being edited).
 export const EMPTY_FORM = {
   department: '', application_name: '', application_owner: '', cr_number: '',
-  epic_number: '', change_type: 'New', vendor_si_partner: '', technology_stack: '',
+  epic_number: '', change_type: 'New', bug_fix_source_request_id: '', vendor_si_partner: '', technology_stack: '',
   release_version: '', build_number: '', environment: 'SIT', target_promotion_environment: 'UAT',
   request_types: [] as string[],
-  request_type_other: '',
   target_release_date: '', remarks: '', checked_items: [] as string[],
   // Classification (Priority + Risk Rating/Category) is collected
   // independently per request type -- see the 'functional' step and the top

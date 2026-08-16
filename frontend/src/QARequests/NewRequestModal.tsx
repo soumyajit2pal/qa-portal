@@ -23,6 +23,7 @@ interface NewRequestModalProps {
   onClose: () => void
   onCreated: (req: QARequestOut) => void
   editing?: QARequestOut
+  delegatedEditing?: boolean
 }
 
 // Builds the wizard's initial form state -- blank for a brand-new request,
@@ -40,14 +41,16 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     cr_number: editing.cr_number || editing.epic_number || '',
     epic_number: '',
     change_type: editing.change_type || 'New',
+    bug_fix_source_request_id: editing.bug_fix_source_request_id || '',
     vendor_si_partner: editing.vendor_si_partner || '',
     technology_stack: editing.technology_stack || '',
     release_version: editing.release_version || '',
     build_number: editing.build_number || '',
     environment: editing.environment || 'SIT',
     target_promotion_environment: editing.target_promotion_environment || 'UAT',
-    request_types: editing.request_types ? editing.request_types.split(',') : [],
-    request_type_other: editing.request_type_other || '',
+    request_types: editing.request_types
+      ? editing.request_types.split(',').filter((type) => type !== 'Others')
+      : [],
     // Prefer the linked child request's own live value (the source of truth
     // once it's been raised) -- fall back to whatever was staged on this
     // still-Draft gateway's draft_classification (see
@@ -119,7 +122,7 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
   }
 }
 
-export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModalProps) {
+export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing = false }: NewRequestModalProps) {
   const { user } = useAuth()
   // 2026-08 "one user can be on multiple departments" CR, follow-up: the
   // department field is no longer locked -- a requester picks which of
@@ -394,7 +397,7 @@ export function NewRequestModal({ onClose, onCreated, editing }: NewRequestModal
         </div>
 
         <form onSubmit={submit}>
-          {step.key === 'details' && <DetailsStep form={form} set={set} departmentOptions={departmentOptions} />}
+          {step.key === 'details' && <DetailsStep form={form} set={set} departmentOptions={departmentOptions} departmentLocked={delegatedEditing} />}
           {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
           {step.key === 'type' && <TypeStep form={form} set={set} />}
           {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}

@@ -24,7 +24,7 @@ export function SecurityScanDialog({ kind, initialApplicationName, busy, error, 
       <form className="security-scan-start" onSubmit={submit} aria-busy={busy}>
         <div className="security-scan-intro">
           <strong>Import the matching Fortify SSC analysis</strong>
-          <span>Enter the exact Application Name and Version used in Fortify. QualityShield will validate them, import the severity summary, and then move this request to Scanning.</span>
+          <span>Enter the exact Application Name and Version used in Fortify. QualityOps will validate them, import the severity summary, and then move this request to Scanning.</span>
         </div>
         <div className="form-row">
           <Field label="Application Name *">

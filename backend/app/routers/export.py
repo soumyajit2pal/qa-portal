@@ -177,7 +177,7 @@ def _rows_to_pdf(rows, meta: dict) -> io.BytesIO:
         canvas.line(document.leftMargin, 7.5 * mm, page_width - document.rightMargin, 7.5 * mm)
         canvas.setFillColor(colors.HexColor("#71868b"))
         canvas.setFont("Helvetica", 7)
-        canvas.drawString(document.leftMargin, 4.5 * mm, "QualityShield - Controlled report export")
+        canvas.drawString(document.leftMargin, 4.5 * mm, "QualityOps - Controlled report export")
         canvas.drawRightString(page_width - document.rightMargin, 4.5 * mm, f"Page {document.page}")
         canvas.restoreState()
 

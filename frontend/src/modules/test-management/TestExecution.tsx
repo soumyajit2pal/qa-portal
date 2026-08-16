@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { api } from '../../api'
+import { api, waitForJob } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { hasRole, hasDepartment, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate } from '../../constants'
-import { TestProjectOut, TestCaseOut, TestCaseListOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut } from '../../types'
+import { ENVIRONMENTS, hasRole, hasDepartment, hasRetestEligibleHistory, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
+import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import InfoModal from '../../components/InfoModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
@@ -66,12 +66,14 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { setError(new Error('Cycle name cannot be blank')); return }
+    if (!startDate || !endDate) { setError(new Error('Start date and end date are required')); return }
+    if (startDate > endDate) { setError(new Error('Start date cannot be after end date')); return }
     if (isOwnerReassignment && !ownerReassignReason.trim()) { setError(new Error('A reassignment reason is required to change the cycle owner')); return }
     setBusy(true); setError(null)
     try {
       const payload = {
         name: name.trim(), description: description || null,
-        start_date: startDate || null, end_date: endDate || null,
+        start_date: startDate, end_date: endDate,
         linked_request_type: linkedRequest ? linkedRequest.split(':')[0] : null,
         linked_request_id: linkedRequest ? Number(linkedRequest.split(':')[1]) : null,
         cycle_type: cycleType || null,
@@ -100,7 +102,17 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
             <input value={cycleType} onChange={(e) => setCycleType(e.target.value)} placeholder="Smoke, Functional, Regression, Retest…" />
           </Field>
           <Field label="Environment">
-            <input value={environment} onChange={(e) => setEnvironment(e.target.value)} placeholder="e.g. UAT, Staging" />
+            <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+              <option value="">-- Select environment --</option>
+              {/* Keep a pre-existing legacy value selectable while editing,
+                  but all new choices come from the shared system list. */}
+              {environment && !ENVIRONMENTS.includes(environment) && (
+                <option value={environment}>{environment} (Legacy)</option>
+              )}
+              {ENVIRONMENTS.map((value) => (
+                <option key={value} value={value}>{value}</option>
+              ))}
+            </select>
           </Field>
           <Field label="Build">
             <input value={build} onChange={(e) => setBuild(e.target.value)} placeholder="e.g. 2026.08.1" />
@@ -133,16 +145,69 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
           <small className="muted">Link the cycle directly to the testing request it executes.</small>
         </Field>
         <div className="grid grid-2">
-          <Field label="Start Date">
-            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          <Field label="Start Date *">
+            <input type="date" required value={startDate} max={endDate || undefined} onChange={(e) => setStartDate(e.target.value)} />
           </Field>
-          <Field label="End Date">
-            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          <Field label="End Date *">
+            <input type="date" required value={endDate} min={startDate || undefined} onChange={(e) => setEndDate(e.target.value)} />
           </Field>
         </div>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
           <button className="btn btn-primary" disabled={busy || (isOwnerReassignment && !ownerReassignReason.trim())}>{busy ? 'Saving…' : editing ? 'Save Changes' : 'Create Cycle'}</button>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+// 2026-08 -- reported directly: "once test cycle completed, then test cycle
+// is locked to edit. that is okay, but give option to link QA request." A
+// narrower sibling of CycleModal -- just the one field, so it can stay
+// reachable on an otherwise-frozen Completed cycle without exposing (or
+// silently no-op'ing) every other field CycleModal carries. Submits a PATCH
+// containing ONLY linked_request_type/linked_request_id -- the backend's own
+// update_cycle allows exactly that shape through even once a cycle is
+// Completed, still rejecting anything broader.
+function LinkCycleRequestModal({ cycle, requests, onClose, onSaved }: {
+  cycle: TestCycleOut
+  requests: QARequestListOut[]
+  onClose: () => void
+  onSaved: (c: TestCycleOut) => void
+}) {
+  const [linkedRequest, setLinkedRequest] = useState(cycle.linked_request_type && cycle.linked_request_id ? `${cycle.linked_request_type}:${cycle.linked_request_id}` : '')
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    setBusy(true); setError(null)
+    try {
+      const saved = await api.patch<TestCycleOut>(`/api/test-execution/cycles/${cycle.id}`, {
+        linked_request_type: linkedRequest ? linkedRequest.split(':')[0] : null,
+        linked_request_id: linkedRequest ? Number(linkedRequest.split(':')[1]) : null,
+      })
+      onSaved(saved)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={`Link QA Request — ${cycle.cycle_key}`} onClose={onClose}>
+      <form onSubmit={submit}>
+        <p className="muted small">{cycle.cycle_key} is Completed and otherwise read-only. The QA Request it's filed against can still be linked, changed, or cleared here for traceability and reporting.</p>
+        <Field label="Linked Child Request">
+          <SearchableSelect value={linkedRequest} onChange={setLinkedRequest} placeholder="Optional — select Functional, SAST, DAST or Performance ID…" options={requests.flatMap((request) => [
+            ...request.linked_functional_requests.map((child) => ({ value: `Functional:${child.id}`, label: `${child.request_id} · Functional — ${request.application_name}` })),
+            ...request.linked_sast_requests.map((child) => ({ value: `SAST:${child.id}`, label: `${child.request_id} · SAST — ${request.application_name}` })),
+            ...request.linked_dast_requests.map((child) => ({ value: `DAST:${child.id}`, label: `${child.request_id} · DAST — ${request.application_name}` })),
+            ...request.linked_performance_requests.map((child) => ({ value: `Performance:${child.id}`, label: `${child.request_id} · Performance — ${request.application_name}` })),
+          ])} />
+          <small className="muted">Leave blank to unlink.</small>
+        </Field>
+        <ErrorText error={error} />
+        <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save Link'}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -280,35 +345,86 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
   )
 }
 
-function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCandidates, onClose, onAdded }: {
+interface TestCaseCandidate {
+  id: number
+  test_case_key: string
+  test_scenario?: string | null
+  test_type?: string | null
+  priority?: string | null
+  module_name?: string | null
+  version: string
+}
+
+interface TestCaseCandidatePage {
+  items: TestCaseCandidate[]
+  total: number
+  next_cursor?: number | null
+  has_more: boolean
+}
+
+function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded }: {
   cycleId: number
-  allCases: TestCaseListOut[]
-  existingCaseIds: Set<number>
   canAssign: boolean
   runnerCandidates: UserOut[]
   onClose: () => void
-  onAdded: (execs: TestExecutionOut[]) => void
+  onAdded: (createdCount: number) => void
 }) {
-  // SRS CYC-003 "Only approved, non-archived testcase versions... shall be
-  // selectable." c.status is TestCase's own mirror -- it shows the
-  // in-progress Draft revision (if any) rather than the still-perfectly-
-  // selectable Approved baseline underneath it (VER-002), so eligibility is
-  // checked against current_approved_version_id (an approval has ever
-  // happened) combined with the mirror not currently reading Archived
-  // (which only happens when there's no draft override and the approved
-  // version itself was archived) -- matches the backend's own check in
-  // add_test_cases_to_cycle.
-  const isSelectable = (c: TestCaseListOut) => !!c.current_approved_version_id && c.status !== 'Archived'
-  const candidates = useMemo(() => allCases.filter((c) => isSelectable(c) && !existingCaseIds.has(c.id)), [allCases, existingCaseIds])
-  const awaitingApproval = useMemo(() => allCases.filter((c) => !isSelectable(c) && !existingCaseIds.has(c.id)), [allCases, existingCaseIds])
+  const pageSize = 25
+  const [candidatePage, setCandidatePage] = useState<TestCaseCandidatePage>({ items: [], total: 0, has_more: false })
+  const [candidateLoading, setCandidateLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  // Each entry is the cursor used to load that page. Keeping the small
+  // history client-side gives Previous/Next navigation without OFFSET.
+  const [cursorStack, setCursorStack] = useState<Array<number | null>>([null])
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [selectAllMatching, setSelectAllMatching] = useState(false)
+  const [excluded, setExcluded] = useState<Set<number>>(new Set())
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [assignedTo, setAssignedTo] = useState('')
   const submittingRef = useRef(false)
+  const requestRef = useRef(0)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250)
+    return () => window.clearTimeout(timer)
+  }, [search])
+
+  useEffect(() => {
+    setCursorStack([null])
+    setSelectAllMatching(false)
+    setSelected(new Set())
+    setExcluded(new Set())
+  }, [debouncedSearch])
+
+  const cursor = cursorStack[cursorStack.length - 1]
+  const pageNumber = cursorStack.length
+  useEffect(() => {
+    const requestId = ++requestRef.current
+    const qs = new URLSearchParams({ page_size: String(pageSize) })
+    if (cursor != null) qs.set('cursor', String(cursor))
+    if (debouncedSearch) qs.set('search', debouncedSearch)
+    setCandidateLoading(true)
+    api.get<TestCaseCandidatePage>(`/api/test-execution/cycles/${cycleId}/candidate-test-cases?${qs.toString()}`)
+      .then((result) => { if (requestId === requestRef.current) { setCandidatePage(result); setError(null) } })
+      .catch((err) => { if (requestId === requestRef.current) setError(err) })
+      .finally(() => { if (requestId === requestRef.current) setCandidateLoading(false) })
+  }, [cycleId, cursor, debouncedSearch])
+
+  const candidates = candidatePage.items
+  const selectedCount = selectAllMatching ? Math.max(0, candidatePage.total - excluded.size) : selected.size
 
   function toggle(id: number) {
     if (busy) return
+    if (selectAllMatching) {
+      setExcluded((prev) => {
+        const next = new Set(prev)
+        if (next.has(id)) next.delete(id); else next.add(id)
+        return next
+      })
+      return
+    }
     setSelected((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id); else next.add(id)
@@ -316,16 +432,38 @@ function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCa
     })
   }
 
-  const allCandidatesSelected = candidates.length > 0 && candidates.every((testCase) => selected.has(testCase.id))
+  const isSelected = (id: number) => selectAllMatching ? !excluded.has(id) : selected.has(id)
+  const allCandidatesSelected = candidates.length > 0 && candidates.every((testCase) => isSelected(testCase.id))
 
   function toggleAllCandidates() {
     if (busy) return
     setSelected((current) => {
+      if (selectAllMatching) {
+        setExcluded((previous) => {
+          const nextExcluded = new Set(previous)
+          if (allCandidatesSelected) candidates.forEach((testCase) => nextExcluded.add(testCase.id))
+          else candidates.forEach((testCase) => nextExcluded.delete(testCase.id))
+          return nextExcluded
+        })
+        return current
+      }
       const next = new Set(current)
       if (allCandidatesSelected) candidates.forEach((testCase) => next.delete(testCase.id))
       else candidates.forEach((testCase) => next.add(testCase.id))
       return next
     })
+  }
+
+  function selectEveryMatchingCase() {
+    setSelectAllMatching(true)
+    setSelected(new Set())
+    setExcluded(new Set())
+  }
+
+  function clearSelection() {
+    setSelectAllMatching(false)
+    setSelected(new Set())
+    setExcluded(new Set())
   }
 
   async function submit() {
@@ -334,24 +472,25 @@ function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCa
     // immediate submission lock; the visible modal overlay below explains
     // the ongoing work and prevents every other interaction.
     if (submittingRef.current) return
-    if (selected.size === 0) { setError(new Error('Pick at least one test case')); return }
+    if (selectedCount === 0) { setError(new Error('Pick at least one test case')); return }
     submittingRef.current = true
     setBusy(true); setError(null)
     try {
-      // Reported directly: "if i have 3500 testcase present, then it's
-      // allowing all in one go, then application going to loading stage and
-      // though it's completing the process still getting timeout error."
-      // Same false-negative pattern as the Excel import fix -- a selection
-      // this large legitimately takes longer than api.ts's default 30s
-      // budget to create server-side (even after the backend's own N+1 fix,
-      // see add_test_cases_to_cycle), so this specific call asks for more
-      // room instead of racing the default. 3 minutes, same headroom as the
-      // Excel import.
-      const execs = await api.post<TestExecutionOut[]>(`/api/test-execution/cycles/${cycleId}/executions`, {
-        test_case_ids: Array.from(selected),
+      let result = await api.post<{ created_count: number; skipped_count: number; job_id?: string | null; status?: string | null }>(`/api/test-execution/cycles/${cycleId}/executions/from-selection`, {
+        selection_mode: selectAllMatching ? 'all_matching' : 'ids',
+        test_case_ids: selectAllMatching ? [] : Array.from(selected),
+        excluded_ids: selectAllMatching ? Array.from(excluded) : [],
+        search: debouncedSearch || null,
         assigned_to_id: assignedTo ? Number(assignedTo) : null,
       }, 180_000)
-      onAdded(execs)
+      while (result.job_id && result.status !== 'COMPLETED') {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000))
+        const job = await api.get<{ status: string; error?: string | null; result?: { created_count: number; skipped_count: number } | null }>(`/api/jobs/${result.job_id}`)
+        if (job.status === 'FAILED') throw new Error(job.error || 'The background add operation failed')
+        if (job.status === 'COMPLETED') result = { ...result, ...job.result, status: job.status }
+        else result = { ...result, status: job.status }
+      }
+      onAdded(result.created_count)
     } catch (err) { setError(err) } finally {
       submittingRef.current = false
       setBusy(false)
@@ -365,30 +504,33 @@ function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCa
         <div className="tm-add-cases-loading-overlay" role="status" aria-live="assertive">
           <div className="tm-add-cases-loading-card">
             <span className="tm-add-cases-loading-spinner" aria-hidden="true" />
-            <strong>Adding {selected.size.toLocaleString()} testcase{selected.size !== 1 ? 's' : ''} to this cycle</strong>
+            <strong>Adding {selectedCount.toLocaleString()} testcase{selectedCount !== 1 ? 's' : ''} to this cycle</strong>
             <span>Validating approved versions and creating execution records. Large selections may take a moment.</span>
             <small>Please keep this window open.</small>
           </div>
         </div>
       )}
-      {awaitingApproval.length > 0 && (
-        <div className="info-banner"><strong>{awaitingApproval.length} testcase{awaitingApproval.length !== 1 ? 's are' : ' is'} unavailable.</strong> Reviewer recommendation and QA Lead final approval are required before cycle assignment.</div>
-      )}
       {canAssign && <div className="tm-add-cases-runner"><div><strong>Assign selected testcases</strong><span>Optional—assign all selected cases to one runner now, then reassign individual rows later.</span></div><UserAssignSelect value={assignedTo} onChange={setAssignedTo} users={runnerCandidates} placeholder="Leave unassigned…" disabled={busy} /></div>}
-      {candidates.length === 0 ? (
+      <Field label="Search approved testcases">
+        <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Test Case ID, scenario, module or type…" disabled={busy} />
+      </Field>
+      {candidateLoading ? (
+        <p className="muted small">Loading approved testcases…</p>
+      ) : candidates.length === 0 ? (
         <p className="muted small">There are no approved testcases available to add. Approve pending testcases in the Test Repository first.</p>
       ) : (
         <>
           <div className="tm-add-cases-selection-bar">
             <div>
-              <strong>{selected.size ? `${selected.size} testcase${selected.size !== 1 ? 's' : ''} selected` : 'Select testcases to add'}</strong>
-              <span>{candidates.length} approved testcase{candidates.length !== 1 ? 's' : ''} available</span>
+              <strong>{selectedCount ? `${selectedCount.toLocaleString()} testcase${selectedCount !== 1 ? 's' : ''} selected` : 'Select testcases to add'}</strong>
+              <span>{candidatePage.total.toLocaleString()} approved testcase{candidatePage.total !== 1 ? 's' : ''} available</span>
             </div>
-            <button type="button" className="btn btn-sm" onClick={toggleAllCandidates} disabled={busy}>
-              {allCandidatesSelected ? 'Clear all' : `Select all (${candidates.length})`}
-            </button>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {!selectAllMatching && <button type="button" className="btn btn-sm" onClick={selectEveryMatchingCase} disabled={busy}>Select all matching ({candidatePage.total.toLocaleString()})</button>}
+              {selectedCount > 0 && <button type="button" className="btn btn-sm" onClick={clearSelection} disabled={busy}>Clear selection</button>}
+            </div>
           </div>
-          <Table<TestCaseListOut>
+          <Table<TestCaseCandidate>
             tableId="add-testcases-to-cycle"
             rowKey="id"
             rows={candidates}
@@ -398,22 +540,35 @@ function AddCasesModal({ cycleId, allCases, existingCaseIds, canAssign, runnerCa
                 key: 'selection',
                 header: <input type="checkbox" aria-label="Select all eligible testcases" checked={allCandidatesSelected} disabled={busy} onChange={toggleAllCandidates} onClick={(event) => event.stopPropagation()} />,
                 filterable: false,
-                render: (testCase) => <input type="checkbox" aria-label={`Select ${testCase.test_case_key}`} checked={selected.has(testCase.id)} disabled={busy} onChange={() => toggle(testCase.id)} onClick={(event) => event.stopPropagation()} />,
+                render: (testCase) => <input type="checkbox" aria-label={`Select ${testCase.test_case_key}`} checked={isSelected(testCase.id)} disabled={busy} onChange={() => toggle(testCase.id)} onClick={(event) => event.stopPropagation()} />,
               },
               { key: 'test_case_key', header: 'Test Case ID' },
               { key: 'test_scenario', header: 'Scenario', render: (testCase) => testCase.test_scenario || '—' },
               { key: 'test_type', header: 'Type', render: (testCase) => testCase.test_type || '—' },
               { key: 'priority', header: 'Priority', render: (testCase) => testCase.priority || '—' },
               { key: 'module_name', header: 'Module', render: (testCase) => testCase.module_name || '—' },
-              { key: 'tags', header: 'Tags', render: (testCase) => testCase.tags?.length ? testCase.tags.join(', ') : '—', filterValue: (testCase) => testCase.tags?.join(' ') || '' },
+              { key: 'version', header: 'Version' },
             ]}
+            server={{
+              page: pageNumber,
+              pageSize,
+              total: candidatePage.total,
+              totalPages: Math.max(1, Math.ceil(candidatePage.total / pageSize)),
+              hasNext: candidatePage.has_more,
+              hasPrevious: cursorStack.length > 1,
+              loading: candidateLoading,
+              onPageChange: (nextPage) => {
+                if (nextPage > pageNumber && candidatePage.next_cursor != null) setCursorStack((current) => [...current, candidatePage.next_cursor!])
+                if (nextPage < pageNumber) setCursorStack((current) => current.slice(0, -1))
+              },
+            }}
           />
         </>
       )}
       <ErrorText error={error} />
       <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-        <button className="btn btn-primary" disabled={busy || selected.size === 0} onClick={submit}>
-          {busy ? 'Adding…' : `Add Selected (${selected.size})`}
+        <button className="btn btn-primary" disabled={busy || selectedCount === 0} onClick={submit}>
+          {busy ? 'Adding…' : `Add Selected (${selectedCount.toLocaleString()})`}
         </button>
         <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
       </div>
@@ -538,13 +693,15 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
       {latestCanLinkDefect && canExecute && <button type="button" className="tm-link-last-defect" onClick={() => { setLinkingDefect((value) => !value); setOpen(false) }}>Link external</button>}
       {open && runPanelPosition && createPortal(<div ref={runPanelRef} className="tm-inline-run-panel portaled" style={runPanelPosition} onClick={(event) => event.stopPropagation()}>
         <div className="tm-inline-run-head"><span><small>Quick execution</small><strong>Record result</strong></span><b>Attempt #{(execution.run_count || 0) + 1}</b></div>
-        <div className="tm-inline-result-options">{TEST_EXECUTION_STATUSES.filter((status) => status !== 'Not Executed').map((status) => {
-          const blocked = executionStatusGate(execution.linked_defects, execution.runs, status)
+        <div className="tm-inline-result-options">{TEST_EXECUTION_STATUSES.filter((status) =>
+          status !== 'Not Executed' && (status !== 'Retest Passed' || hasRetestEligibleHistory(execution.runs, execution.status))
+        ).map((status) => {
+          const blocked = executionStatusGate(execution.linked_defects, execution.runs, status, undefined, execution.status)
           const tone = status.toLowerCase().replace(/\s+/g, '-')
           return <button type="button" key={status} className={`${result === status ? 'selected ' : ''}result-${tone}`} disabled={!!blocked} title={blocked || undefined} onClick={() => setResult(status)}><i />{status}</button>
         })}</div>
-        {result && executionStatusGate(execution.linked_defects, execution.runs, result) && (
-          <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result)}</small>
+        {result && executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status) && (
+          <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status)}</small>
         )}
         <div className="tm-inline-run-actions"><span>{result ? `${result} selected` : 'Select one result'}</span><button type="button" className="btn btn-sm" onClick={() => { setResult(''); setOpen(false) }}>Cancel</button><button type="button" className="btn btn-sm btn-primary" disabled={!result || busy} onClick={saveResult}>{busy ? 'Saving…' : 'Save attempt'}</button></div>
       </div>, document.body)}
@@ -922,7 +1079,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   // constants.ts's executionStatusGate / backend's matching
   // _execution_status_gate for where this is actually enforced.
   const activeLinkedDefects = (execution.linked_defects || []).filter((d) => !['Deferred', 'Closed'].includes(d.status))
-  const hasPriorFail = (execution.runs || []).some((run) => run.status === 'Fail')
+  const hasPriorFailedOrBlocked = hasRetestEligibleHistory(execution.runs, execution.status)
   return (
     <Modal title={`Record Result -- ${tc?.test_case_key || `Test Case #${execution.test_case_id}`}`} onClose={onClose} wide>
       {execution.pinned_version_id && (
@@ -1021,7 +1178,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
           status cannot be changed until all linked defects are Closed or Deferred.
         </div>
       )}
-      {activeLinkedDefects.length === 0 && hasPriorFail && (
+      {activeLinkedDefects.length === 0 && hasPriorFailedOrBlocked && (
         <div className="info-banner">
           The linked defect has been Closed or Deferred. Please retest the test case and select
           {' '}<strong>Retest Passed</strong> if it passes, or <strong>Fail</strong> if it fails again.
@@ -1039,13 +1196,15 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
           <Field label="Result *">
             <select required value={status} onChange={(e) => setStatus(e.target.value)}>
               <option value="" disabled>Select result...</option>
-              {TEST_EXECUTION_STATUSES.filter((s) => s !== 'Not Executed').map((s) => {
-                const blocked = executionStatusGate(execution.linked_defects, execution.runs, s, defectId)
+              {TEST_EXECUTION_STATUSES.filter((s) =>
+                s !== 'Not Executed' && (s !== 'Retest Passed' || hasPriorFailedOrBlocked)
+              ).map((s) => {
+                const blocked = executionStatusGate(execution.linked_defects, execution.runs, s, defectId, execution.status)
                 return <option key={s} value={s} disabled={!!blocked}>{s}{blocked ? ' (locked)' : ''}</option>
               })}
             </select>
-            {status && executionStatusGate(execution.linked_defects, execution.runs, status, defectId) && (
-              <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, status, defectId)}</small>
+            {status && executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status) && (
+              <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status)}</small>
             )}
           </Field>
           <Field label="Actual Result">
@@ -1125,7 +1284,7 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
   // caught before Confirm rather than after the backend rejects it (which
   // still happens regardless, see _execution_status_gate).
   const defectBlocked = selectedExecutions
-    .map((execution) => ({ execution, violation: executionStatusGate(execution.linked_defects, execution.runs, status, defectId) }))
+    .map((execution) => ({ execution, violation: executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status) }))
     .filter((row): row is { execution: TestExecutionOut; violation: string } => !!row.violation)
 
   function review(e: React.FormEvent) {
@@ -1184,11 +1343,12 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
   }
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
+  const selectionCount = selectedExecutions.length
   const title = stage === 'executing' ? 'Executing selected testcases'
-    : stage === 'success' ? 'Bulk execution completed'
-      : stage === 'error' ? 'Bulk execution stopped'
-        : stage === 'confirm' ? 'Confirm bulk execution'
-          : `Bulk execute ${selectedExecutions.length} testcase${selectedExecutions.length !== 1 ? 's' : ''}`
+    : stage === 'success' ? `${selectionActionLabel(selectionCount, 'execution')} completed`
+      : stage === 'error' ? `${selectionActionLabel(selectionCount, 'execution')} stopped`
+        : stage === 'confirm' ? `Confirm ${selectionCount > 1 ? 'bulk ' : ''}execution`
+          : `${selectionActionLabel(selectionCount, 'execute')} ${selectionCount} testcase${selectionCount !== 1 ? 's' : ''}`
   const preview = selectedExecutions.slice(0, 6).map((execution) => execution.test_case?.test_case_key || `#${execution.test_case_id}`)
 
   return (
@@ -1199,7 +1359,10 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
           <Field label="Execution Result *">
             <select required value={status} onChange={(event) => setStatus(event.target.value)}>
               <option value="" disabled>Select result…</option>
-              {TEST_EXECUTION_STATUSES.filter((item) => item !== 'Not Executed').map((item) => <option key={item} value={item}>{item}</option>)}
+              {TEST_EXECUTION_STATUSES.filter((item) =>
+                item !== 'Not Executed'
+                && (item !== 'Retest Passed' || selectedExecutions.every((execution) => hasRetestEligibleHistory(execution.runs, execution.status)))
+              ).map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
           </Field>
           <Field label="Common Actual Result">
@@ -1215,10 +1378,10 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
             <Field label="Defect Title"><input maxLength={255} value={defectTitle} onChange={(event) => setDefectTitle(event.target.value)} placeholder="Short defect summary" /></Field>
             <Field label="Defect Notes"><textarea maxLength={5000} value={defectNotes} onChange={(event) => setDefectNotes(event.target.value)} /></Field>
           </div>}
-          <div className="info-banner">Bulk execution records the same result as a separate retained attempt on every selected testcase. Add testcase-specific screenshots or defects from the individual runner afterward.</div>
+          <div className="info-banner">{selectionActionLabel(selectionCount, 'execution')} records the same result as a separate retained attempt on every selected testcase. Add testcase-specific screenshots or defects from the individual runner afterward.</div>
           <ErrorText error={error} />
           <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-            <button className="btn btn-primary">Review bulk execution</button>
+            <button className="btn btn-primary">Review {selectionCount > 1 ? 'bulk ' : ''}execution</button>
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
           </div>
         </form>
@@ -1243,7 +1406,7 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk execution progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(selectionCount, 'execution')} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>{progress < 100 ? 'Please keep this dialog open' : 'The new attempts are now visible in this cycle'}</span><strong>{progress}%</strong></div>
           {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
         </div>
@@ -1252,8 +1415,8 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
         <div className="tm-operation-state error" role="alert">
           <div className="tm-operation-icon">!</div>
           <strong>No execution attempt was recorded</strong>
-          <p className="muted small">The complete selection remains unchanged because bulk execution is atomic.</p>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk execution stopped progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <p className="muted small">The complete selection remains unchanged because this operation is atomic.</p>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(selectionCount, 'execution')} stopped progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>Stopped during validation or saving</span><strong>{progress}%</strong></div>
           <div className="tm-operation-error"><strong>Exact reason</strong><p>{errorReason}</p></div>
           <div className="action-error-guidance"><strong>What to do</strong><p>Resolve the listed assignment or approval issue, or select only eligible testcases, then try again.</p></div>
@@ -1341,9 +1504,10 @@ function BulkRemoveModal({ cycleId, cycleKey, executions, eligibility, onClose, 
   }
 
   const errorReason = error instanceof Error ? error.message : String(error || 'The server did not provide an error reason.')
+  const selectionCount = selectedExecutions.length
   const title = stage === 'removing' ? 'Removing testcases from cycle'
-    : stage === 'success' ? 'Bulk removal completed'
-      : stage === 'error' ? 'Bulk removal stopped'
+    : stage === 'success' ? `${selectionActionLabel(selectionCount, 'removal')} completed`
+      : stage === 'error' ? `${selectionActionLabel(selectionCount, 'removal')} stopped`
         : `Remove ${selectedExecutions.length} testcase${selectedExecutions.length !== 1 ? 's' : ''} from ${cycleKey}?`
 
   return (
@@ -1375,7 +1539,7 @@ function BulkRemoveModal({ cycleId, cycleKey, executions, eligibility, onClose, 
         <div className={`tm-operation-state ${stage === 'success' ? 'success' : ''}`} aria-live="polite">
           <div className="tm-operation-icon">{stage === 'success' ? '✓' : '↻'}</div>
           <strong>{progressMessage}</strong>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk removal progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(selectionCount, 'removal')} progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>{progress < 100 ? 'Please keep this dialog open' : `${result?.removed_attempt_count || 0} attempts and ${result?.removed_evidence_count || 0} evidence files removed`}</span><strong>{progress}%</strong></div>
           {stage === 'success' && <button className="btn btn-primary" onClick={onClose}>Done</button>}
         </div>
@@ -1384,8 +1548,8 @@ function BulkRemoveModal({ cycleId, cycleKey, executions, eligibility, onClose, 
         <div className="tm-operation-state error" role="alert">
           <div className="tm-operation-icon">!</div>
           <strong>Nothing was removed</strong>
-          <p className="muted small">The complete selection remains in the cycle because bulk removal is atomic.</p>
-          <div className="tm-progress-track" role="progressbar" aria-label="Bulk removal stopped progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
+          <p className="muted small">The complete selection remains in the cycle because this operation is atomic.</p>
+          <div className="tm-progress-track" role="progressbar" aria-label={`${selectionActionLabel(selectionCount, 'removal')} stopped progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
           <div className="tm-progress-meta"><span>Stopped during validation or saving</span><strong>{progress}%</strong></div>
           <div className="tm-operation-error"><strong>Exact reason</strong><p>{errorReason}</p></div>
           <div className="action-error-guidance"><strong>What to do</strong><p>Confirm that the project is active and every selected testcase still belongs to this cycle, then try again.</p></div>
@@ -1455,13 +1619,12 @@ export default function TestExecution() {
   const [projectId, setProjectId] = useState<number | ''>('')
   const [cycles, setCycles] = useState<TestCycleOut[]>([])
   const [cycleId, setCycleId] = useState<number | ''>('')
-  const [cases, setCases] = useState<TestCaseListOut[]>([])
   // SRS 7.2 pagination rollout -- the folder-tree-style "everything at
-  // once" fetch is gone; existingCaseIds and executionSummary now come from
+  // Full-repository and full execution-ID fetches are intentionally absent;
+  // the Add Test Cases modal queries its own database-filtered candidates.
   // their own small dedicated endpoints (see loadExecutionExtras below)
   // instead of being derived from the complete (now paginated) execution
   // list.
-  const [existingCaseIds, setExistingCaseIds] = useState<Set<number>>(new Set())
   const [executionSummary, setExecutionSummary] = useState<TestExecutionSummaryOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [showNewCycle, setShowNewCycle] = useState(false)
@@ -1495,6 +1658,14 @@ export default function TestExecution() {
   const [unlinkedCycleRequestNotice, setUnlinkedCycleRequestNotice] = useState<string | null>(null)
   const [qaRequests, setQaRequests] = useState<QARequestListOut[]>([])
   const [linkingExistingExecution, setLinkingExistingExecution] = useState<TestExecutionOut | null>(null)
+  // 2026-08 -- reported directly: "once test cycle completed, then test
+  // cycle is locked to edit. that is okay, but give option to link QA
+  // request." A Completed cycle stays frozen for everything else (Edit
+  // Cycle stays hidden below), but the QA Request it's filed against can
+  // still be set/changed/cleared afterward for traceability -- see
+  // LinkCycleRequestModal, a narrower standalone form for just that one
+  // field, and the matching backend allowance in update_cycle.
+  const [linkingCycleRequest, setLinkingCycleRequest] = useState<TestCycleOut | null>(null)
 
   useEffect(() => {
     // SRS 7.2 pagination rollout -- /api/test-projects is now wrapped in
@@ -1509,15 +1680,19 @@ export default function TestExecution() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams])
 
+  // Picker data is loaded only when a control that needs it is reachable.
+  // This includes the Record Result dialog and the cycle table's inline
+  // assignment controls -- previously only New/Edit Cycle and Add Cases
+  // triggered the fetch, so Record Result received an empty users array and
+  // its otherwise-correct shared UserAssignSelect displayed "No matches".
   useEffect(() => {
-    // Test Management-scoped picker (Cycle owner, runner assignment) -- see
-    // constants.TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS on the backend.
-    api.get<UserOut[]>('/api/test-projects/eligible-users').then(setUsers).catch(setError)
-    // SRS PAG-002 -- /api/qa-requests is now paginated (max page_size 100);
-    // this Cycle-creation picker wants "effectively all of them," so it
-    // asks for the max size directly rather than one page at a time.
-    api.get<PageOut<QARequestListOut>>('/api/qa-requests?page_size=100').then((p) => setQaRequests(p.items)).catch(setError)
-  }, [])
+    const runnerAssignmentVisible = Boolean(cycleId && canManageRunners)
+    if (!showNewCycle && !editingCycle && !showAddCases && !editingExecution && !runnerAssignmentVisible && !linkingCycleRequest) return
+    if (!users.length) api.get<UserOut[]>('/api/test-projects/eligible-users').then(setUsers).catch(setError)
+    if ((showNewCycle || editingCycle || linkingCycleRequest) && !qaRequests.length) {
+      api.get<PageOut<QARequestListOut>>('/api/qa-requests?page_size=100').then((p) => setQaRequests(p.items)).catch(setError)
+    }
+  }, [showNewCycle, editingCycle, showAddCases, editingExecution, cycleId, canManageRunners, users.length, qaRequests.length, linkingCycleRequest])
 
   useEffect(() => {
     if (!projectId) { setMyAccess(null); return }
@@ -1530,19 +1705,9 @@ export default function TestExecution() {
 
   const loadCycles = useCallback(async (pid: number) => {
     try {
-      const [cPage, cs] = await Promise.all([
-        // SRS 7.2 pagination rollout -- Page[T] wrapper (task #82);
-        // page_size=100 + .items since the cycle sidebar still wants the
-        // complete list.
-        api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${pid}/cycles?page_size=100`),
-        // PAG-010 -- the unpaginated candidate-pool endpoint, not the
-        // paginated browsing list TestRepository.tsx itself now uses. This
-        // modal's "Add test cases to cycle" picker needs every eligible
-        // case in the project at once (bulk multi-select), not one page.
-        api.get<TestCaseListOut[]>(`/api/test-repository/projects/${pid}/test-cases/all`),
-      ])
+      const cPage = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${pid}/cycles?page_size=100`)
       const c = cPage.items
-      setCycles(c); setCases(cs)
+      setCycles(c)
       const requestedCycle = Number(searchParams.get('cycle'))
       setCycleId(c.some((cycle) => cycle.id === requestedCycle) ? requestedCycle : (c.length ? c[0].id : ''))
     } catch (err) { setError(err) }
@@ -1565,14 +1730,11 @@ export default function TestExecution() {
       sortOrder: 'asc',
       extra: { assignment: assignmentFilter !== 'all' ? assignmentFilter : undefined },
     },
+    { cursor: true },
   )
   const loadExecutionExtras = useCallback(async (cid: number) => {
     try {
-      const [ids, summaryData] = await Promise.all([
-        api.get<number[]>(`/api/test-execution/cycles/${cid}/executions/case-ids`),
-        api.get<TestExecutionSummaryOut>(`/api/test-execution/cycles/${cid}/executions/summary`),
-      ])
-      setExistingCaseIds(new Set(ids))
+      const summaryData = await api.get<TestExecutionSummaryOut>(`/api/test-execution/cycles/${cid}/executions/summary`)
       setExecutionSummary(summaryData)
     } catch (err) { setError(err) }
   }, [])
@@ -1584,7 +1746,7 @@ export default function TestExecution() {
     if (cycleId) {
       loadExecutionExtras(cycleId)
       api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${cycleId}`).then(setCycleActivity).catch(() => setCycleActivity([]))
-    } else { setExistingCaseIds(new Set()); setExecutionSummary(null); setCycleActivity([]) }
+    } else { setExecutionSummary(null); setCycleActivity([]) }
   }, [cycleId, loadExecutionExtras])
   // Defect traceability deep-link -- fetches the specific execution by id
   // directly (PAG-006-style) rather than searching the loaded page, since
@@ -1742,8 +1904,10 @@ export default function TestExecution() {
     if (!cycleId || !selectedCycle) return
     setExportingCycle(true); setError(null)
     try {
+      const queued = await api.post<{ id: string }>(`/api/test-execution/cycles/${cycleId}/export-xlsx/jobs`)
+      await waitForJob(queued.id)
       await api.downloadFile(
-        `/api/test-execution/cycles/${cycleId}/export-xlsx`,
+        `/api/jobs/${queued.id}/download`,
         `${selectedCycle.cycle_key}_test_lifecycle.xlsx`,
       )
     } catch (err) { setError(err) } finally { setExportingCycle(false) }
@@ -1774,6 +1938,7 @@ export default function TestExecution() {
     <div className="tm-page">
       <ErrorText error={error} />
       <PageHeader
+        eyebrow="Test Case Management · Design · Organize · Execute · Trace"
         title="Test Execution" count={cycleExecutionTotal}
         subtitle="Organize test cycles, execute step-by-step, capture evidence, and connect failures to defects."
         actions={(
@@ -1849,12 +2014,23 @@ export default function TestExecution() {
                     {selectedCycle?.build && <span className="badge badge-gray">Build {selectedCycle.build}</span>}
                     {selectedCycle?.owner_name && <span className="badge badge-gray">Owner: {selectedCycle.owner_name}</span>}
                   </div>
-                  {selectedCycle?.linked_request_key && <div className="tm-cycle-request-link"><b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>{canExec && projectIsActive && !cycleIsLocked && <button type="button" disabled={unlinkingCycleLink} onClick={() => setPendingUnlinkCycleRequest(true)}>{unlinkingCycleLink ? 'Unlinking…' : 'Unlink'}</button>}</div>}
+                  {selectedCycle?.linked_request_key && (
+                    <div className="tm-cycle-request-link">
+                      <b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>
+                      {canExec && projectIsActive && !cycleIsLocked && <button type="button" disabled={unlinkingCycleLink} onClick={() => setPendingUnlinkCycleRequest(true)}>{unlinkingCycleLink ? 'Unlinking…' : 'Unlink'}</button>}
+                      {canExec && projectIsActive && selectedCycle.status === 'Completed' && <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Change link</button>}
+                    </div>
+                  )}
+                  {!selectedCycle?.linked_request_key && canExec && projectIsActive && selectedCycle?.status === 'Completed' && (
+                    <div className="tm-cycle-request-link tm-cycle-request-link--empty">
+                      <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Link QA Request</button>
+                    </div>
+                  )}
                   {cycleIsLocked && (
                     <div className="info-banner">
                       {selectedCycle?.status === 'Blocked'
                         ? <>This cycle is <strong>Blocked</strong>. Assignment, editing, execution, testcase, defect, evidence, and link changes are disabled until Resume Execution.</>
-                        : <>This cycle is <strong>Completed</strong> and read-only. No further changes are allowed.</>}
+                        : <>This cycle is <strong>Completed</strong> and read-only. No further changes are allowed, except linking or updating the QA Request it's filed against.</>}
                     </div>
                   )}
                 </div>
@@ -1889,8 +2065,8 @@ export default function TestExecution() {
               </div>
               {selectedCycle && <LinkedDefects query={`cycle_id=${selectedCycle.id}`} title="Cycle Defects" returnTo={`/test-execution?project=${projectId}&cycle=${selectedCycle.id}`} />}
               {canExec && projectIsActive && !cycleIsLocked && (
-                <div className="tm-bulk-bar" role="region" aria-label="Bulk testcase lifecycle actions">
-                  <strong>{selectedExecutionIds.size ? `${selectedExecutionIds.size} testcase${selectedExecutionIds.size !== 1 ? 's' : ''} selected` : 'Select rows to assign, execute, or remove in bulk'}</strong>
+                <div className="tm-bulk-bar" role="region" aria-label={selectedExecutionIds.size > 1 ? 'Bulk testcase lifecycle actions' : 'Testcase lifecycle actions'}>
+                  <strong>{selectedExecutionIds.size ? `${selectedExecutionIds.size} testcase${selectedExecutionIds.size !== 1 ? 's' : ''} selected` : 'Select one or more rows to assign, execute, or remove'}</strong>
                   <button type="button" className="btn btn-sm" disabled={!selectableExecutions.length} onClick={toggleVisibleExecutions}>{allVisibleSelected ? 'Clear visible' : `Select visible (${selectableExecutions.length})`}</button>
                   {selectedExecutionIds.size > 0 && <button type="button" className="btn btn-sm" onClick={() => setSelectedExecutionIds(new Set())}>Clear selection</button>}
                   {canManageRunners && selectedExecutionIds.size > 0 && (() => {
@@ -1931,7 +2107,7 @@ export default function TestExecution() {
                       </div>
                     )
                   })()}
-                  <button type="button" className="btn btn-sm btn-primary" disabled={!bulkExecutionEligible} title={selectedExecutionIds.size && !bulkExecutionEligible ? 'Bulk execution requires every selected testcase to be assigned to you' : undefined} onClick={() => setShowBulkExecution(true)}>Bulk execute{selectedExecutionIds.size ? ` (${selectedExecutionIds.size})` : ''}</button>
+                  <button type="button" className="btn btn-sm btn-primary" disabled={!bulkExecutionEligible} title={selectedExecutionIds.size && !bulkExecutionEligible ? 'Execution requires every selected testcase to be assigned to you' : undefined} onClick={() => setShowBulkExecution(true)}>{selectionActionLabel(selectedExecutionIds.size, 'execute')}{selectedExecutionIds.size ? ` (${selectedExecutionIds.size})` : ''}</button>
                   {/* Scenario 1: visible to any exec-capable user now, not just QA Lead
                       Group -- a plain QA_ENGINEER may still remove testcases THEY added
                       before execution (removeFromCycleEligibility/BulkRemoveModal do the
@@ -1945,7 +2121,7 @@ export default function TestExecution() {
                 onRowClick={setEditingExecution}
                 server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading: executionsLoading }}
                 columns={[
-                  { key: 'select', header: <input type="checkbox" aria-label="Select all visible testcases" checked={allVisibleSelected} disabled={!selectableExecutions.length} onChange={toggleVisibleExecutions} onClick={(event) => event.stopPropagation()} />, filterable: false, render: (execution) => <input type="checkbox" aria-label={`Select ${execution.test_case?.test_case_key || `testcase ${execution.test_case_id}`}`} checked={selectedExecutionIds.has(execution.id)} disabled={!canSelectRow(execution)} title={canSelectRow(execution) ? 'Select for bulk lifecycle actions' : execution.assigned_to_id ? `Assigned to ${execution.assigned_to_name || 'another runner'}` : 'Assign a runner before execution'} onChange={() => toggleExecutionSelection(execution.id)} onClick={(event) => event.stopPropagation()} /> },
+                  { key: 'select', header: <input type="checkbox" aria-label="Select all visible testcases" checked={allVisibleSelected} disabled={!selectableExecutions.length} onChange={toggleVisibleExecutions} onClick={(event) => event.stopPropagation()} />, filterable: false, render: (execution) => <input type="checkbox" aria-label={`Select ${execution.test_case?.test_case_key || `testcase ${execution.test_case_id}`}`} checked={selectedExecutionIds.has(execution.id)} disabled={!canSelectRow(execution)} title={canSelectRow(execution) ? 'Select for lifecycle actions' : execution.assigned_to_id ? `Assigned to ${execution.assigned_to_name || 'another runner'}` : 'Assign a runner before execution'} onChange={() => toggleExecutionSelection(execution.id)} onClick={(event) => event.stopPropagation()} /> },
                   { key: 'test_case', header: 'Test Case', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.test_case?.test_case_key || `#${e.test_case_id}`}</strong><small>{[e.test_case?.module_name, `pinned v${e.pinned_version_label || e.test_case?.version || '1.0'}`].filter(Boolean).join(' · ')}{e.is_pinned_stale && <span className="badge badge-yellow" style={{ marginLeft: 6 }} title="A newer Approved version exists">Stale</span>}</small></span>, filterValue: (e) => `${e.test_case?.test_case_key || e.test_case_id} ${e.test_case?.module_name || ''}` },
                   { key: 'scenario', header: 'Scenario', render: (e) => e.test_case?.test_scenario || '—', filterValue: (e) => e.test_case?.test_scenario || '' },
                   { key: 'assigned_to_name', header: 'Assigned To', render: (e) => (projectIsActive && !cycleIsLocked && (e.assigned_to_id ? canReassignExecution(e) : canManageRunners)) ? <div className="tm-table-assignee" onClick={(event) => event.stopPropagation()}><UserAssignSelect value={e.assigned_to_id ? String(e.assigned_to_id) : ''} onChange={(value) => handleRunnerChange(e, value)} users={runnerCandidates} placeholder="Assign runner…" />{e.assigned_to_id && <button type="button" title="Unassign" onClick={() => handleRunnerChange(e, '')}>×</button>}</div> : <span className={e.assigned_to_name ? '' : 'muted'}>{e.assigned_to_name || 'Unassigned'}</span>, filterValue: (e) => e.assigned_to_name || 'Unassigned' },
@@ -1992,11 +2168,17 @@ export default function TestExecution() {
           onSaved={(saved) => { setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle)); setEditingCycle(null) }}
         />
       )}
+      {linkingCycleRequest && projectIsActive && (
+        <LinkCycleRequestModal
+          cycle={linkingCycleRequest}
+          requests={qaRequests}
+          onClose={() => setLinkingCycleRequest(null)}
+          onSaved={(saved) => { setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle)); setLinkingCycleRequest(null) }}
+        />
+      )}
       {showAddCases && cycleId && projectIsActive && (
         <AddCasesModal
           cycleId={cycleId}
-          allCases={cases}
-          existingCaseIds={existingCaseIds}
           canAssign={canManageRunners}
           runnerCandidates={runnerCandidates}
           onClose={() => setShowAddCases(false)}

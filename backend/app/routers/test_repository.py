@@ -1,14 +1,15 @@
+import asyncio
 import io
 import os
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 import openpyxl
 
 from .. import models, schemas, pagination
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from ..deps import (
     get_current_user, require_roles, get_or_404,
     require_can_author_repository, require_can_review_repository, require_can_give_final_approval,
@@ -21,6 +22,7 @@ from ..constants import (
     TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS,
 )
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
+from . import jobs
 
 # PAG-005 -- every eager-load the list endpoint needs to serialize
 # TestCaseListOut without an N+1: folder/created_by/checked_out_by are
@@ -540,6 +542,8 @@ def list_test_cases(
     ),
     priority: Optional[str] = Query(None, description="Exact-match priority filter"),
     tag: Optional[str] = Query(None, description="Exact-match tag filter"),
+    cursor_mode: bool = Query(False, description="Use primary-key cursor pagination instead of OFFSET"),
+    cursor: Optional[int] = Query(None, ge=0),
     params: pagination.PageParams = Depends(),
     db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
 ):
@@ -596,16 +600,14 @@ def list_test_cases(
     # hiding a real (non-Archived) status from the default view instead.
     if not params.status:
         q = q.filter(models.TestCase.status != "Archived")
-    q = pagination.apply_sort(
-        q, params,
-        sortable={
-            "test_case_key": models.TestCase.test_case_key,
-            "status": models.TestCase.status,
-            "priority": models.TestCase.priority,
-            "updated_at": models.TestCase.updated_at,
-        },
-        default_column=models.TestCase.created_at, id_column=models.TestCase.id,
-    )
+    if cursor_mode:
+        return pagination.paginate_by_id(q, params, models.TestCase.id, cursor)
+    q = pagination.apply_sort(q, params, sortable={
+        "test_case_key": models.TestCase.test_case_key,
+        "status": models.TestCase.status,
+        "priority": models.TestCase.priority,
+        "updated_at": models.TestCase.updated_at,
+    }, default_column=models.TestCase.created_at, id_column=models.TestCase.id)
     result = pagination.paginate(q, params)
     return pagination.to_page_response(result, params)
 
@@ -670,7 +672,7 @@ def get_test_case_summary(project_id: int, db: Session = Depends(get_db),
     )
 
 
-@router.get("/projects/{project_id}/test-cases/all", response_model=List[schemas.TestCaseListOut])
+@router.get("/projects/{project_id}/test-cases/all", response_model=List[schemas.TestCaseListOut], deprecated=True)
 def list_all_test_cases_for_project(project_id: int, db: Session = Depends(get_db),
                                      current_user: models.User = Depends(get_current_user)):
     """PAG-010 -- deliberately NOT paginated, unlike list_test_cases above.
@@ -804,6 +806,29 @@ def export_test_repository(
         widths={"Comments": 54, "Role Snapshot": 28},
     )
     return workbook_response(workbook, f"{project.project_key}_test_repository.xlsx")
+
+
+@router.post("/projects/{project_id}/export-xlsx/jobs")
+def queue_test_repository_export(
+    project_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    project = _get_project_or_404(db, project_id)
+    filename = f"{project.project_key}_test_repository.xlsx"
+    user_id = current_user.id
+
+    def build(job_id: str):
+        with SessionLocal() as worker_db:
+            worker_user = worker_db.query(models.User).get(user_id)
+            if not worker_user:
+                raise RuntimeError("The user who started this export no longer exists")
+            jobs.update(job_id, progress=15)
+            response = export_test_repository(project_id, worker_db, worker_user)
+            return asyncio.run(jobs.save_streaming_response(job_id, response, filename))
+
+    return jobs.enqueue(background_tasks, "TEST_REPOSITORY_EXPORT", user_id, build)
 
 
 @router.post("/projects/{project_id}/test-cases", response_model=schemas.TestCaseOut)
@@ -2045,6 +2070,7 @@ def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprov
     _require_active_project(_get_project_or_404(db, project_id))
     rows = _selected_project_cases(db, project_id, payload.ids)
     _lock_current_drafts(db, rows)
+    operation_label = "Bulk approval" if len(rows) > 1 else "Approval"
     comments = payload.comments.strip()
     if not comments:
         raise HTTPException(400, "Enter one approval message for the selected test cases")
@@ -2057,14 +2083,14 @@ def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprov
         suffix = "…" if len(not_pending) > 5 else ""
         raise HTTPException(
             400,
-            f"Bulk approval stopped because {len(not_pending)} selected test case(s) are not pending "
+            f"{operation_label} stopped because {len(not_pending)} selected test case(s) are not pending "
             f"QA Lead final approval: {preview}{suffix}",
         )
     statuses_present = {row.current_draft_version.status for row in rows}
     if len(statuses_present) > 1:
         raise HTTPException(
             400,
-            "Bulk approval stopped because the selection mixes OLD-workflow (\"Review Completed\") and "
+            f"{operation_label} stopped because the selection mixes OLD-workflow (\"Review Completed\") and "
             "NEW-workflow (\"QA Lead Approval Pending\") test cases -- select one group at a time.",
         )
     is_old_path = statuses_present == {"Review Completed"}
@@ -2131,6 +2157,7 @@ def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkReco
     _require_active_project(_get_project_or_404(db, project_id))
     rows = _selected_project_cases(db, project_id, payload.ids)
     _lock_current_drafts(db, rows)
+    operation_label = "Bulk recommendation" if len(rows) > 1 else "Recommendation"
     comments = (payload.comments or "").strip()
     if len(comments) > 5000:
         raise HTTPException(400, "Comment cannot exceed 5,000 characters")
@@ -2141,14 +2168,14 @@ def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkReco
         suffix = "…" if len(not_pending) > 5 else ""
         raise HTTPException(
             400,
-            f"Bulk recommendation stopped because {len(not_pending)} selected test case(s) are not pending "
+            f"{operation_label} stopped because {len(not_pending)} selected test case(s) are not pending "
             f"QA recommendation: {preview}{suffix}",
         )
     statuses_present = {row.current_draft_version.status for row in rows}
     if len(statuses_present) > 1:
         raise HTTPException(
             400,
-            "Bulk recommendation stopped because the selection mixes OLD-workflow (\"In Review\") and "
+            f"{operation_label} stopped because the selection mixes OLD-workflow (\"In Review\") and "
             "NEW-workflow (\"Recommendation Pending\") test cases -- select one group at a time.",
         )
     is_old_path = statuses_present == {"In Review"}
@@ -2189,7 +2216,10 @@ def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkReco
         draft.status = new_state
         draft.reviewed_by_id = current_user.id
         draft.reviewed_at = models.now()
-        draft.review_comments = comments or "Recommended for QA Lead final approval (bulk recommend)."
+        draft.review_comments = comments or (
+            "Recommended for QA Lead final approval (bulk recommend)."
+            if len(rows) > 1 else "Recommended for QA Lead final approval."
+        )
         _sync_case_mirror(row, draft)
         db.add(_case_workflow_action(row.id, current_user, "Recommended for approval", draft.review_comments,
                                      previous_state=previous_state, new_state=new_state))
@@ -2211,6 +2241,7 @@ def _bulk_new_path_decision_rows(db: Session, project_id: int, payload_ids: List
     stage (submitter for Stage 1, submitter+Stage-1-reviewer for Stage 2)."""
     rows = _selected_project_cases(db, project_id, payload_ids)
     _lock_current_drafts(db, rows)
+    operation_label = f"Bulk {action_label}" if len(rows) > 1 else action_label.capitalize()
     _new_pending = ("Recommendation Pending", "QA Lead Approval Pending")
     not_pending = [row.test_case_key for row in rows if not row.current_draft_version
                    or row.current_draft_version.status not in _new_pending]
@@ -2219,14 +2250,14 @@ def _bulk_new_path_decision_rows(db: Session, project_id: int, payload_ids: List
         suffix = "…" if len(not_pending) > 5 else ""
         raise HTTPException(
             400,
-            f"Bulk {action_label} stopped because {len(not_pending)} selected test case(s) are not pending "
+            f"{operation_label} stopped because {len(not_pending)} selected test case(s) are not pending "
             f"a QA Group/QA Lead Group decision: {preview}{suffix}",
         )
     statuses_present = {row.current_draft_version.status for row in rows}
     if len(statuses_present) > 1:
         raise HTTPException(
             400,
-            f"Bulk {action_label} stopped because the selection mixes Stage 1 (\"Recommendation Pending\") and "
+            f"{operation_label} stopped because the selection mixes Stage 1 (\"Recommendation Pending\") and "
             f"Stage 2 (\"QA Lead Approval Pending\") test cases -- select one stage at a time.",
         )
     is_stage1 = statuses_present == {"Recommendation Pending"}
@@ -2543,3 +2574,40 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
         created_test_cases=created_test_cases, imported_executions=imported_executions,
         skipped_rows=skipped_rows, errors=errors, failure_reason=failure_reason,
     )
+
+
+@router.post("/projects/{project_id}/import-xlsx/jobs")
+async def queue_test_case_import(
+    project_id: int,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    folder_id: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES)),
+):
+    """Upload immediately, then parse and insert outside the HTTP request."""
+    _require_active_project(_get_project_or_404(db, project_id))
+    require_can_author_repository(db, project_id, current_user)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "The uploaded Excel file is empty")
+    filename = os.path.basename(file.filename or "testcases.xlsx")
+    user_id = current_user.id
+
+    def process(job_id: str):
+        with SessionLocal() as worker_db:
+            worker_user = worker_db.query(models.User).get(user_id)
+            if not worker_user:
+                raise RuntimeError("The user who started this import no longer exists")
+            jobs.update(job_id, progress=15)
+            upload = UploadFile(filename=filename, file=io.BytesIO(raw))
+            result = asyncio.run(import_test_cases(
+                project_id,
+                upload,
+                folder_id,
+                worker_db,
+                worker_user,
+            ))
+            return result.model_dump(mode="json")
+
+    return jobs.enqueue(background_tasks, "TESTCASE_XLSX_IMPORT", user_id, process)

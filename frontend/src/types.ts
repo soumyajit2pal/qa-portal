@@ -17,6 +17,7 @@ export interface PageOut<T> {
   total_pages: number
   has_next: boolean
   has_previous: boolean
+  next_cursor?: number | null
 }
 
 export interface UserOut {
@@ -43,6 +44,24 @@ export interface UserOut {
   // rosters (DepartmentAdmin.tsx) and only a System Admin (Admin.tsx) can
   // reassign their role(s) or activate/deactivate them.
   admin_managed_only: boolean
+}
+
+export interface QARequestDelegationOut {
+  id: number
+  qa_request_id: number
+  target_type: 'QA_REQUEST' | 'FUNCTIONAL' | 'SAST' | 'DAST' | 'PERFORMANCE'
+  target_id: number
+  assigned_by_id: number
+  assigned_to_id: number
+  assigned_by_name?: string | null
+  assigned_to_name?: string | null
+  assignment_reason: string
+  status: 'ACTIVE' | 'RETURNED' | 'RECALLED'
+  assigned_at: string
+  closed_by_id?: number | null
+  closed_by_name?: string | null
+  returned_at?: string | null
+  return_comments?: string | null
 }
 
 // SRS 7.2 pagination rollout -- backs Admin.tsx's account-summary strip and
@@ -226,6 +245,7 @@ export interface QARequestListOut {
   created_at: string
   updated_at: string
   application_master_status?: string | null
+  active_delegation?: QARequestDelegationOut | null
   linked_functional_requests: LinkedRequestRef[]
   linked_sast_requests: LinkedRequestRef[]
   linked_dast_requests: LinkedRequestRef[]
@@ -243,6 +263,7 @@ export interface QARequestOut {
   cr_number?: string | null
   epic_number?: string | null
   change_type?: string | null
+  bug_fix_source_request_id?: string | null
   vendor_si_partner?: string | null
   technology_stack?: string | null
   release_version?: string | null
@@ -250,7 +271,6 @@ export interface QARequestOut {
   environment?: string | null
   target_promotion_environment?: string | null
   request_types?: string | null
-  request_type_other?: string | null
   target_release_date?: string | null
   supporting_doc_path?: string | null
   remarks?: string | null
@@ -263,6 +283,7 @@ export interface QARequestOut {
   // SM's Approve/Reject action target the right master row.
   application_master_id?: number | null
   application_master_status?: string | null
+  active_delegation?: QARequestDelegationOut | null
   linked_functional_requests: LinkedRequestRef[]
   linked_sast_requests: LinkedRequestRef[]
   linked_dast_requests: LinkedRequestRef[]
@@ -319,10 +340,13 @@ export interface FunctionalOut {
   qa_lead_id?: number | null
   assigned_tester_ids?: string | null
   signoff_id?: number | null
+  signoff_certificate_id?: string | null      // 2026-08 -- "LINK THE CERTIFICATE ONCE GENERATED"
+  signoff_certificate_status?: string | null
   created_at: string
   updated_at: string
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  active_delegation?: QARequestDelegationOut | null
   application_name?: string | null
   epic_number?: string | null
   department?: string | null
@@ -336,6 +360,7 @@ export interface FunctionalOut {
   // models.FunctionalRequest.
   cr_number?: string | null
   change_type?: string | null
+  bug_fix_source_request_id?: string | null
   environment?: string | null
   target_promotion_environment?: string | null
   release_version?: string | null
@@ -490,6 +515,7 @@ export interface SASTOut {
   findings: SASTFindingOut[]
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  active_delegation?: QARequestDelegationOut | null
   department?: string | null
   application_owner?: string | null
   // See backend models.ApplicationMaster -- delegated the same way as
@@ -579,6 +605,7 @@ export interface DASTOut {
   findings: DASTFindingOut[]
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  active_delegation?: QARequestDelegationOut | null
   department?: string | null
   application_owner?: string | null
   // See backend models.ApplicationMaster -- delegated the same way as
@@ -658,6 +685,7 @@ export interface PerformanceOut {
   // ---- Annexure VIII fields ----
   request_type?: string | null
   change_type?: string | null
+  bug_fix_source_request_id?: string | null
   vendor_si_partner?: string | null
   technology_stack?: string | null
   release_version?: string | null
@@ -674,6 +702,7 @@ export interface PerformanceOut {
   updated_at: string
   qa_request_id?: number | null
   qa_request?: LinkedRequestRef | null
+  active_delegation?: QARequestDelegationOut | null
   department?: string | null
   application_owner?: string | null
   // See backend models.ApplicationMaster -- delegated the same way as

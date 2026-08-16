@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from .. import models, cache
 from ..database import get_db
 from ..deps import get_current_user, dashboard_department_scope
+from ..xlsx_export import new_workbook, add_summary_sheet, add_table_sheet, workbook_response
 from ..constants import (
     Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
     QA_DEPARTMENT, QA_REQUEST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
@@ -178,6 +179,173 @@ def _occupancy_band(percent: int) -> str:
     return "Overloaded"
 
 
+_QA_DASHBOARD_ROLES = {
+    Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
+    Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+}
+
+
+def _require_qa_dashboard_access(current_user: models.User) -> None:
+    if not _QA_DASHBOARD_ROLES.intersection(current_user.roles):
+        raise HTTPException(403, "QA tester analytics are restricted to the QA team")
+
+
+def _grouped_actor_counts(db: Session, model, actor_column, date_column,
+                          tester_ids: list[int], date_from: str | None, date_to: str | None) -> dict[int, int]:
+    if not tester_ids:
+        return {}
+    query = _in_period(
+        db.query(actor_column.label("tester_id"), func.count(model.id).label("item_count")),
+        date_column, date_from, date_to,
+    ).filter(actor_column.in_(tester_ids)).group_by(actor_column)
+    return {int(tester_id): int(item_count) for tester_id, item_count in query.all()}
+
+
+def _grouped_last_activity(db: Session, model, actor_column, date_column,
+                           tester_ids: list[int], date_from: str | None, date_to: str | None) -> dict[int, datetime.datetime]:
+    if not tester_ids:
+        return {}
+    query = _in_period(
+        db.query(actor_column.label("tester_id"), func.max(date_column).label("last_at")),
+        date_column, date_from, date_to,
+    ).filter(actor_column.in_(tester_ids)).group_by(actor_column)
+    return {int(tester_id): last_at for tester_id, last_at in query.all() if last_at}
+
+
+def _add_contribution_metrics(db: Session, rows: dict[int, dict],
+                              date_from: str | None, date_to: str | None) -> dict:
+    """Attach period-based authoring/execution/defect/project metrics.
+
+    Testcase count uses identity rows, never versions. Retests use the
+    governed Defect's recorded retest tester/timestamp. Project coverage is
+    evidence-based: authoring a testcase, executing an attempt, reporting a
+    linked defect, or retesting a linked defect qualifies the project.
+    """
+    tester_ids = list(rows)
+    for row in rows.values():
+        row.update({
+            "testcases_created": 0,
+            "testcases_draft": 0, "recommendation_pending": 0,
+            "qa_lead_approval_pending": 0, "testcases_approved": 0,
+            "defects_raised": 0,
+            "retests_performed": 0, "executions_completed": 0,
+            "projects_worked": 0, "project_names": [],
+            "current_execution_assignments": 0, "last_activity": None,
+            "total_contributions": 0,
+        })
+    if not tester_ids:
+        return {"active_contributors": 0, "testcases_created": 0,
+                "testcases_draft": 0, "recommendation_pending": 0,
+                "qa_lead_approval_pending": 0, "testcases_approved": 0,
+                "defects_raised": 0,
+                "retests_performed": 0, "executions_completed": 0, "projects_covered": 0}
+
+    count_specs = [
+        ("testcases_created", models.TestCase, models.TestCase.created_by_id, models.TestCase.created_at),
+        ("defects_raised", models.Defect, models.Defect.reporter_id, models.Defect.reported_at),
+        ("retests_performed", models.Defect, models.Defect.retest_tester_id, models.Defect.retest_at),
+        ("executions_completed", models.TestExecutionRun, models.TestExecutionRun.executed_by_id, models.TestExecutionRun.executed_at),
+    ]
+    latest_by_tester: dict[int, datetime.datetime] = {}
+    for field, model, actor_column, date_column in count_specs:
+        for tester_id, count in _grouped_actor_counts(
+            db, model, actor_column, date_column, tester_ids, date_from, date_to,
+        ).items():
+            rows[tester_id][field] = count
+        for tester_id, activity_at in _grouped_last_activity(
+            db, model, actor_column, date_column, tester_ids, date_from, date_to,
+        ).items():
+            if tester_id not in latest_by_tester or activity_at > latest_by_tester[tester_id]:
+                latest_by_tester[tester_id] = activity_at
+
+    # Management workflow breakdown within the same testcase-creation period
+    # shown by "Test cases created". Count current testcase identities, not
+    # versions, and support both retained legacy and simplified labels.
+    pending_status_fields = {
+        "Draft": "testcases_draft",
+        "In Review": "recommendation_pending",
+        "Recommendation Pending": "recommendation_pending",
+        "Review Completed": "qa_lead_approval_pending",
+        "QA Lead Approval Pending": "qa_lead_approval_pending",
+        "Approved": "testcases_approved",
+    }
+    pending_rows = _in_period(
+        db.query(
+            models.TestCase.created_by_id,
+            models.TestCase.status,
+            func.count(models.TestCase.id),
+        ),
+        models.TestCase.created_at, date_from, date_to,
+    ).filter(
+        models.TestCase.created_by_id.in_(tester_ids),
+        models.TestCase.status.in_(tuple(pending_status_fields)),
+    ).group_by(models.TestCase.created_by_id, models.TestCase.status).all()
+    for tester_id, status, count in pending_rows:
+        rows[int(tester_id)][pending_status_fields[status]] += int(count)
+
+    current_assignments = (db.query(
+        models.TestExecution.assigned_to_id,
+        func.count(models.TestExecution.id),
+    ).join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
+      .filter(models.TestExecution.assigned_to_id.in_(tester_ids),
+              models.TestCycle.status != "Completed")
+      .group_by(models.TestExecution.assigned_to_id).all())
+    for tester_id, count in current_assignments:
+        rows[int(tester_id)]["current_execution_assignments"] = int(count)
+
+    project_sets: dict[int, set[int]] = {tester_id: set() for tester_id in tester_ids}
+
+    testcase_pairs = _in_period(
+        db.query(models.TestCase.created_by_id, models.TestCase.project_id),
+        models.TestCase.created_at, date_from, date_to,
+    ).filter(models.TestCase.created_by_id.in_(tester_ids)).distinct().all()
+    run_pairs = _in_period(
+        db.query(models.TestExecutionRun.executed_by_id, models.TestCycle.project_id)
+          .join(models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id)
+          .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id),
+        models.TestExecutionRun.executed_at, date_from, date_to,
+    ).filter(models.TestExecutionRun.executed_by_id.in_(tester_ids)).distinct().all()
+    defect_report_pairs = _in_period(
+        db.query(models.Defect.reporter_id, models.TestCycle.project_id)
+          .join(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id),
+        models.Defect.reported_at, date_from, date_to,
+    ).filter(models.Defect.reporter_id.in_(tester_ids)).distinct().all()
+    defect_retest_pairs = _in_period(
+        db.query(models.Defect.retest_tester_id, models.TestCycle.project_id)
+          .join(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id),
+        models.Defect.retest_at, date_from, date_to,
+    ).filter(models.Defect.retest_tester_id.in_(tester_ids)).distinct().all()
+    for tester_id, project_id in testcase_pairs + run_pairs + defect_report_pairs + defect_retest_pairs:
+        if tester_id and project_id:
+            project_sets[int(tester_id)].add(int(project_id))
+
+    all_project_ids = sorted({project_id for project_ids in project_sets.values() for project_id in project_ids})
+    project_names = {
+        project.id: f"{project.project_key} — {project.name}"
+        for project in (db.query(models.TestProject).filter(models.TestProject.id.in_(all_project_ids)).all()
+                        if all_project_ids else [])
+    }
+    for tester_id, row in rows.items():
+        row["last_activity"] = latest_by_tester.get(tester_id)
+        row["projects_worked"] = len(project_sets[tester_id])
+        row["project_names"] = [project_names.get(project_id, f"Project #{project_id}")
+                                for project_id in sorted(project_sets[tester_id])]
+        row["total_contributions"] = sum(row[field] for field, *_rest in count_specs)
+
+    return {
+        "active_contributors": sum(1 for row in rows.values() if row["total_contributions"] > 0),
+        "testcases_created": sum(row["testcases_created"] for row in rows.values()),
+        "testcases_draft": sum(row["testcases_draft"] for row in rows.values()),
+        "recommendation_pending": sum(row["recommendation_pending"] for row in rows.values()),
+        "qa_lead_approval_pending": sum(row["qa_lead_approval_pending"] for row in rows.values()),
+        "testcases_approved": sum(row["testcases_approved"] for row in rows.values()),
+        "defects_raised": sum(row["defects_raised"] for row in rows.values()),
+        "retests_performed": sum(row["retests_performed"] for row in rows.values()),
+        "executions_completed": sum(row["executions_completed"] for row in rows.values()),
+        "projects_covered": len(all_project_ids),
+    }
+
+
 @router.get("/qa-tester-workload")
 def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None = Query(None),
                        db: Session = Depends(get_db),
@@ -185,12 +353,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     """QA-team-only capacity view. Work is converted to weighted concurrent
     assignment points so a QA Lead can see who is available, balanced, full,
     or overloaded. Shared requests divide their load across assigned testers."""
-    qa_team_roles = {
-        Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
-        Role.CHIEF_MANAGER_QA, Role.AGM_QA,
-    }
-    if not qa_team_roles.intersection(current_user.roles):
-        raise HTTPException(403, "QA tester workload is restricted to the QA team")
+    _require_qa_dashboard_access(current_user)
     qa_testers = (db.query(models.User)
                   .join(models.UserRole, models.UserRole.user_id == models.User.id)
                   .filter(models.User.is_active == True,  # noqa: E712
@@ -319,6 +482,8 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
                     "is_current": False,
                 })
 
+    contribution_summary = _add_contribution_metrics(db, rows, date_from, date_to)
+
     for row in rows.values():
         row["assignments"].sort(key=lambda item: item["updated_at"] or datetime.datetime.min, reverse=True)
         row["occupied_points"] = round(row["occupied_points"], 2)
@@ -338,7 +503,243 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
         "available_testers": sum(1 for row in result_rows if row["occupancy_percent"] < 50),
         "highly_occupied_testers": sum(1 for row in result_rows if row["occupancy_percent"] >= 80),
         "overloaded_testers": sum(1 for row in result_rows if row["occupancy_percent"] > 100),
+        "contribution_summary": contribution_summary,
     }
+
+
+@router.get("/qa-tester-contribution/{tester_id}")
+def qa_tester_contribution_detail(
+    tester_id: int,
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    limit: int = Query(100, ge=10, le=250),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Drill-down evidence behind one tester's contribution metrics."""
+    _require_qa_dashboard_access(current_user)
+    tester = db.query(models.User).filter(models.User.id == tester_id).first()
+    if not tester:
+        raise HTTPException(404, "QA tester not found")
+
+    activities: list[dict] = []
+
+    defect_rows = _in_period(
+        db.query(models.Defect, models.TestCycle, models.TestProject)
+          .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
+          .outerjoin(models.TestProject, models.TestCycle.project_id == models.TestProject.id),
+        models.Defect.reported_at, date_from, date_to,
+    ).filter(models.Defect.reporter_id == tester_id) \
+     .order_by(models.Defect.reported_at.desc(), models.Defect.id.desc()).limit(limit).all()
+    for defect, cycle, project in defect_rows:
+        activities.append({
+            "activity_id": f"defect-{defect.id}",
+            "activity_type": "Defect Raised", "record_key": defect.defect_key,
+            "description": defect.title, "status": defect.status,
+            "activity_at": defect.reported_at,
+            "project_id": project.id if project else None,
+            "project_key": project.project_key if project else None,
+            "project_name": project.name if project else None,
+            "route": f"/defects?open={defect.defect_key}",
+        })
+
+    retest_rows = _in_period(
+        db.query(models.Defect, models.TestCycle, models.TestProject)
+          .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
+          .outerjoin(models.TestProject, models.TestCycle.project_id == models.TestProject.id),
+        models.Defect.retest_at, date_from, date_to,
+    ).filter(models.Defect.retest_tester_id == tester_id) \
+     .order_by(models.Defect.retest_at.desc(), models.Defect.id.desc()).limit(limit).all()
+    for defect, cycle, project in retest_rows:
+        activities.append({
+            "activity_id": f"retest-{defect.id}",
+            "activity_type": "Defect Retested", "record_key": defect.defect_key,
+            "description": defect.retest_actual_result or defect.retest_remarks or defect.title,
+            "status": defect.retest_result or defect.status,
+            "activity_at": defect.retest_at,
+            "project_id": project.id if project else None,
+            "project_key": project.project_key if project else None,
+            "project_name": project.name if project else None,
+            "route": f"/defects?open={defect.defect_key}",
+        })
+
+    run_rows = _in_period(
+        db.query(models.TestExecutionRun, models.TestExecution, models.TestCase,
+                 models.TestCycle, models.TestProject)
+          .join(models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id)
+          .join(models.TestCase, models.TestExecution.test_case_id == models.TestCase.id)
+          .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
+          .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id),
+        models.TestExecutionRun.executed_at, date_from, date_to,
+    ).filter(models.TestExecutionRun.executed_by_id == tester_id) \
+     .order_by(models.TestExecutionRun.executed_at.desc(), models.TestExecutionRun.id.desc()).limit(limit).all()
+    for run, execution, test_case, cycle, project in run_rows:
+        activities.append({
+            "activity_id": f"execution-{run.id}",
+            "activity_type": "Execution Attempt", "record_key": test_case.test_case_key,
+            "description": f"{cycle.cycle_key} · Attempt {run.attempt_no}",
+            "status": run.status, "activity_at": run.executed_at,
+            "project_id": project.id, "project_key": project.project_key,
+            "project_name": project.name,
+            "route": f"/test-execution?project={project.id}&cycle={cycle.id}",
+        })
+
+    assignment_rows = (db.query(models.TestExecution, models.TestCase, models.TestCycle, models.TestProject)
+                       .join(models.TestCase, models.TestExecution.test_case_id == models.TestCase.id)
+                       .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
+                       .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+                       .filter(models.TestExecution.assigned_to_id == tester_id,
+                               models.TestCycle.status != "Completed")
+                       .order_by(models.TestExecution.assigned_at.desc(), models.TestExecution.id.desc())
+                       .limit(limit).all())
+    current_assignments = [{
+        "record_key": test_case.test_case_key,
+        "cycle_key": cycle.cycle_key,
+        "cycle_status": cycle.status,
+        "execution_status": execution.status,
+        "assigned_at": execution.assigned_at,
+        "project_id": project.id, "project_key": project.project_key,
+        "project_name": project.name,
+        "route": f"/test-execution?project={project.id}&cycle={cycle.id}",
+    } for execution, test_case, cycle, project in assignment_rows]
+
+    activities.sort(key=lambda item: item["activity_at"] or datetime.datetime.min, reverse=True)
+    project_rollup: dict[int, dict] = {}
+    for item in activities:
+        project_id = item.get("project_id")
+        if not project_id:
+            continue
+        project = project_rollup.setdefault(project_id, {
+            "project_id": project_id, "project_key": item.get("project_key"),
+            "project_name": item.get("project_name"),
+            "activity_types": set(), "last_activity": None,
+        })
+        project["activity_types"].add(item["activity_type"])
+        if not project["last_activity"] or (item["activity_at"] and item["activity_at"] > project["last_activity"]):
+            project["last_activity"] = item["activity_at"]
+
+    # Testcase detail records are deliberately excluded from this endpoint:
+    # the management drill-down only needs Defects, Retests and Executions.
+    # Preserve accurate Projects coverage with one compact grouped query,
+    # without loading or serializing hundreds of testcase rows.
+    testcase_project_rows = _in_period(
+        db.query(
+            models.TestProject.id,
+            models.TestProject.project_key,
+            models.TestProject.name,
+            func.max(models.TestCase.created_at),
+        ).join(models.TestCase, models.TestCase.project_id == models.TestProject.id),
+        models.TestCase.created_at, date_from, date_to,
+    ).filter(models.TestCase.created_by_id == tester_id).group_by(
+        models.TestProject.id, models.TestProject.project_key, models.TestProject.name,
+    ).all()
+    for project_id, project_key, project_name, last_created_at in testcase_project_rows:
+        project = project_rollup.setdefault(project_id, {
+            "project_id": project_id, "project_key": project_key,
+            "project_name": project_name, "activity_types": set(), "last_activity": None,
+        })
+        project["activity_types"].add("Testcase Created")
+        if not project["last_activity"] or (last_created_at and last_created_at > project["last_activity"]):
+            project["last_activity"] = last_created_at
+    projects = sorted(project_rollup.values(), key=lambda item: item["last_activity"] or datetime.datetime.min, reverse=True)
+    for project in projects:
+        project["activity_types"] = sorted(project["activity_types"])
+
+    return {
+        "tester_id": tester.id, "tester_name": tester.full_name,
+        "period": {"date_from": date_from, "date_to": date_to},
+        "activities": activities[:limit], "current_assignments": current_assignments,
+        "projects": projects, "detail_limit": limit,
+    }
+
+
+@router.get("/qa-contribution-export")
+def export_qa_tester_contribution(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    search: str | None = Query(None),
+    department: str | None = Query(None),
+    project: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Excel evidence pack for the visible management contribution scope."""
+    _require_qa_dashboard_access(current_user)
+    qa_testers = (db.query(models.User)
+                  .join(models.UserRole, models.UserRole.user_id == models.User.id)
+                  .filter(models.User.is_active == True,  # noqa: E712
+                          models.UserRole.role.in_([Role.QA_ENGINEER, Role.SECURITY_ANALYST]),
+                          models.User.department_assignments.any(
+                              models.UserDepartment.department == QA_DEPARTMENT
+                          ))
+                  .distinct().order_by(models.User.full_name).all())
+    rows = {
+        user.id: {
+            "tester_id": user.id, "tester_name": user.full_name,
+            "department": (", ".join(user.departments) if user.departments else None) or "—",
+        }
+        for user in qa_testers
+    }
+    summary = _add_contribution_metrics(db, rows, date_from, date_to)
+    result_rows = list(rows.values())
+    if search:
+        needle = search.strip().lower()
+        result_rows = [row for row in result_rows if needle in f"{row['tester_name']} {row['department']}".lower()]
+    if department:
+        result_rows = [row for row in result_rows if department in row["department"]]
+    if project:
+        result_rows = [row for row in result_rows if project in row["project_names"]]
+
+    visible_summary = {
+        "active_contributors": sum(1 for row in result_rows if row["total_contributions"] > 0),
+        "testcases_created": sum(row["testcases_created"] for row in result_rows),
+        "testcases_draft": sum(row["testcases_draft"] for row in result_rows),
+        "recommendation_pending": sum(row["recommendation_pending"] for row in result_rows),
+        "qa_lead_approval_pending": sum(row["qa_lead_approval_pending"] for row in result_rows),
+        "testcases_approved": sum(row["testcases_approved"] for row in result_rows),
+        "defects_raised": sum(row["defects_raised"] for row in result_rows),
+        "retests_performed": sum(row["retests_performed"] for row in result_rows),
+        "executions_completed": sum(row["executions_completed"] for row in result_rows),
+        "projects_covered": len({name for row in result_rows for name in row["project_names"]}),
+    } if any((search, department, project)) else summary
+    workbook = new_workbook()
+    add_summary_sheet(
+        workbook,
+        "QA Contribution & Coverage",
+        "Management evidence for testcase authoring, governed defects, retests, execution attempts, and Test Project coverage.",
+        [
+            ("Generated by", current_user.full_name), ("Generated at", models.now()),
+            ("From", date_from or "All time"), ("To", date_to or "All time"),
+            ("Tester search", search or "All"), ("Department", department or "All"),
+            ("Project", project or "All"),
+        ],
+        [
+            ("Active contributors", visible_summary["active_contributors"]),
+            ("Test cases created", visible_summary["testcases_created"]),
+            ("Draft test cases", visible_summary["testcases_draft"]),
+            ("Recommendation pending", visible_summary["recommendation_pending"]),
+            ("QA Lead approval pending", visible_summary["qa_lead_approval_pending"]),
+            ("Approved test cases", visible_summary["testcases_approved"]),
+            ("Defects raised", visible_summary["defects_raised"]),
+            ("Retests performed", visible_summary["retests_performed"]),
+            ("Execution attempts", visible_summary["executions_completed"]),
+            ("Projects covered", visible_summary["projects_covered"]),
+        ],
+    )
+    add_table_sheet(
+        workbook, "Tester Contribution", "QA Tester Contribution & Coverage",
+        ["QA Tester", "Department", "Test Cases Created", "Draft Test Cases", "Recommendation Pending", "QA Lead Approval Pending", "Approved Test Cases", "Defects Raised", "Retests Performed",
+         "Execution Attempts", "Projects Worked On", "Project Names", "Current Assignments", "Last Activity"],
+        [[
+            row["tester_name"], row["department"], row["testcases_created"],
+            row["testcases_draft"], row["recommendation_pending"],
+            row["qa_lead_approval_pending"], row["testcases_approved"], row["defects_raised"],
+            row["retests_performed"], row["executions_completed"], row["projects_worked"],
+            "; ".join(row["project_names"]), row["current_execution_assignments"], row["last_activity"],
+        ] for row in result_rows],
+        date_headers={"Last Activity"}, widths={"QA Tester": 24, "Department": 24, "Project Names": 42},
+    )
+    return workbook_response(workbook, "qa-contribution-and-coverage.xlsx")
 
 
 def _age_days(dt) -> int:

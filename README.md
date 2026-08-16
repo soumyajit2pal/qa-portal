@@ -1,6 +1,6 @@
-# Centralized QA Portal
+# QualityOps — Enterprise Quality Operations Platform
 
-A full-stack application built from the **"Centralized QA Portal Creation"** change request
+A full-stack quality operations platform built from the **"Centralized QA Portal Creation"** change request
 (Bank of Maharashtra, Information Technology Department, FY 2026-27).
 
 - **Frontend:** a single React 18 + Vite SPA (one build, one deploy). Internally organized by
@@ -96,7 +96,7 @@ right tool — it's just more machinery than this project currently needs.
 ## Repository layout
 
 ```
-qa-portal/
+qualityops/
   backend/
     app/
       main.py              # FastAPI app, router registration
@@ -187,6 +187,34 @@ uvicorn app.main:app --reload --port 8000
 The API is now at `http://localhost:8000`, with interactive docs at
 `http://localhost:8000/docs`.
 
+### Logging modes
+
+Backend logging is controlled centrally from `backend/.env`:
+
+```dotenv
+DEEP_LOGGING=false
+LOG_DIR=logs
+LOG_FILE_NAME=app.log
+LOG_MAX_BYTES=10485760
+LOG_BACKUP_COUNT=5
+SLOW_REQUEST_MS=2000
+```
+
+`DEEP_LOGGING=false` is the normal production mode. It records startup,
+access, audit-related operational events, slow requests, warnings, errors and
+full unhandled-exception tracebacks. `DEEP_LOGGING=true` temporarily adds
+DEBUG application events, request start/completion timings, SQL text with all
+bind values hidden, and SQLAlchemy connection-pool activity. Request bodies,
+authorization headers, cookies and SQL parameter values are never included.
+
+Restart every API worker after changing the flag. Deep mode creates much more
+I/O and should be disabled again after the diagnostic window:
+
+```bash
+sudo systemctl restart qualityops-backend
+tail -f backend/logs/app.log
+```
+
 ### 2. Frontend
 
 ```bash
@@ -237,8 +265,8 @@ Try logging in as `requester1` to raise a QA request, then `qalead1` to approve 
 Two images, backend and frontend, each with a standalone `Dockerfile`:
 
 ```bash
-docker build -f backend/Dockerfile -t qa-portal-backend backend
-docker build -f frontend/Dockerfile -t qa-portal-frontend frontend
+docker build -f backend/Dockerfile -t qualityops-backend backend
+docker build -f frontend/Dockerfile -t qualityops-frontend frontend
 ```
 
 The frontend image's nginx (`frontend/nginx.conf`) reverse-proxies `/api/*` to a `backend`
@@ -333,6 +361,14 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
 
 - Apply versioned Oracle schema changes with **Alembic** before starting API
   containers; see `backend/MIGRATIONS.md`.
+- Testcase/repository and execution lists use primary-key cursor pagination;
+  cycle candidates are evaluated with SQL `NOT EXISTS` and are loaded only
+  when the Add Test Cases dialog opens. Revision `20260815_0001` installs the
+  supporting Oracle indexes and must be applied with `alembic upgrade head`.
+- Large cycle additions (more than 500 rows), testcase Excel imports, and
+  repository/lifecycle Excel exports run as background jobs. Job status and
+  generated artifacts live under `<configured upload root>/.jobs`; therefore
+  every API worker must use the same durable shared upload root in production.
 - Configure `TRUSTED_PROXY_CIDRS` with only the actual load-balancer, ingress or
   reverse-proxy networks. Login and action audit records will then store the
   original client from `X-Forwarded-For` instead of the proxy's address. The

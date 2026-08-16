@@ -92,7 +92,8 @@ function NewProjectModal({ applications, departments, users, currentUserId, onCl
           />
         </Field>
         <Field label="Project Name *">
-          <input required value={name} onChange={(e) => setName(e.target.value)} />
+          <input required maxLength={150} value={name} onChange={(e) => setName(e.target.value)} />
+          <small className="muted">{name.length}/150 characters</small>
         </Field>
         <Field label="Department *">
           <SearchableSelect disabled={applicationId !== ''} value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select department…"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
@@ -189,7 +190,8 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
           />
         </Field>
         <Field label="Project Name *">
-          <input required value={name} onChange={(e) => setName(e.target.value)} />
+          <input required maxLength={150} value={name} onChange={(e) => setName(e.target.value)} />
+          <small className="muted">{name.length}/150 characters</small>
         </Field>
         <Field label="Department *">
           <SearchableSelect disabled={applicationId !== ''} value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select department…"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
@@ -566,6 +568,7 @@ export default function TestProjects() {
     <div className="tm-page">
       <ErrorText error={error} />
       <PageHeader
+        eyebrow="Test Case Management · Design · Organize · Execute · Trace"
         title="Projects" count={visibleProjects.length}
         subtitle="Plan testing work, organize reusable test assets, and monitor execution from one project workspace."
         actions={canManage && (
@@ -612,8 +615,8 @@ export default function TestProjects() {
                 <Badge status={project.is_archived ? 'Archived' : project.is_active ? 'Active' : 'Inactive'} />
               </span>
             </div>
-            <h3>{project.name}</h3>
-            <p>{project.description || 'Test design and execution workspace for this application.'}</p>
+            <h3 title={project.name}>{project.name}</h3>
+            <p title={project.description || undefined}>{project.description || 'Test design and execution workspace for this application.'}</p>
             <div className="tm-project-stats">
               <div><strong>{summaries[project.id]?.cases ?? '—'}</strong><span>Test cases</span></div>
               <div><strong>{summaries[project.id]?.cycles ?? '—'}</strong><span>Test cycles</span></div>

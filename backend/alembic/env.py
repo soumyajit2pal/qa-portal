@@ -1,4 +1,4 @@
-"""Alembic environment for QualityShield's Oracle schema."""
+"""Alembic environment for the QualityOps Oracle schema."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ VERSION_TABLE = "qap_alembic_version"
 
 
 def include_object(obj, name, type_, reflected, compare_to):  # noqa: ARG001
-    """Do not propose dropping non-QualityShield objects in a shared schema."""
+    """Do not propose dropping non-QualityOps objects in a shared schema."""
     if type_ == "table" and reflected:
         return name == VERSION_TABLE or name.startswith("qap_")
     return True

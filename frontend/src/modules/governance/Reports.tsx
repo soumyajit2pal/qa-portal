@@ -32,6 +32,7 @@ export default function Reports() {
             rows={REPORTS.filter((r) => r.group === group)}
             columns={[
               { key: 'label', header: 'Report' },
+              { key: 'description', header: 'Purpose' },
               {
                 key: 'export', header: 'Export', filterable: false,
                 render: (r) => (

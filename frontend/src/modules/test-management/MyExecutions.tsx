@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, TableColumn, ErrorText, PageHeader, Badge } from '../../components/Common'
-import { TEST_EXECUTION_STATUSES, executionStatusGate } from '../../constants'
+import { TEST_EXECUTION_STATUSES, executionStatusGate, hasRetestEligibleHistory } from '../../constants'
 import { TestProjectOut, TestCycleOut, TestExecutionOut, TestRunDefectOut, PageOut } from '../../types'
 
 // SRS EXE-002 -- "the signed-in user's actionable items across authorized
@@ -100,14 +100,17 @@ function QuickResultActions({ execution, onChanged, onError }: {
         <div ref={panelRef} className="tm-inline-run-panel portaled" style={position} onClick={(event) => event.stopPropagation()}>
           <div className="tm-inline-run-head"><span><small>Quick execution</small><strong>Record result</strong></span><b>Attempt #{(execution.run_count || 0) + 1}</b></div>
           <div className="tm-inline-result-options">
-            {TEST_EXECUTION_STATUSES.filter((status) => status !== 'Not Executed').map((status) => {
-              const blocked = executionStatusGate(execution.linked_defects, execution.runs, status)
+            {TEST_EXECUTION_STATUSES.filter((status) =>
+              status !== 'Not Executed'
+              && (status !== 'Retest Passed' || hasRetestEligibleHistory(execution.runs, execution.status))
+            ).map((status) => {
+              const blocked = executionStatusGate(execution.linked_defects, execution.runs, status, undefined, execution.status)
               const tone = status.toLowerCase().replace(/\s+/g, '-')
               return <button type="button" key={status} className={`${result === status ? 'selected ' : ''}result-${tone}`} disabled={!!blocked} title={blocked || undefined} onClick={() => setResult(status)}><i />{status}</button>
             })}
           </div>
-          {result && executionStatusGate(execution.linked_defects, execution.runs, result) && (
-            <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result)}</small>
+          {result && executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status) && (
+            <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status)}</small>
           )}
           <div className="tm-inline-run-actions">
             <span>{result ? `${result} selected` : 'Select one result'}</span>
@@ -253,6 +256,7 @@ export default function MyExecutions() {
     <div className="tm-page my-executions-page">
       <ErrorText error={error} />
       <PageHeader
+        eyebrow="Test Case Management · Design · Organize · Execute · Trace"
         title="My Executions" count={visibleRows.length}
         subtitle="Test cases assigned to you for execution, across every project you have access to."
       />

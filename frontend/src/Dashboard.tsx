@@ -974,6 +974,19 @@ interface TesterWorkloadRow {
   waiting_count: number
   near_complete_count: number
   assignments: TesterAssignment[]
+  testcases_created: number
+  testcases_draft: number
+  recommendation_pending: number
+  qa_lead_approval_pending: number
+  testcases_approved: number
+  defects_raised: number
+  retests_performed: number
+  executions_completed: number
+  projects_worked: number
+  project_names: string[]
+  current_execution_assignments: number
+  last_activity?: string | null
+  total_contributions: number
 }
 
 interface TesterAssignment {
@@ -996,20 +1009,92 @@ interface TesterWorkloadOut {
   available_testers: number
   highly_occupied_testers: number
   overloaded_testers: number
+  contribution_summary: TesterContributionSummary
 }
+
+interface TesterContributionSummary {
+  active_contributors: number
+  testcases_created: number
+  testcases_draft: number
+  recommendation_pending: number
+  qa_lead_approval_pending: number
+  testcases_approved: number
+  defects_raised: number
+  retests_performed: number
+  executions_completed: number
+  projects_covered: number
+}
+
+interface TesterContributionActivity {
+  activity_id: string
+  activity_type: 'Defect Raised' | 'Defect Retested' | 'Execution Attempt'
+  record_key: string
+  description: string
+  status: string
+  activity_at: string
+  project_id?: number | null
+  project_key?: string | null
+  project_name?: string | null
+  route: string
+}
+
+interface TesterCurrentAssignment {
+  record_key: string
+  cycle_key: string
+  cycle_status: string
+  execution_status: string
+  assigned_at?: string | null
+  project_id: number
+  project_key: string
+  project_name: string
+  route: string
+}
+
+interface TesterContributionProject {
+  project_id: number
+  project_key: string
+  project_name: string
+  activity_types: string[]
+  last_activity?: string | null
+}
+
+interface TesterContributionDetail {
+  tester_id: number
+  tester_name: string
+  period: { date_from?: string | null; date_to?: string | null }
+  activities: TesterContributionActivity[]
+  current_assignments: TesterCurrentAssignment[]
+  projects: TesterContributionProject[]
+  detail_limit: number
+}
+
+type TesterContributionDetailView = 'Defects' | 'Retests' | 'Executions' | 'Projects' | 'Current Assignments'
 
 // QA-team-only capacity view. Aggregation and permission
 // enforcement both live on /api/dashboard/qa-tester-workload; the client
 // gate below is for navigation clarity, not the sole security boundary.
 function TesterOverviewTab() {
   const navigate = useNavigate()
-  const [range, setRange] = useState<RaisedRange>({ preset: 'all', from: '', to: '' })
+  const [range, setRange] = useState<RaisedRange>({ preset: '1m', from: '', to: '' })
   const [workload, setWorkload] = useState<TesterWorkloadOut | null>(null)
   const [error, setError] = useState<unknown>(null)
-  const [selectedTesterId, setSelectedTesterId] = useState<number | null>(null)
+  const [view, setView] = useState<'contribution' | 'capacity'>('contribution')
+  const [selectedCapacityTesterId, setSelectedCapacityTesterId] = useState<number | null>(null)
+  const [contributionDetail, setContributionDetail] = useState<TesterContributionDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailView, setDetailView] = useState<TesterContributionDetailView>('Defects')
+  const [testerFilterId, setTesterFilterId] = useState('')
+  const [departmentFilter, setDepartmentFilter] = useState('')
+  const [projectFilter, setProjectFilter] = useState('')
+  const [exportingContribution, setExportingContribution] = useState(false)
 
   useEffect(() => {
+    // Keep the previous dashboard visible while a custom period is being
+    // entered; do not accidentally issue an unbounded all-time query when
+    // only one of the two mandatory dates is present.
+    if (range.preset === 'custom' && (!range.from || !range.to)) return
     setWorkload(null); setError(null)
+    setContributionDetail(null)
     api.get<TesterWorkloadOut>(`/api/dashboard/qa-tester-workload${rangeQuery(range)}`)
       .then(setWorkload).catch(setError)
   }, [range])
@@ -1017,7 +1102,28 @@ function TesterOverviewTab() {
   if (error) return <ErrorText error={error} />
   if (!workload) return <p className="muted">Loading QA tester workload…</p>
 
-  const columns: TableColumn<TesterWorkloadRow>[] = [
+  async function openContribution(row: TesterWorkloadRow, target?: TesterContributionDetailView) {
+    const resolvedTarget = target
+      || (row.defects_raised ? 'Defects'
+        : row.retests_performed ? 'Retests'
+          : row.executions_completed ? 'Executions'
+            : row.projects_worked ? 'Projects' : 'Current Assignments')
+    setDetailView(resolvedTarget)
+    setDetailLoading(true)
+    setError(null)
+    try {
+      const query = rangeQuery(range)
+      setContributionDetail(await api.get<TesterContributionDetail>(
+        `/api/dashboard/qa-tester-contribution/${row.tester_id}${query}${query ? '&' : '?'}limit=200`,
+      ))
+    } catch (err) {
+      setError(err)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  const capacityColumns: TableColumn<TesterWorkloadRow>[] = [
     {
       key: 'tester_name', header: 'QA Tester',
       render: (row) => <div className="tester-capacity-person"><strong>{row.tester_name}</strong><span>{row.role_label} · {row.department}</span></div>,
@@ -1059,24 +1165,192 @@ function TesterOverviewTab() {
     },
   ]
 
+  const contributionColumns: TableColumn<TesterWorkloadRow>[] = [
+    {
+      key: 'tester_name', header: 'QA Tester',
+      render: (row) => <div className="tester-capacity-person"><strong>{row.tester_name}</strong><span>{row.role_label} · {row.department}</span></div>,
+    },
+    { key: 'testcases_created', header: 'Test Cases Created', render: (row) => <strong>{row.testcases_created}</strong> },
+    { key: 'testcases_draft', header: 'Draft Test Cases', render: (row) => <strong className={row.testcases_draft ? 'tester-draft-count' : 'muted'}>{row.testcases_draft}</strong> },
+    { key: 'recommendation_pending', header: 'Recommendation Pending', render: (row) => <strong className={row.recommendation_pending ? 'tester-pending-count' : 'muted'}>{row.recommendation_pending}</strong> },
+    { key: 'qa_lead_approval_pending', header: 'QA Lead Approval Pending', render: (row) => <strong className={row.qa_lead_approval_pending ? 'tester-pending-count is-qa-lead' : 'muted'}>{row.qa_lead_approval_pending}</strong> },
+    { key: 'testcases_approved', header: 'Approved Test Cases', render: (row) => <strong className={row.testcases_approved ? 'tester-approved-count' : 'muted'}>{row.testcases_approved}</strong> },
+    { key: 'defects_raised', header: 'Defects Raised', render: (row) => <button className="tester-metric-link danger" disabled={!row.defects_raised} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Defects') }}>{row.defects_raised}</button> },
+    { key: 'retests_performed', header: 'Retests', render: (row) => <button className="tester-metric-link warning" disabled={!row.retests_performed} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Retests') }}>{row.retests_performed}</button> },
+    { key: 'executions_completed', header: 'Execution Attempts', render: (row) => <button className="tester-metric-link" disabled={!row.executions_completed} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Executions') }}>{row.executions_completed}</button> },
+    { key: 'projects_worked', header: 'Projects Worked On', render: (row) => <button className="tester-metric-link success" disabled={!row.projects_worked} title={row.project_names.join('\n')} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Projects') }}>{row.projects_worked}</button>, filterValue: (row) => row.project_names.join(' ') },
+    { key: 'current_execution_assignments', header: 'Current Assignments', render: (row) => <button className="tester-metric-link" disabled={!row.current_execution_assignments} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Current Assignments') }}>{row.current_execution_assignments}</button> },
+    { key: 'last_activity', header: 'Last Activity', render: (row) => row.last_activity ? new Date(row.last_activity).toLocaleString() : <span className="muted">No activity in period</span> },
+  ]
+
+  const departments = Array.from(new Set(workload.rows.map((row) => row.department).filter((value) => value && value !== '—'))).sort()
+  const projects = Array.from(new Set(workload.rows.flatMap((row) => row.project_names))).sort()
+  const filteredRows = workload.rows.filter((row) => (
+    (!testerFilterId || row.tester_id === Number(testerFilterId))
+    && (!departmentFilter || row.department.includes(departmentFilter))
+    && (!projectFilter || row.project_names.includes(projectFilter))
+  ))
+  const filteredSummary: TesterContributionSummary = {
+    active_contributors: filteredRows.filter((row) => row.total_contributions > 0).length,
+    testcases_created: filteredRows.reduce((sum, row) => sum + row.testcases_created, 0),
+    testcases_draft: filteredRows.reduce((sum, row) => sum + row.testcases_draft, 0),
+    recommendation_pending: filteredRows.reduce((sum, row) => sum + row.recommendation_pending, 0),
+    qa_lead_approval_pending: filteredRows.reduce((sum, row) => sum + row.qa_lead_approval_pending, 0),
+    testcases_approved: filteredRows.reduce((sum, row) => sum + row.testcases_approved, 0),
+    defects_raised: filteredRows.reduce((sum, row) => sum + row.defects_raised, 0),
+    retests_performed: filteredRows.reduce((sum, row) => sum + row.retests_performed, 0),
+    executions_completed: filteredRows.reduce((sum, row) => sum + row.executions_completed, 0),
+    projects_covered: new Set(filteredRows.flatMap((row) => row.project_names)).size,
+  }
+  const testerContributionChart = Object.fromEntries(
+    [...filteredRows].sort((a, b) => b.total_contributions - a.total_contributions).slice(0, 10)
+      .map((row) => [row.tester_name, row.total_contributions]),
+  )
+  const projectCoverageChart = filteredRows.reduce<Record<string, number>>((result, row) => {
+    row.project_names.forEach((project) => { result[project] = (result[project] || 0) + 1 })
+    return result
+  }, {})
+  const bounds = rangeBounds(range)
+  const periodLabel = range.preset === 'all' ? 'All recorded activity' : `${bounds.start?.toLocaleDateString() || 'Beginning'} – ${bounds.end?.toLocaleDateString() || 'Today'}`
+
+  function exportContribution() {
+    downloadCsv('qa-contribution-and-coverage.csv', filteredRows.map((row) => ({
+      tester: row.tester_name, department: row.department,
+      test_cases_created: row.testcases_created,
+      draft_test_cases: row.testcases_draft,
+      recommendation_pending: row.recommendation_pending,
+      qa_lead_approval_pending: row.qa_lead_approval_pending,
+      approved_test_cases: row.testcases_approved,
+      defects_raised: row.defects_raised,
+      retests_performed: row.retests_performed, execution_attempts: row.executions_completed,
+      projects_worked_on: row.projects_worked, project_names: row.project_names.join('; '),
+      current_assignments: row.current_execution_assignments,
+      last_activity: row.last_activity ? new Date(row.last_activity).toLocaleString() : '',
+      reporting_period: periodLabel,
+    })), [
+      { key: 'tester', header: 'QA Tester' }, { key: 'department', header: 'Department' },
+      { key: 'test_cases_created', header: 'Test Cases Created' },
+      { key: 'draft_test_cases', header: 'Draft Test Cases' },
+      { key: 'recommendation_pending', header: 'Recommendation Pending' },
+      { key: 'qa_lead_approval_pending', header: 'QA Lead Approval Pending' },
+      { key: 'approved_test_cases', header: 'Approved Test Cases' },
+      { key: 'defects_raised', header: 'Defects Raised' },
+      { key: 'retests_performed', header: 'Retests Performed' }, { key: 'execution_attempts', header: 'Execution Attempts' },
+      { key: 'projects_worked_on', header: 'Projects Worked On' }, { key: 'project_names', header: 'Project Names' },
+      { key: 'current_assignments', header: 'Current Assignments' }, { key: 'last_activity', header: 'Last Activity' },
+      { key: 'reporting_period', header: 'Reporting Period' },
+    ])
+  }
+
+  async function exportContributionExcel() {
+    setExportingContribution(true)
+    setError(null)
+    try {
+      const { start, end } = rangeBounds(range)
+      const params = new URLSearchParams()
+      if (start) params.set('date_from', start.toISOString())
+      if (end) params.set('date_to', end.toISOString())
+      const selectedTester = workload?.rows.find((row) => row.tester_id === Number(testerFilterId))
+      if (selectedTester) params.set('search', selectedTester.tester_name)
+      if (departmentFilter) params.set('department', departmentFilter)
+      if (projectFilter) params.set('project', projectFilter)
+      await api.downloadFile(`/api/dashboard/qa-contribution-export?${params}`, 'qa-contribution-and-coverage.xlsx')
+    } catch (err) {
+      setError(err)
+    } finally {
+      setExportingContribution(false)
+    }
+  }
+
   return (
     <div className="tester-overview-tab">
       <div className="dashboard-section-head">
-        <div><strong>QA team capacity and occupancy</strong><span>Current Functional, Performance, SAST, and DAST assignments for QA Testers and Security Analysts.</span></div>
+        <div><strong>QA Contribution & Coverage</strong><span>Evidence-based testcase, defect, retest, execution, project, and current-work tracking.</span></div>
         <Badge status="QA_LEAD_ASSIGNED" label="QA team only" />
       </div>
+      <div className="pill-tabs tester-overview-modes">
+        <button className={view === 'contribution' ? 'active' : ''} onClick={() => setView('contribution')}>Contribution & Coverage</button>
+        <button className={view === 'capacity' ? 'active' : ''} onClick={() => setView('capacity')}>Capacity & Occupancy</button>
+      </div>
       <div className="tester-period-filter" role="group" aria-label="Completed request period">
-        <div><strong>Completed-work period</strong><span>Current assignments always remain visible.</span></div>
+        <div><strong>Reporting period</strong><span>{periodLabel}. Current assignments always remain visible.</span></div>
         <div className="tester-period-presets">
           {([
             ['all', 'All time'], ['3d', 'Last 3 days'], ['15d', 'Last 15 days'], ['1m', 'Last month'], ['custom', 'Custom dates'],
           ] as Array<[RaisedRangePreset, string]>).map(([preset, label]) => <button key={preset} type="button" className={range.preset === preset ? 'active' : ''} onClick={() => setRange((current) => ({ ...current, preset }))}>{label}</button>)}
         </div>
         {range.preset === 'custom' && <div className="tester-custom-dates">
-          <label><span>From</span><input type="date" value={range.from} max={range.to || undefined} onChange={(event) => setRange((current) => ({ ...current, from: event.target.value }))} /></label>
-          <label><span>To</span><input type="date" value={range.to} min={range.from || undefined} onChange={(event) => setRange((current) => ({ ...current, to: event.target.value }))} /></label>
+          <label><span>From *</span><input required type="date" value={range.from} max={range.to || undefined} onChange={(event) => setRange((current) => ({ ...current, from: event.target.value }))} /></label>
+          <label><span>To *</span><input required type="date" value={range.to} min={range.from || undefined} onChange={(event) => setRange((current) => ({ ...current, to: event.target.value }))} /></label>
         </div>}
       </div>
+      {view === 'contribution' && <>
+      <div className="tester-contribution-filters">
+        <SearchableSelect
+          value={testerFilterId}
+          onChange={setTesterFilterId}
+          placeholder="Search QA tester…"
+          options={[
+            { value: '', label: 'All QA testers' },
+            ...workload.rows.map((row) => ({ value: String(row.tester_id), label: `${row.tester_name} · ${row.role_label} · ${row.department}` })),
+          ]}
+          style={{ minWidth: 280, flex: '1 1 320px' }}
+        />
+        <select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option value="">All departments</option>{departments.map((department) => <option key={department}>{department}</option>)}</select>
+        <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="">All projects</option>{projects.map((project) => <option key={project}>{project}</option>)}</select>
+        <button className="btn btn-sm btn-primary" disabled={exportingContribution} onClick={exportContributionExcel}>{exportingContribution ? 'Exporting…' : 'Export Excel'}</button>
+        <button className="btn btn-sm" onClick={exportContribution}>Export CSV</button>
+      </div>
+      <div className="tester-workload-summary tester-contribution-summary">
+        <div><small>Active QA contributors</small><strong>{filteredSummary.active_contributors}</strong><span>With recorded work in this period</span></div>
+        <div><small>Test cases created</small><strong>{filteredSummary.testcases_created}</strong><span>Original testcase identities, not versions</span></div>
+        <div><small>Draft test cases</small><strong className={filteredSummary.testcases_draft ? 'draft' : ''}>{filteredSummary.testcases_draft}</strong><span>Created but not submitted for recommendation</span></div>
+        <div><small>Recommendation pending</small><strong className={filteredSummary.recommendation_pending ? 'warning' : ''}>{filteredSummary.recommendation_pending}</strong><span>Awaiting reviewer recommendation</span></div>
+        <div><small>QA Lead approval pending</small><strong className={filteredSummary.qa_lead_approval_pending ? 'danger' : ''}>{filteredSummary.qa_lead_approval_pending}</strong><span>Recommended and awaiting final approval</span></div>
+        <div><small>Approved test cases</small><strong className={filteredSummary.testcases_approved ? 'approved' : ''}>{filteredSummary.testcases_approved}</strong><span>Completed final QA approval</span></div>
+        <div><small>Defects raised</small><strong>{filteredSummary.defects_raised}</strong><span>Governed defects reported</span></div>
+        <div><small>Retests performed</small><strong>{filteredSummary.retests_performed}</strong><span>Governed defect retest decisions</span></div>
+        <div><small>Execution attempts</small><strong>{filteredSummary.executions_completed}</strong><span>Retained testcase run attempts</span></div>
+        <div><small>Projects covered</small><strong>{filteredSummary.projects_covered}</strong><span>Distinct projects with real QA activity</span></div>
+      </div>
+      <div className="grid grid-2 tester-contribution-charts">
+        <Card title="Contribution by tester"><BarChart data={testerContributionChart} /></Card>
+        <Card title="Project coverage by QA testers"><BarChart data={projectCoverageChart} /></Card>
+      </div>
+      <div className="tester-metric-definition" role="note"><strong>How these figures are counted</strong><span>A testcase is counted once from its original author record; versions do not increase the count. Draft, pending, and approved figures show the current workflow stage of testcases created in the selected period. Defects use the reporter. Retests use the recorded retest tester and retest date. Projects require actual authoring, execution, defect, or retest activity. Click any number for record-level evidence.</span></div>
+      <Card>
+        <Table rowKey="tester_id" columns={contributionColumns} rows={filteredRows} onRowClick={(row) => openContribution(row)} />
+        {!filteredRows.length && <p className="muted small" style={{ marginTop: 8 }}>No QA contribution matches the selected filters and period.</p>}
+      </Card>
+      {detailLoading && <p className="muted">Loading tester contribution details…</p>}
+      {contributionDetail && !detailLoading && <Card title={`${contributionDetail.tester_name} · Contribution evidence`} className="tester-contribution-detail">
+        <div className="pill-tabs tester-detail-tabs">
+          {(['Defects', 'Retests', 'Executions', 'Projects', 'Current Assignments'] as const).map((item) => <button key={item} className={detailView === item ? 'active' : ''} onClick={() => setDetailView(item)}>{item}</button>)}
+        </div>
+        {detailView === 'Projects' ? <Table rowKey="project_id" rows={contributionDetail.projects} onRowClick={(project) => navigate(`/test-repository?project=${project.project_id}`)} columns={[
+          { key: 'project_key', header: 'Project', render: (project) => <strong>{project.project_key}</strong> },
+          { key: 'project_name', header: 'Project Name' },
+          { key: 'activity_types', header: 'Contribution Types', render: (project) => project.activity_types.join(', ') },
+          { key: 'last_activity', header: 'Last Activity', render: (project) => project.last_activity ? new Date(project.last_activity).toLocaleString() : '—' },
+        ]} /> : detailView === 'Current Assignments' ? <Table rowKey="record_key" rows={contributionDetail.current_assignments} onRowClick={(item) => navigate(item.route)} columns={[
+          { key: 'record_key', header: 'Test Case', render: (item) => <strong>{item.record_key}</strong> },
+          { key: 'project_name', header: 'Project', render: (item) => `${item.project_key} — ${item.project_name}` },
+          { key: 'cycle_key', header: 'Cycle' },
+          { key: 'cycle_status', header: 'Cycle Status', render: (item) => <Badge status={item.cycle_status} /> },
+          { key: 'execution_status', header: 'Latest Result', render: (item) => <Badge status={item.execution_status} /> },
+          { key: 'assigned_at', header: 'Assigned', render: (item) => item.assigned_at ? new Date(item.assigned_at).toLocaleString() : '—' },
+        ]} /> : <Table rowKey="activity_id" rows={contributionDetail.activities.filter((item) => (detailView === 'Defects' && item.activity_type === 'Defect Raised') || (detailView === 'Retests' && item.activity_type === 'Defect Retested') || (detailView === 'Executions' && item.activity_type === 'Execution Attempt'))} onRowClick={(item) => navigate(item.route)} columns={[
+          { key: 'activity_type', header: 'Activity' },
+          { key: 'record_key', header: 'Record ID', render: (item) => <strong>{item.record_key}</strong> },
+          { key: 'project_name', header: 'Project', render: (item) => item.project_name ? `${item.project_key} — ${item.project_name}` : 'Not linked to a Test Project' },
+          { key: 'description', header: 'Details' },
+          { key: 'status', header: 'Status', render: (item) => <Badge status={item.status} /> },
+          { key: 'activity_at', header: 'Activity Date', render: (item) => new Date(item.activity_at).toLocaleString() },
+        ]} />}
+        {!['Projects', 'Current Assignments'].includes(detailView) && <p className="muted small">Up to {contributionDetail.detail_limit} recent records are shown per activity category. Summary counts above always cover the complete selected period.</p>}
+      </Card>}
+      </>}
+      {view === 'capacity' && <>
       <div className="tester-workload-summary">
         <div><small>Average team occupancy</small><strong>{workload.average_occupancy}%</strong><span>Across {workload.rows.length} active QA team members</span></div>
         <div><small>Available team members</small><strong>{workload.available_testers}</strong><span>Below 50% occupied</span></div>
@@ -1091,16 +1365,16 @@ function TesterOverviewTab() {
       <Card>
         <Table
           rowKey="tester_id"
-          columns={columns}
+          columns={capacityColumns}
           rows={workload.rows}
-          onRowClick={(row) => setSelectedTesterId((current) => current === row.tester_id ? null : row.tester_id)}
+          onRowClick={(row) => setSelectedCapacityTesterId((current) => current === row.tester_id ? null : row.tester_id)}
         />
         {workload.rows.length === 0 && (
           <p className="muted small" style={{ marginTop: 8 }}>No active QA testers are available.</p>
         )}
       </Card>
-      {selectedTesterId && (() => {
-        const tester = workload.rows.find((row) => row.tester_id === selectedTesterId)
+      {selectedCapacityTesterId && (() => {
+        const tester = workload.rows.find((row) => row.tester_id === selectedCapacityTesterId)
         if (!tester) return null
         const pathBySource: Record<TesterAssignment['source'], string> = { Functional: '/functional-requests', Performance: '/performance', SAST: '/sast', DAST: '/dast' }
         return <Card title={`${tester.tester_name} · Request tracking`} className="tester-assignment-ledger">
@@ -1122,6 +1396,7 @@ function TesterOverviewTab() {
           {!tester.assignments.length && <p className="muted small">No request assignments found for the selected period.</p>}
         </Card>
       })()}
+      </>}
     </div>
   )
 }
