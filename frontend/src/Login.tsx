@@ -61,7 +61,7 @@ export default function Login() {
           <div className="login-brand-copy">
             <div className="eyebrow"><span /> Plan · Test · Secure · Approve</div>
             <h1>Quality operations,<br />governed end to end.</h1>
-            <p>One secure workspace for QA requests, test case management, execution, security assurance, approvals, and release readiness.</p>
+            <p>One secure workspace for QA requests, test case management, execution, security assurance, and approvals workflow.</p>
 
             <div className="login-capabilities">
               <div><span><IconWorkflow /></span><strong>Orchestrated workflows</strong><small>Track every request through a clear, governed lifecycle.</small></div>

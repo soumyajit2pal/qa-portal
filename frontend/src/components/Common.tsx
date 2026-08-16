@@ -688,14 +688,14 @@ export function ApprovalDecisionButtons({
             </p>
           </div>
           <div className="workflow-decision-options">
-            <button type="button" className="workflow-decision-card approve" disabled={busy || !signature || signBlocked} onClick={handleApproveClick} title={!signature ? "Verify and sign first to enable approval" : approveLabel}>
-              <span className="workflow-decision-icon">✓</span><span><strong>{approveLabel}</strong><small>Accept and move to the next stage</small></span><i>→</i>
+            <button type="button" className="workflow-decision-card approve" disabled={busy || !signature || signBlocked} onClick={handleApproveClick} title={!signature ? "Verify and sign first to enable approval" : "Accept and move to the next stage"}>
+              <span className="workflow-decision-icon">✓</span><span>{approveLabel}</span>
             </button>
-            <button type="button" className="workflow-decision-card return" disabled={busy} onClick={() => openDecision("return")}>
-              <span className="workflow-decision-icon">↩</span><span><strong>{returnLabel}</strong><small>Send back for corrections and resubmission</small></span><i>→</i>
+            <button type="button" className="workflow-decision-card return" disabled={busy} onClick={() => openDecision("return")} title="Send back for corrections and resubmission">
+              <span className="workflow-decision-icon">↩</span><span>{returnLabel}</span>
             </button>
-            <button type="button" className="workflow-decision-card reject" disabled={busy} onClick={() => openDecision("reject")}>
-              <span className="workflow-decision-icon">×</span><span><strong>{rejectLabel}</strong><small>Stop and close this approval path</small></span><i>→</i>
+            <button type="button" className="workflow-decision-card reject" disabled={busy} onClick={() => openDecision("reject")} title="Stop and close this approval path">
+              <span className="workflow-decision-icon">×</span><span>{rejectLabel}</span>
             </button>
           </div>
         </div>
@@ -793,9 +793,9 @@ export function WorkflowDecisionPanel({
       <span className="workflow-sign-copy"><small>WORKFLOW DECISION</small><strong>{title}</strong><em>{description}</em></span>
     </div>
     <div className="workflow-decision-options">
-      {options.map((option) => <button key={option.key} type="button" className={`workflow-decision-card ${option.tone || "return"}`} disabled={busy || option.disabled} onClick={option.onClick}>
+      {options.map((option) => <button key={option.key} type="button" className={`workflow-decision-card ${option.tone || "return"}`} disabled={busy || option.disabled} onClick={option.onClick} title={option.description}>
         <span className="workflow-decision-icon">{option.icon || (option.tone === "approve" ? "✓" : option.tone === "reject" ? "×" : "↩")}</span>
-        <span><strong>{option.label}</strong><small>{option.description}</small></span><i>→</i>
+        <span>{option.label}</span>
       </button>)}
     </div>
   </div>;

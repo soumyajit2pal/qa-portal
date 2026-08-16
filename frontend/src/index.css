@@ -376,12 +376,20 @@ a { color: inherit; }
    shell pattern .topbar above already uses), so it's pinned at the bottom
    of every signed-in page regardless of how long the page content is or
    whether the sidebar is collapsed. */
+/* 2026-08 -- reported directly: "footer is not visible, make more
+   visible." At 10.5px in --muted (a light gray) on a plain white bar, it
+   was easy to miss entirely against the surrounding chrome. Bumped up
+   font-size, switched the base text to the darker --text color (only the
+   separator dot stays --muted), and gave the bar its own light tinted
+   background + a heavier top border so it reads as a distinct, intentional
+   footer rather than blending into the page. */
 .app-footer {
-  flex-shrink: 0; padding: 7px 24px; border-top: 1px solid var(--border);
-  background: #fff; display: flex; align-items: center; justify-content: center;
-  gap: 5px; color: var(--muted); font-size: 10.5px;
+  flex-shrink: 0; padding: 10px 24px; border-top: 1.5px solid var(--border);
+  background: var(--navy-50, #f4f5fb); display: flex; align-items: center; justify-content: center;
+  gap: 6px; color: var(--text); font-size: 12.5px; font-weight: 500; letter-spacing: .01em;
 }
-.app-footer strong { color: var(--text); font-weight: 650; }
+.app-footer span:not(:first-child):not(:last-child) { color: var(--muted); }
+.app-footer strong { color: var(--navy); font-weight: 700; }
 
 /* Consistent page header -- title + optional record count + description,
    with primary actions right-aligned. Used at the top of every page instead
@@ -867,24 +875,34 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .workflow-decision-readiness.ready > span { background: #2d8154; }
 .workflow-decision-readiness.ready strong { color: #286344; }
 .workflow-decision-readiness.ready small { color: #668171; }
-.workflow-decision-options { display: grid; grid-template-columns: repeat(3,minmax(180px,330px)); align-items: stretch; justify-content: start; gap: 9px; }
-.workflow-decision-card { width: 100%; min-width: 0; min-height: 54px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #cfd9e3; border-radius: 9px; background: #fff; color: #344054; text-align: left; cursor: pointer; box-shadow: 0 1px 3px rgba(16,24,40,.05); transition: transform .14s ease,box-shadow .14s ease,border-color .14s ease,background .14s ease; }
-.workflow-decision-card:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(30,50,75,.1); }
-.workflow-decision-card:disabled { opacity: .56; cursor: not-allowed; box-shadow: none; }
-.workflow-decision-card > span:nth-child(2) { min-width: 0; display: grid; gap: 1px; }
-.workflow-decision-card strong { color: inherit; font-size: 10px; font-weight: 760; line-height: 1.2; }
-.workflow-decision-card small { display: block; color: #718094; font-size: 8px; line-height: 1.25; }
-.workflow-decision-card > i { display: block; color: #98a5b5; font-size: 11px; font-style: normal; }
-.workflow-decision-icon { display: grid; place-items: center; width: 24px; height: 24px; flex: 0 0 24px; border-radius: 7px; font-size: 11px; font-weight: 850; }
-.workflow-decision-card.approve { border-color: #a8d2ba; background: #f8fcfa; color: #237347; }
-.workflow-decision-card.approve .workflow-decision-icon { color: #237347; background: #e4f4ea; }
-.workflow-decision-card.approve:hover:not(:disabled) { border-color: #4d9a70; background: #f0f9f4; }
-.workflow-decision-card.return { border-color: #e2c678; background: #fffdf7; color: #725817; }
-.workflow-decision-card.return .workflow-decision-icon { color: #80600f; background: #fbf0ce; }
-.workflow-decision-card.return:hover:not(:disabled) { border-color: #bd9028; background: #fff9e9; }
-.workflow-decision-card.reject { border-color: #e1b8bd; background: #fffafb; color: #a6313e; }
-.workflow-decision-card.reject .workflow-decision-icon { color: #a6313e; background: #f9e7e9; }
-.workflow-decision-card.reject:hover:not(:disabled) { border-color: #c75b66; background: #fff3f4; }
+/* 2026-08 -- reported directly: "Button style is not matching with the
+   whole system button style" (fixed below to reuse the real .btn-success/
+   .btn-danger gradients), then immediately again: "resude width!! not
+   prefessional design i am not making school project. enterprise
+   applicatrion." Fair -- matching the color wasn't enough. These were still
+   stretched to fill a 330px-wide grid cell each, with a big always-visible
+   two-line title+subtitle and a decorative arrow -- a wide, illustrated
+   "choice card" treatment, not how an enterprise app renders three buttons
+   in a row. Every real button elsewhere in this app (.btn: inline-flex,
+   content-width, single line, ~40px tall) sits as wide as its label and no
+   wider. Rebuilt on the same footing: .workflow-decision-options is now a
+   plain flex-wrap row (matches .modal-actions' own layout), each button is
+   inline-flex and only as wide as icon+label, one line, no arrow glyph, no
+   oversized icon badge -- the longer "what this does" explanation moved to
+   a native title tooltip (already the pattern for Approve; see the
+   disabled/enabled title logic on that button) instead of always being
+   printed on the button face. */
+.workflow-decision-options { display: flex; flex-wrap: wrap; gap: 9px; }
+.workflow-decision-card { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 9px 16px; border: 1px solid transparent; border-radius: 9px; color: #fff; cursor: pointer; font-size: 12.5px; font-weight: 750; letter-spacing: .005em; box-shadow: 0 2px 8px rgba(16,24,40,.16), inset 0 1px 0 rgba(255,255,255,.18); transition: transform .14s ease,box-shadow .14s ease,background .14s ease; }
+.workflow-decision-card:hover:not(:disabled) { transform: translateY(-1px); }
+.workflow-decision-card:disabled { opacity: .5; cursor: not-allowed; box-shadow: none; transform: none; }
+.workflow-decision-icon { display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 850; line-height: 1; }
+.workflow-decision-card.approve { border-color: #185f37; background: linear-gradient(135deg,#3c9b63,#237747 72%); }
+.workflow-decision-card.approve:hover:not(:disabled) { border-color: #185f37; background: linear-gradient(135deg,#48a86f,#1d693d 72%); box-shadow: 0 5px 13px rgba(35,119,71,.3), inset 0 1px 0 rgba(255,255,255,.2); }
+.workflow-decision-card.return { border-color: #92400e; background: linear-gradient(135deg,#ef9a4c,#d97706 72%); }
+.workflow-decision-card.return:hover:not(:disabled) { border-color: #7c3a0c; background: linear-gradient(135deg,#f4a862,#b45f09 72%); box-shadow: 0 5px 13px rgba(217,119,6,.3), inset 0 1px 0 rgba(255,255,255,.2); }
+.workflow-decision-card.reject { border-color: #8f1720; background: linear-gradient(135deg,#df5962,#b4232d 72%); }
+.workflow-decision-card.reject:hover:not(:disabled) { border-color: #8f1720; background: linear-gradient(135deg,#e7656e,#981c25 72%); box-shadow: 0 5px 13px rgba(180,35,45,.3), inset 0 1px 0 rgba(255,255,255,.2); }
 .workflow-blocked-message { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid #efd494; border-radius: 9px; background: #fff9e9; }
 .workflow-blocked-message b { color: #805b0b; font-size: 9.5px; }
 .workflow-blocked-message span { color: #8d7540; font-size: 8.5px; line-height: 1.4; }
@@ -902,7 +920,7 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .workflow-note-field textarea { width: 100%; min-height: 92px; resize: vertical; border: 1px solid #cedcdf; border-radius: 9px; padding: 10px; font: inherit; font-size: 11px; }
 .workflow-note-field textarea:focus { outline: 0; border-color: #168097; box-shadow: 0 0 0 3px rgba(13,102,120,.1); }
 .workflow-note-field > small { color: #859397; font-size: 8.5px; }
-@media (max-width: 760px) { .workflow-decision-flow { padding: 12px; }.workflow-sign-step { grid-template-columns: auto minmax(0,1fr) auto; }.workflow-sign-step .esign-trigger { grid-column: 2 / 4; justify-self: start; }.workflow-decision-options { grid-template-columns: 1fr; }.workflow-decision-card { min-height: 52px; } }
+@media (max-width: 760px) { .workflow-decision-flow { padding: 12px; }.workflow-sign-step { grid-template-columns: auto minmax(0,1fr) auto; }.workflow-sign-step .esign-trigger { grid-column: 2 / 4; justify-self: start; }.workflow-decision-options { flex-direction: column; }.workflow-decision-card { width: 100%; min-height: 44px; } }
 @media (max-width: 520px) { .workflow-step-status { display: none; }.workflow-decision-heading { grid-template-columns: auto minmax(0,1fr); }.workflow-sign-step { grid-template-columns: auto minmax(0,1fr); }.workflow-sign-step .esign-trigger { grid-column: 1 / -1; width: 100%; }.workflow-sign-copy strong { white-space: normal; } }
 
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }

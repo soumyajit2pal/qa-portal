@@ -5029,6 +5029,72 @@ section and the PDF's matching section now show one card per stage instead of on
 `rsync`+`diff -q` confirmed `signoff.py` and `SignOff.tsx` match between `Documents/qa-portal/` and
 `outputs/qa-portal/`.
 
+## 107. App page footer -- make it more visible
+
+Reported directly: "footer is not visible, make more visible" -- referring to the "Developed by Soumyajit
+Pal · Quality Assurance Department - IT" credit bar pinned to the bottom of every signed-in page (`.app-footer`
+in `index.css`, rendered by `Layout.tsx`). It was there, but at 10.5px in the light-gray `--muted` color on a
+plain white bar it blended straight into the surrounding chrome -- easy to miss even though it was already
+visible on every page (a prior fix, before this session, moved it out of the collapsible sidebar for exactly
+that reason).
+
+**Fix (`index.css`).** Increased the font size (10.5px → 12.5px, medium weight), switched the base text
+color from `--muted` to the darker `--text`, gave the name itself `--navy` + bold so it stands out as the
+focal point, kept only the "·" separator in `--muted`, and gave the bar a light tinted background
+(`--navy-50`) plus a heavier top border so it reads as a distinct footer band rather than blending into the
+page background. No layout/structural change -- still the same fixed bar at the bottom of `.main`, pinned
+regardless of scroll position or sidebar collapse state.
+
+**Verified:** visual review of the CSS rule against the surrounding theme variables (`--text`/`--muted`/
+`--navy`/`--navy-50` all confirmed defined in every active root theme block); `rsync`+`diff -q` confirmed
+`index.css` matches between `Documents/qa-portal/` and `outputs/qa-portal/`.
+
+## 108. Approve / Return / Reject decision buttons -- match the system's real button style
+
+Reported directly, with a screenshot of the Approve/Return to Requester/Reject step (`ApprovalDecisionButtons`
+in `Common.tsx`, also reused as-is by `WorkflowDecisionPanel` for SM/Department Head/Security decision
+steps): "Button style is not matching with the whole system button style." Correct -- `.workflow-decision-card`
+(`index.css`) was a pale outlined info-card: light tinted background, colored text, 8-10px type, sitting right
+next to the "Verify & sign" button which correctly uses the app's real button treatment (solid gradient fill,
+white bold text, ~40px tall). Every other action in the app -- Accept & Close, Changes Required, Reopen
+Certificate, and both the SM/Department Head/Security decision flows that reuse this same component -- uses
+`.btn`/`.btn-success`/`.btn-danger`'s solid-gradient look; this one component alone had its own bespoke card
+styling from an earlier design pass that was never brought in line.
+
+**Fix (`index.css`, `.workflow-decision-card` and related rules).** Approve and Reject now use the exact same
+gradient formulas as `.navigation-v8 .btn-success`/`.btn-danger` (the theme actually active, per the
+screenshot's navy palette) -- solid fill, white text, matching border-radius/height/font-size. Return didn't
+have an existing `.btn-` variant to copy (no amber/warning button exists elsewhere), so it's now built the
+same way from the shared `--warning` token instead of inventing a new pale color. Icon badges are now a
+consistent translucent-white circle on all three (previously a different pastel per state). Layout is
+unchanged -- still a 3-up grid with title + one-line consequence caption, so what each choice does is still
+visible before clicking; only the paint now matches the rest of the system instead of looking like a
+different app.
+
+**Verified:** visual review of the CSS against the exact gradient values already used by
+`.navigation-v8 .btn-success`/`.btn-danger` elsewhere in the same file (byte-identical formulas reused, not
+approximated); `rsync`+`diff -q` confirmed `index.css` matches between `Documents/qa-portal/` and
+`outputs/qa-portal/`.
+
+**Follow-up, same section:** reported directly, immediately after: "resude width!! not prefessional design i
+am not making school project. enterprise applicatrion." Matching the color wasn't the whole problem --
+`.workflow-decision-card` was still stretched to fill a `minmax(180px,330px)` grid cell each, carrying an
+always-visible two-line title+subtitle and a decorative "→" arrow, closer to an illustrated onboarding-wizard
+"choice card" than a button in an enterprise line-of-business app. No other button anywhere else in the
+portal (`.btn`: inline-flex, sized to its own label, single line, no arrow decoration) looks like that.
+
+**Fix (`Common.tsx` + `index.css`).** `ApprovalDecisionButtons` and `WorkflowDecisionPanel` (both render
+`.workflow-decision-card`) now render icon + single-line label only -- the longer "what this does" copy moved
+into the button's native `title` tooltip (the pattern the Approve button already used for its
+disabled/enabled explanation, now applied consistently to Return and Reject too). `.workflow-decision-options`
+switched from a 3-column stretched grid to a plain `flex-wrap` row -- the same layout `.modal-actions` already
+uses elsewhere -- so each button is `inline-flex` and only as wide as its own icon+label, exactly like every
+other button in the app. Dropped the oversized icon badge and the arrow glyph. Colors/gradients from the fix
+above are unchanged.
+
+**Verified:** `npx tsc --noEmit -p .` clean; `rsync`+`diff -q` confirmed `index.css` and `Common.tsx` match
+between `Documents/qa-portal/` and `outputs/qa-portal/`.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.
