@@ -300,7 +300,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const { user } = useAuth()
   const [tab, setTab] = useState('overview')
   const [error, setError] = useState<unknown>(null)
-  const [finding, setFinding] = useState({ issue_id: '', severity: 'Medium', description: '' })
   const [editing, setEditing] = useState(false)
   const [comments, setComments] = useState('')
   const [selectedQALead, setSelectedQALead] = useState('')
@@ -394,14 +393,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // break too: this request's row might not even be on the default first
   // page. A direct GET of the single record is both the fix and the
   // simplification (PAG-006's own "detail endpoint" pattern).
-  async function addFinding(e: React.FormEvent) {
-    e.preventDefault()
-    try {
-      await api.post(`/api/sast-requests/${req.id}/findings`, finding)
-      onChanged(await api.get<SASTOut>(`/api/sast-requests/${req.id}`))
-      setFinding({ issue_id: '', severity: 'Medium', description: '' })
-    } catch (err) { setError(err) }
-  }
   async function resolveFinding(findingId: number) {
     try {
       await api.post(`/api/sast-requests/${req.id}/findings/${findingId}/resolve`, {})
@@ -521,13 +512,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
     (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&
     SAST_DAST_ANALYST_REASSIGNABLE_STATUSES.includes(status)
   const canStartScan = isAssignedAnalyst && status === 'CONFIGURATION'
-  // Findings can be logged while still scanning, and -- this is the bit that
-  // was missing -- after Complete Scan answers "findings identified", which
-  // moves the request to Finding Validation rather than leaving it at
-  // Scanning. Answering "no findings" instead skips straight past Finding
-  // Validation to Security Complete (see _complete_scan), so this naturally
-  // stays blocked once that's confirmed -- no separate check needed.
-  const canAddFinding = isAssignedAnalyst && ['SCANNING', 'FINDING_VALIDATION'].includes(status)
   const canCompleteScan = isAssignedAnalyst && status === 'SCANNING'
   const canValidateFindings = isAssignedAnalyst && status === 'FINDING_VALIDATION'
   const canAssignToRequester = isAssignedAnalyst && status === 'REMEDIATION'
@@ -904,16 +888,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
               ) : null
             ) },
           ]} rows={req.findings} />
-          {canAddFinding && (
-            <form onSubmit={addFinding} style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-              <input placeholder="Issue ID" value={finding.issue_id} onChange={(e) => setFinding((f) => ({ ...f, issue_id: e.target.value }))} />
-              <select value={finding.severity} onChange={(e) => setFinding((f) => ({ ...f, severity: e.target.value }))}>
-                {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <input placeholder="Description" value={finding.description} onChange={(e) => setFinding((f) => ({ ...f, description: e.target.value }))} />
-              <button className="btn btn-sm">Log Finding</button>
-            </form>
-          )}
         </div>
       )}
 

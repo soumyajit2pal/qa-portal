@@ -1,9 +1,13 @@
 """Minimal, server-side Fortify SSC result importer for SAST and DAST.
 
 Credentials are read only from environment variables; browser clients never
-receive them. The supplied reference scripts query projectVersions,
-filterSets and issueGroups, which retrieves an existing SSC analysis rather
-than starting an SCA/WebInspect engine job. This adapter intentionally keeps
+receive them. The confirmed-working lookup (2026-08 reference trace against
+the live SSC instance) is a project-scoped chain, not a single flat query:
+GET projects (match by application name -> project id), then
+GET projects/{id}/versions (match by version name -> project version id),
+then projectVersions/{id}/filterSets and issueGroups for the actual
+severity counts. This retrieves an existing SSC analysis rather than
+starting an SCA/WebInspect engine job -- this adapter intentionally keeps
 that exact semantic and returns a normalized severity snapshot.
 """
 import json
@@ -87,11 +91,35 @@ class FortifySSCClient:
         return self._request("GET", path, auth=f"FortifyToken {self._access_token()}")
 
     def retrieve_snapshot(self, application_name: str, application_version: str) -> FortifyScanSnapshot:
-        versions = (self._get("projectVersions").get("data") or [])
+        # 2026-08 -- reported directly, with a working reference trace against
+        # the real SSC instance: "api endpoint for sast currently not
+        # correct... for dast also same" (this client is shared by both, see
+        # sast_dast.py's kind="SAST"/"DAST"). This used to call the flat,
+        # org-wide GET /projectVersions and filter client-side by both
+        # project name and version name in one pass -- besides being the
+        # wrong shape (the confirmed-working trace is a two-step project ->
+        # versions lookup, not one unscoped versions call), an unscoped
+        # listing across every project in the SSC instance is subject to
+        # SSC's own default page size, so a project sitting past the first
+        # page could silently fail to match at all. Replaced with the exact
+        # two-call sequence from the trace: GET /projects, match by name to
+        # get the project id, then GET /projects/{id}/versions -- already
+        # scoped to just that project -- match by version name to get the
+        # version id. `count=-1` on both list calls asks SSC for every
+        # result instead of relying on its default page size, closing that
+        # same truncation gap either call could otherwise hit.
+        projects = (self._get("projects?count=-1").get("data") or [])
+        project = next((
+            row for row in projects
+            if str(row.get("name", "")).strip().casefold() == application_name.strip().casefold()
+        ), None)
+        if not project:
+            raise FortifySSCError(f"Application '{application_name}' was not found in Fortify SSC")
+        project_id = project["id"]
+        versions = (self._get(f"projects/{project_id}/versions?count=-1").get("data") or [])
         project_version = next((
             row for row in versions
             if str(row.get("name", "")).strip() == application_version
-            and str((row.get("project") or {}).get("name", "")).strip().casefold() == application_name.casefold()
         ), None)
         if not project_version:
             raise FortifySSCError(

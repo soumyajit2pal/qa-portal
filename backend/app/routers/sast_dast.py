@@ -730,17 +730,6 @@ def _resolve_finding(db: Session, finding, current_user):
     return finding
 
 
-def _add_finding(db: Session, obj, payload, current_user):
-    _require_assigned_security_analyst(obj, current_user)
-    finding_cls = models.SASTFinding if isinstance(obj, models.SASTRequest) else models.DASTFinding
-    fk_field = "sast_request_id" if isinstance(obj, models.SASTRequest) else "dast_request_id"
-    finding = finding_cls(**{fk_field: obj.id}, **payload.model_dump())
-    db.add(finding)
-    db.commit()
-    db.refresh(finding)
-    return finding
-
-
 # ---------------- Module 4: SAST ----------------
 @router.get("/api/sast-requests", response_model=pagination.Page[schemas.SASTListOut])
 def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
@@ -802,7 +791,7 @@ def get_sast(req_id: int, db: Session = Depends(get_db), current_user: models.Us
     # closes a real gap: this endpoint did not exist before (every other
     # module already had one), and frontend code that re-fetched the entire
     # unpaginated list just to find one row by id (see SAST.tsx's own
-    # addFinding/resolveFinding) now uses this instead.
+    # resolveFinding) now uses this instead.
     return _get_or_404(db, models.SASTRequest, req_id, "SAST")
 
 
@@ -1001,13 +990,6 @@ def sast_close_request(req_id: int, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
     return _close_request(db, obj, current_user)
-
-
-@router.post("/api/sast-requests/{req_id}/findings", response_model=schemas.SASTFindingOut)
-def add_sast_finding(req_id: int, payload: schemas.SASTFindingIn, db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
-    return _add_finding(db, obj, payload, current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/findings/{finding_id}/resolve", response_model=schemas.SASTFindingOut)
@@ -1467,13 +1449,6 @@ def dast_close_request(req_id: int, db: Session = Depends(get_db),
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
     obj = _close_request(db, obj, current_user)
     return _dast_out(obj, current_user)
-
-
-@router.post("/api/dast-requests/{req_id}/findings", response_model=schemas.DASTFindingOut)
-def add_dast_finding(req_id: int, payload: schemas.SASTFindingIn, db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
-    return _add_finding(db, obj, payload, current_user)
 
 
 @router.post("/api/dast-requests/{req_id}/findings/{finding_id}/resolve", response_model=schemas.DASTFindingOut)

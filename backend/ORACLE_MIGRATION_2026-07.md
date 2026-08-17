@@ -5095,6 +5095,102 @@ above are unchanged.
 **Verified:** `npx tsc --noEmit -p .` clean; `rsync`+`diff -q` confirmed `index.css` and `Common.tsx` match
 between `Documents/qa-portal/` and `outputs/qa-portal/`.
 
+## 109. SAST/DAST -- remove manual "Log Finding" entry
+
+Reported directly: "currently we are fetching findings from SAST DAST api, so manually add finding currently
+not required. remove manually add functionality of findings." Findings tracked in this portal's `SASTFinding`/
+`DASTFinding` tables had no automated source -- the "Log Finding" form (`addFinding` in `SAST.tsx`/`DAST.tsx`,
+`POST /api/sast-requests/{id}/findings` and the DAST equivalent) was the only way a row ever got created. That's
+now redundant: the actual scan output is already surfacing automatically via the separate scan-results
+pipeline (`SecurityScanResult`/`SecurityScanResults`, populated by Start Scan against the real SAST/DAST tool's
+API) shown directly above this same table.
+
+**Fix.** Removed the manual-entry path entirely, both sides:
+
+- `SAST.tsx`/`DAST.tsx`: removed the `addFinding` handler, the `finding`/`setFinding` form state, the
+  `canAddFinding` gate, and the "Log Finding" form itself (Issue ID / Severity / Description inputs + submit
+  button) from the Findings tab.
+- `routers/sast_dast.py`: removed the `POST /api/sast-requests/{id}/findings` and
+  `POST /api/dast-requests/{id}/findings` endpoints (`add_sast_finding`/`add_dast_finding`) and the shared
+  `_add_finding` helper they both called -- not just hidden behind a removed button, the write path itself no
+  longer exists.
+
+Left untouched: the Findings table itself, "Mark Fixed" (`resolveFinding`/`resolve_sast_finding`/
+`resolve_dast_finding`), and Validate Findings -- any findings already on file stay visible and resolvable;
+only *creating new ones by hand* was in scope here. `schemas.SASTFindingIn` is now unreferenced but left in
+place rather than deleted, in case a future automated ingestion path needs the same shape.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean;
+`rsync`+`diff -q` confirmed `sast_dast.py`, `SAST.tsx`, `DAST.tsx` match between `Documents/qa-portal/` and
+`outputs/qa-portal/`.
+
+## 110. Defect lifecycle -- add a tracked "Triaged" stage
+
+Reported directly, with a full defect lifecycle diagram and a 12-row stage table (New/Open -> Triage ->
+Assigned/Rejected/Duplicate -> In Progress -> Fixed/Resolved -> Retest -> Closed/Reopened, plus Deferred and
+Won't Fix as side branches). The existing workflow (`routers/defects.py` STATUSES/TRANSITIONS, mirrored in
+`Defects.tsx`) already covered nearly all of it -- Assigned, In Progress, Resolved, Retest, Closed, Reopened,
+Deferred, Rejected, Duplicate, and "Not a Defect" (this system's existing equivalent of "invalid/won't fix,
+investigated and not a real defect") were all already there. The one real gap: New went straight to
+Assigned/Rejected/Duplicate/etc. with no tracked record that anyone actually reviewed, validated, and
+prioritized it first -- "Triage" happened, if at all, informally.
+
+Three follow-up questions resolved this before implementing (asked directly, since each is a one-way schema/
+workflow decision): (1) add "Triaged" as a real, separately-tracked status -- yes; (2) the spec's "Won't Fix"
+row overlaps with the existing "Not a Defect" status (valid-but-not-fixing vs. not-a-real-defect are different
+meanings, but) -- confirmed to reuse "Not a Defect" rather than add a third overlapping status; (3) the
+diagram shows Reopened -> In Progress directly, the system has Reopened -> Assigned first -- confirmed to keep
+the existing Assigned step (chance to reassign before work resumes), not follow the diagram literally there.
+
+**Fix.** `New` now only transitions to the new `Triaged` status; `Triaged` inherits every option `New` used to
+have (`Assigned`, `Rejected`, `Duplicate`, `Not a Defect`, `Deferred`). No new required fields on the Triage
+step itself (matches the existing "In Progress" transition's own precedent of a simple optional Remarks field
+-- `TransitionModal`'s generic fallback already covers it, no JSX change needed there). Who may triage: same
+actor set already trusted to reject/duplicate a defect (Defect Reporter, QA Engineer, QA Lead group, Admin) --
+the spec's "Dev Department Head" isn't included at this step since no assignee exists yet to have a department
+head of. Updated both sides: `routers/defects.py` (STATUSES tuple, TRANSITIONS dict, permission check in
+`transition_defect`) and `Defects.tsx` (STATUSES, TRANSITIONS, `allowedTransitions` filter, and the `lifecycle`
+progress-stepper array shown in the defect detail modal). Dashboard counts needed no changes -- `by_status` is
+a live SQL `GROUP BY` (not a hardcoded list), and `_TERMINAL_STATUSES`/`_RETEST_STATUSES` already exclude both
+New and Triaged, so Triaged defects count as "open" automatically.
+
+**No migration needed** -- `status` is an existing `Column(String(20))` with no DB-level enum/check
+constraint; "Triaged" is just a new string value it now accepts, well within the 20-char limit.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean;
+`rsync`+`diff -q` confirmed `defects.py` and `Defects.tsx` match between `Documents/qa-portal/` and
+`outputs/qa-portal/`.
+
+## 111. Fortify SSC integration -- fix the SAST/DAST project/version lookup
+
+Reported directly, with a working reference trace captured against the live SSC instance
+(`sast.mahabank.co.in`): "api endpoint for sast currently not correct, so fix based on the attachment. for
+dast also same." One shared client (`fortify_ssc.py`'s `FortifySSCClient.retrieve_snapshot`, called from
+`routers/sast_dast.py`'s scan-start handler with `kind="SAST"` or `kind="DAST"`) backs both modules, so a
+single fix covers both -- consistent with the report.
+
+**Root cause.** The lookup called the flat, org-wide `GET /projectVersions` and filtered the result
+client-side by matching both project name and version name in one pass. The confirmed-working trace is a
+two-step, project-scoped chain instead: `GET /projects` (find the project by name, get its id), then
+`GET /projects/{id}/versions` (already scoped to just that project, find the version by name). Beyond being
+the wrong shape, the old unscoped call was also subject to SSC's own default page size across every project
+in the whole instance -- an application sitting past the first page of results could silently fail to match
+at all, which fits "currently not correct" better than a pure shape mismatch would on its own.
+
+**Fix (`fortify_ssc.py`).** Replaced the single unscoped `projectVersions` call with the exact two-call
+sequence from the trace: `GET /projects` matched by application name -> project id, then
+`GET /projects/{id}/versions` matched by version name -> project version id. Added `count=-1` to both list
+calls so SSC returns every result instead of its default page size, closing the truncation gap either call
+could otherwise hit. Everything downstream (`projectVersions/{id}/filterSets` and `issueGroups` for the
+severity counts) is unchanged -- the trace confirms that half was already correct. No frontend or API
+contract change -- `POST /api/{sast,dast}-requests/{id}/start-scan`'s request/response shape is untouched;
+this is purely the server-side call this endpoint makes to SSC underneath.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `rsync`+`diff -q` confirmed
+`fortify_ssc.py` matches between `Documents/qa-portal/` and `outputs/qa-portal/`. Not verified against the
+live SSC instance itself (no network access to `sast.mahabank.co.in` from this environment) -- worth a real
+Start Scan run against a known project/version once deployed.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.

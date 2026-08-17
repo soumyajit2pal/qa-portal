@@ -20,7 +20,7 @@ from .. import reassignment
 
 router = APIRouter(prefix="/api/defects", tags=["defect-management"])
 
-STATUSES = ("New", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect", "Closed")
+STATUSES = ("New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect", "Closed")
 SEVERITIES = ("Critical", "High", "Medium", "Low")
 PRIORITIES = ("P1 – Immediate", "P2 – High", "P3 – Medium", "P4 – Low")
 RESOLUTION_TYPES = (
@@ -28,7 +28,18 @@ RESOLUTION_TYPES = (
     "Environment Issue Resolved", "Cannot Reproduce", "Working as Designed", "Other",
 )
 TRANSITIONS = {
-    "New": {"Assigned", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
+    # 2026-08 -- reported directly, with a full defect lifecycle diagram: a
+    # New/Open defect should pass through an explicit "Triaged" checkpoint
+    # (reviewed, validated, prioritized) before any disposition is made --
+    # previously New went straight to Assigned/Rejected/Duplicate/etc. with
+    # no tracked record that triage happened at all. Triaged now owns every
+    # outgoing option New used to have; New itself only ever moves to
+    # Triaged. (Two follow-up questions from that same report were answered
+    # explicitly: "Won't Fix" is NOT a new status -- the existing "Not a
+    # Defect" status covers that ground -- and Reopened still goes back to
+    # Assigned first rather than straight to In Progress, unchanged below.)
+    "New": {"Triaged"},
+    "Triaged": {"Assigned", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
     "Assigned": {"In Progress", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
     "In Progress": {"Resolved", "Rejected", "Duplicate", "Deferred"},
     "Resolved": {"Retest"},
@@ -661,6 +672,14 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     manager = _is_manager(db, obj, current_user)
     assignee = _is_assignee(obj, current_user)
     tester = _is_tester(obj, current_user)
+    # Triage happens before there's an assignee, so the "Dev Department
+    # Head" actor from the reported spec's table doesn't apply yet (that
+    # role only becomes reachable once someone from their team is actually
+    # assigned) -- scoped to whoever could route the defect anyway
+    # (_can_assign: QA Engineer or QA Lead group) or the reporter, same
+    # actor set already trusted to reject/duplicate it.
+    if requested == "Triaged" and not (_can_assign(db, obj, current_user) or obj.reporter_id == current_user.id):
+        raise HTTPException(403, "Only the Defect Reporter, a QA Engineer, QA Lead, or Administrator can triage a defect")
     if requested == "Assigned" and not _can_assign(db, obj, current_user):
         raise HTTPException(403, "Only a QA Engineer, QA Lead, Project Lead, or Administrator can assign a defect")
     if requested in {"Rejected", "Duplicate"} and not (

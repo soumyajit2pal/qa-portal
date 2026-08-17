@@ -14,12 +14,19 @@ import { useAuth } from '../../context/AuthContext'
 import { ENVIRONMENTS, DEFECT_REASSIGNABLE_STATUSES, QA_DEPARTMENT, hasRole, hasDepartment, canReassign, userDepartments } from '../../constants'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 
-const STATUSES = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect', 'Closed']
+const STATUSES = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect', 'Closed']
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
 const PRIORITIES = ['P1 – Immediate', 'P2 – High', 'P3 – Medium', 'P4 – Low']
 const RESOLUTION_TYPES = ['Fixed', 'Configuration Changed', 'Data Corrected', 'Code Change', 'Environment Issue Resolved', 'Cannot Reproduce', 'Working as Designed', 'Other']
+// 2026-08 -- reported directly, with a full defect lifecycle diagram: New
+// now passes through an explicit "Triaged" checkpoint before any
+// disposition (mirrors routers/defects.py's own TRANSITIONS -- see that
+// dict's comment for the two follow-up decisions from the same report:
+// no separate "Won't Fix" status, and Reopened still goes to Assigned
+// first rather than straight to In Progress).
 const TRANSITIONS: Record<string, string[]> = {
-  New: ['Assigned', 'Rejected', 'Duplicate', 'Not a Defect', 'Deferred'],
+  New: ['Triaged'],
+  Triaged: ['Assigned', 'Rejected', 'Duplicate', 'Not a Defect', 'Deferred'],
   Assigned: ['In Progress', 'Rejected', 'Duplicate', 'Not a Defect', 'Deferred'],
   'In Progress': ['Resolved', 'Rejected', 'Duplicate', 'Deferred'],
   Resolved: ['Retest'], Retest: ['Closed', 'Reopened'], Reopened: ['Assigned'],
@@ -614,6 +621,10 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     && canReassign(user, defect.assignee_id, currentAssigneeUser?.departments && currentAssigneeUser.departments.length
       ? currentAssigneeUser.departments : (currentAssigneeUser?.department || defect.assigned_team))
   const allowedTransitions = (TRANSITIONS[defect.status] || []).filter((target) => {
+    // Same actor set already trusted to reject/duplicate a defect -- see
+    // routers/defects.py's matching comment on why the Dev Department Head
+    // isn't included here (no assignee exists yet at triage time).
+    if (target === 'Triaged') return canAssign || defect.reporter_id === user?.id
     if (target === 'Assigned') return canAssign
     if (['Rejected', 'Duplicate'].includes(target)) return manager || defect.reporter_id === user?.id || assigneeOrDepartmentHead
     if (target === 'Not a Defect') return manager || defect.reporter_id === user?.id
@@ -630,7 +641,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
         : manager || tester
     return false
   })
-  const lifecycle = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Closed']
+  const lifecycle = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Closed']
   const terminalOutcomes = ['Rejected', 'Not a Defect']
   const lifecycleIndex = lifecycle.indexOf(defect.status)
   return <>
