@@ -328,6 +328,17 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // through with no confirmation dialog, since the system already knows the
   // answer from the latest imported scan.
   const [showRescan, setShowRescan] = useState(false)
+  // Reported directly: "while clicking on Scan or Rescan, give warning
+  // message saying are you ready to retrieve the result or are you sure
+  // scan has been completed" -- Start Scan/Rescan both import whatever is
+  // CURRENTLY sitting in Fortify SSC for that application/version right
+  // away, with no separate "is the scan actually done yet" check; clicking
+  // too early silently imports a stale or in-progress result. This is a
+  // one-question Yes/No gate in front of each -- confirming just advances
+  // to the existing SecurityScanDialog (Validate & Start Scan / Rescan)
+  // unchanged; declining closes it with nothing started.
+  const [showStartScanConfirm, setShowStartScanConfirm] = useState(false)
+  const [showRescanConfirm, setShowRescanConfirm] = useState(false)
   // "give option to link and delink supression request from sast request
   // and supression both" -- opens LinkSuppressionModal (SecurityScan.tsx),
   // the SAST-side counterpart to Suppression.tsx's own Relink control.
@@ -837,7 +848,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                   </button>
                 </>
               )}
-              {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setScanError(null); setShowStartScan(true) }}>Start Scan</button>}
+              {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => setShowStartScanConfirm(true)}>Start Scan</button>}
               {/* Rescan / Mark Scan Complete now live in the Findings tab's
                   Scan Summary panel (SecurityScanResults, section 4.4 of the
                   "Findings Validation" doc) instead of here -- they act on
@@ -949,7 +960,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
             hasOpenSuppression={hasOpenSuppression}
             openSuppressionIds={openSuppressionIds}
             rejectedSuppressionIds={rejectedSuppressionIds}
-            onRescan={() => { setScanError(null); setShowRescan(true) }}
+            onRescan={() => setShowRescanConfirm(true)}
             onMarkComplete={markScanComplete}
             onInitiateSuppression={initiateSuppression}
             onAssignToRequester={() => act('assign-to-requester')}
@@ -972,6 +983,31 @@ function SASTDetail({ req, onClose, onChanged, users }: {
           until switching tabs. Same fix applies to Start Scan for
           consistency, even though that button itself only lives on
           Overview today. */}
+      {/* "give warning message saying are you ready to retrieve the result
+          or are you sure scan has been completed" -- one confirm step in
+          front of each import dialog; confirming is the only thing that
+          sets showStartScan/showRescan, so the actual import can't be
+          reached without it. */}
+      {showStartScanConfirm && (
+        <ConfirmModal
+          title="Start Scan"
+          message="Has the scan in Fortify SSC finished running? Starting the import now will retrieve whatever results are currently available for this application/version -- if the scan is still in progress, the results may be incomplete."
+          confirmLabel="Yes, retrieve results"
+          cancelLabel="Not yet"
+          onConfirm={() => { setShowStartScanConfirm(false); setScanError(null); setShowStartScan(true) }}
+          onCancel={() => setShowStartScanConfirm(false)}
+        />
+      )}
+      {showRescanConfirm && (
+        <ConfirmModal
+          title="Rescan"
+          message="Has the rescan in Fortify SSC finished running? Retrieving results now will import whatever is currently available for this application/version -- if the scan is still in progress, the results may be incomplete."
+          confirmLabel="Yes, retrieve results"
+          cancelLabel="Not yet"
+          onConfirm={() => { setShowRescanConfirm(false); setScanError(null); setShowRescan(true) }}
+          onCancel={() => setShowRescanConfirm(false)}
+        />
+      )}
       {showStartScan && <SecurityScanDialog kind="SAST" initialApplicationName={req.application_name} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
       {showRescan && (
         <SecurityScanDialog

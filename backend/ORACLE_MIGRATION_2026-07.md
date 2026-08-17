@@ -5774,6 +5774,30 @@ blocked; Done-only: not blocked; Done+a-new-open-one: blocked; no suppression at
 blocked) -- all match the backend's own gate. `rsync`+`diff -q` confirmed `SAST.tsx`/`DAST.tsx` match between
 `Documents/qa-portal/` and `outputs/qa-portal/`.
 
+## 128. Confirm-before-import warning on Start Scan / Rescan
+
+Reported directly: "while clicking on Scan or Rescan, give warning message saying are you ready to
+retrieve the result or are you sure scan has been completed."
+
+**Why.** Start Scan and Rescan both call straight through to `SecurityScanDialog`, which immediately
+imports whatever Fortify SSC currently has on record for the entered application/version -- there was no
+check that the scan itself had actually finished running in SSC first. Clicking either button too early
+would silently import a stale or in-progress result as if it were final.
+
+**Fix (frontend only -- `SAST.tsx`, `DAST.tsx`).** Both buttons now go through a `ConfirmModal` (existing
+shared Yes/No component, same one used elsewhere e.g. Suppression.tsx's re-approval prompt) before the
+real dialog opens: new `showStartScanConfirm`/`showRescanConfirm` state, set by the Start Scan button's
+`onClick` and `SecurityScanResults`' `onRescan` respectively (previously these set `showStartScan`/
+`showRescan` directly). Confirming ("Yes, retrieve results") is the only path that sets
+`showStartScan`/`showRescan` true and opens the actual `SecurityScanDialog`; declining ("Not yet") just
+closes the confirm prompt with nothing started. The message asks whether the scan has finished running in
+Fortify SSC and warns that retrieving now imports whatever is currently available, which may be incomplete
+if the scan is still in progress. No backend change -- this is purely an extra confirmation step in front
+of the existing import flow.
+
+**Verified:** `npx tsc --noEmit -p .` clean. `rsync`+`diff -q` confirmed `SAST.tsx`/`DAST.tsx` match between
+`Documents/qa-portal/` and `outputs/qa-portal/`.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.
