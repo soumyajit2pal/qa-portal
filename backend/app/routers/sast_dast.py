@@ -87,26 +87,36 @@ _ADMIN_ONLY_FIELDS = {"application_name", "epic_number", "cr_number"}
 #   Draft -> Submit -> same-department SM Approval -> same-department
 #   Department Head Approval (assigns a COE - Quality Assurance QA Lead) -> Security Readiness
 #   (owned by that QA Lead) -> Planning (QA Lead assigns a COE - Quality Assurance Security
-#   Analyst) -> Configuration -> Scanning -> Complete
-#   Scan, gated on a confirmation pop-up ("Are you sure no security findings
-#   were identified during the scan?"):
-#     - Yes (clean scan) -> Security Complete -> Report Ready -> Closed, all
-#       chained automatically in one step (see _auto_close_if_clean). Every
-#       hop into Security Complete (here, in _validate_findings, and in
-#       _rescan_decision's Passed branch) and the Security Complete ->
-#       Report Ready hop are both gated on any linked Suppression request
-#       being "Done" (see _require_no_pending_suppressions) -- a request
-#       can't be called Security Complete while a suppression raised against
-#       it is still an open decision.
-#     - No (findings identified) -> Finding Validation, and the UI switches
-#       to the Findings tab -> [no open findings after all ->] Security
-#       Complete, or [open findings ->] Remediation -> Assigned To Requester
-#       -> Waiting For Fix -> (requester marks fixed) -> Assigned To Lead ->
-#       Rescan -> the same confirmation pop-up again (Rescan Decision):
-#         - Passed (no findings remain) -> Security Complete -> Report Ready
-#           -> Closed, same auto-chain (and same suppression gate) as above.
-#         - Failed (findings still exist) -> back to Finding Validation, UI
-#           returns to the Findings tab -> repeat remediation/rescan.
+#   Analyst) -> Configuration -> Scanning, where Start Scan imports the first
+#   SecurityScanResult snapshot from Fortify SSC.
+#
+#   2026-08 "Findings Validation" requirement doc, reported directly with the
+#   full spec attached -- Scanning (and Finding Validation/Remediation/
+#   Waiting For Fix/Rescan, collectively SCAN_ACTIVE_STATUSES below, for
+#   requests that still use that older manual hand-off chain) now offers two
+#   data-driven actions instead of the old self-reported "were there
+#   findings?" pop-up:
+#     - Rescan (_rescan_scan) -- re-imports fresh SSC results, same as Start
+#       Scan, into a NEW SecurityScanResult row every time ("each rescan
+#       shall create a new scan execution record... previous scan records
+#       shall remain unchanged" -- the doc's own words). Status is left
+#       unchanged; this is purely a data refresh.
+#     - Mark Scan Complete (_mark_scan_complete) -- FR-06's 4 rules, read off
+#       the latest SecurityScanResult instead of a manual self-report:
+#       findings = 0 -> Security Complete -> Report Ready -> Closed, all
+#       chained automatically (_auto_close_if_clean); findings > 0 is only
+#       allowed through once every Suppression Request linked to this id is
+#       "Done" (_require_no_pending_suppressions) -- otherwise it's blocked
+#       with FR-06's exact error text.
+#
+#   The older manual chain -- Finding Validation (_validate_findings) ->
+#   Remediation -> Assigned To Requester -> Waiting For Fix -> (requester
+#   marks fixed) -> Assigned To Lead -> Rescan status -- is left fully
+#   reachable via its own existing buttons for any request already using it,
+#   and _validate_findings now reads the same real SecurityScanResult data
+#   instead of the no-longer-populated SASTFinding/DASTFinding list. New
+#   requests aren't forced through it: Rescan/Mark Scan Complete work
+#   directly from Scanning, matching the doc's flatter model.
 #
 # Implemented once as generic helpers parameterized by model instance (a
 # models.SASTRequest or models.DASTRequest row), with a thin pair of route
@@ -512,19 +522,21 @@ def _start_configuration(db: Session, obj, current_user):
     )
 
 
-def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_user):
-    _require(obj, "CONFIGURATION", "Start scan")
-    _require_assigned_security_analyst(obj, current_user)
-    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+def _import_scan_result(db: Session, obj, kind: str, application_name: str, application_version: str, current_user):
+    """Shared Fortify SSC import -- one immutable SecurityScanResult row per
+    call. Used by both Start Scan (the very first import, CONFIGURATION ->
+    SCANNING) and Rescan (2026-08, "Findings Validation" requirement doc:
+    "Each rescan shall create a new scan execution record. Previous scan
+    records shall remain unchanged. System shall maintain scan history." --
+    previously only Start Scan ever called SSC at all; the old "Rescan
+    Decision" action was just the analyst's own Passed/Failed guess with no
+    fresh data behind it)."""
     try:
-        snapshot = FortifySSCClient(kind).retrieve_snapshot(
-            payload.application_name, payload.application_version,
-        )
+        snapshot = FortifySSCClient(kind).retrieve_snapshot(application_name, application_version)
     except FortifySSCError as exc:
         # Do not advance the workflow if SSC cannot resolve/import the exact
         # application version selected by the analyst.
         raise HTTPException(502, str(exc)) from exc
-
     scan_result = models.SecurityScanResult(
         request_type=kind, request_id=obj.id,
         application_name=snapshot.application_name,
@@ -536,6 +548,16 @@ def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_
         filters_json=json.dumps(snapshot.filters), imported_by_id=current_user.id,
     )
     db.add(scan_result)
+    return scan_result, snapshot
+
+
+def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_user):
+    _require(obj, "CONFIGURATION", "Start scan")
+    _require_assigned_security_analyst(obj, current_user)
+    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+    scan_result, snapshot = _import_scan_result(
+        db, obj, kind, payload.application_name, payload.application_version, current_user,
+    )
     obj.status = "SCANNING"
     _log(
         db, obj, "Configuration", current_user, "SSC Results Imported / Scanning Started",
@@ -548,13 +570,112 @@ def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_
     return obj, scan_result
 
 
+# 2026-08 "Findings Validation" requirement doc -- Rescan and Mark Scan
+# Complete are both reachable across this whole "still actively resolving
+# scan findings" window, not just one specific status. Kept broad
+# deliberately: some requests may currently be sitting in Finding
+# Validation/Remediation/Waiting For Fix/Rescan already (that manual
+# hand-off chain -- Validate Findings/Assign to Requester/Mark Fixed -- is
+# left fully intact below, unchanged, for teams that still want it), and
+# the doc's own flatter model ("Findings > 0 -> Display Rescan and
+# Suppression Options") doesn't require routing through any of those first.
+SCAN_ACTIVE_STATUSES = {"SCANNING", "FINDING_VALIDATION", "REMEDIATION", "WAITING_FOR_FIX", "RESCAN"}
+
+
+def _rescan_scan(db: Session, obj, kind: str, payload: schemas.SecurityScanStartIn, current_user):
+    _require(obj, SCAN_ACTIVE_STATUSES, "Rescan")
+    _require_assigned_security_analyst(obj, current_user)
+    scan_result, snapshot = _import_scan_result(
+        db, obj, kind, payload.application_name, payload.application_version, current_user,
+    )
+    _log(
+        db, obj, SAST_DAST_STATUS_LABELS.get(obj.status, obj.status), current_user, "Rescan Imported",
+        f"Fortify SSC application '{snapshot.application_name}', version '{snapshot.application_version}', "
+        f"provider version ID {snapshot.project_version_id}; {snapshot.total_count} finding(s) across filter sets.",
+    )
+    db.commit()
+    db.refresh(obj)
+    db.refresh(scan_result)
+    return obj, scan_result
+
+
+def _mark_scan_complete(db: Session, obj, kind: str, payload: schemas.CommentIn, current_user, sup_filter_col):
+    """FR-06 Scan Completion Validation, from the "Findings Validation"
+    requirement doc -- replaces the old Complete Scan's manual "were there
+    findings?" self-report with the system's own answer, read straight off
+    the latest imported SecurityScanResult:
+      Rule 1: Findings = 0                                          -> Allow
+      Rule 2: Findings > 0 AND no Suppression Request exists at all -> Block
+      Rule 3: Findings > 0 AND Suppression Request status != Done   -> Block
+      Rule 4: Findings > 0 AND Suppression Request status = Done    -> Allow
+    Rules 2 and 3 share the exact error message specified in the doc."""
+    _require(obj, SCAN_ACTIVE_STATUSES, "Mark Scan Complete")
+    _require_assigned_security_analyst(obj, current_user)
+    results = _scan_results(db, kind, obj.id)
+    if not results:
+        raise HTTPException(400, "Start a scan and import Fortify SSC results before marking this scan complete.")
+    current_scan = results[0]
+    if current_scan.total_count > 0:
+        has_suppression = db.query(models.SuppressionRequest.id).filter(sup_filter_col == obj.id).first() is not None
+        pending = _pending_suppression_ids(db, obj, sup_filter_col)
+        if not has_suppression or pending:
+            raise HTTPException(
+                400,
+                "Scan cannot be marked as Complete. Open findings exist and associated suppression request "
+                "is not completed. Please complete remediation, perform a rescan, or obtain approved "
+                "suppression before closing the scan.",
+            )
+    obj.status = "SECURITY_COMPLETE"
+    _log(db, obj, "Scanning", current_user, "Scan Marked Complete",
+         (payload.comments if payload else None) or f"{current_scan.total_count} finding(s) on latest scan.")
+    db.commit()
+    db.refresh(obj)
+    return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
+
+
 def _scan_results(db: Session, kind: str, request_id: int):
-    return (
+    """Oldest-first pass computes each row's Scan No / Type / Status (2026-08
+    "Findings Validation" doc, section 4.3 Scan History -- these are derived
+    from ordering, not stored columns, since Scan No 1 is always "Initial
+    Scan" and every row after it is a "Rescan" by definition; Status is
+    always "Completed" because a failed/partial SSC import never gets this
+    far -- see _import_scan_result, which only ever adds a row after a
+    successful retrieve_snapshot()), then reverses back to the newest-first
+    order this function has always returned (SecurityScanResults.tsx's
+    `results[0]` == latest is relied on elsewhere)."""
+    rows = (
         db.query(models.SecurityScanResult)
         .filter_by(request_type=kind, request_id=request_id)
-        .order_by(models.SecurityScanResult.imported_at.desc(), models.SecurityScanResult.id.desc())
+        .order_by(models.SecurityScanResult.imported_at.asc(), models.SecurityScanResult.id.asc())
         .all()
     )
+    for index, row in enumerate(rows):
+        row.scan_no = index + 1
+        row.scan_type = "Initial Scan" if index == 0 else "Rescan"
+        row.status = "Completed"
+    rows.reverse()
+    return rows
+
+
+def _scan_summary(db: Session, kind: str, request_id: int, sup_filter_col) -> dict:
+    """Backs the doc's 4.1 Scan Summary section: Initial Scan Findings /
+    Current Scan Findings / Total Rescans / Open Findings / Suppressed
+    Findings."""
+    results = _scan_results(db, kind, request_id)
+    if not results:
+        return {"initial": None, "current": None, "total_rescans": 0, "open_findings": 0, "suppressed_findings": 0}
+    current_scan = results[0]
+    initial_scan = results[-1]
+    suppressed_findings = (
+        db.query(models.SuppressionItem)
+        .join(models.SuppressionRequest, models.SuppressionItem.suppression_request_id == models.SuppressionRequest.id)
+        .filter(sup_filter_col == request_id, models.SuppressionRequest.status == "Done")
+        .count()
+    )
+    return {
+        "initial": initial_scan, "current": current_scan, "total_rescans": len(results) - 1,
+        "open_findings": current_scan.total_count, "suppressed_findings": suppressed_findings,
+    }
 
 
 def _close_request(db: Session, obj, current_user):
@@ -573,9 +694,9 @@ def _close_request(db: Session, obj, current_user):
 
 def _auto_close_if_clean(db: Session, obj, current_user, sup_filter_col):
     """Best-effort chain from Security Complete through Report Ready to
-    Closed -- used right after the Complete Scan / Rescan confirmation
-    pop-up confirms no findings were identified, so a clean scan reaches
-    Closed in one step instead of three separate manual clicks. Stops
+    Closed -- used right after Mark Scan Complete (or Finding Validation's
+    own clean-scan branch) confirms no open findings remain, so a clean scan
+    reaches Closed in one step instead of three separate manual clicks. Stops
     (without raising) at Report Ready's existing suppression gate if any
     linked Suppression / False Positive request isn't Done yet -- the
     analyst then finishes the remaining hop(s) manually via the existing
@@ -587,38 +708,28 @@ def _auto_close_if_clean(db: Session, obj, current_user, sup_filter_col):
     return _close_request(db, obj, current_user)
 
 
-def _complete_scan(db: Session, obj, current_user, no_findings: bool, comments, sup_filter_col):
-    _require(obj, "SCANNING", "Complete scan")
-    _require_assigned_security_analyst(obj, current_user)
-    if no_findings:
-        # Confirmed clean -- skip Finding Validation/Remediation entirely
-        # and fast-track toward closure, unless a suppression raised earlier
-        # against this same request is still outstanding.
-        _require_no_pending_suppressions(db, obj, sup_filter_col, "Security Complete")
-        obj.status = "SECURITY_COMPLETE"
-        _log(db, obj, "Scanning", current_user, "Scan Complete - No Findings", comments)
-        db.commit()
-        db.refresh(obj)
-        return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
-    obj.status = "FINDING_VALIDATION"
-    _log(db, obj, "Scanning", current_user, "Scan Complete - Findings Identified", comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
-def _validate_findings(db: Session, obj, current_user, sup_filter_col):
+def _validate_findings(db: Session, obj, current_user, sup_filter_col, kind: str):
     """Moves from Finding Validation into Remediation if any findings need
     fixing, or straight to Security Complete if the scan came back clean --
     unless a suppression raised against this request is still outstanding,
-    in which case Security Complete stays blocked until it's Done."""
+    in which case Security Complete stays blocked until it's Done.
+
+    2026-08 -- this used to check `obj.findings` (the manually-logged
+    SASTFinding/DASTFinding list), which can never be populated anymore now
+    that "Log Finding" was removed (findings come from the Fortify SSC scan
+    import instead, see the "manually add finding... not required" fix
+    earlier) -- so this check was permanently vacuous (open_findings always
+    empty, every request silently took the "clean" branch regardless of the
+    real scan result). Now reads the latest SecurityScanResult's total_count
+    instead, the same real data source Rescan/Mark Scan Complete use."""
     _require(obj, "FINDING_VALIDATION", "Validate findings")
     _require_assigned_security_analyst(obj, current_user)
-    open_findings = [f for f in obj.findings if f.status == "Open"]
-    if open_findings:
+    results = _scan_results(db, kind, obj.id)
+    open_count = results[0].total_count if results else 0
+    if open_count > 0:
         obj.status = "REMEDIATION"
         _log(db, obj, "Finding Validation", current_user, "Findings Confirmed",
-             f"{len(open_findings)} finding(s) require remediation")
+             f"{open_count} finding(s) on the latest scan require remediation")
     else:
         _require_no_pending_suppressions(db, obj, sup_filter_col, "Security Complete")
         obj.status = "SECURITY_COMPLETE"
@@ -660,39 +771,13 @@ def _mark_fixed(db: Session, obj, current_user):
     return obj
 
 
-def _rescan_decision(db: Session, obj, payload, current_user, sup_filter_col):
-    """Driven by the same "any findings identified?" confirmation pop-up as
-    Complete Scan -- Passed means the rescan confirmed no findings remain
-    (fast-track to Closed, same as a clean Complete Scan); Failed means
-    findings still exist, so this loops back to Finding Validation (not a
-    fresh Scanning cycle) so the analyst can log the remaining findings and
-    repeat the remediation/rescan workflow."""
-    _require(obj, "RESCAN", "Rescan decision")
-    _require_assigned_security_analyst(obj, current_user)
-    if payload.decision == "Passed":
-        _require_no_pending_suppressions(db, obj, sup_filter_col, "Security Complete")
-        obj.status = "SECURITY_COMPLETE"
-        _log(db, obj, "Rescan", current_user, payload.decision, payload.comments)
-        db.commit()
-        db.refresh(obj)
-        return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
-    elif payload.decision == "Failed":
-        obj.status = "FINDING_VALIDATION"
-    else:
-        raise HTTPException(400, "decision must be one of: Passed, Failed")
-    _log(db, obj, "Rescan", current_user, payload.decision, payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
-
-
 def _pending_suppression_ids(db: Session, obj, sup_filter_col) -> list:
     """IDs of any Suppression / False Positive requests raised against this
     SAST/DAST id that aren't marked 'Done' yet (see constants.
     SUPPRESSION_STATUSES). Shared by the Security Complete gate (below, in
-    _validate_findings/_complete_scan/_rescan_decision) and Report Ready's own
-    gate in _mark_report_ready -- a suppression is still an open decision
-    about a finding, so neither checkpoint should be reachable while one's
+    _validate_findings/_mark_scan_complete) and Report Ready's own gate in
+    _mark_report_ready -- a suppression is still an open decision about a
+    finding, so neither checkpoint should be reachable while one's
     outstanding."""
     linked_sups = db.query(models.SuppressionRequest).filter(sup_filter_col == obj.id).all()
     return [s.suppression_id for s in linked_sups if s.status != "Done"]
@@ -945,19 +1030,32 @@ def sast_scan_results(req_id: int, db: Session = Depends(get_db),
     return _scan_results(db, "SAST", req_id)
 
 
-@router.post("/api/sast-requests/{req_id}/complete-scan", response_model=schemas.SASTOut)
-def sast_complete_scan(req_id: int, payload: schemas.ScanCompletionIn, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
+@router.get("/api/sast-requests/{req_id}/scan-summary", response_model=schemas.SecurityScanSummaryOut)
+def sast_scan_summary(req_id: int, db: Session = Depends(get_db),
+                       current_user: models.User = Depends(get_current_user)):
+    _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    return _scan_summary(db, "SAST", req_id, models.SuppressionRequest.sast_request_id)
+
+
+@router.post("/api/sast-requests/{req_id}/rescan", response_model=schemas.SASTScanStartOut)
+def sast_rescan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session = Depends(get_db),
+                 current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
+    obj, result = _rescan_scan(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), "SAST", payload, current_user)
+    return {"request": obj, "scan_result": result}
+
+
+@router.post("/api/sast-requests/{req_id}/mark-scan-complete", response_model=schemas.SASTOut)
+def sast_mark_scan_complete(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
+                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
-    return _complete_scan(db, obj, current_user, payload.no_findings, payload.comments,
-                           models.SuppressionRequest.sast_request_id)
+    return _mark_scan_complete(db, obj, "SAST", payload, current_user, models.SuppressionRequest.sast_request_id)
 
 
 @router.post("/api/sast-requests/{req_id}/validate-findings", response_model=schemas.SASTOut)
 def sast_validate_findings(req_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
-    return _validate_findings(db, obj, current_user, models.SuppressionRequest.sast_request_id)
+    return _validate_findings(db, obj, current_user, models.SuppressionRequest.sast_request_id, "SAST")
 
 
 @router.post("/api/sast-requests/{req_id}/assign-to-requester", response_model=schemas.SASTOut)
@@ -969,13 +1067,6 @@ def sast_assign_to_requester(req_id: int, db: Session = Depends(get_db),
 @router.post("/api/sast-requests/{req_id}/mark-fixed", response_model=schemas.SASTOut)
 def sast_mark_fixed(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return _mark_fixed(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
-
-
-@router.post("/api/sast-requests/{req_id}/rescan-decision", response_model=schemas.SASTOut)
-def sast_rescan_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
-    return _rescan_decision(db, obj, payload, current_user, models.SuppressionRequest.sast_request_id)
 
 
 @router.post("/api/sast-requests/{req_id}/mark-report-ready", response_model=schemas.SASTOut)
@@ -1397,12 +1488,25 @@ def dast_scan_results(req_id: int, db: Session = Depends(get_db),
     return _scan_results(db, "DAST", req_id)
 
 
-@router.post("/api/dast-requests/{req_id}/complete-scan", response_model=schemas.DASTOut)
-def dast_complete_scan(req_id: int, payload: schemas.ScanCompletionIn, db: Session = Depends(get_db),
-                        current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
+@router.get("/api/dast-requests/{req_id}/scan-summary", response_model=schemas.SecurityScanSummaryOut)
+def dast_scan_summary(req_id: int, db: Session = Depends(get_db),
+                       current_user: models.User = Depends(get_current_user)):
+    _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    return _scan_summary(db, "DAST", req_id, models.SuppressionRequest.dast_request_id)
+
+
+@router.post("/api/dast-requests/{req_id}/rescan", response_model=schemas.DASTScanStartOut)
+def dast_rescan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session = Depends(get_db),
+                 current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
+    obj, result = _rescan_scan(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), "DAST", payload, current_user)
+    return {"request": _dast_out(obj, current_user), "scan_result": result}
+
+
+@router.post("/api/dast-requests/{req_id}/mark-scan-complete", response_model=schemas.DASTOut)
+def dast_mark_scan_complete(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
+                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
-    obj = _complete_scan(db, obj, current_user, payload.no_findings, payload.comments,
-                          models.SuppressionRequest.dast_request_id)
+    obj = _mark_scan_complete(db, obj, "DAST", payload, current_user, models.SuppressionRequest.dast_request_id)
     return _dast_out(obj, current_user)
 
 
@@ -1410,7 +1514,7 @@ def dast_complete_scan(req_id: int, payload: schemas.ScanCompletionIn, db: Sessi
 def dast_validate_findings(req_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
-    obj = _validate_findings(db, obj, current_user, models.SuppressionRequest.dast_request_id)
+    obj = _validate_findings(db, obj, current_user, models.SuppressionRequest.dast_request_id, "DAST")
     return _dast_out(obj, current_user)
 
 
@@ -1424,14 +1528,6 @@ def dast_assign_to_requester(req_id: int, db: Session = Depends(get_db),
 @router.post("/api/dast-requests/{req_id}/mark-fixed", response_model=schemas.DASTOut)
 def dast_mark_fixed(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _mark_fixed(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
-    return _dast_out(obj, current_user)
-
-
-@router.post("/api/dast-requests/{req_id}/rescan-decision", response_model=schemas.DASTOut)
-def dast_rescan_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
-    obj = _rescan_decision(db, obj, payload, current_user, models.SuppressionRequest.dast_request_id)
     return _dast_out(obj, current_user)
 
 

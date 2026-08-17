@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
@@ -9,7 +9,7 @@ import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import ChildRequestDelegation from '../../components/ChildRequestDelegation'
 import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut } from '../../types'
+import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { SecurityScanDialog, SecurityScanResults } from './SecurityScan'
 
@@ -319,14 +319,18 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>(req.checklist_items || [])
   useEffect(() => { setChecklist(req.checklist_items || []) }, [req])
   const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/sast-requests', req.id)
-  // Complete Scan (at Scanning) and the Rescan decision (at Rescan) both ask
-  // the same "were any findings identified?" confirmation before branching --
-  // this tracks which of the two triggered the pop-up currently showing (or
-  // null when it's closed).
-  const [scanConfirmAction, setScanConfirmAction] = useState<null | 'complete-scan' | 'rescan-decision'>(null)
+  const navigate = useNavigate()
   const [showStartScan, setShowStartScan] = useState(false)
+  // 2026-08 "Findings Validation" doc -- Rescan reuses SecurityScanDialog in
+  // `mode="rescan"`; replaces the old scanConfirmAction/ConfirmModal pair
+  // (Complete Scan's and Rescan Decision's shared "were there findings?"
+  // self-report pop-up) entirely -- Mark Scan Complete now calls straight
+  // through with no confirmation dialog, since the system already knows the
+  // answer from the latest imported scan.
+  const [showRescan, setShowRescan] = useState(false)
   const [scanError, setScanError] = useState<unknown>(null)
   const [scanResults, setScanResults] = useState<SecurityScanResultOut[]>([])
+  const [scanSummary, setScanSummary] = useState<SecurityScanSummaryOut | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -334,10 +338,13 @@ function SASTDetail({ req, onClose, onChanged, users }: {
     } catch (err) { setError(err) }
   }, [req.id])
 
-  useEffect(() => { load() }, [load])
-  useEffect(() => {
+  const loadScan = useCallback(() => {
     api.get<SecurityScanResultOut[]>(`/api/sast-requests/${req.id}/scan-results`).then(setScanResults).catch(() => setScanResults([]))
+    api.get<SecurityScanSummaryOut>(`/api/sast-requests/${req.id}/scan-summary`).then(setScanSummary).catch(() => setScanSummary(null))
   }, [req.id])
+
+  useEffect(() => { load() }, [load])
+  useEffect(() => { loadScan() }, [loadScan])
   useEffect(() => { setReassignAnalystReason('') }, [req.id, req.security_analyst_id])
 
   async function toggleChecklistItem(item: ChecklistItemOut) {
@@ -365,27 +372,36 @@ function SASTDetail({ req, onClose, onChanged, users }: {
       const response = await api.post<{ request: SASTOut; scan_result: SecurityScanResultOut }>(`/api/sast-requests/${req.id}/start-scan`, {
         application_name: applicationName, application_version: applicationVersion,
       })
-      setScanResults((current) => [response.scan_result, ...current])
       onChanged(response.request)
       setShowStartScan(false)
+      loadScan()
       await load()
     } catch (err) { setScanError(err) } finally { setBusy(false) }
   }
-  // Answers the "were any findings identified?" pop-up -- Yes (no findings)
-  // fast-tracks toward Security Complete/Report Ready/Closed on the backend
-  // (see _auto_close_if_clean); No switches straight to the Findings tab so
-  // they can be logged, matching the requested "navigate to the Findings
-  // tab" behaviour for both Complete Scan and a failed Rescan.
-  async function answerScanConfirm(noFindings: boolean) {
-    const action = scanConfirmAction
-    setScanConfirmAction(null)
-    if (!action) return
-    if (action === 'complete-scan') {
-      await act('complete-scan', { no_findings: noFindings, comments })
-    } else {
-      await act('rescan-decision', { decision: noFindings ? 'Passed' : 'Failed', comments })
-    }
-    if (!noFindings) setTab('findings')
+  // 2026-08 "Findings Validation" doc -- re-imports fresh Fortify SSC
+  // results into a NEW scan record (see routers/sast_dast.py::_rescan_scan);
+  // status is unchanged by this call, only the scan data refreshes.
+  async function rescan(applicationName: string, applicationVersion: string) {
+    setBusy(true); setScanError(null)
+    try {
+      const response = await api.post<{ request: SASTOut; scan_result: SecurityScanResultOut }>(`/api/sast-requests/${req.id}/rescan`, {
+        application_name: applicationName, application_version: applicationVersion,
+      })
+      onChanged(response.request)
+      setShowRescan(false)
+      loadScan()
+      await load()
+    } catch (err) { setScanError(err) } finally { setBusy(false) }
+  }
+  async function markScanComplete() {
+    await act('mark-scan-complete', { comments })
+    loadScan()
+  }
+  // Deep-links to the Suppression module's own "New Suppression Request"
+  // modal, pre-linked to this exact SAST request (see Suppression.tsx's
+  // `?new=1&scan_type=...&request_id=...` handling).
+  function initiateSuppression() {
+    navigate(`/suppression?new=1&scan_type=SAST&request_id=${req.id}`)
   }
   // Previously re-fetched the ENTIRE /api/sast-requests list just to find
   // this one row by id and discard the rest -- besides the obvious waste,
@@ -512,18 +528,27 @@ function SASTDetail({ req, onClose, onChanged, users }: {
     (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&
     SAST_DAST_ANALYST_REASSIGNABLE_STATUSES.includes(status)
   const canStartScan = isAssignedAnalyst && status === 'CONFIGURATION'
-  const canCompleteScan = isAssignedAnalyst && status === 'SCANNING'
+  // 2026-08 "Findings Validation" doc -- Rescan/Mark Scan Complete are
+  // reachable across the whole active-scan window, mirroring
+  // routers/sast_dast.py's SCAN_ACTIVE_STATUSES exactly (Scanning, plus the
+  // older manual Finding Validation/Remediation/Waiting For Fix/Rescan chain
+  // for any request still using it).
+  const canScanAct = isAssignedAnalyst && ['SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(status)
   const canValidateFindings = isAssignedAnalyst && status === 'FINDING_VALIDATION'
   const canAssignToRequester = isAssignedAnalyst && status === 'REMEDIATION'
   const canMarkFixed = (isRequester || isAssignedAnalyst) && status === 'WAITING_FOR_FIX'
-  const canRescanDecide = isAssignedAnalyst && status === 'RESCAN'
   const canMarkReportReady = isAssignedAnalyst && status === 'SECURITY_COMPLETE'
-  // Report Ready -> Closed. Usually reached automatically as part of the
-  // Complete Scan/Rescan "no findings" confirmation, but this manual action
-  // covers the case where that auto-chain stopped at Report Ready's
-  // suppression gate and the analyst needs to finish the last hop themselves
-  // once the linked suppression(s) are Done.
+  // Report Ready -> Closed. Usually reached automatically as part of Mark
+  // Scan Complete's clean-scan chain, but this manual action covers the case
+  // where that auto-chain stopped at Report Ready's suppression gate and the
+  // analyst needs to finish the last hop themselves once the linked
+  // suppression(s) are Done.
   const canCloseRequest = isAssignedAnalyst && status === 'REPORT_READY'
+  // Up-front UI hint for 4.4's "If Suppression Pending" -- the backend's
+  // FR-06 rules (_mark_scan_complete) remain the actual gate; this just
+  // disables the button and shows the doc's exact message before the
+  // analyst even tries, rather than only after a failed submit.
+  const suppressionPending = (req.suppressions || []).some((s) => s.status !== 'Done')
 
   return (
     <Modal title={`${req.request_id} — ${req.application_name}`} onClose={onClose} wide>
@@ -776,13 +801,14 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                 </>
               )}
               {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setScanError(null); setShowStartScan(true) }}>Start Scan</button>}
-              {canCompleteScan && <button className="btn btn-sm" disabled={busy} onClick={() => setScanConfirmAction('complete-scan')}>Complete Scan</button>}
+              {/* Rescan / Mark Scan Complete now live in the Findings tab's
+                  Scan Summary panel (SecurityScanResults, section 4.4 of the
+                  "Findings Validation" doc) instead of here -- they act on
+                  the scan data shown right there, and replace the old
+                  Complete Scan / Rescan Decision self-report buttons. */}
               {canValidateFindings && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('validate-findings')}>Validate Findings</button>}
               {canAssignToRequester && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('assign-to-requester')}>Assign to Requester</button>}
               {canMarkFixed && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('mark-fixed')}>Mark Fixed (send to Rescan)</button>}
-              {canRescanDecide && (
-                <button className="btn btn-sm" disabled={busy} onClick={() => setScanConfirmAction('rescan-decision')}>Rescan Decision</button>
-              )}
               {canMarkReportReady && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('mark-report-ready')}>Mark Report Ready</button>}
               {canCloseRequest && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('close')}>Close Request</button>}
             </div>
@@ -796,18 +822,17 @@ function SASTDetail({ req, onClose, onChanged, users }: {
             />
           )}
 
-          {scanConfirmAction && (
-            <ConfirmModal
-              title={scanConfirmAction === 'complete-scan' ? 'Complete Scan' : 'Rescan Decision'}
-              message="Are you sure no security findings were identified during the scan?"
-              confirmLabel="Yes, no findings"
-              cancelLabel="No, findings identified"
-              busy={busy}
-              onConfirm={() => answerScanConfirm(true)}
-              onCancel={() => answerScanConfirm(false)}
+          {showStartScan && <SecurityScanDialog kind="SAST" initialApplicationName={req.application_name} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
+          {showRescan && (
+            <SecurityScanDialog
+              kind="SAST" mode="rescan"
+              initialApplicationName={scanResults[0]?.application_name || req.application_name}
+              initialApplicationVersion={scanResults[0]?.application_version}
+              busy={busy} error={scanError}
+              onClose={() => setShowRescan(false)}
+              onStart={rescan}
             />
           )}
-          {showStartScan && <SecurityScanDialog kind="SAST" initialApplicationName={req.application_name} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
         </div>
       )}
 
@@ -876,7 +901,17 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'findings' && (
         <div>
-          <SecurityScanResults results={scanResults} />
+          <SecurityScanResults
+            kind="SAST"
+            results={scanResults}
+            summary={scanSummary}
+            canAct={canScanAct}
+            busy={busy}
+            suppressionPending={suppressionPending}
+            onRescan={() => { setScanError(null); setShowRescan(true) }}
+            onMarkComplete={markScanComplete}
+            onInitiateSuppression={initiateSuppression}
+          />
           <Table rowKey="id" columns={[
             { key: 'issue_id', header: 'Issue ID' },
             { key: 'severity', header: 'Severity' },

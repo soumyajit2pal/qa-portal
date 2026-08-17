@@ -105,7 +105,14 @@ function RequestIdSearch({ requests, selected, onSelect, onClear }: {
   )
 }
 
-function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCreated: (s: SuppressionOut) => void }) {
+function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
+  onClose: () => void; onCreated: (s: SuppressionOut) => void
+  // 2026-08 "Findings Validation" requirement doc, section 4.4 Action
+  // Buttons -- "Initiate Suppression Request" from a SAST/DAST request's own
+  // Findings tab (see SecurityScan.tsx) should land here pre-linked to that
+  // exact request, not on a blank picker the analyst has to search again.
+  initialRequest?: { kind: 'SAST' | 'DAST'; id: number }
+}) {
   const { user } = useAuth()
   const [form, setForm] = useState<SuppressionForm>(EMPTY_FORM)
   const [selectedRef, setSelectedRef] = useState<CombinedSecurityRequest | null>(null)
@@ -124,8 +131,16 @@ function NewSuppressionModal({ onClose, onCreated }: { onClose: () => void; onCr
       api.get<PageOut<SASTListOut>>('/api/sast-requests?page_size=100'),
       api.get<PageOut<DASTListOut>>('/api/dast-requests?page_size=100'),
     ])
-      .then(([sast, dast]) => { setSastRequests(sast.items); setDastRequests(dast.items) })
+      .then(([sast, dast]) => {
+        setSastRequests(sast.items); setDastRequests(dast.items)
+        if (initialRequest) {
+          const pool = initialRequest.kind === 'SAST' ? sast.items : dast.items
+          const match = pool.find((r) => r.id === initialRequest.id)
+          if (match) selectRequest({ ...match, _kind: initialRequest.kind })
+        }
+      })
       .catch(() => { /* autosuggest is a convenience -- fields stay manually editable if this fails */ })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // The Request ID autosuggest should only ever offer SAST/DAST requests the
@@ -489,6 +504,22 @@ export default function Suppression() {
     setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
   }, [rows, searchParams, setSearchParams])
 
+  // "Initiate Suppression Request" (SecurityScan.tsx, findings tab) links
+  // here as `?new=1&scan_type=SAST&request_id=123` -- opens the New
+  // Suppression modal pre-linked to that exact request instead of a blank
+  // picker. Doesn't wait on `rows` (unlike `?open=` above) since it's not
+  // looking anything up from this page's own list.
+  const [newRequestPrefill, setNewRequestPrefill] = useState<{ kind: 'SAST' | 'DAST'; id: number } | undefined>()
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return
+    const kind = searchParams.get('scan_type')
+    const id = Number(searchParams.get('request_id'))
+    if ((kind === 'SAST' || kind === 'DAST') && id) setNewRequestPrefill({ kind, id })
+    setShowNew(true)
+    setSearchParams((p) => { p.delete('new'); p.delete('scan_type'); p.delete('request_id'); return p }, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Anyone can raise a suppression request now (Application Owner step was
   // removed from the flow entirely) -- see backend routers/suppression.py
   // create_suppression, which just requires get_current_user.
@@ -518,7 +549,13 @@ export default function Suppression() {
           { key: 'pending_with', header: 'Pending With', render: (r) => SUPPRESSION_PENDING_WITH[r.status] || '—', filterValue: (r) => SUPPRESSION_PENDING_WITH[r.status] || '' },
         ]} rows={rows} />
       </Card>
-      {showNew && <NewSuppressionModal onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load() }} />}
+      {showNew && (
+        <NewSuppressionModal
+          initialRequest={newRequestPrefill}
+          onClose={() => { setShowNew(false); setNewRequestPrefill(undefined) }}
+          onCreated={() => { setShowNew(false); setNewRequestPrefill(undefined); load() }}
+        />
+      )}
       {selected && <SuppressionDetail sup={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }} users={users} />}
     </div>
   )

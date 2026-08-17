@@ -5191,6 +5191,78 @@ this is purely the server-side call this endpoint makes to SSC underneath.
 live SSC instance itself (no network access to `sast.mahabank.co.in` from this environment) -- worth a real
 Start Scan run against a known project/version once deployed.
 
+## 112. SAST/DAST -- implement the "Findings Validation" requirement doc (Rescan + Mark Scan Complete)
+
+Implemented from an uploaded requirement doc ("Findings Validation.docx", "implement based on this
+requirement"), covering three linked pieces: **Findings Validation** (0 findings -> allow scan completion;
+>0 findings -> show Rescan/Suppression options), **Rescan Request** (user-initiated re-scan after
+remediation, each creating a new scan execution record while prior records stay unchanged, with full scan
+history retained), and **FR-06 Scan Completion Validation** (block scan closure while unresolved findings
+exist and no completed suppression covers them, with an exact required error message). Two design questions
+were clarified before implementing: (1) whether Rescan should become a real Fortify SSC re-import creating a
+new scan record, vs. staying a manual Passed/Failed self-report -- chose the real re-import, since the doc's
+"new scan execution record" / "scan history" language only makes sense against real data; (2) whether Mark
+Scan Complete should be rebuilt to match FR-06's rules/button/error text exactly, vs. layered onto the
+existing Complete Scan/Rescan Decision flow -- chose matching the doc exactly.
+
+**Bug found and fixed along the way.** `_validate_findings` (`sast_dast.py`) still read
+`obj.findings` (the old manually-logged `SASTFinding`/`DASTFinding` rows) to decide whether a request had
+open findings. Manual finding entry was removed earlier in this project ("findings come from the SAST DAST
+api, so manually add finding currently not required"), so `obj.findings` has been permanently empty since --
+`_validate_findings` was silently always taking the "no open findings" branch. Fixed by having it read the
+real, current Fortify SSC scan result (`_scan_results(...)[0].total_count`) instead.
+
+**Backend (`sast_dast.py`).** Extracted the SSC-import logic shared by Start Scan and Rescan into
+`_import_scan_result(db, obj, kind, application_name, application_version, current_user)`. Added
+`SCAN_ACTIVE_STATUSES = {SCANNING, FINDING_VALIDATION, REMEDIATION, WAITING_FOR_FIX, RESCAN}` -- Rescan and
+Mark Scan Complete are reachable across this whole superset, covering both the simple SCANNING-only path the
+doc describes and the older multi-stage remediation hand-off chain (Finding Validation -> Remediation ->
+Assigned to Requester -> Waiting For Fix), which was left fully intact rather than removed since it may have
+live records sitting in those statuses and the doc doesn't call for its removal. New `_rescan_scan(...)`
+re-imports from SSC via `_import_scan_result` and logs "Rescan Imported" without changing `obj.status`. New
+`_mark_scan_complete(...)` implements FR-06's four rules exactly: 0 findings -> allow; >0 findings with no
+suppression request -> block; >0 findings with suppression not "Done" -> block; >0 findings with suppression
+"Done" -> allow. The block path raises the doc's exact required error text: "Scan cannot be marked as
+Complete. Open findings exist and associated suppression request is not completed. Please complete
+remediation, perform a rescan, or obtain approved suppression before closing the scan." New `_scan_summary`
+computes Initial Scan Findings, Current Scan Findings, Total Rescans, Open Findings, and Suppressed Findings
+(the last via a join on `SuppressionItem`/`SuppressionRequest` filtered to `status == "Done"`) for the UI's
+4.1 Scan Summary section. `_scan_results` now annotates each row (in-memory only, no schema change) with
+`scan_no`, `scan_type` ("Initial Scan" / "Rescan"), and `status` for the 4.3 Scan History table. Removed the
+old `_complete_scan`/`_rescan_decision` functions and their `/complete-scan`/`/rescan-decision` endpoints
+entirely (confirmed via grep only this app's own frontend called them) -- replaced by exactly one
+data-driven Mark Scan Complete action, matching the doc. New endpoints for both SAST and DAST: `GET
+.../scan-summary`, `POST .../rescan`, `POST .../mark-scan-complete`.
+
+**Schema/types.** Added `SecurityScanSummaryOut` (backend `schemas.py` / frontend `types.ts`) and three
+computed fields (`scan_no`, `scan_type`, `status`) on `SecurityScanResultOut`. No database schema change --
+`scan_no`/`scan_type`/`status` are transient Python attributes set at response-build time, not new columns,
+so no migration script was needed (this app has no Alembic; see section on manual `.sql` scripts for actual
+column changes).
+
+**Frontend.** `SecurityScan.tsx`'s `SecurityScanResults` component was rewritten to the doc's full UI spec:
+4.1 Scan Summary grid, 4.2 Findings Display (Initial vs Current severity breakdowns shown side by side), 4.3
+Scan History table (Scan No/Type/Scan Date/Findings/Status), and 4.4 Action Buttons (`Rescan` + `Initiate
+Suppression Request` when findings > 0; `Mark Scan Complete`, disabled with "Pending suppression requests
+exist. Scan cannot be completed." when a suppression is still open, when findings = 0). `SecurityScanDialog`
+gained a `mode="rescan"` variant (same form, prefilled from the latest scan's application name/version,
+different copy/button text) so Start Scan and Rescan share one dialog. "Initiate Suppression Request"
+deep-links to `/suppression?new=1&scan_type={SAST|DAST}&request_id={id}` -- `Suppression.tsx` and its
+`NewSuppressionModal` were extended to read those params and open pre-filled to the linked request, mirroring
+the app's existing `?open=<id>` deep-link convention. `SAST.tsx` and `DAST.tsx` were both updated identically:
+old status-specific `canCompleteScan`/`canRescanDecide` self-report buttons and their shared `ConfirmModal`
+confirmation replaced by a single `canScanAct` gate (active across `SCAN_ACTIVE_STATUSES`) whose actions now
+live inside `SecurityScanResults` itself, plus a `loadScan()` refresh after Start Scan, Rescan, and Mark Scan
+Complete.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py` clean; `npx tsc --noEmit -p .` clean across
+the full frontend; `rsync`+`diff -q` confirmed every changed file (`sast_dast.py`, `schemas.py`, `types.ts`,
+`SecurityScan.tsx`, `Suppression.tsx`, `SAST.tsx`, `DAST.tsx`) matches between `Documents/qa-portal/` and
+`outputs/qa-portal/`. Not exercised against a live Fortify SSC instance or a real suppression approval in
+this environment -- worth a manual pass through Start Scan -> Rescan (findings drop) -> Mark Scan Complete,
+and separately Rescan (findings stay) -> Initiate Suppression Request -> approve -> Mark Scan Complete, once
+deployed.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.

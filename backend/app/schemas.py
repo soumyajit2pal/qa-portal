@@ -768,12 +768,12 @@ class RequesterDecisionIn(BaseModel):
 
 
 class ScanCompletionIn(BaseModel):
-    """Payload for SAST/DAST's Complete Scan confirmation pop-up ("Are you
-    sure no security findings were identified during the scan?"). True ->
-    no findings, request fast-tracks toward Security Complete/Report Ready/
-    Closed; False -> findings were identified, request goes to Finding
-    Validation and the UI switches to the Findings tab so they can be
-    logged."""
+    """2026-08 -- superseded by the "Findings Validation" requirement doc's
+    Mark Scan Complete (routers/sast_dast.py::_mark_scan_complete), which
+    derives no_findings from the latest SecurityScanResult automatically
+    instead of asking the analyst to self-report it. No longer referenced by
+    any route; kept defined rather than deleted in case something else needs
+    the same shape later."""
     no_findings: bool
     comments: Optional[str] = None
 
@@ -820,6 +820,23 @@ class SecurityScanResultOut(ORMModel):
     filters: List[SecurityScanFilterOut] = []
     imported_by_id: Optional[int] = None
     imported_at: datetime.datetime
+    # 2026-08 "Findings Validation" doc, section 4.3 Scan History -- derived
+    # (not stored columns) by routers/sast_dast.py::_scan_results based on
+    # each row's position among its own request's scan history: Scan No 1 is
+    # always "Initial Scan", every later one is a "Rescan"; Status is always
+    # "Completed" since a failed/partial SSC import never persists a row.
+    scan_no: int = 1
+    scan_type: str = "Initial Scan"
+    status: str = "Completed"
+
+
+class SecurityScanSummaryOut(ORMModel):
+    """Backs the "Findings Validation" doc's 4.1 Scan Summary section."""
+    initial: Optional[SecurityScanResultOut] = None
+    current: Optional[SecurityScanResultOut] = None
+    total_rescans: int = 0
+    open_findings: int = 0
+    suppressed_findings: int = 0
 
 
 class CommentIn(BaseModel):

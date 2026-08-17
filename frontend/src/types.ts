@@ -450,6 +450,21 @@ export interface SecurityScanResultOut {
   filters: SecurityScanFilterOut[]
   imported_by_id?: number | null
   imported_at: string
+  // 2026-08 "Findings Validation" doc, section 4.3 Scan History -- derived
+  // by the backend from position in this request's own scan history, not
+  // stored columns (see schemas.SecurityScanResultOut).
+  scan_no: number
+  scan_type: 'Initial Scan' | 'Rescan'
+  status: string
+}
+
+// Backs the "Findings Validation" doc's 4.1 Scan Summary section.
+export interface SecurityScanSummaryOut {
+  initial?: SecurityScanResultOut | null
+  current?: SecurityScanResultOut | null
+  total_rescans: number
+  open_findings: number
+  suppressed_findings: number
 }
 
 // One repository row -- replaces the old design where Repository URL/
