@@ -8,10 +8,10 @@ import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import ChildRequestDelegation from '../../components/ChildRequestDelegation'
-import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
+import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
 import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
-import { SecurityScanDialog, SecurityScanResults } from './SecurityScan'
+import { SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -340,6 +340,10 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   const navigate = useNavigate()
   const [showStartScan, setShowStartScan] = useState(false)
   const [showRescan, setShowRescan] = useState(false)
+  // "give option to link and delink supression request from sast request
+  // and supression both" -- opens LinkSuppressionModal (SecurityScan.tsx),
+  // the DAST-side counterpart to Suppression.tsx's own Relink control.
+  const [showLinkSuppression, setShowLinkSuppression] = useState(false)
   const [scanError, setScanError] = useState<unknown>(null)
   const [scanResults, setScanResults] = useState<SecurityScanResultOut[]>([])
   const [scanSummary, setScanSummary] = useState<SecurityScanSummaryOut | null>(null)
@@ -414,17 +418,6 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   function initiateSuppression() {
     navigate(`/suppression?new=1&scan_type=DAST&request_id=${req.id}`)
   }
-  // See SAST.tsx's matching comment on its own resolveFinding -- same fix,
-  // same reasoning (was re-fetching the entire unpaginated list to find one
-  // row by id; now that the list is paginated it could miss the row
-  // entirely, not just waste a request).
-  async function resolveFinding(findingId: number) {
-    try {
-      await api.post(`/api/dast-requests/${req.id}/findings/${findingId}/resolve`, {})
-      onChanged(await api.get<DASTOut>(`/api/dast-requests/${req.id}`))
-    } catch (err) { setError(err) }
-  }
-
   const isAdmin = hasRole(user, 'ADMIN')
   const isRequester = req.requester_id === user?.id || isAdmin
   const status = req.status
@@ -524,11 +517,56 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   // across the same superset of in-flight statuses, replacing the old
   // status-specific canCompleteScan/canRescanDecide self-report gates.
   const canScanAct = isAssignedAnalyst && ['SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(status)
+  // Reported directly: "suppression requests CAN ONLY be raised by
+  // requester, so this should be enable for requester, not QA team." --
+  // Initiate Suppression Request is the requester's own action (same
+  // active-scan window as canScanAct above), separate from Rescan/Mark Scan
+  // Complete which stay the assigned analyst's.
+  const canInitiateSuppression = isRequester && ['SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(status)
   const canValidateFindings = isAssignedAnalyst && status === 'FINDING_VALIDATION'
-  const canAssignToRequester = isAssignedAnalyst && status === 'REMEDIATION'
+  // Reported directly: "where is waiting for fix, assign to requester ...
+  // if there are findings then it should show waiting for fix option" --
+  // Assign to Requester used to require status === 'REMEDIATION', a status
+  // nothing in the new Rescan/Mark Scan Complete flow ever transitions into
+  // (Start Scan goes straight to SCANNING), leaving it permanently
+  // unreachable. Now reachable across the same active-scan window as
+  // Rescan/Mark Scan Complete (mirrors sast_dast.py's
+  // _assign_to_requester, which now checks SCAN_ACTIVE_STATUSES + open
+  // findings instead); rendered in the Findings tab next to Rescan
+  // (SecurityScanResults), not here.
+  const canAssignToRequester = canScanAct
   const canMarkFixed = (isRequester || isAssignedAnalyst) && status === 'WAITING_FOR_FIX'
   const canMarkReportReady = isAssignedAnalyst && status === 'SECURITY_COMPLETE'
-  const suppressionPending = (req.suppressions || []).some((s) => s.status !== 'Done')
+  // Reported directly (bug): "Supression request is now rejected, but
+  // still user not able to create supression request." Narrower than
+  // suppressionPending below -- Rejected must NOT block Initiate
+  // Suppression Request (only Mark Scan Complete's FR-06 gate treats
+  // Rejected as still-blocking), so this excludes both SUPPRESSION_
+  // TERMINAL_STATUSES (Done AND Rejected), not just Done.
+  const hasOpenSuppression = (req.suppressions || []).some((s) => !SUPPRESSION_TERMINAL_STATUSES.includes(s.status || ''))
+  // Up-front UI hint for 4.4's "If Suppression Pending" -- mirrors the
+  // backend's own has_done/pending formula in _mark_scan_complete exactly
+  // (that endpoint remains the actual gate; this just disables the button
+  // and shows the doc's message before the analyst even tries).
+  //
+  // Reported directly (bug): "Suppression request rejected: TQA-SUP-01 ...
+  // while other linked request already completed, still [blocked]" -- this
+  // used to be `some(s => s.status !== 'Done')`, which stayed true forever
+  // once ANY suppression on the request was Rejected, even after a LATER
+  // suppression reached Done (the same has_suppression-vs-has_done bug
+  // fixed server-side, but never mirrored here on the frontend). Now
+  // matches _mark_scan_complete's `not has_done or pending`: blocked only
+  // while no suppression has reached Done yet, or a genuinely open one
+  // (hasOpenSuppression, Rejected excluded) still exists alongside it.
+  const hasDoneSuppression = (req.suppressions || []).some((s) => s.status === 'Done')
+  const suppressionPending = !hasDoneSuppression || hasOpenSuppression
+  const openSuppressionIds = (req.suppressions || []).filter((s) => !SUPPRESSION_TERMINAL_STATUSES.includes(s.status || '')).map((s) => s.suppression_id)
+  // Reported directly (follow-up): "Pending suppression requests exist:
+  // though request is rejected still it is showing like that" -- named
+  // separately from openSuppressionIds above so the Mark Scan Complete
+  // blocked-message can say "rejected" instead of mislabelling a Rejected
+  // decision as "pending".
+  const rejectedSuppressionIds = (req.suppressions || []).filter((s) => s.status === 'Rejected').map((s) => s.suppression_id)
   // Report Ready -> Closed. Usually reached automatically as part of the
   // Complete Scan/Rescan "no findings" confirmation, but this manual action
   // covers the case where that auto-chain stopped at Report Ready's
@@ -541,7 +579,12 @@ function DASTDetail({ req, onClose, onChanged, users }: {
       <div className="tabs">
         {['overview', 'checklist', 'targets', 'findings', 'documents', 'history'].map((t) => (
           <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
-            {t === 'findings' ? `Findings (${req.findings.length})`
+            {/* Findings count now comes from the latest Fortify SSC scan
+                result, not the old manually-logged req.findings rows --
+                that manual "Log Finding" entry point was removed since
+                findings come from the SAST/DAST API, which made
+                req.findings permanently empty. */}
+            {t === 'findings' ? `Findings (${scanResults[0]?.total_count ?? 0})`
               : t === 'history' ? 'Activity' : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}
@@ -791,9 +834,12 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                   "Findings Validation" doc) instead of here -- they act on
                   the scan data shown right there, and replace the old
                   Complete Scan / Rescan Decision self-report buttons. */}
+              {/* Assign to Requester / Mark Fixed now live in the Findings
+                  tab (SecurityScanResults, section 4.4) next to Rescan --
+                  reported directly, see canAssignToRequester above. Validate
+                  Findings stays here, untouched, for backward compatibility
+                  with any legacy request still sitting in FINDING_VALIDATION. */}
               {canValidateFindings && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('validate-findings')}>Validate Findings</button>}
-              {canAssignToRequester && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('assign-to-requester')}>Assign to Requester</button>}
-              {canMarkFixed && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('mark-fixed')}>Mark Fixed (send to Rescan)</button>}
               {canMarkReportReady && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('mark-report-ready')}>Mark Report Ready</button>}
               {canCloseRequest && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('close')}>Close Request</button>}
             </div>
@@ -807,17 +853,6 @@ function DASTDetail({ req, onClose, onChanged, users }: {
             />
           )}
 
-          {showStartScan && <SecurityScanDialog kind="DAST" initialApplicationName={req.application_name} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
-          {showRescan && (
-            <SecurityScanDialog
-              kind="DAST" mode="rescan"
-              initialApplicationName={scanResults[0]?.application_name || req.application_name}
-              initialApplicationVersion={scanResults[0]?.application_version}
-              busy={busy} error={scanError}
-              onClose={() => setShowRescan(false)}
-              onStart={rescan}
-            />
-          )}
         </div>
       )}
 
@@ -886,28 +921,32 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'findings' && (
         <div>
+          {/* The old manual findings table (Issue ID/Severity/Description/
+              Status, backed by req.findings -- DASTFinding rows) is removed
+              -- reported directly. It always showed "No records found."
+              since manual "Log Finding" entry was removed (findings come
+              from the DAST API); SecurityScanResults above is the real,
+              live findings view now. */}
           <SecurityScanResults
             kind="DAST"
             results={scanResults}
             summary={scanSummary}
             canAct={canScanAct}
+            canInitiateSuppression={canInitiateSuppression}
+            canAssignToRequester={canAssignToRequester}
+            canMarkFixed={canMarkFixed}
             busy={busy}
             suppressionPending={suppressionPending}
+            hasOpenSuppression={hasOpenSuppression}
+            openSuppressionIds={openSuppressionIds}
+            rejectedSuppressionIds={rejectedSuppressionIds}
             onRescan={() => { setScanError(null); setShowRescan(true) }}
             onMarkComplete={markScanComplete}
             onInitiateSuppression={initiateSuppression}
+            onAssignToRequester={() => act('assign-to-requester')}
+            onMarkFixed={() => act('mark-fixed')}
+            onLinkSuppression={() => setShowLinkSuppression(true)}
           />
-          <Table rowKey="id" columns={[
-            { key: 'issue_id', header: 'Issue ID' },
-            { key: 'severity', header: 'Severity' },
-            { key: 'description', header: 'Description' },
-            { key: 'status', header: 'Status' },
-            { key: 'actions', header: '', filterable: false, render: (f) => (
-              f.status === 'Open' && hasRole(user, 'SECURITY_ANALYST') ? (
-                <button className="btn btn-sm" onClick={() => resolveFinding(f.id)}>Mark Fixed</button>
-              ) : null
-            ) },
-          ]} rows={req.findings} />
         </div>
       )}
 
@@ -915,6 +954,34 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'history' && (
         <JiraActivity entityType="DAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
+      )}
+
+      {/* Rendered outside every tab-specific block (not just inside
+          Overview) -- reported directly: clicking Rescan from the Findings
+          tab's SecurityScanResults set showRescan but this dialog used to
+          only be mounted while tab === 'overview', so nothing appeared
+          until switching tabs. Same fix applies to Start Scan for
+          consistency, even though that button itself only lives on
+          Overview today. */}
+      {showStartScan && <SecurityScanDialog kind="DAST" initialApplicationName={req.application_name} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
+      {showRescan && (
+        <SecurityScanDialog
+          kind="DAST" mode="rescan"
+          initialApplicationName={scanResults[0]?.application_name || req.application_name}
+          initialApplicationVersion={scanResults[0]?.application_version}
+          busy={busy} error={scanError}
+          onClose={() => setShowRescan(false)}
+          onStart={rescan}
+        />
+      )}
+      {showLinkSuppression && (
+        <LinkSuppressionModal
+          kind="DAST"
+          requestId={req.id}
+          requestLabel={req.request_id}
+          onClose={() => setShowLinkSuppression(false)}
+          onLinked={async () => { setShowLinkSuppression(false); await load() }}
+        />
       )}
     </Modal>
   )

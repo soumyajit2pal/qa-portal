@@ -5,7 +5,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole, hasDepartment } from '../../constants'
+import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_TERMINAL_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole, hasDepartment } from '../../constants'
 import { SASTListOut, DASTListOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
@@ -143,15 +143,19 @@ function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // The Request ID autosuggest should only ever offer SAST/DAST requests the
-  // requester could plausibly be raising a suppression against -- either one
-  // they raised themselves, or one from their own department (mirrors the
-  // same-department scoping already used for SM/Department Head decisions
-  // elsewhere in the app). An Admin isn't scoped -- they can see everything,
-  // same as their override elsewhere.
+  // Reported directly: "suppression requests CAN ONLY be raised by
+  // requester, so this should be enable for requester, not QA team." This
+  // used to also allow anyone in the same department (mirroring the
+  // SM/Department Head decision scoping elsewhere) -- which let a Security
+  // Analyst/QA team member raise a suppression against someone else's
+  // SAST/DAST request. Narrowed to exactly the requester (the backend's
+  // create_suppression now enforces the same thing server-side, so this is
+  // purely to keep the picker from offering a request that would just 403
+  // on submit). An Admin isn't scoped -- they can see everything, same as
+  // their override elsewhere.
   function inScope(r: SASTListOut | DASTListOut): boolean {
     if (hasRole(user, 'ADMIN')) return true
-    return r.requester_id === user?.id || hasDepartment(user, r.department)
+    return r.requester_id === user?.id
   }
 
   // A suppression is a decision about a *finding* -- there's nothing to
@@ -303,6 +307,90 @@ function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
   )
 }
 
+// 2026-08, reported directly: "if supression request then link that
+// request with that sast request, which should be linkable. and give
+// option to link and delink supression request from sast request and
+// supression both." -- lets the requester (or Admin) re-point an already-
+// raised suppression at a *different* SAST/DAST request any time it hasn't
+// reached a terminal outcome yet (mirrors backend's relink_suppression --
+// SUPPRESSION_TERMINAL_STATUSES gate, same eligibility filters as the New
+// Suppression Request picker above). "Delink" is deliberately not a
+// separate action -- a suppression must always point at exactly one
+// SAST/DAST request, so delinking is just picking a different one here.
+function RelinkSuppressionModal({ sup, onClose, onRelinked }: {
+  sup: SuppressionOut
+  onClose: () => void
+  onRelinked: (s: SuppressionOut) => void
+}) {
+  const { user } = useAuth()
+  const [selectedRef, setSelectedRef] = useState<CombinedSecurityRequest | null>(null)
+  const [sastRequests, setSastRequests] = useState<SASTListOut[]>([])
+  const [dastRequests, setDastRequests] = useState<DASTListOut[]>([])
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    Promise.all([
+      api.get<PageOut<SASTListOut>>('/api/sast-requests?page_size=100'),
+      api.get<PageOut<DASTListOut>>('/api/dast-requests?page_size=100'),
+    ])
+      .then(([sast, dast]) => { setSastRequests(sast.items); setDastRequests(dast.items) })
+      .catch(() => { /* picker is a convenience -- fails closed with an empty list */ })
+  }, [])
+
+  // Same eligibility window as the New Suppression Request picker above
+  // (requester's own requests, or Admin unrestricted; Scanning-or-later;
+  // not yet Security Complete) -- mirrors the backend's own
+  // _require_linked_request/_require_requester_of_linked, re-checked
+  // server-side on submit regardless.
+  function inScope(r: SASTListOut | DASTListOut): boolean {
+    if (hasRole(user, 'ADMIN')) return true
+    return r.requester_id === user?.id
+  }
+  function hasReachedScanning(r: SASTListOut | DASTListOut): boolean {
+    return !SAST_DAST_PRE_SCANNING_STATUSES.includes(r.status)
+  }
+  function isNotYetCompleted(r: SASTListOut | DASTListOut): boolean {
+    return !SAST_DAST_COMPLETED_STATUSES.includes(r.status)
+  }
+
+  const combinedRequests: CombinedSecurityRequest[] = [
+    ...sastRequests.filter(inScope).filter(hasReachedScanning).filter(isNotYetCompleted).map((r) => ({ ...r, _kind: 'SAST' as const })),
+    ...dastRequests.filter(inScope).filter(hasReachedScanning).filter(isNotYetCompleted).map((r) => ({ ...r, _kind: 'DAST' as const })),
+  ]
+
+  async function submit() {
+    if (!selectedRef) { setError(new Error('Select a SAST/DAST Request ID to relink to.')); return }
+    setBusy(true)
+    setError(null)
+    try {
+      const updated = await api.post<SuppressionOut>(`/api/suppressions/${sup.id}/relink`, {
+        sast_request_id: selectedRef._kind === 'SAST' ? selectedRef.id : null,
+        dast_request_id: selectedRef._kind === 'DAST' ? selectedRef.id : null,
+      })
+      onRelinked(updated)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={`Relink ${sup.suppression_id}`} onClose={() => { if (!busy) onClose() }} variant="dialog" preventBackdropClose>
+      <p className="muted small">
+        Currently linked to {sup.scan_type} request {sup.linked_request?.request_id || '—'}. Pick a
+        different SAST/DAST request below to relink this suppression to it — application details will
+        be re-derived from the new link.
+      </p>
+      <Field label="SAST / DAST Request ID *">
+        <RequestIdSearch requests={combinedRequests} selected={selectedRef} onSelect={setSelectedRef} onClear={() => setSelectedRef(null)} />
+      </Field>
+      <ErrorText error={error} />
+      <div className="modal-actions">
+        <button className="btn btn-primary" disabled={busy || !selectedRef} onClick={submit}>{busy ? 'Relinking...' : 'Relink'}</button>
+        <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+      </div>
+    </Modal>
+  )
+}
+
 function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: SuppressionOut; onClose: () => void; onChanged: (s: SuppressionOut) => void; users: UserOut[] }) {
   const { user } = useAuth()
   const [tab, setTab] = useState<'overview' | 'documents' | 'history'>('overview')
@@ -314,6 +402,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
   // "Return to Requester" was easy to miss, so this is now asked as a pop-up
   // at the moment of returning it instead.
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
+  const [showRelink, setShowRelink] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const loadExtras = useCallback(async () => {
@@ -341,6 +430,11 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
   // (it's the QA/security side receiving the request).
   const sameDept = hasDepartment(user, sup.department)
 
+  // "give option to link and delink supression request from sast request
+  // and supression both" -- reachable any time this suppression hasn't
+  // reached a terminal outcome yet (mirrors backend's relink_suppression
+  // gate exactly: SUPPRESSION_TERMINAL_STATUSES, not just Draft).
+  const canRelink = isRequester && !SUPPRESSION_TERMINAL_STATUSES.includes(status)
   const canSubmit = isRequester && status === 'Draft'
   const canResubmit = isRequester && ['RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status)
   // Reported directly: a person who raised this request but also separately
@@ -382,7 +476,14 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
           <div className="grid grid-2">
             <div><strong>Status:</strong> <Badge status={status} /> <span className="muted small">{SUPPRESSION_STATUS_LABELS[status] || status}</span></div>
             <div><strong>Scan Type:</strong> {sup.scan_type}</div>
-            <div><strong>{sup.scan_type} Request ID:</strong> {sup.linked_request?.request_id || '—'}</div>
+            <div>
+              <strong>{sup.scan_type} Request ID:</strong> {sup.linked_request?.request_id || '—'}
+              {canRelink && (
+                <button type="button" className="btn btn-sm" style={{ marginLeft: 8 }} disabled={busy} onClick={() => setShowRelink(true)}>
+                  Relink
+                </button>
+              )}
+            </div>
             <div><strong>Requester:</strong> {userName(users, sup.created_by_id) || '—'}</div>
             <div><strong>Department:</strong> {sup.department || '—'}</div>
             <div><strong>Application Owner:</strong> {sup.application_owner || '—'}</div>
@@ -463,6 +564,14 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
       )}
 
       {tab === 'documents' && <RequestDocuments apiBase="/api/suppressions" reqId={sup.id} canManage={canManageDocuments} />}
+
+      {showRelink && (
+        <RelinkSuppressionModal
+          sup={sup}
+          onClose={() => setShowRelink(false)}
+          onRelinked={(updated) => { setShowRelink(false); onChanged(updated) }}
+        />
+      )}
     </Modal>
   )
 }

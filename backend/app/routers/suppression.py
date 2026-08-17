@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, selectinload, joinedload
 from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES
+from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, SUPPRESSION_TERMINAL_STATUSES
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 
@@ -86,6 +86,60 @@ def _require_linked_request(db: Session, data: dict):
             f"The linked {kind} request has already reached '{linked.status}' -- a suppression can no "
             f"longer be raised against it once the security review is complete.",
         )
+    return linked, kind
+
+
+def _require_no_existing_pending_suppression(db: Session, linked, kind: str, exclude_id: int = None) -> None:
+    """Reported directly: "if pending supression request there, then dont
+    allow to create new suppression request." One open suppression decision
+    against a given SAST/DAST request at a time -- if a suppression already
+    raised against this same linked request is still genuinely open (not
+    yet reached one of SUPPRESSION_TERMINAL_STATUSES -- Done or Rejected),
+    block starting another rather than letting them pile up in parallel.
+    `exclude_id` lets update_suppression re-check a re-linked request
+    without the suppression being edited blocking itself.
+
+    Reported directly (follow-up bug): "Supression request is now rejected,
+    but still user not able to create supression request." This originally
+    checked `status != "Done"`, which -- unlike _pending_suppression_ids in
+    sast_dast.py, where treating Rejected as still-blocking is correct per
+    FR-06's literal rule text -- wrongly treated Rejected as still "pending"
+    here too, permanently locking a requester out of ever raising another
+    suppression once one got rejected. Rejected is terminal for THIS check:
+    the natural next step after a rejection is either remediate the finding
+    or raise a fresh, better-justified suppression, not a dead end."""
+    sup_col = models.SuppressionRequest.sast_request_id if kind == "SAST" else models.SuppressionRequest.dast_request_id
+    q = db.query(models.SuppressionRequest).filter(
+        sup_col == linked.id, models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES),
+    )
+    if exclude_id is not None:
+        q = q.filter(models.SuppressionRequest.id != exclude_id)
+    existing = q.first()
+    if existing:
+        raise HTTPException(
+            400,
+            f"A suppression request ({existing.suppression_id}) is already pending against this {kind} "
+            "request -- it must be resolved (marked Done) before another can be raised.",
+        )
+
+
+def _require_requester_of_linked(linked, current_user: models.User) -> None:
+    """Reported directly: "suppression requests CAN ONLY be raised by
+    requester, so this should be enable for requester, not QA team." Until
+    now create_suppression had no permission check at all beyond being
+    logged in -- any authenticated user, including a Security Analyst/QA
+    team member with no relationship to the request, could raise a
+    suppression against someone else's SAST/DAST request. Restricted to the
+    linked request's own requester (or Admin, same bypass convention as
+    every other check in this file)."""
+    if current_user.has_role(Role.ADMIN):
+        return
+    if linked.requester_id != current_user.id:
+        raise HTTPException(
+            403,
+            "Only the requester of the linked SAST/DAST request (or an admin) can raise a suppression "
+            "request against it",
+        )
 
 
 @router.get("", response_model=List[schemas.SuppressionOut])
@@ -124,7 +178,9 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
     items_data = data.pop("items")
     if not items_data:
         raise HTTPException(400, "At least one finding/issue is required")
-    _require_linked_request(db, data)
+    linked, kind = _require_linked_request(db, data)
+    _require_requester_of_linked(linked, current_user)
+    _require_no_existing_pending_suppression(db, linked, kind)
     obj = models.SuppressionRequest(**data, created_by_id=current_user.id, status="Draft")
     obj.items = [models.SuppressionItem(**item) for item in items_data]
     db.add(obj)
@@ -155,7 +211,19 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
     data = payload.model_dump()
     items_data = data.pop("items", None)
-    _require_linked_request(db, data)
+    linked, kind = _require_linked_request(db, data)
+    # Re-checked here too, not just in create_suppression -- an edit can
+    # re-point sast_request_id/dast_request_id at a different request
+    # entirely, so the *new* link's requester must still be this same
+    # requester (obj.created_by_id, already verified above), otherwise a
+    # requester could quietly relink their own Draft suppression onto
+    # someone else's SAST/DAST request.
+    _require_requester_of_linked(linked, current_user)
+    # Same re-link case as above -- exclude_id=obj.id so this suppression
+    # (which is itself still pending) doesn't block its own edit; only a
+    # DIFFERENT already-pending suppression against the (possibly new)
+    # linked request should.
+    _require_no_existing_pending_suppression(db, linked, kind, exclude_id=obj.id)
     for k, v in data.items():
         setattr(obj, k, v)
     if items_data is not None:
@@ -163,6 +231,45 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
             db.delete(item)
         db.flush()
         obj.items = [models.SuppressionItem(**item) for item in items_data]
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.post("/{sup_id}/relink", response_model=schemas.SuppressionOut)
+def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Session = Depends(get_db),
+                        current_user: models.User = Depends(get_current_user)):
+    """Reported directly: "give option to link and delink supression request
+    from sast request and supression both." Unlike update_suppression above
+    (full-form edit, Draft only), relinking -- pointing this suppression at
+    a *different* SAST/DAST request -- is allowed any time the suppression
+    itself hasn't reached a terminal outcome yet (SUPPRESSION_TERMINAL_
+    STATUSES: Done or Rejected), not just while still Draft. A suppression
+    must always be linked to exactly one SAST/DAST request (no "unlinked"
+    state) -- "delink" means pointing it at a different one via this same
+    endpoint, not clearing the link entirely."""
+    obj = db.query(models.SuppressionRequest).get(sup_id)
+    if not obj:
+        raise HTTPException(404, "Suppression request not found")
+    if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Only the requester or an admin can relink this request")
+    if obj.status in SUPPRESSION_TERMINAL_STATUSES:
+        raise HTTPException(400, f"Cannot relink a suppression request that has already reached '{obj.status}'")
+    data = payload.model_dump()
+    linked, kind = _require_linked_request(db, data)
+    _require_requester_of_linked(linked, current_user)
+    _require_no_existing_pending_suppression(db, linked, kind, exclude_id=obj.id)
+    obj.sast_request_id = data.get("sast_request_id")
+    obj.dast_request_id = data.get("dast_request_id")
+    obj.scan_type = kind
+    # Re-derive the application identity fields from the newly linked
+    # request, same as the New Suppression form's own auto-populate --
+    # keeps them consistent with the new link rather than stale from the old
+    # one.
+    obj.application_name = linked.application_name
+    obj.department = linked.department
+    obj.application_owner = linked.application_owner
+    _log(db, obj.id, "Requester", current_user, "Relinked", f"Relinked to {kind} request {linked.request_id}")
     db.commit()
     db.refresh(obj)
     return obj

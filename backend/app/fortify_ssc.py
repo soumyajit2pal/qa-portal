@@ -5,8 +5,11 @@ receive them. The confirmed-working lookup (2026-08 reference trace against
 the live SSC instance) is a project-scoped chain, not a single flat query:
 GET projects (match by application name -> project id), then
 GET projects/{id}/versions (match by version name -> project version id),
-then projectVersions/{id}/filterSets and issueGroups for the actual
-severity counts. This retrieves an existing SSC analysis rather than
+then projectVersions/{id}/filterSets and issueGroups per filter set for the
+actual severity counts -- see retrieve_snapshot for why each filter set's
+counts are kept independent (never summed together into one number) and
+which single filter set ("Security Auditor View") drives gating decisions
+like Mark Scan Complete. This retrieves an existing SSC analysis rather than
 starting an SCA/WebInspect engine job -- this adapter intentionally keeps
 that exact semantic and returns a normalized severity snapshot.
 """
@@ -91,23 +94,6 @@ class FortifySSCClient:
         return self._request("GET", path, auth=f"FortifyToken {self._access_token()}")
 
     def retrieve_snapshot(self, application_name: str, application_version: str) -> FortifyScanSnapshot:
-        # 2026-08 -- reported directly, with a working reference trace against
-        # the real SSC instance: "api endpoint for sast currently not
-        # correct... for dast also same" (this client is shared by both, see
-        # sast_dast.py's kind="SAST"/"DAST"). This used to call the flat,
-        # org-wide GET /projectVersions and filter client-side by both
-        # project name and version name in one pass -- besides being the
-        # wrong shape (the confirmed-working trace is a two-step project ->
-        # versions lookup, not one unscoped versions call), an unscoped
-        # listing across every project in the SSC instance is subject to
-        # SSC's own default page size, so a project sitting past the first
-        # page could silently fail to match at all. Replaced with the exact
-        # two-call sequence from the trace: GET /projects, match by name to
-        # get the project id, then GET /projects/{id}/versions -- already
-        # scoped to just that project -- match by version name to get the
-        # version id. `count=-1` on both list calls asks SSC for every
-        # result instead of relying on its default page size, closing that
-        # same truncation gap either call could otherwise hit.
         projects = (self._get("projects?count=-1").get("data") or [])
         project = next((
             row for row in projects
@@ -127,8 +113,22 @@ class FortifySSCClient:
             )
         version_id = str(project_version["id"])
         filter_sets = self._get(f"projectVersions/{version_id}/filterSets").get("data") or []
+        if not filter_sets:
+            raise FortifySSCError(
+                f"No filter sets found for '{application_name}' version '{application_version}' in Fortify SSC"
+            )
+        # 2026-08 -- reported directly: "sum of filter in total is wrong" --
+        # each filter set SSC returns is a different LENS over the same
+        # underlying issues (Security Auditor View, Quick View, OWASP Top
+        # 10, PCI-DSS 3.2, etc all cover overlapping issues, just grouped/
+        # labelled differently), so summing every filter set's counts
+        # together double- and triple-counts the same findings under every
+        # view they happen to also appear in. Fixed by never adding filter
+        # sets together: each one keeps its own independent Critical/High/
+        # Medium/Low/Total below (see filter_results), and the UI shows
+        # them "split by filter" (each with its own individual total, not
+        # combined) rather than as one number.
         filter_results = []
-        aggregate = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
         for filter_set in filter_sets:
             guid = str(filter_set.get("guid") or "")
             if not guid:
@@ -141,10 +141,8 @@ class FortifySSCClient:
             result = self._get(f"projectVersions/{version_id}/issueGroups?{query}")
             severity_counts = {
                 severity: next((int(item.get("totalCount") or 0) for item in result.get("data", []) if item.get("id") == severity), 0)
-                for severity in aggregate
+                for severity in ("Critical", "High", "Medium", "Low")
             }
-            for severity, count in severity_counts.items():
-                aggregate[severity] += count
             filter_results.append({
                 "title": str(filter_set.get("title") or "Unnamed filter"),
                 "guid": guid,
@@ -152,11 +150,26 @@ class FortifySSCClient:
                 **{f"{severity.lower()}_count": count for severity, count in severity_counts.items()},
                 "audit_url": f"{self.base_url}/html/ssc/version/{version_id}/audit?filterset={urllib.parse.quote(guid)}&orderby=friority&viewTab=code",
             })
-        total = sum(aggregate.values())
+        if not filter_results:
+            raise FortifySSCError(
+                f"No usable filter sets found for '{application_name}' version '{application_version}' in Fortify SSC"
+            )
+        # The top-level critical/high/medium/low/total fields (used for
+        # gating decisions -- Mark Scan Complete's FR-06 rules, "does this
+        # scan have open findings" -- not for display) need exactly ONE
+        # filter set as their source, never several combined. "Security
+        # Auditor View" is SSC's standard comprehensive view; fall back to
+        # whichever filter set SSC returned first if that exact name isn't
+        # present (naming can vary slightly across SSC instances/versions).
+        primary = next(
+            (f for f in filter_results if "security auditor view" in f["title"].strip().casefold()),
+            filter_results[0],
+        )
         return FortifyScanSnapshot(
             application_name=application_name, application_version=application_version,
-            project_version_id=version_id, critical_count=aggregate["Critical"], high_count=aggregate["High"],
-            medium_count=aggregate["Medium"], low_count=aggregate["Low"], total_count=total,
+            project_version_id=version_id,
+            critical_count=primary["critical_count"], high_count=primary["high_count"],
+            medium_count=primary["medium_count"], low_count=primary["low_count"], total_count=primary["total_count"],
             audit_url=f"{self.base_url}/html/ssc/version/{version_id}/audit",
             filters=filter_results,
         )

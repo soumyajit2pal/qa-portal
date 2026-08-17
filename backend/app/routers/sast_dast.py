@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, is_readiness_evidence_editable, application_name_block_message
+from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, SUPPRESSION_TERMINAL_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
@@ -608,7 +608,16 @@ def _mark_scan_complete(db: Session, obj, kind: str, payload: schemas.CommentIn,
       Rule 2: Findings > 0 AND no Suppression Request exists at all -> Block
       Rule 3: Findings > 0 AND Suppression Request status != Done   -> Block
       Rule 4: Findings > 0 AND Suppression Request status = Done    -> Allow
-    Rules 2 and 3 share the exact error message specified in the doc."""
+    Rules 2 and 3 share the exact error message specified in the doc.
+
+    Reported directly (bug): "there is already approved suppression, still
+    not working." Rule 4 needs a suppression that specifically reached
+    Done, not merely "a suppression row exists" -- the old `has_suppression`
+    check below was satisfied by ANY linked suppression regardless of its
+    outcome, including one sitting Rejected with no Done row at all, which
+    happened to still block (for the wrong reason) via `pending`'s old,
+    now-fixed definition. Replaced with `has_done`, an explicit check for at
+    least one Done suppression -- the correct, direct read of Rule 4."""
     _require(obj, SCAN_ACTIVE_STATUSES, "Mark Scan Complete")
     _require_assigned_security_analyst(obj, current_user)
     results = _scan_results(db, kind, obj.id)
@@ -616,9 +625,11 @@ def _mark_scan_complete(db: Session, obj, kind: str, payload: schemas.CommentIn,
         raise HTTPException(400, "Start a scan and import Fortify SSC results before marking this scan complete.")
     current_scan = results[0]
     if current_scan.total_count > 0:
-        has_suppression = db.query(models.SuppressionRequest.id).filter(sup_filter_col == obj.id).first() is not None
+        has_done = db.query(models.SuppressionRequest.id).filter(
+            sup_filter_col == obj.id, models.SuppressionRequest.status == "Done",
+        ).first() is not None
         pending = _pending_suppression_ids(db, obj, sup_filter_col)
-        if not has_suppression or pending:
+        if not has_done or pending:
             raise HTTPException(
                 400,
                 "Scan cannot be marked as Complete. Open findings exist and associated suppression request "
@@ -739,14 +750,29 @@ def _validate_findings(db: Session, obj, current_user, sup_filter_col, kind: str
     return obj
 
 
-def _assign_to_requester(db: Session, obj, current_user):
-    """Remediation -> Assigned To Requester -> Waiting For Fix. The
-    "Assigned To Requester" hop is logged in the audit trail but not held as
-    a resting status (mirrors how QA Request's Submitted/SAST-DAST's own
-    Submitted step is transient on the way to the next real checkpoint)."""
-    _require(obj, "REMEDIATION", "Assign to requester")
+def _assign_to_requester(db: Session, obj, kind: str, current_user):
+    """-> Assigned To Requester -> Waiting For Fix. The "Assigned To
+    Requester" hop is logged in the audit trail but not held as a resting
+    status (mirrors how QA Request's Submitted/SAST-DAST's own Submitted
+    step is transient on the way to the next real checkpoint).
+
+    Reported directly: "where is waiting for fix, assign to requester...
+    if there are findings then it should show waiting for fix option."
+    This used to require status == "REMEDIATION" -- but nothing transitions
+    a request into Finding Validation/Remediation anymore under the
+    "Findings Validation" doc's Rescan/Mark Scan Complete flow (Start Scan
+    goes straight to SCANNING), so this action was permanently unreachable
+    for any new request. Reachable now from the same SCAN_ACTIVE_STATUSES
+    window as Rescan/Mark Scan Complete, with an explicit open-findings
+    check taking the place of the old REMEDIATION-implies-findings-exist
+    assumption."""
+    _require(obj, SCAN_ACTIVE_STATUSES, "Assign to requester")
     _require_assigned_security_analyst(obj, current_user)
-    _log(db, obj, "Remediation", current_user, "Assigned To Requester", None)
+    results = _scan_results(db, kind, obj.id)
+    open_count = results[0].total_count if results else 0
+    if open_count <= 0:
+        raise HTTPException(400, "No open findings on the latest scan -- nothing to assign for remediation.")
+    _log(db, obj, SAST_DAST_STATUS_LABELS.get(obj.status, obj.status), current_user, "Assigned To Requester", None)
     obj.status = "WAITING_FOR_FIX"
     _log(db, obj, "Waiting For Fix", current_user, "Awaiting Fix", None)
     db.commit()
@@ -773,14 +799,26 @@ def _mark_fixed(db: Session, obj, current_user):
 
 def _pending_suppression_ids(db: Session, obj, sup_filter_col) -> list:
     """IDs of any Suppression / False Positive requests raised against this
-    SAST/DAST id that aren't marked 'Done' yet (see constants.
-    SUPPRESSION_STATUSES). Shared by the Security Complete gate (below, in
-    _validate_findings/_mark_scan_complete) and Report Ready's own gate in
-    _mark_report_ready -- a suppression is still an open decision about a
-    finding, so neither checkpoint should be reachable while one's
-    outstanding."""
+    SAST/DAST id that are still genuinely open -- not yet reached a
+    terminal outcome (constants.SUPPRESSION_TERMINAL_STATUSES: Done or
+    Rejected). Shared by the Security Complete gate (below, in
+    _mark_scan_complete) and Report Ready's own gate in _mark_report_ready
+    -- a suppression is still an open decision about a finding, so neither
+    checkpoint should be reachable while one's outstanding.
+
+    Reported directly (bug): "there is already approved suppression, still
+    not working." This used to treat Rejected the same as "still pending"
+    (`status != "Done"`) -- so once a requester raised one suppression that
+    got Rejected, then raised a SECOND one for the same request that got
+    approved (Done), the leftover Rejected row alone kept blocking Mark
+    Scan Complete forever, even though a later suppression had actually
+    succeeded. Narrowed to SUPPRESSION_TERMINAL_STATUSES so a Rejected
+    suppression no longer counts as "pending" here -- only a genuinely
+    still-open one does. _mark_scan_complete separately checks for at
+    least one Done suppression (see has_done there) to still enforce
+    FR-06's Rule 4 exactly (Done specifically, not just "nothing open")."""
     linked_sups = db.query(models.SuppressionRequest).filter(sup_filter_col == obj.id).all()
-    return [s.suppression_id for s in linked_sups if s.status != "Done"]
+    return [s.suppression_id for s in linked_sups if s.status not in SUPPRESSION_TERMINAL_STATUSES]
 
 
 def _require_no_pending_suppressions(db: Session, obj, sup_filter_col, action: str):
@@ -1061,7 +1099,7 @@ def sast_validate_findings(req_id: int, db: Session = Depends(get_db),
 @router.post("/api/sast-requests/{req_id}/assign-to-requester", response_model=schemas.SASTOut)
 def sast_assign_to_requester(req_id: int, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    return _assign_to_requester(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
+    return _assign_to_requester(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), "SAST", current_user)
 
 
 @router.post("/api/sast-requests/{req_id}/mark-fixed", response_model=schemas.SASTOut)
@@ -1521,7 +1559,7 @@ def dast_validate_findings(req_id: int, db: Session = Depends(get_db),
 @router.post("/api/dast-requests/{req_id}/assign-to-requester", response_model=schemas.DASTOut)
 def dast_assign_to_requester(req_id: int, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
-    obj = _assign_to_requester(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
+    obj = _assign_to_requester(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), "DAST", current_user)
     return _dast_out(obj, current_user)
 
 

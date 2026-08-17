@@ -1281,6 +1281,17 @@ class SuppressionCreate(BaseModel):
     items: List[SuppressionItemIn]
 
 
+# 2026-08 -- reported directly: "give option to link and delink supression
+# request from sast request and supression both." A dedicated, minimal
+# payload for POST /api/suppressions/{id}/relink -- only the link itself,
+# not the full SuppressionCreate form -- so relinking doesn't require
+# resending every other field untouched. Exactly one of the two must be set,
+# same rule as SuppressionCreate, enforced in routers/suppression.py.
+class SuppressionRelinkIn(BaseModel):
+    sast_request_id: Optional[int] = None
+    dast_request_id: Optional[int] = None
+
+
 class SuppressionOut(ORMModel):
     id: int
     suppression_id: str

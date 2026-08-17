@@ -5263,6 +5263,517 @@ this environment -- worth a manual pass through Start Scan -> Rescan (findings d
 and separately Rescan (findings stay) -> Initiate Suppression Request -> approve -> Mark Scan Complete, once
 deployed.
 
+## 113. Mock Fortify SSC server -- local testing without live SSC access
+
+Reported directly: "can you do mock api for this, as I dont have actual envioronment access" -- to
+exercise the new Start Scan / Rescan / Mark Scan Complete flow (section 112) without a real Fortify SSC
+instance to point at.
+
+**New: `backend/scripts/mock_fortify_ssc.py`.** A stdlib-only (no install needed) HTTP server implementing
+exactly the four endpoints `fortify_ssc.py`'s `FortifySSCClient` calls: `POST /api/v1/tokens`, `GET
+/api/v1/projects`, `GET /api/v1/projects/{id}/versions`, `GET /api/v1/projectVersions/{id}/filterSets`, `GET
+/api/v1/projectVersions/{id}/issueGroups`. Pre-seeds three demo app/version pairs to type directly into the
+Start Scan / Rescan dialog: `Demo Banking Portal` / `1.0` (has findings; each Rescan against the same
+name+version roughly halves the count, so a few Rescans naturally reach 0 -- exercises the Rescan and
+"findings > 0" branch of Mark Scan Complete), `Demo Banking Portal` / `1.0-clean` (always 0 findings from the
+first scan -- fast path to FR-06 rule 1), and `Payment Gateway API` / `2.3` (a second app, same
+halve-on-rescan behaviour). Any name/version not registered behaves like the real "not found in Fortify SSC"
+case, so that error path is exercisable too. `POST /mock/register` adds further app/version pairs on the fly
+for anything not covered by the three demo ones; `GET /mock/state` dumps current scan numbers/finding counts
+for visibility while testing.
+
+**Config.** `backend/.env.example` now has a commented block under the existing `FORTIFY_SSC_*` example
+showing the local values to use against the mock (`FORTIFY_SSC_URL=http://127.0.0.1:8089`, a placeholder
+`FORTIFY_SSC_AUTH` since the mock never checks it, `FORTIFY_SSC_VERIFY_TLS=false`). No code change to
+`fortify_ssc.py`/`sast_dast.py` -- the mock is a drop-in stand-in for the real SSC instance at the HTTP layer
+only.
+
+**Verified:** ran the mock locally (`python3 scripts/mock_fortify_ssc.py --port 8089`) and drove the actual
+`FortifySSCClient.retrieve_snapshot(...)` against it directly (not a re-implementation of its call sequence)
+for all four cases -- initial scan returns findings with a Critical/High/Medium/Low split summing to the
+total, a second call against the same name+version returns roughly half, `1.0-clean` returns 0 immediately,
+and an unregistered app correctly raises `FortifySSCError("...was not found in Fortify SSC")`. `python3 -m
+py_compile scripts/mock_fortify_ssc.py` clean; `rsync`+`diff -q` confirmed `mock_fortify_ssc.py` and
+`.env.example` match between `Documents/qa-portal/` and `outputs/qa-portal/`.
+
+## 114. Fortify SSC -- stop summing severity counts across filter sets
+
+Reported directly: "Initial scan findings and Current Scan Findings which split by filter, no requirement
+of aggregation or sum of filter. Filter-set analysis (latest scan) not required. also in scan history just
+show Security Audit view. sum of filter in total is wrong."
+
+**Root cause.** `retrieve_snapshot` (`fortify_ssc.py`) looped over every filter set Fortify SSC returned for
+a project version (e.g. "Security Auditor View", "Quick View", "OWASP Top 10", "PCI-DSS 3.2" -- however many
+an instance has configured) and summed each one's severity counts together into one total. Each filter set is
+a different *lens* over the same underlying issues, not a distinct subset of them -- an issue commonly
+appears under several views at once -- so summing them inflated every count (Critical/High/Medium/Low/Total,
+and everything downstream: Scan Summary, Initial/Current Findings Display, Scan History, and the Findings
+Validation open-findings check) well past the real number.
+
+**Fix (`fortify_ssc.py`).** `retrieve_snapshot` now selects exactly one canonical filter set --
+matched by title, case-insensitively, against "Security Auditor View" (SSC's standard comprehensive view),
+falling back to the first filter set returned if no exact name match is found -- and reads every count
+straight from that one filter set's `issueGroups` call. No aggregation loop, nothing summed across filter
+sets. `FortifyScanSnapshot.filters` (and `SecurityScanResult.filters_json`/`SecurityScanFilterOut` downstream
+-- unchanged shape, so no schema/migration work needed) now always holds exactly that one filter set's own
+figures, kept for reference/debugging rather than for display.
+
+**Frontend (`SecurityScan.tsx`).** Removed the "Filter-set analysis (latest scan)" table entirely --
+per "not required." Added a small label next to the Scan History heading naming the filter set every count on
+this page is sourced from (`Scan History (Security Auditor View)`), read from the snapshot's own filter title
+so it stays accurate if an instance's fallback filter set ever differs. 4.1 Scan Summary and 4.2 Findings
+Display (Initial vs Current) needed no code change -- they already just read `critical_count`/`total_count`/
+etc. off the scan result, which are now correct by construction once the backend stopped aggregating.
+
+**Mock server (`scripts/mock_fortify_ssc.py`).** Updated to return two filter sets per project version
+("Security Auditor View" and "Quick View") instead of one, with "Quick View" deliberately returning a
+different, inflated finding count -- specifically so this exact bug (summing across filter sets) would be
+caught if it ever regressed: a correct client's total must equal Security Auditor View's count alone, never
+the two combined.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean; `npx tsc
+--noEmit -p .` clean. Ran the real `FortifySSCClient.retrieve_snapshot(...)` (not a re-implementation)
+against the updated two-filter-set mock: total (24) equals Critical+High+Medium+Low exactly, `filters` came
+back as exactly one entry titled "Security Auditor View", and the deliberately-inflated Quick View total
+(127) was confirmed absent from the result -- proving no cross-filter summing. `rsync`+`diff -q` confirmed
+`fortify_ssc.py`, `scripts/mock_fortify_ssc.py`, and `SecurityScan.tsx` match between `Documents/qa-portal/`
+and `outputs/qa-portal/`.
+
+## 115. Findings Display -- split by filter set again, correcting section 114
+
+Reported directly, immediately after section 114 shipped: "here split by filter. show initial scan
+findings and Current Scan findings but split Filter. and total also individual level not security + quick
+like that" -- with a screenshot showing Current Scan Findings' Total (48) sitting inconsistently next to
+Open Findings (48) while Initial stayed at 24, because section 114 had collapsed every filter set down to
+one ("Security Auditor View" only) everywhere, including the per-scan Findings Display.
+
+**Correction.** Section 114 over-corrected: "sum of filter in total is wrong" meant filter sets must never be
+added together into one number, not that every filter but one should be discarded. `retrieve_snapshot`
+(`fortify_ssc.py`) now queries every filter set again (like before 114) and keeps each one's own independent
+Critical/High/Medium/Low/Total in `filters` -- but, unlike the original pre-114 code, never sums them. The
+top-level `critical_count`/`high_count`/`medium_count`/`low_count`/`total_count` fields (which drive gating --
+Mark Scan Complete's FR-06 rules, "does this scan have open findings") still come from exactly one filter set
+("Security Auditor View", falling back to the first filter set returned) -- that part of 114 was correct and
+stays.
+
+**Frontend (`SecurityScan.tsx`).** New `findingsByFilter()` replaces the single `severityBreakdown()` call
+under 4.2 Findings Display: Initial Scan Findings and Current Scan Findings each now render one
+severityBreakdown card per filter set (Security Auditor View, Quick View, ...), labelled, stacked, each
+showing its own Total -- never a combined number. `severityBreakdown()` itself was generalized to accept
+either a full scan result or a single filter's counts (same field names). The Scan History heading's
+filter-name label now looks up the actual "Security Auditor View" entry (falling back to the first filter)
+instead of assuming index 0, since filter ordering isn't guaranteed. New CSS:
+`.security-scan-filter-breakdown` / `.security-scan-filter-label` (`index.css`); the now-dead
+`.security-scan-filter-results` rules from the removed flat table were deleted.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean; `npx tsc
+--noEmit -p .` clean. Ran the real `FortifySSCClient.retrieve_snapshot(...)` against the mock's two filter
+sets: `filters` came back with both Security Auditor View (total 24) and Quick View (total 127) as
+independent entries, the top-level gating total equalled Security Auditor View's own total exactly, and was
+confirmed NOT equal to the two summed (151) -- both halves of the requirement hold at once.
+`rsync`+`diff -q` confirmed `fortify_ssc.py`, `SecurityScan.tsx`, and `index.css` match between
+`Documents/qa-portal/` and `outputs/qa-portal/`.
+
+## 116. Findings tab cleanup -- drop the 4.1 Scan Summary grid, the dead manual findings table, and fix Rescan's modal
+
+Three follow-ups reported directly in quick succession while reviewing the Findings Validation UI (section
+115): (1) a screenshot of the 4.1 Scan Summary strip (Initial/Current/Total Rescans/Open/Suppressed cards)
+with "this part is not required"; (2) a screenshot of the old manual findings table showing "No records
+found." with "remove this as well"; (3) "also rescan button not working properly, on click of rescan
+button, untill I am navigating to Overview tab, till then modal not opening."
+
+**1. Scan Summary grid removed (`SecurityScan.tsx`).** The 4.1 strip's Initial/Current Scan Findings numbers
+duplicated what 4.2's per-filter breakdown (section 115) already shows, and Current Scan Findings sitting
+next to an identical Open Findings number read as redundant/confusing. Removed the whole
+`security-scan-summary-grid` block; `summary.total_rescans`/`open_findings`/`suppressed_findings` are no
+longer read in this component (the backend still computes and returns them on `SecurityScanSummaryOut` in
+case they're needed again). Matching now-dead CSS (`.security-scan-summary-grid` and its responsive rule)
+removed from `index.css`.
+
+**2. Dead manual findings table removed (`SAST.tsx` / `DAST.tsx`).** The Issue ID/Severity/Description/
+Status table under the Findings tab was backed by `req.findings` (`SASTFinding`/`DASTFinding` rows), which
+has been permanently empty since manual "Log Finding" entry was removed earlier in this project ("findings
+come from the SAST DAST api, so manually add finding currently not required") -- it always rendered "No
+records found." Deleted the table and its now-unused `resolveFinding` function from both files;
+`SecurityScanResults` (the live Fortify SSC view) is the only findings view left. Also fixed the Findings tab
+button's count, which read `req.findings.length` (always 0) -- now reads `scanResults[0]?.total_count ?? 0`,
+the current scan's real finding count.
+
+**3. Rescan dialog not opening (`SAST.tsx` / `DAST.tsx`).** Both `SecurityScanDialog` renders (Start Scan and
+Rescan) were nested inside `{tab === 'overview' && (...)}`, left over from when Start Scan's button lived
+there. Once Rescan's trigger moved into `SecurityScanResults` on the Findings tab (section 112), clicking it
+set `showRescan` correctly but the dialog itself wasn't mounted on that tab -- nothing appeared until
+switching to Overview, which finally mounted the block and showed the already-open dialog. Fixed by moving
+both dialog renders out to the `Modal`'s top level, as siblings of every tab's content rather than nested
+inside Overview's -- they now render (or don't) purely off `showStartScan`/`showRescan` regardless of which
+tab is active.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean; `npx tsc
+--noEmit -p .` clean. `rsync`+`diff -q` confirmed `SAST.tsx`, `DAST.tsx`, `SecurityScan.tsx`, and `index.css`
+match between `Documents/qa-portal/` and `outputs/qa-portal/`. The Rescan-modal fix was reasoned through
+code (dialog now sits outside every `tab ===` conditional in both files) rather than click-tested in a
+running browser, since this environment has no UI to click through -- worth a quick manual check (click
+Rescan from the Findings tab without visiting Overview first) once deployed.
+
+## 117. Scan History -- split by filter set, with full severity breakdown
+
+Reported directly, with a screenshot of the Scan History table: "Scan history also split by filter,
+currently fixed to Security Auditor View only. along with that instead of total findings show all like
+critical, high etc."
+
+**Fix (`SecurityScan.tsx`).** The Scan History table previously showed one row per scan, with a single
+combined "Findings" column sourced from that scan's top-level `total_count` (which section 115 anchored to
+Security Auditor View alone, for gating purposes). It now shows one row per (scan, filter set) -- built by
+`results.flatMap(...)` over each scan's own `filters` list (the same per-filter data section 115 already
+attaches to every scan result) -- with a new "Filter" column naming which view each row is (Security Auditor
+View, Quick View, ...), and the single "Findings" column replaced with four: Critical, High, Medium, Low
+(plus Total, kept). Consistent with sections 114/115's rule: each filter's numbers stay independent, never
+summed with another filter's row. Falls back to the scan's own top-level counts (one row, Filter "—") for
+any legacy scan result that has no `filters` recorded. The heading's now-redundant "(Security Auditor View)"
+parenthetical was dropped since the filter is named per-row instead.
+
+**Verified:** `npx tsc --noEmit -p .` clean; `python3 -m py_compile app/*.py app/routers/*.py
+scripts/mock_fortify_ssc.py` clean (backend untouched by this change, re-run for safety).
+`rsync`+`diff -q` confirmed `SecurityScan.tsx` matches between `Documents/qa-portal/` and
+`outputs/qa-portal/`.
+
+## 118. Scan History -- use the shared Table component (per-column filters)
+
+Reported directly: "in table filter option is missing." The Scan History table (section 117) was a
+hand-rolled `<table>`, so it never had the per-column filter dropdowns or "Columns" visibility toggle
+(`components/Common.tsx`'s shared `Table`) that every other table in the app has.
+
+**Fix (`SecurityScan.tsx`).** Replaced the hand-rolled `<table>` with the shared `Table` component. The
+(scan, filter set) flattening from section 117 stays the same, now producing a typed `ScanHistoryRow[]` (`id`,
+`scan_no`, `scan_type`, `filter_title`, `imported_at`, the four severity counts, `total_count`, `status`) fed
+into a module-level `SCAN_HISTORY_COLUMNS: TableColumn<ScanHistoryRow>[]` -- same column set as before
+(Scan No/Type/Filter/Scan Date/Critical/High/Medium/Low/Total/Status), just declared the same way
+`SAST_COMPONENT_COLUMNS`/`DAST_TARGET_COLUMNS` already are elsewhere in this module. `Table` renders its own
+`.table-wrap`/`<table>` internally, so no markup restructuring was needed beyond swapping the tag.
+
+**Verified:** `npx tsc --noEmit -p .` clean. `rsync`+`diff -q` confirmed `SecurityScan.tsx` matches between
+`Documents/qa-portal/` and `outputs/qa-portal/`.
+
+## 119. Document/exercise separate Fortify SSC URLs for SAST vs DAST
+
+Asked directly: "FORTIFY_SSC_URL for SAST and DAST is different." Already supported --
+`FortifySSCClient.__init__` (`fortify_ssc.py`) has always checked `FORTIFY_SSC_{SAST,DAST}_URL`/
+`FORTIFY_SSC_{SAST,DAST}_AUTH` first and only fallen back to the shared `FORTIFY_SSC_URL`/`FORTIFY_SSC_AUTH`
+if a kind-specific one isn't set -- no code change needed. `.env.example` mentioned the override existed but
+never showed real values, so this was purely a documentation gap.
+
+**Fix (`.env.example`).** Added concrete example lines for `FORTIFY_SSC_SAST_URL`/`_AUTH` and
+`FORTIFY_SSC_DAST_URL`/`_AUTH` pointing at separate instances, plus a matching pair of commented lines for
+testing the split against two local `scripts/mock_fortify_ssc.py` instances (one per port, e.g. 8089 for
+SAST / 8090 for DAST).
+
+**Verified:** ran two mock server instances (ports 8093/8094) and instantiated
+`FortifySSCClient("SAST")`/`FortifySSCClient("DAST")` with `FORTIFY_SSC_SAST_URL`/`FORTIFY_SSC_DAST_URL` set
+to each -- confirmed `base_url` resolved correctly per kind and `retrieve_snapshot(...)` against each client
+hit its own mock instance independently. `rsync`+`diff -q` confirmed `.env.example` matches between
+`Documents/qa-portal/` and `outputs/qa-portal/`.
+
+## 120. Suppression requests -- restrict raising one to the linked request's requester
+
+Reported directly: "suppression requests CAN ONLY be raised by requester, so this should be enable for
+requester, not QA team." Three surfaces let anyone other than the requester raise a suppression; all three
+are fixed.
+
+**Backend (`suppression.py`) -- the actual security gap.** `create_suppression` had no permission check at
+all beyond being logged in -- any authenticated user, including a Security Analyst/QA team member with no
+relationship to the request, could raise a suppression against someone else's SAST/DAST request. New
+`_require_requester_of_linked(linked, current_user)` (Admin bypasses, same convention as every other check
+in this router) is now called from both `create_suppression` and `update_suppression` -- the latter matters
+too, since editing a Draft suppression can re-point `sast_request_id`/`dast_request_id` at a different
+request entirely, so the *new* link's requester must still match. `_require_linked_request` now returns the
+resolved `linked` row (previously discarded) so both call sites have it to check against.
+
+**Frontend picker (`Suppression.tsx`).** `NewSuppressionModal`'s `inScope` used to allow either the
+requester themselves OR anyone in the same department (mirroring SM/Department Head decision scoping
+elsewhere) -- letting a Security Analyst/QA team member select and raise a suppression against a
+department-mate's request. Narrowed to `requester_id === user.id` (or Admin) only, so the picker no longer
+offers a request that would just 403 on submit against the backend fix above.
+
+**Frontend Findings tab button (`SecurityScan.tsx` / `SAST.tsx` / `DAST.tsx`).** "Initiate Suppression
+Request" (4.4 Action Buttons) was shown under the same `canAct` gate as Rescan/Mark Scan Complete --
+i.e. the assigned Security Analyst, not the requester. Split into its own `canInitiateSuppression` prop,
+wired in both `SAST.tsx`/`DAST.tsx` as `isRequester && [SCANNING, FINDING_VALIDATION, REMEDIATION,
+WAITING_FOR_FIX, RESCAN].includes(status)` -- the same active-scan window `canScanAct` already uses, just
+requester-gated instead of analyst-gated. Rescan and Mark Scan Complete are unaffected and stay
+analyst-only.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean; `npx tsc
+--noEmit -p .` clean. `rsync`+`diff -q` confirmed `suppression.py`, `Suppression.tsx`, `SecurityScan.tsx`,
+`SAST.tsx`, and `DAST.tsx` match between `Documents/qa-portal/` and `outputs/qa-portal/`. Not exercised
+against a running database in this environment (no DB access here) -- worth a manual check once deployed:
+a Security Analyst attempting `POST /api/suppressions` against a request they didn't raise should get a 403,
+and the "Initiate Suppression Request" button should only appear for the requester's own view of a request
+with open findings.
+
+## 121. Block raising a new suppression request while one is already pending
+
+Reported directly, immediately after section 120: "also if pending supression request there, then dont
+allow to create new suppression request. and update message 'Pending suppression requests exist. Scan
+cannot be completed.' to 'Pending suppression requests exist.'"
+
+**Backend (`suppression.py`).** New `_require_no_existing_pending_suppression(db, linked, kind,
+exclude_id=None)` -- mirrors `sast_dast.py`'s `_pending_suppression_ids` definition of "pending" (any linked
+suppression whose status isn't yet "Done"). Called from `create_suppression` (blocks outright if the linked
+SAST/DAST request already has one pending) and `update_suppression` (same check, `exclude_id=obj.id` so an
+in-progress suppression being edited doesn't block its own edit -- only a *different* pending one, or a
+pending one on a request it's being re-linked to, blocks). `_require_linked_request` now returns `(linked,
+kind)` instead of just `linked` so both call sites have `kind` on hand for the SAST/DAST-specific column
+lookup.
+
+**Frontend (`SecurityScan.tsx`).** "Initiate Suppression Request" is now `disabled={busy ||
+suppressionPending}`, matching Mark Scan Complete's existing pattern. The "Pending suppression requests
+exist" message now shows for either gate (`canAct` OR `canInitiateSuppression`) instead of only `canAct`, so
+the requester sees why their own button is disabled too, not just the analyst. Message text shortened from
+"Pending suppression requests exist. Scan cannot be completed." to "Pending suppression requests exist." --
+the old wording only made sense next to Mark Scan Complete; now that the same message covers Initiate
+Suppression Request as well, the more generic form fits both. Also removed the `suppressionPendingMessage`
+prop, which was declared but never actually read anywhere in the render (dead code, noticed while touching
+this block).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean; `npx tsc
+--noEmit -p .` clean. `rsync`+`diff -q` confirmed `suppression.py` and `SecurityScan.tsx` match between
+`Documents/qa-portal/` and `outputs/qa-portal/`. Not exercised against a running database in this
+environment -- worth a manual check once deployed: raising a second suppression against a request that
+already has one in Draft/pending-approval should 400, and the button/message should update accordingly in
+the UI.
+
+## 122. Name the pending suppression request(s) in the blocked-action message
+
+Reported directly, immediately after section 121: "show the id as well" -- the "Pending suppression
+requests exist." message (Findings tab) named that *something* was blocking, not *which* suppression
+request(s).
+
+**Fix (`SecurityScan.tsx` / `SAST.tsx` / `DAST.tsx`).** New `suppressionPendingIds?: string[]` prop on
+`SecurityScanResults`, computed in both `SAST.tsx` and `DAST.tsx` as `(req.suppressions ||
+[]).filter((s) => s.status !== 'Done').map((s) => s.suppression_id)` -- `req.suppressions`
+(`LinkedSuppressionRef[]`) already carries `suppression_id` per entry, so no new API data was needed. The
+message now reads "Pending suppression requests exist: SUP-000123." (falls back to the plain sentence if the
+list is somehow empty). The backend's own pending-block error (section 121's
+`_require_no_existing_pending_suppression`) already named the specific `suppression_id` it found, so this
+closes the same gap on the frontend's up-front hint. FR-06's block-on-Mark-Scan-Complete error text was left
+exactly as the requirement doc specifies it, verbatim -- that message is a different, doc-mandated string,
+not the one this request was about.
+
+**Verified:** `npx tsc --noEmit -p .` clean; `python3 -m py_compile app/*.py app/routers/*.py
+scripts/mock_fortify_ssc.py` clean (backend untouched by this change, re-run for safety). `rsync`+`diff -q`
+confirmed `SecurityScan.tsx`, `SAST.tsx`, and `DAST.tsx` match between `Documents/qa-portal/` and
+`outputs/qa-portal/`.
+
+## 123. Fix: a Rejected suppression permanently blocked raising a new one
+
+Reported directly: "Supression request is now rejected, but still user not able to create supression
+request." Section 121's pending-suppression block used `status != "Done"` to mean "still pending" -- which
+also matched "Rejected", a terminal status. Once rejected, the requester was permanently locked out of ever
+raising another suppression against that request; there was no way forward.
+
+**Root cause.** `Rejected` is terminal in every other sense in this app (`constants.py`'s own
+`SUPPRESSION_TERMINAL_STATUSES = ["Done", "Rejected"]`, already used elsewhere for exactly this
+"still-open vs. finished" distinction -- e.g. `dashboard.py`'s open-suppression counts). Section 121's new
+check was written against `!= "Done"` instead, missing that Rejected needed the same terminal treatment
+here. Mark Scan Complete's own FR-06 gate (`_pending_suppression_ids` in `sast_dast.py`) is correct to treat
+Rejected as still-blocking -- the doc's Rule 3 literally says any status other than "Done" blocks scan
+completion, since a rejected suppression means the finding is real and still unresolved -- so that gate was
+deliberately left untouched; only the *new-suppression* block from section 121 was wrong.
+
+**Backend (`suppression.py`).** `_require_no_existing_pending_suppression` now filters on
+`status.notin_(SUPPRESSION_TERMINAL_STATUSES)` instead of `status != "Done"`, so a Rejected suppression no
+longer blocks raising a new one -- only a genuinely still-open one (Draft through Security Team
+Verification, or Returned-by-*) does.
+
+**Frontend (`SecurityScan.tsx` / `SAST.tsx` / `DAST.tsx`).** The "Initiate Suppression Request" button's
+disabled-state and blocked message used to share `suppressionPending` with Mark Scan Complete (same
+`!= 'Done'` bug, mirrored client-side). Split into a second, narrower pair --
+`hasOpenSuppression`/`openSuppressionIds`, computed with `SUPPRESSION_TERMINAL_STATUSES` the same way the
+backend now does -- so the button re-enables and its own "Pending suppression requests exist" message
+correctly stops naming a Rejected request once that's the only one on record.
+`suppressionPending`/`suppressionPendingIds` are untouched and still gate Mark Scan Complete exactly as
+before (correctly including Rejected).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean; confirmed
+`SUPPRESSION_TERMINAL_STATUSES == ["Done", "Rejected"]` and that in-flight statuses like
+`SM_APPROVAL_PENDING` aren't in it. `npx tsc --noEmit -p .` clean. `rsync`+`diff -q` confirmed
+`suppression.py`, `SecurityScan.tsx`, `SAST.tsx`, and `DAST.tsx` match between `Documents/qa-portal/` and
+`outputs/qa-portal/`. Not exercised against a running database in this environment -- worth a manual check
+once deployed: reject a suppression, then confirm the requester can immediately raise a new one against the
+same request, while Mark Scan Complete for the analyst stays correctly blocked until a suppression actually
+reaches Done.
+
+## 124. Mark Scan Complete's blocked message shouldn't call a Rejected suppression "pending"
+
+Reported directly, immediately after section 123: "Pending suppression requests exist: though request is
+rejected still it is showing like that, and blocking mark scan complete."
+
+**Not a bug in the block itself.** Mark Scan Complete staying blocked while the only suppression on record
+is Rejected is correct -- FR-06 Rule 3 literally blocks on any status other than "Done", and a rejected
+suppression means the finding is real and still unresolved, so this was intentionally left untouched in
+section 123. The actual problem was the message text: calling a Rejected (finished, unfavourable) decision
+"pending" (still awaiting action) is inaccurate and confusing.
+
+**Fix (`SecurityScan.tsx` / `SAST.tsx` / `DAST.tsx`).** The Mark Scan Complete blocked-message now names
+open and Rejected suppressions separately and accurately: genuinely in-flight ones (Draft through Security
+Team Verification, Returned-by-*) still read "Pending suppression requests exist: SUP-000123."; Rejected
+ones now read "Suppression request(s) rejected: SUP-000124 -- findings must be remediated (or a new
+suppression approved) before the scan can be marked complete." (both render together if a mix of each
+exists). New `rejectedSuppressionIds` prop/computation (`status === 'Rejected'`), alongside the
+`openSuppressionIds` section 123 already added. The now-redundant `suppressionPendingIds` prop (superseded
+by the open/rejected split) was removed. `suppressionPending` itself (the boolean that actually disables the
+button) is unchanged.
+
+**Verified:** `npx tsc --noEmit -p .` clean; `python3 -m py_compile app/*.py app/routers/*.py
+scripts/mock_fortify_ssc.py` clean (backend untouched by this change, re-run for safety). `rsync`+`diff -q`
+confirmed `SecurityScan.tsx`, `SAST.tsx`, and `DAST.tsx` match between `Documents/qa-portal/` and
+`outputs/qa-portal/`.
+
+## 125. Fix: an old Rejected suppression kept blocking Mark Scan Complete even after a newer one was Done
+
+Reported directly: "there is already approved suppression, still not working." A real gap left over from
+sections 123/124, which only fixed the *wording* and the *Initiate Suppression Request* gate for a Rejected
+suppression -- Mark Scan Complete's own gate still had the underlying bug.
+
+**Root cause.** Once section 123 let a requester raise a second suppression after a first one was Rejected,
+a SAST/DAST request could end up with two linked `SuppressionRequest` rows: one Rejected, one Done.
+`_pending_suppression_ids` (`sast_dast.py`) still defined "pending" as `status != "Done"`, so the *old*
+Rejected row alone kept showing up as pending forever -- even once the *newer* suppression reached Done --
+permanently blocking Mark Scan Complete regardless of the approval that had actually happened.
+`_mark_scan_complete`'s companion `has_suppression` check made this worse: it was satisfied by ANY linked
+row existing at all (including a Rejected-only one with no Done row), so on its own it never would have
+caught a request that had never actually been approved either.
+
+**Fix.** `_pending_suppression_ids` now excludes `SUPPRESSION_TERMINAL_STATUSES` (Done AND Rejected) instead
+of just Done -- a Rejected row no longer counts as "pending" anywhere it's used (Mark Scan Complete, Report
+Ready). `_mark_scan_complete`'s `has_suppression` (any row exists) was replaced with `has_done` (a direct
+query for at least one row with `status == "Done"`) -- the literal, correct read of FR-06's Rule 4 ("Findings
+> 0 AND Suppression Request Status = Done -> Allow"). Combined, `blocked = not has_done or pending` now
+means: allowed once ANY suppression against the request reaches Done, as long as nothing else is still
+genuinely open (a fresh in-flight suppression, e.g. `SM_APPROVAL_PENDING`, correctly still blocks even with
+an older Done one on record).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean. Checked
+the `blocked = not has_done or pending` formula against six status combinations in isolation: Rejected-only
+(blocked, correct -- matches section 124's still-intentional behavior), Rejected+Done together (the exact
+reported bug -- now NOT blocked), Done-only (not blocked), Done+a-new-open-one (blocked, correctly waits for
+the new one too), no suppression at all (blocked), and open-only/never-decided (blocked). `rsync`+`diff -q`
+confirmed `sast_dast.py` matches between `Documents/qa-portal/` and `outputs/qa-portal/`. Not exercised
+against a running database in this environment -- worth a manual check once deployed: reject one suppression,
+raise and approve a second against the same request, then confirm Mark Scan Complete succeeds.
+
+## 126. Reachable Waiting-for-Fix remediation loop, delegate extension, and Suppression link/delink
+
+Reported directly: "where is waiting for fix, assign to requester. if there are findings then it should
+show waiting for fix option, then give option to delegate then after fix requester will reassign and then
+qa will scan then again the same process. if supression request then link that request with that sast
+request, which should be linkable. and give option to link and delink supression request from sast
+request and supression both." Four clarifying questions were asked up front and all four answered with
+the "(Recommended)" option: Assign to Requester becomes a new Findings-tab button next to Rescan;
+"delegate" extends the existing Delegate-for-Input feature rather than building something new; Suppression
+relink/delink is allowed any time the suppression hasn't reached a terminal status, not just Draft; and
+"delink" means replacing the link (a suppression must always point at exactly one SAST/DAST request, never
+none).
+
+**Root cause -- the remediation loop was dead.** `_assign_to_requester` (`sast_dast.py`) required
+`status == "REMEDIATION"` and `_validate_findings` required `status == "FINDING_VALIDATION"`, but nothing
+in the "Findings Validation" doc's Rescan/Mark Scan Complete flow (introduced earlier this cycle) ever
+transitions a request into either status any more -- Start Scan goes straight to `SCANNING`, and Rescan
+stays there. So Assign to Requester -> Waiting For Fix, and therefore the whole
+fix-\>reassign-\>rescan-\>repeat loop, was permanently unreachable for any request created under the new
+flow.
+
+**Backend fix (`sast_dast.py`).** `_assign_to_requester` now takes an explicit `kind: str` parameter and
+requires `SCAN_ACTIVE_STATUSES` (the same umbrella set Rescan/Mark Scan Complete already use) instead of
+`"REMEDIATION"`. Since the old `REMEDIATION`-only precondition used to implicitly guarantee findings
+existed, an explicit check was added in its place: it loads the latest scan via `_scan_results` and 400s
+with "No open findings on the latest scan -- nothing to assign for remediation." if there are none. The
+audit-log step name is now derived from `SAST_DAST_STATUS_LABELS.get(obj.status, obj.status)` instead of a
+hardcoded `"Remediation"`, since it can now fire from several different statuses. `sast_assign_to_requester`
+/`dast_assign_to_requester` both pass their own `kind` through. `_validate_findings` (the old
+`FINDING_VALIDATION`-gated action) and its Overview-tab "Validate Findings" button are deliberately left
+untouched -- kept only for backward compatibility with any legacy record still sitting in that status.
+`_mark_fixed` (`WAITING_FOR_FIX -> RESCAN`) needed no change at all -- it already existed, and
+`SCAN_ACTIVE_STATUSES` already includes `RESCAN`, so once Assign to Requester became reachable the rest of
+the fix-\>reassign-\>rescan loop just worked.
+
+**Backend: delegate extension (`qa_requests.py`).** "then give option to delegate" reuses the existing
+child-workflow delegation feature (`assign_child_for_input` / `ChildRequestDelegation.tsx`) rather than a
+new mechanism -- `_CHILD_DELEGATION_TARGETS["SAST"]` and `["DAST"]` both gained `"WAITING_FOR_FIX"`
+alongside their existing pre-approval statuses, so a requester can now delegate a Waiting-for-Fix request to
+someone else for input, the same way they could already delegate a Draft/Returned one.
+
+**Backend: Suppression relink (`suppression.py`, `schemas.py`).** New `SuppressionRelinkIn` schema
+(`sast_request_id`/`dast_request_id`, both optional) and `POST /api/suppressions/{sup_id}/relink`. Unlike
+`update_suppression` (full-form edit, Draft only), relink is a narrow, separate capability: it only repoints
+the link and re-derives `application_name`/`department`/`application_owner` from the newly linked request,
+reusing the same `_require_linked_request`/`_require_requester_of_linked`/
+`_require_no_existing_pending_suppression` checks `create_suppression`/`update_suppression` already used.
+Allowed any time `obj.status not in SUPPRESSION_TERMINAL_STATUSES` (Done/Rejected), matching the "any time
+it's still open" answer -- not just Draft. Only the requester (`created_by_id`) or an Admin may call it,
+same convention as the rest of this router. There is no "unlink" -- a suppression must always point at
+exactly one SAST/DAST request, so "delink" is implemented as picking a different one through this same
+endpoint, per the "Replace only, always linked" answer.
+
+**Frontend: Findings-tab remediation buttons (`SecurityScan.tsx`, `SAST.tsx`, `DAST.tsx`).**
+`SecurityScanResults`'s 4.4 action row gained two new independent gates: `canAssignToRequester` (renders
+"Assign to Requester (Waiting for Fix)" next to Rescan, only while the latest scan still has findings) and
+`canMarkFixed` (renders "Mark Fixed (send to Rescan)", independent of `hasFindings` since it only applies
+once already `WAITING_FOR_FIX`). In `SAST.tsx`/`DAST.tsx`, `canAssignToRequester` is now simply
+`canScanAct` (the same assigned-analyst/active-window gate as Rescan) instead of the old dead
+`status === 'REMEDIATION'` check; `canMarkFixed` is unchanged. The old Overview-tab "Assign to Requester"
+and "Mark Fixed" buttons were removed as redundant now that both live in the Findings tab; "Validate
+Findings" was left in place on Overview, untouched, for the same backward-compatibility reason as the
+backend.
+
+**Frontend: Suppression relink/link UI (`Suppression.tsx`, `SecurityScan.tsx`).** Two entry points, both
+calling the same `POST /api/suppressions/{id}/relink`:
+- `Suppression.tsx`'s detail view gained a "Relink" button next to the linked Request ID
+  (`RelinkSuppressionModal`, reusing the existing `RequestIdSearch` autosuggest and the same
+  inScope/hasReachedScanning/isNotYetCompleted eligibility filters as the New Suppression Request picker),
+  visible to the requester/Admin whenever `status` isn't in `SUPPRESSION_TERMINAL_STATUSES`.
+- `SecurityScan.tsx` gained `LinkSuppressionModal`, opened from a new "Link Existing Suppression Request"
+  button next to "Initiate Suppression Request" in the Findings tab (same `canInitiateSuppression`/
+  `hasOpenSuppression` gates). It lists the current user's own still-open suppression requests (excluding
+  ones already linked to this exact SAST/DAST request) in a plain `<select>`, and relinks the chosen one to
+  the request the Findings tab belongs to.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean;
+`npx tsc --noEmit -p .` clean across the frontend after every edit in this section, including the final
+combined check. `rsync`+`diff -q` confirmed `sast_dast.py`, `qa_requests.py`, `suppression.py`, `schemas.py`,
+`SecurityScan.tsx`, `SAST.tsx`, `DAST.tsx`, and `Suppression.tsx` all match between `Documents/qa-portal/`
+and `outputs/qa-portal/`. Not exercised against a running database/UI in this environment -- worth a manual
+walkthrough once deployed: run a scan with findings, click Assign to Requester, delegate it, mark it fixed,
+rescan, and separately raise a suppression, relink it from both the Suppression detail view and the
+SAST/DAST Findings tab.
+
+## 127. Fix: Mark Scan Complete stayed blocked on the frontend even after a later suppression reached Done
+
+Reported directly, with a screenshot: "Suppression request rejected: TQA-SUP-01 -- findings must be
+remediated (or a new suppression approved) before the scan can be marked complete. ... while other linked
+request already completed, still [blocked]."
+
+**Root cause.** Section 125 fixed this exact bug on the backend (`_mark_scan_complete`'s `has_done`/`pending`
+formula), but never on the frontend. `SAST.tsx`/`DAST.tsx`'s own `suppressionPending` -- the flag that
+disables the Mark Scan Complete button and picks which blocked-message to show, *before* the analyst even
+submits -- was still `(req.suppressions || []).some((s) => s.status !== 'Done')`: true forever once ANY
+suppression on the request was Rejected, even after a *later* suppression on the same request reached Done.
+So the button stayed disabled, and the Rejected-branch message kept rendering, even in cases the backend
+itself would now allow.
+
+**Fix.** `suppressionPending` in both `SAST.tsx` and `DAST.tsx` now mirrors `_mark_scan_complete`'s own
+`not has_done or pending` formula exactly: `!hasDoneSuppression || hasOpenSuppression`, where
+`hasDoneSuppression` checks for at least one suppression with `status === 'Done'` and `hasOpenSuppression`
+(already existing, from section 123) excludes `SUPPRESSION_TERMINAL_STATUSES`. Blocked only while no
+suppression has reached Done yet, or a genuinely open one still exists alongside a Done one -- a Rejected
+row sitting next to a Done row no longer keeps the button disabled or the message showing.
+
+**Verified:** `npx tsc --noEmit -p .` clean. Walked the formula through the same six status combinations as
+section 125's backend check (Rejected-only: blocked; Rejected+Done together, the exact reported bug: now NOT
+blocked; Done-only: not blocked; Done+a-new-open-one: blocked; no suppression at all: blocked; open-only: 
+blocked) -- all match the backend's own gate. `rsync`+`diff -q` confirmed `SAST.tsx`/`DAST.tsx` match between
+`Documents/qa-portal/` and `outputs/qa-portal/`.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.
