@@ -34,7 +34,13 @@ const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
 // Exported so steps/DetailsStep.tsx's inline onBlur error text checks the
 // exact same rule as the real gate below, instead of keeping its own
 // separate copy that could silently drift out of sync with this one.
-export const CR_OR_EPIC_NUMBER_REGEX = /^(?:CR-[0-9]{1,4}|EPIC-[0-9]{1,6})$/
+//
+// Reported directly: "max length 15" -- both alternatives now cap out at 15
+// characters total (prefix included): CR-<up to 12 digits> or EPIC-<up to
+// 10 digits>. DetailsStep.tsx's own `maxLength={11}` on the input was
+// already inconsistent with this regex even before this change (11 is
+// shorter than EPIC-123456789's 14 chars), so that's raised to 15 too.
+export const CR_OR_EPIC_NUMBER_REGEX = /^(?:CR-[0-9]{1,12}|EPIC-[0-9]{1,10})$/
 
 // Because each wizard step's fields are unmounted once you move to another
 // step, the browser's native `required` attribute can't catch a missing

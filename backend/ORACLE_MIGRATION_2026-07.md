@@ -6253,6 +6253,29 @@ app in this environment -- worth a manual check once deployed: on a Waiting For 
 suppression, confirm Initiate/Link Suppression Request are both disabled with the new message, Mark Fixed
 stays enabled, and a direct `POST /api/suppressions` against the same linked request now 400s.
 
+## 139. CR/EPIC Number -- max length 15
+
+Reported directly, pasting the current regex and asking for it to be updated to a 15-character max.
+
+**Fix (`QARequests/validation.ts`).** `CR_OR_EPIC_NUMBER_REGEX` changed from `/^(?:CR-[0-9]{1,4}|EPIC-
+[0-9]{1,9})$/` to `/^(?:CR-[0-9]{1,12}|EPIC-[0-9]{1,10})$/` -- both alternatives now cap at exactly 15
+characters total including the prefix (`CR-` is 3 chars + up to 12 digits; `EPIC-` is 5 chars + up to 10
+digits). Verified with a quick node check: `CR-123456789012` (15 chars) and `EPIC-1234567890` (15 chars) both
+pass, `CR-1234567890123` and `EPIC-12345678901` (16 chars each) both correctly fail.
+
+**Also fixed in passing (`QARequests/steps/DetailsStep.tsx`).** The CR Number/EPIC Number input's own
+`maxLength={11}` was already inconsistent with even the OLD regex (11 is shorter than `EPIC-123456789`'s 14
+characters, so the HTML attribute alone would have silently truncated a valid EPIC number before the user
+could finish typing it, regardless of what the regex allowed). Raised to `maxLength={15}` to match the new
+regex exactly. Confirmed via grep that this is the only editable entry point for `cr_number` in the frontend
+-- every other module (SAST/DAST/Functional/Performance/RequestDetail) only displays it read-only, delegated
+from the QA Request.
+
+**Verified:** `npx tsc --noEmit -p .` clean. `python3 -m py_compile app/*.py app/routers/*.py
+scripts/mock_fortify_ssc.py` clean (no backend changes -- `cr_number` is stored as a plain `String(64)`
+column with no server-side format regex, so this was a frontend-only fix). `rsync`+`diff -q` confirmed
+`validation.ts` and `DetailsStep.tsx` match between `Documents/qa-portal/` and `outputs/qa-portal/`.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.

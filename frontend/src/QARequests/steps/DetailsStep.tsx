@@ -176,7 +176,7 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
           <Field label="CR Number/EPIC Number *">
             <input
               required
-              maxLength={11}
+              maxLength={15}
               placeholder="e.g. CR-1234 or EPIC-123456"
               value={form.cr_number}
               onChange={(e) => {
