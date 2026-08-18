@@ -931,6 +931,11 @@ class SASTListOut(ORMModel):
     department: Optional[str] = None
     application_owner: Optional[str] = None
     findings_count: int = 0
+    # 2026-08 "Findings Validation" doc -- lets the list Status column
+    # overlay "Suppression Approval Pending" over WAITING_FOR_FIX, mirroring
+    # application_master_status's own overlay of "Application Owner Approval
+    # Pending" over SM_APPROVAL_PENDING. See models.SASTRequest.has_open_suppression.
+    has_open_suppression: bool = False
     qa_request: Optional[LinkedRequestRef] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
@@ -1040,6 +1045,8 @@ class DASTListOut(ORMModel):
     department: Optional[str] = None
     application_owner: Optional[str] = None
     findings_count: int = 0
+    # See SASTListOut.has_open_suppression above -- same idea, for DAST.
+    has_open_suppression: bool = False
     qa_request: Optional[LinkedRequestRef] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime

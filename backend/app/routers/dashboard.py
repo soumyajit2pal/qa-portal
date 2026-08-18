@@ -65,6 +65,44 @@ def _in_period(query, column, date_from: str | None, date_to: str | None):
         query = query.filter(column <= end)
     return query
 
+
+def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
+    """Reported directly: "in dashboard sast dast findings showing 0
+    result." Every SAST/DAST findings figure below used to read
+    models.SASTFinding/DASTFinding -- the old manually-logged findings
+    tables, retired when the "Findings Validation" doc moved findings to
+    Fortify SSC-backed imports (see models.SecurityScanResult). Nothing has
+    written a SASTFinding/DASTFinding row since, so every metric built on
+    them (open findings, severity distribution, remediation status) has
+    silently read as zero/empty ever since, on the Dashboard AND the
+    Reports module (routers/reports.py has the identical bug -- see its own
+    copy of this same fix).
+
+    Returns {request_id: latest SecurityScanResult row} for whichever of
+    `request_ids` have actually been scanned at least once -- request ids
+    with no scan yet are simply absent, same as `_scan_results` in
+    sast_dast.py treats "never scanned" (no special zero-row). Ordering
+    ascending by (request_id, imported_at, id) and overwriting as we go is
+    a plain Python "latest wins" reduction -- no window function needed,
+    consistent with the rest of this file's fetch-then-aggregate-in-Python
+    style."""
+    request_ids = [rid for rid in request_ids if rid is not None]
+    if not request_ids:
+        return {}
+    rows = (
+        db.query(models.SecurityScanResult)
+        .filter(models.SecurityScanResult.request_type == kind,
+                models.SecurityScanResult.request_id.in_(request_ids))
+        .order_by(models.SecurityScanResult.request_id,
+                  models.SecurityScanResult.imported_at.asc(),
+                  models.SecurityScanResult.id.asc())
+        .all()
+    )
+    latest: dict = {}
+    for row in rows:
+        latest[row.request_id] = row
+    return latest
+
 # Statuses that represent "work still in flight" for a QA Request (i.e. not a
 # terminal state and not sitting untouched in Draft).
 ACTIVE_QA_STATUSES = {
@@ -803,12 +841,21 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
         if r.status in ACTIVE_QA_STATUSES and (r.cr_number or r.epic_number)
     })
 
-    sast_findings = _join_qa_department(
-        _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
-        models.SASTRequest, scope).count()
-    dast_findings = _join_qa_department(
-        _in_period(db.query(models.DASTFinding).join(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
-        models.DASTRequest, scope).count()
+    # Reported directly: "in dashboard sast dast findings showing 0
+    # result." Used to count models.SASTFinding/DASTFinding rows -- the old
+    # manually-logged findings tables, which nothing has written to since
+    # findings moved to Fortify SSC imports (see _latest_scan_by_request's
+    # own comment above). "Open security findings" now means each in-scope
+    # SAST/DAST request's OWN latest scan's total_count, summed -- current
+    # open findings across the portal, not a raw historical row count.
+    sast_ids = [r.id for r in _join_qa_department(
+        _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
+        models.SASTRequest, scope).all()]
+    dast_ids = [r.id for r in _join_qa_department(
+        _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
+        models.DASTRequest, scope).all()]
+    sast_findings = sum(s.total_count for s in _latest_scan_by_request(db, "SAST", sast_ids).values())
+    dast_findings = sum(s.total_count for s in _latest_scan_by_request(db, "DAST", dast_ids).values())
 
     # Was QA-Request-only, which disagreed with the "approvals needing
     # attention" count shown elsewhere in the app (e.g. the old Approval
@@ -960,9 +1007,28 @@ def security_sast(date_from: str | None = Query(None), date_to: str | None = Que
     scope = dashboard_department_scope(current_user)
     reqs = _join_qa_department(
         _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to), models.SASTRequest, scope).all()
-    findings = _join_qa_department(
-        _in_period(db.query(models.SASTFinding).join(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
-        models.SASTRequest, scope).all()
+    # Reported directly: "in dashboard sast dast findings showing 0
+    # result." Used to read models.SASTFinding -- see
+    # _latest_scan_by_request's own comment for why that's always empty
+    # now. Each request's own latest Fortify SSC scan (if it's been
+    # scanned at least once) stands in for "its findings" below.
+    latest_scans = _latest_scan_by_request(db, "SAST", [r.id for r in reqs])
+    severity_totals = Counter()
+    for scan in latest_scans.values():
+        severity_totals["Critical"] += scan.critical_count
+        severity_totals["High"] += scan.high_count
+        severity_totals["Medium"] += scan.medium_count
+        severity_totals["Low"] += scan.low_count
+    # "Current disposition of identified findings" -- of the requests that
+    # have actually been scanned, how many now show 0 open findings on
+    # their latest scan (Resolved) vs still have some (Open). Requests
+    # never scanned yet have no findings to have a disposition about, so
+    # they're left out of this one distribution (they still count in
+    # total_requests above).
+    remediation_status = Counter(
+        "Resolved" if scan.total_count == 0 else "Open"
+        for scan in latest_scans.values()
+    )
     return {
         # Every SAST request ever raised, any status -- distinct from
         # applications_scanned below (only those that actually finished
@@ -970,9 +1036,9 @@ def security_sast(date_from: str | None = Query(None), date_to: str | None = Que
         # many have been scanned".
         "total_requests": len(reqs),
         "applications_scanned": len({r.application_name for r in reqs if r.status in ("REPORT_READY", "CLOSED")}),
-        "open_vulnerabilities": len([f for f in findings if f.status == "Open"]),
-        "severity_distribution": Counter(f.severity for f in findings),
-        "remediation_status": Counter(f.status for f in findings),
+        "open_vulnerabilities": sum(scan.total_count for scan in latest_scans.values()),
+        "severity_distribution": severity_totals,
+        "remediation_status": remediation_status,
     }
 
 
@@ -981,9 +1047,17 @@ def security_dast(date_from: str | None = Query(None), date_to: str | None = Que
     scope = dashboard_department_scope(current_user)
     reqs = _join_qa_department(
         _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to), models.DASTRequest, scope).all()
-    findings = _join_qa_department(
-        _in_period(db.query(models.DASTFinding).join(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
-        models.DASTRequest, scope).all()
+    # Reported directly: "in dashboard sast dast findings showing 0
+    # result." Used to read models.DASTFinding -- see
+    # _latest_scan_by_request's own comment (and security_sast's matching
+    # fix just above) for why that's always empty now.
+    latest_scans = _latest_scan_by_request(db, "DAST", [r.id for r in reqs])
+    vulnerability_totals = Counter()
+    for scan in latest_scans.values():
+        vulnerability_totals["Critical"] += scan.critical_count
+        vulnerability_totals["High"] += scan.high_count
+        vulnerability_totals["Medium"] += scan.medium_count
+        vulnerability_totals["Low"] += scan.low_count
     # scan_coverage used to count every DAST request's application_url
     # regardless of status -- including ones still sitting in Draft/SM
     # Approval/Configuration that have never actually been scanned. Scoped
@@ -996,7 +1070,9 @@ def security_dast(date_from: str | None = Query(None), date_to: str | None = Que
         # comment on total_requests in security_sast above.
         "total_requests": len(reqs),
         "scan_coverage": len({r.application_url for r in scanned_reqs if r.application_url}),
-        "vulnerability_trends": Counter(f.severity for f in findings),
+        "vulnerability_trends": vulnerability_totals,
+        # compliance_status was never actually broken -- it reads DASTRequest.status directly,
+        # not DASTFinding, so it's untouched here.
         "compliance_status": Counter(r.status for r in reqs),
     }
 

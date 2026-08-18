@@ -5798,6 +5798,461 @@ of the existing import flow.
 **Verified:** `npx tsc --noEmit -p .` clean. `rsync`+`diff -q` confirmed `SAST.tsx`/`DAST.tsx` match between
 `Documents/qa-portal/` and `outputs/qa-portal/`.
 
+## 129. Fix: empty pink box next to Rescan/Assign to Requester when no suppression exists yet
+
+Reported directly, with a screenshot: an empty pink/red bordered box showing next to the Rescan and Assign
+to Requester buttons in the Findings tab, with no text inside.
+
+**Root cause.** `SecurityScanResults`' blocked-message box (`.security-scan-suppression-blocked`) renders
+whenever `canAct && suppressionPending`. `suppressionPending` covers all three of FR-06's block cases:
+Rule 2 (findings exist, no suppression raised at all), Rule 3 (a suppression is still genuinely open), and
+the Rejected case from section 124. But the box's own JSX only ever rendered text for the open case
+(`openSuppressionIds`) and the rejected case (`rejectedSuppressionIds`) -- it had no text at all for Rule 2,
+the "no suppression exists yet" case, which is exactly what the reported request (`TQA-SAST-02`, 24 open
+findings, no suppression raised) hit: the box rendered (border, background, padding) with nothing inside.
+
+**Fix (`SecurityScan.tsx`).** Added the missing third branch: when neither `openSuppressionIds` nor
+`rejectedSuppressionIds` has anything in it (i.e. no suppression request exists against this SAST/DAST
+request at all), the box now reads "No suppression request has been raised for these findings -- findings
+must be remediated (rescan) or a suppression request raised and approved before the scan can be marked
+complete."
+
+**Verified:** `npx tsc --noEmit -p .` clean. `rsync`+`diff -q` confirmed `SecurityScan.tsx` matches between
+`Documents/qa-portal/` and `outputs/qa-portal/`.
+
+## 130. Fix: Assign to Requester / Rescan stayed enabled while already Waiting For Fix
+
+Reported directly: "I clicked on Assigned to Requester, button is not behaving correctly, it should be
+disabled, and along with that, rescan button also should be disabled, as it assigned to requester for fix.
+when requester assigned to me then only i can do rescan."
+
+**Root cause.** Section 126 made Assign to Requester reachable from `SCAN_ACTIVE_STATUSES`, the same
+umbrella set already used for Rescan/Mark Scan Complete -- but that set includes `WAITING_FOR_FIX` itself.
+So once a request was assigned to the requester for a fix, the Security Analyst could still see and click
+Assign to Requester again (re-logging a redundant step with no real state change) and Rescan (re-importing
+results before the requester had done anything), on both the backend and the frontend. Rescan/Mark Scan
+Complete/Assign to Requester are specifically the analyst's OWN turn -- while `WAITING_FOR_FIX`, the ball is
+in the requester's court (fix it, or delegate it) until Mark Fixed hands it back via `RESCAN`.
+
+**Fix.** New `SCAN_ANALYST_ACTIVE_STATUSES = SCAN_ACTIVE_STATUSES - {"WAITING_FOR_FIX"}` (`sast_dast.py`),
+used in place of `SCAN_ACTIVE_STATUSES` for `_rescan_scan`, `_mark_scan_complete`, and
+`_assign_to_requester`'s `_require(...)` calls -- `SCAN_ACTIVE_STATUSES` itself is untouched and still used
+where the full window is correct (e.g. `canInitiateSuppression`, which stays the requester's the whole
+time, including while `WAITING_FOR_FIX`). `SAST.tsx`/`DAST.tsx`'s `canScanAct` (which `canAssignToRequester`
+already aliased to, from section 126) now excludes `WAITING_FOR_FIX` the same way, so both buttons
+disappear from the Findings tab -- not just visually disabled -- the moment a request is assigned to the
+requester, and only reappear once Mark Fixed moves it to `RESCAN`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` and
+`npx tsc --noEmit -p .` both clean. `rsync`+`diff -q` confirmed `sast_dast.py`, `SAST.tsx`, and `DAST.tsx`
+match between `Documents/qa-portal/` and `outputs/qa-portal/`. Not exercised against a running
+database/UI in this environment -- worth a manual check once deployed: Assign to Requester on a request
+with open findings, confirm Rescan/Assign to Requester are both gone from the Findings tab (only Mark
+Fixed and the requester's suppression actions remain), then Mark Fixed and confirm Rescan/Assign to
+Requester reappear.
+
+## 131. Mark Fixed narrowed to requester-only; missing active-delegation guard added
+
+Reported directly, as a pointed follow-up to section 130: "why still mark fixed is visible? why you are not
+going through the codebase and not fixing all and not checking edge cases."
+
+**Why Mark Fixed was still visible.** Not a leftover of the same bug as section 130 -- `_mark_fixed`
+(`sast_dast.py`) has, since sections 51/52 (written well before the turn-based Rescan/Assign to Requester
+model this session built), deliberately allowed the assigned Security Analyst (or Admin) to self-mark-fixed
+alongside the requester. That was a conscious, documented choice at the time. It doesn't hold up against the
+model this session actually shipped, though: "after fix requester will reassign and then qa will scan"
+describes Mark Fixed as strictly the requester's action -- the exact mirror of Rescan/Assign to Requester
+being strictly the analyst's (section 130). Narrowed `_mark_fixed`'s permission check to requester-or-Admin
+only (dropped the `Role.SECURITY_ANALYST` bypass and the `_require_assigned_security_analyst` branch), and
+mirrored it in `SAST.tsx`/`DAST.tsx`'s `canMarkFixed` (dropped `isAssignedAnalyst`).
+
+**Edge case found on the "check edge cases" pass.** `_mark_fixed` had no active-delegation guard at all --
+unlike `_resubmit`'s own identical requester-owned-action check a few functions above it in the same file
+(`if obj.active_delegation: raise HTTPException(400, "The active delegation must be returned or recalled
+before resubmission")`). Once section 126 added `WAITING_FOR_FIX` to `_CHILD_DELEGATION_TARGETS` (extending
+Delegate for Input), a requester who'd delegated a Waiting-for-Fix request out to someone else could still
+click Mark Fixed themselves while that delegate's assignment was still active -- defeating the entire point
+of delegating the fix out, and letting the requester resubmit before the delegate had actually done
+anything. `_mark_fixed` now raises the same "must be returned or recalled first" error `_resubmit` does;
+`canMarkFixed` on the frontend now also checks `!req.active_delegation`.
+
+Also fixed a comment in `SAST.tsx`'s `assignedGroupFor` that had documented the now-removed analyst
+exception ("even though an analyst/admin may also click 'Mark Fixed'") -- left as-is it would have been
+actively misleading about current behavior.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` and
+`npx tsc --noEmit -p .` both clean. `rsync`+`diff -q` confirmed `sast_dast.py`, `SAST.tsx`, and `DAST.tsx`
+match between `Documents/qa-portal/` and `outputs/qa-portal/`. Not exercised against a running database/UI
+in this environment -- worth a manual check once deployed: as the assigned analyst, confirm Mark Fixed no
+longer appears on a Waiting-for-Fix request; as the requester, delegate a Waiting-for-Fix request, confirm
+Mark Fixed disappears until the delegate returns or the delegation is recalled.
+
+## 132. Delegate on a Waiting-for-Fix request is now a full stand-in for the requester
+
+Reported directly, immediately after section 131 shipped: "requester delegated, to qa. but as status is
+Waiting For Fix, in qa side rescan button and all eligble button not visible." Asked directly whether the
+delegate should be a full stand-in for the requester (including Mark Fixed itself) or edit/evidence-only
+with the requester still confirming; answered "Full stand-in for requester."
+
+**Why nothing was visible.** Section 131's active-delegation guard blocked Mark Fixed outright while a
+Waiting-for-Fix request was delegated -- on the (reasonable-sounding, but wrong for this case) assumption
+that the delegate would edit/attach evidence and then Return to Requester so the requester could click Mark
+Fixed themselves, mirroring `_resubmit`'s own guard elsewhere in the file. In practice SAST/DAST has *no*
+editable surface during Waiting For Fix at all -- Documents and Checklist Evidence are both locked solid
+from Department Head approval onward (`_can_upload_documents`), and the request's own edit form is
+pre-approval-only -- so the delegate landed on a request with nothing reachable: not Rescan/Assign to
+Requester (correctly analyst-only, unaffected by this), not Mark Fixed (blocked), not Initiate Suppression
+Request (still gated on the ORIGINAL requester's `isRequester`). Delegating a Waiting-for-Fix request was
+functionally a dead end.
+
+**Fix.** The active delegate is now treated as a genuine stand-in for the requester on this one request,
+matching how `requesterInputEditor` (`isActiveDelegate || isAdmin || (isRequester && !active_delegation)`)
+already works for the pre-approval delegation targets:
+- `sast_dast.py::_mark_fixed` -- no longer blocks outright while delegated. The active delegate can call it
+  directly; the *original* requester is still locked out while someone else holds the delegation (same
+  mutual exclusion as `requesterInputEditor`). On success, if a delegation was active, it's now
+  auto-closed (`status -> "RETURNED"`, same fields `return_child_delegation` sets) so the "Input assigned
+  to ..." badge and Return/Recall controls don't linger on a request that's already moved on to Rescan.
+- `suppression.py::_require_requester_of_linked` -- now also accepts the linked SAST/DAST request's active
+  delegate (previously only the requester or Admin), with the same requester-locked-out-while-delegated
+  rule. Used by `create_suppression`, `update_suppression`, and `relink_suppression`.
+- `SAST.tsx`/`DAST.tsx` -- `canMarkFixed` and `canInitiateSuppression` both swapped `isRequester` for
+  `requesterInputEditor`. Outside Waiting For Fix there's never an active delegation (it's the only
+  delegatable status among `SCAN_ACTIVE_STATUSES` -- see `_CHILD_DELEGATION_TARGETS`), so this is a no-op
+  for the rest of the active-scan window.
+
+Rescan/Assign to Requester deliberately still don't appear for the delegate -- they're the assigned
+Security Analyst's own actions (section 130), unrelated to who's standing in for the requester. A delegate
+who happens to also be the assigned analyst would see them for that reason, not because of the delegation.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` and
+`npx tsc --noEmit -p .` both clean. `rsync`+`diff -q` confirmed `sast_dast.py`, `suppression.py`,
+`SAST.tsx`, and `DAST.tsx` match between `Documents/qa-portal/` and `outputs/qa-portal/`. Not exercised
+against a running database/UI in this environment -- worth a manual check once deployed: delegate a
+Waiting-for-Fix request to someone else, confirm they see Mark Fixed and Initiate/Link Suppression Request
+(but not Rescan/Assign to Requester unless they're also the assigned analyst), click Mark Fixed as the
+delegate, and confirm both the status moves to Rescan and the delegation badge disappears without a manual
+Return/Recall.
+
+## 133. Dashboard/Reports SAST/DAST findings figures showing 0 (dead SASTFinding/DASTFinding tables)
+
+Reported directly: "in dashboard sast dast findings showing 0 result. fix the dashboard, insights
+everything."
+
+**Root cause.** When the "Findings Validation" doc moved SAST/DAST findings from manual "Log Finding" entry
+to Fortify SSC imports (`models.SecurityScanResult`) earlier this cycle, the old `models.SASTFinding`/
+`DASTFinding` tables stopped being written to entirely -- confirmed already noted in-code at the time
+("It always showed 'No records found.' since manual 'Log Finding' entry was removed", SAST.tsx/DAST.tsx).
+But five backend read sites were never updated off those now-permanently-empty tables, so every figure
+built on them silently read as zero (counts) or empty (distributions) instead of erroring -- easy to miss
+since nothing throws:
+- `dashboard.py::project_wise` (4.9.1/4.9.2) -- the Dashboard's own "Open security findings" stat card
+  (`sast_findings`/`dast_findings`).
+- `dashboard.py::security_sast`/`security_dast` (4.9.5/4.9.6) -- the Insights > Security tab's Open
+  Vulnerabilities, SAST Severity Distribution, SAST Remediation Status, and DAST Vulnerability Trends
+  cards (`compliance_status` was already fine -- it reads `DASTRequest.status`, not `DASTFinding`).
+- `reports.py::sast_scan_report`/`dast_scan_report` -- the Reports module's SAST/DAST Scan Register
+  exports' "Findings" column.
+- `reports.py::_security_severity_counts`/`severity_distribution` -- the Reports module's "Security
+  Finding Severity Distribution" export.
+
+**Fix.** Added `_latest_scan_by_request(db, kind, request_ids)` (one copy in `dashboard.py`, one in
+`reports.py` -- matching this codebase's per-file-locality convention rather than a new shared module) --
+fetches every `SecurityScanResult` row for the given SAST/DAST request ids, ordered ascending by
+`(request_id, imported_at, id)`, and reduces to `{request_id: latest row}` by "last write wins" in Python
+(no window function, consistent with this file's existing fetch-then-aggregate style). Request ids with no
+scan yet are simply absent, same as "never scanned" reads everywhere else in the app. All five read sites
+above now use each request's own latest scan snapshot instead of the dead per-finding tables:
+- "Open security findings" / "Open Vulnerabilities" = sum of `total_count` across the latest scan of every
+  in-scope request.
+- Severity Distribution / Vulnerability Trends = summed `critical_count`/`high_count`/`medium_count`/
+  `low_count` across those same latest scans.
+- SAST Remediation Status (subtitle: "Current disposition of identified findings") -- since
+  `SecurityScanResult` has no per-finding status field to reuse (only aggregate severity counts per
+  snapshot), this is now `Resolved` (latest scan's `total_count == 0`) vs `Open` (`> 0`), counted per
+  request that's actually been scanned at least once; never-scanned requests are excluded from this one
+  distribution (nothing "identified" yet), though they still count toward `total_requests`.
+- Scan Register "Findings" column = the request's own latest scan `total_count` (0 if never scanned).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` clean. Verified
+the "ascending order + dict overwrite = latest wins" reduction in isolation with synthetic rows (a
+remediated request with an older high-count scan and a newer zero-count rescan correctly resolves to the
+newer one; a request with no scan rows at all is correctly absent). `rsync`+`diff -q` confirmed
+`dashboard.py` and `reports.py` match between `Documents/qa-portal/` and `outputs/qa-portal/`. Could not
+exercise against a live Oracle database in this environment (no `sqlalchemy`/network access in the
+sandbox) -- worth a manual check once deployed: open Dashboard's "Open security findings" card and the
+Insights > Security tab on an environment with at least one scanned SAST/DAST request and confirm nonzero
+figures, then cross-check the SAST/DAST Scan Register and Security Finding Severity Distribution exports
+under Reports.
+
+## 134. Restored Finding Validation as a mandatory gate (SAST/DAST Request Workflow Requirement doc)
+
+Reported directly: a full "SAST/DAST Request Workflow Requirement" document was pasted, describing the
+intended SAST/DAST status flow end-to-end, including a mermaid flowchart. Sections 113-133 of this cycle
+had built a flatter model where Rescan/Mark Scan Complete/Assign to Requester all acted directly from
+`SCANNING`, bypassing Finding Validation as a real held status. The new doc's flowchart (`Scanning ->
+Finding Validation -> [No findings -> Security Completed] / [Findings identified -> Waiting for Fix]`)
+restores Finding Validation as a genuine, mandatory gate the assigned Security Analyst must explicitly
+pass through. No new status values or DB migration were needed -- every status in the flowchart
+(`FINDING_VALIDATION`, `REMEDIATION`, `WAITING_FOR_FIX`, `RESCAN`, etc.) already existed in
+`SAST_DAST_STAGE_ORDER`; this section is purely about which statuses are reachable and which action gates
+each one.
+
+**Backend (`routers/sast_dast.py`).**
+- `_validate_findings` (the "Validate Findings" action): now requires `status == "SCANNING"` (was
+  `"FINDING_VALIDATION"`, unreachable under the old flatter model). Findings with an approved suppression
+  covering them still route to `SECURITY_COMPLETE` (reuses `_mark_scan_complete`'s own `has_done and not
+  pending` suppression-coverage check, rather than duplicating it) via `_auto_close_if_clean`; otherwise,
+  any findings with no adequate suppression move the request to `REMEDIATION`.
+- `_rescan_scan`: precondition narrowed from the old broad `SCAN_ANALYST_ACTIVE_STATUSES` window to
+  `status == "RESCAN"` only. Now also sets `status = "SCANNING"` after import (previously Rescan never
+  changed status at all), so the freshly re-imported results flow back through Finding Validation again.
+- `_assign_to_requester`: precondition narrowed back to `status == "REMEDIATION"` only (reverting section
+  126's broadening to the full active-scan window), matching the flowchart's `Waiting for Fix` only being
+  reachable after Finding Validation identified findings.
+- `_mark_fixed`: new guard -- raises 400 if a suppression on the request is still genuinely open
+  (`_pending_suppression_ids`), matching the doc's Section 4 branch logic ("Approved -> requester can
+  reassign" / "Rejected -> returns to Waiting for Fix" implies reassignment is blocked while a suppression
+  decision is still in flight). Signature gained a `sup_filter_col` parameter; both `sast_mark_fixed` and
+  `dast_mark_fixed` route functions updated to pass it.
+- `_mark_scan_complete` and its two routes are left completely untouched and still directly callable via
+  API (still gated on `SCAN_ANALYST_ACTIVE_STATUSES`), but are no longer wired to any frontend button --
+  dead-but-harmless legacy endpoint, matching this codebase's existing convention for superseded actions.
+- `SCAN_ACTIVE_STATUSES`/`SCAN_ANALYST_ACTIVE_STATUSES` module constants left unchanged; confirmed via grep
+  they're now only referenced by `_mark_scan_complete` and comments.
+
+**Frontend (`modules/security/SecurityScan.tsx`, `SAST.tsx`, `DAST.tsx`).**
+- `SecurityScanResults`' props rewritten: `canAct`/`suppressionPending`/`rejectedSuppressionIds`/
+  `onMarkComplete` removed; added `canValidateFindings`, `canRescan`, `onValidateFindings` (all required),
+  and `canAssignToRequester`/`canMarkFixed` changed from optional to required. The old `hasFindings` local
+  variable is gone -- branching is now purely status-driven, matching the backend gates above.
+- SAST.tsx/DAST.tsx: three turn-based gates replace the old broad `canScanAct` --
+  `canValidateFindings = isAssignedAnalyst && status === 'SCANNING'`,
+  `canAssignToRequester = isAssignedAnalyst && status === 'REMEDIATION'`,
+  `canRescan = isAssignedAnalyst && status === 'RESCAN'`. `canInitiateSuppression` narrowed from the whole
+  active-scan window to `status === 'WAITING_FOR_FIX'` only, for internal consistency with the now
+  turn-specific analyst gates (Section 4 of the doc: "After reviewing the findings, the requester may
+  choose..."). `canMarkFixed` was already `WAITING_FOR_FIX`-only and is unchanged. The Overview tab's old
+  "Validate Findings" button (previously legacy-only, unreachable) was removed -- Validate Findings /
+  Assign to Requester / Mark Fixed now live exclusively in the Findings tab (`SecurityScanResults`). The
+  dead `markScanComplete()` function was renamed to `validateFindings()` and now calls the
+  `validate-findings` action. Dead `hasDoneSuppression`/`suppressionPending`/`rejectedSuppressionIds`
+  variables removed; `hasOpenSuppression`/`openSuppressionIds` kept as-is.
+
+**"Suppression Approval Pending" display overlay.** The flowchart's `Suppression Approval Pending` node has
+no backing status of its own -- treated as a display-only label overlay on top of the real `WAITING_FOR_FIX`
+status while a non-terminal suppression is linked, mirroring the existing
+`applicationNameAwareStatusLabel` pattern (which overlays "Application Owner Approval Pending" onto
+`SM_APPROVAL_PENDING`). New `suppressionAwareStatusLabel(status, hasOpenSuppression)` helper added next to
+it in `components/Common.tsx`. Only what's *displayed* changes (the Status badge, in both the detail view
+and the list's Status column) -- every gate that actually reads `status` is untouched. The list column
+needed a new `has_open_suppression: bool` field on `SASTListOut`/`DASTListOut` (computed via a new
+`has_open_suppression` model property on `SASTRequest`/`DASTRequest`, mirroring the existing
+`findings_count` property) since the lightweight list schemas don't carry the full `suppressions` array;
+`list_sast`/`list_dast` now `selectinload` `suppressions` so this doesn't lazy-load per row. The "Pending
+With" list column was deliberately left unchanged (still shows "Requester" during this overlay) -- same
+convention as `WAITING_FOR_FIX`/`DEFECT_RAISED` already pointing at Requester even when someone else acts.
+
+**Scope decisions made without full user confirmation (flagging explicitly).** The pasted doc was answered
+by a re-paste of its flowchart alone, which was read as authorization to restore Finding Validation as a
+mandatory gate. Two further questions from the doc were resolved unilaterally and are called out here for
+the user to redirect if either assumption is wrong:
+1. **Per-finding tracking.** The doc's Section 5 requires classifying *each* finding as
+   Open/Fixed/Suppression Pending/Suppressed-Accepted/Reopened. This was **not** built -- findings still
+   only exist as an aggregate `SecurityScanResult` snapshot (severity counts from the Fortify SSC import,
+   see section 133 above), not individual tracked records. All of the logic above approximates the doc's
+   per-finding rules at the request/aggregate level (has-any-open-finding, has-any-covering-suppression).
+   True per-finding tracking would require a new data model importing individual findings from Fortify SSC
+   (which the mock server and real integration don't currently expose per-finding) and is a materially
+   larger change.
+2. **Notifications.** The doc's Key Business Rules require notifications on assignment, return, waiting for
+   fix, suppression submission/approval/rejection, and closure readiness. This was **not** built --
+   notifications (routes, UI, models, and DB tables) were deliberately retired on 2026-08-14, per this same
+   file's own historical note just below. Re-adding them was treated as out of scope for this pass rather
+   than silently reversing that prior removal.
+3. **"Scan report or supporting evidence" (Section 2).** Treated as already satisfied by the existing
+   mandatory Fortify SSC snapshot (`SecurityScanResult.audit_url`, surfaced as "Open in Fortify SSC" in the
+   UI) rather than building a new separate mandatory document-upload field for Finding Validation
+   specifically.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` and
+`npx tsc --noEmit -p .` both clean. `rsync`+`diff -q` confirmed `sast_dast.py`, `models.py`, `schemas.py`,
+`SAST.tsx`, `DAST.tsx`, `SecurityScan.tsx`, `Common.tsx`, and `types.ts` match byte-for-byte between
+`Documents/qa-portal/` and `outputs/qa-portal/`. Could not exercise the full status flow against a live
+Oracle database in this environment (no `sqlalchemy`/network access in the sandbox) -- worth a manual
+walkthrough once deployed: Start Scan -> Validate Findings (no findings) -> confirm auto-close to Security
+Completed; then a separate request with findings -> Validate Findings -> Assign to Requester -> Mark Fixed
+-> Rescan -> Validate Findings again, and a suppression branch (raise -> Suppression Approval Pending badge
+shows -> Approve -> reassign -> Validate Findings -> Security Completed).
+
+## 135. Suppression list's "+ New Suppression Request" button still visible to QA/Security side
+
+Reported directly: "INITIATE SUPPRESSION REQUEST SHOULD BE FROM REQUESTER SIDE, NOT QA SIDE."
+
+**Root cause.** Section 120 (this same cycle) already locked raising a suppression down to the linked
+request's requester at both ends that matter functionally: the backend (`create_suppression`'s
+`_require_requester_of_linked`) and the picker inside `NewSuppressionModal` (`inScope`, `requester_id ===
+user.id`). But the top-level "+ New Suppression Request" button on the Suppression module's own list page
+(`Suppression.tsx`) had no gating at all -- it was still guarded only by a stale comment ("Anyone can raise
+a suppression request now ... just requires get_current_user") that predated section 120's fix and was
+never updated after. A Security Analyst/QA team member could still click it and open the modal; the picker
+inside would just come up empty for them (nothing to select, so nothing to submit) -- functionally blocked,
+but the entry point itself was misleadingly still on offer to the wrong audience.
+
+**Fix (`modules/security/Suppression.tsx`).** Removed the stale comment. Added `const canInitiateSuppression
+= hasRole(user, 'REQUESTER', 'BUSINESS_ANALYST', 'ADMIN')` in the top-level `Suppression()` component and
+wrapped the "+ New Suppression Request" button in it. `REQUESTER`/`BUSINESS_ANALYST` are the only two roles
+`qa_requests.py`'s `create_request`/`submit_request` accept (`require_roles(Role.REQUESTER,
+Role.BUSINESS_ANALYST)`) -- since every SAST/DAST request is born from a QA Request raised by one of those
+two roles, a user holding neither (e.g. a Security-Analyst-only account) can never legitimately become a
+`requester_id` on any SAST/DAST request, so hiding the button for them isn't just tidying up a dead end --
+it's an accurate reflection of who could ever complete the form. Admin still bypasses, same convention as
+every other permission check in this module. The Findings tab's own "Initiate Suppression Request" button
+(`SecurityScan.tsx`, `canInitiateSuppression` in `SAST.tsx`/`DAST.tsx`) was already correctly requester-only
+from section 120 onward and needed no change.
+
+**Verified:** `npx tsc --noEmit -p .` clean. `python3 -m py_compile app/*.py app/routers/*.py
+scripts/mock_fortify_ssc.py` clean (no backend changes this section; ran as a sanity check only). `rsync`+
+`diff -q` confirmed `Suppression.tsx` matches between `Documents/qa-portal/` and `outputs/qa-portal/`. Not
+exercised against a running app in this environment -- worth a manual check once deployed: log in as a
+Security-Analyst-only account and confirm "+ New Suppression Request" no longer appears on the Suppression
+list page, while a Requester/Business Analyst/Admin account still sees and can use it normally.
+
+## 136. Suppression-raising carved out of delegate "full stand-in" -- security analyst delegate could raise a suppression against their own finding
+
+Reported directly, with a screenshot of a SAST request's Findings tab: "why this is showing to QA, this is
+for QA / inititiate supression" -- "Initiate Suppression Request" was visible and enabled for a Security
+Analyst account that was neither the request's requester nor an Admin.
+
+**Root cause.** Traced this live via `AskUserQuestion` rather than guessing: confirmed the account was
+Security-Analyst-only (not requester, not admin), which per the gating logic (`requesterInputEditor =
+isActiveDelegate || isAdmin || (isRequester && !req.active_delegation)`) is only reachable if
+`isActiveDelegate` is true. Checked the request's Overview tab -- confirmed it had an active "Delegate for
+Input" pointing at that exact Security Analyst account. This is the intended, previously-built "full
+stand-in for requester" delegation feature (see section covering "requester delegated, to qa ... Full
+stand-in for requester" earlier this cycle) working exactly as designed: a requester can delegate a
+`WAITING_FOR_FIX` request to literally anyone (the backend's `assign_child_for_input` has no role
+restriction on the assignee), and the delegate then gets every requester-side action, including
+`canInitiateSuppression`. In this case the requester happened to delegate to a Security Analyst, who could
+then raise a suppression request against a finding their own team flagged -- defeating the point of
+suppression being the requester's own independent exception request.
+
+This put two of the user's own directions from this cycle in direct conflict ("full stand-in for requester,
+including Mark Fixed" vs. "Initiate Suppression Request should be from requester side, not QA side"), so
+this was resolved by asking rather than guessing: confirmed the fix should carve suppression out of
+delegate stand-in specifically, while leaving Mark Fixed and every other delegate power untouched.
+
+**Backend (`routers/suppression.py::_require_requester_of_linked`).** Removed the delegate branch entirely
+-- now strictly `current_user.has_role(ADMIN)` or `linked.requester_id == current_user.id`, regardless of
+whether the linked SAST/DAST request currently has an active delegation. Since the delegate can no longer
+act here at all, the ORIGINAL requester is correspondingly no longer blocked while delegated out (removing
+the earlier "requester blocked / delegate can do it instead" mutual exclusion for this one action only --
+there'd be nobody left who could raise a suppression otherwise). This function is shared by
+`create_suppression`, `update_suppression`, and `relink_suppression`, so all three are covered by the same
+change.
+
+**Frontend (`SAST.tsx`/`DAST.tsx`).** `canInitiateSuppression` changed from `requesterInputEditor &&
+status === 'WAITING_FOR_FIX'` to `isRequester && status === 'WAITING_FOR_FIX'` -- `isRequester` (`req.
+requester_id === user?.id || isAdmin`) doesn't factor in delegation status at all, so it grants the literal
+original requester (or Admin) regardless of whether the request is currently delegated, and no longer
+grants the delegate. Both the "Initiate Suppression Request" and "Link Existing Suppression Request"
+buttons in `SecurityScan.tsx`'s Findings tab key off this same prop, so both are covered. `canMarkFixed` and
+every other `requesterInputEditor`-gated action (Edit Details, Documents, checklist evidence) are
+unaffected and remain fully delegable.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` and `npx tsc
+--noEmit -p .` both clean. `rsync`+`diff -q` confirmed `suppression.py`, `SAST.tsx`, and `DAST.tsx` match
+between `Documents/qa-portal/` and `outputs/qa-portal/`. Not exercised against a running app in this
+environment -- worth a manual check once deployed: on the exact reported scenario (requester delegates a
+Waiting For Fix request to a Security Analyst), confirm the delegate no longer sees Initiate/Link
+Suppression Request but still sees Mark Fixed, and that the original requester (even while still delegated
+out) can now raise a suppression themselves via the Suppression module directly.
+
+## 137. "Initiate Suppression Request" didn't reliably auto-link, and gave no confirmation once it did
+
+Reported directly: "requester created suppression request from here, still it is not linked, and still
+asking to create. also once request created from here, this should be automatically linked."
+
+**Root cause.** `NewSuppressionModal`'s prefill (reached via `SecurityScan.tsx`'s "Initiate Suppression
+Request" -> `/suppression?new=1&scan_type=SAST&request_id=<id>`) fetched only the first 100 SAST/DAST rows
+(`?page_size=100`) and matched `initialRequest.id` against that page client-side. If the originating request
+wasn't among those 100 rows, the match silently failed and the SAST/DAST Request ID field was left empty --
+the requester would then either be blocked from submitting at all (it's a mandatory field) or have to notice
+and re-select it manually. Separately, even a successful creation gave no feedback: the modal just closed
+back onto the Suppression list, so the requester had no way to see it reflected against the originating
+SAST/DAST request without navigating there themselves and reopening it.
+
+**Fix (`modules/security/Suppression.tsx`).**
+- `NewSuppressionModal` now fetches the exact SAST/DAST record directly by id (`GET /api/sast-requests/{id}`
+  / `/api/dast-requests/{id}`) when `initialRequest` is set, instead of matching against a paginated list.
+  This can't miss -- no pagination, no client-side search, always finds it as long as it still exists (the
+  backend re-validates eligibility again on submit regardless). The general `page_size=100` list fetch is
+  now only used for the picker's manual "Change"/search path.
+- After a successful creation that came from this deep-linked flow, the requester is now navigated straight
+  back to the originating request (`/sast?open=<request_id>` or `/dast?open=<request_id>`, the same deep-link
+  pattern the topbar search and Linked Requests tables already use) instead of being left on the Suppression
+  list. Reopening shows Overview's "Suppression Requested?" as Yes and the Findings tab's Initiate
+  Suppression Request button now disabled with the "Suppression Approval Pending" note -- immediate,
+  concrete confirmation the link took, instead of the requester having to go check themselves. Manual
+  creation from the Suppression module's own "+ New Suppression Request" (no prefill) is unaffected and
+  still just returns to the Suppression list.
+
+**Verified:** `npx tsc --noEmit -p .` clean. `python3 -m py_compile app/*.py app/routers/*.py
+scripts/mock_fortify_ssc.py` clean (no backend changes this section; ran as a sanity check only). `rsync`+
+`diff -q` confirmed `Suppression.tsx` matches between `Documents/qa-portal/` and `outputs/qa-portal/`. Not
+exercised against a running app in this environment -- worth a manual check once deployed: click Initiate
+Suppression Request from a SAST/DAST request's Findings tab, fill out and submit the form, and confirm it
+lands back on that exact request with the suppression already reflected (Overview and Findings tab both),
+with no manual re-selection needed anywhere in between.
+
+## 138. Initiate/Link Suppression Request still offered after the existing one reached Done
+
+Reported directly: "for same sast request, even though supression request is present and mark completed,
+again askign for new supression request and relink."
+
+**Root cause.** `hasOpenSuppression` (the flag disabling Initiate/Link Suppression Request) only counted a
+suppression as blocking while its status wasn't in `SUPPRESSION_TERMINAL_STATUSES` (`Done`/`Rejected`). Once
+a suppression reached `Done` -- an APPROVED outcome -- it stopped being "open", which silently re-enabled
+both buttons, offering to raise a second suppression against a request that already had one fully approved.
+Per the requirement doc's Section 4, once a suppression is Approved the requester's next move is to
+reassign the request to the analyst (Mark Fixed), not raise another suppression.
+
+**Backend (`routers/suppression.py::_require_no_existing_pending_suppression`).** Previously excluded both
+`Done` and `Rejected` from blocking a new suppression (`status.notin_(SUPPRESSION_TERMINAL_STATUSES)`).
+Changed to `status != "Rejected"` -- so `Done` now blocks a new suppression the same as any still-pending
+status, and only a `Rejected` suppression still allows a fresh one (per the earlier, still-valid fix in this
+same function: a rejection's natural next step is remediate or resubmit, not a dead end). Shared by
+`create_suppression`, `update_suppression`, and `relink_suppression`, so all three now enforce this. Error
+message now distinguishes "pending decision" vs. "already approved" so it's clear which case triggered it.
+
+**Frontend (`SecurityScan.tsx`, `SAST.tsx`, `DAST.tsx`).** Added `hasDoneSuppression`/`doneSuppressionIds`,
+computed the same way as the existing `hasOpenSuppression`/`openSuppressionIds` but filtering for `status
+=== 'Done'`. Both "Initiate Suppression Request" and "Link Existing Suppression Request" are now `disabled=
+{busy || hasOpenSuppression || hasDoneSuppression}` (was just `hasOpenSuppression`). Added a second info
+message ("This request already has an approved suppression ... reassign it to the Security Analyst via Mark
+Fixed instead of raising another one"), shown whenever Initiate is offered but blocked by `hasDoneSuppression`
+specifically (mutually exclusive with the existing "Suppression Approval Pending" message, since a
+suppression can't be both open and Done at once). Mark Fixed's own gating is unaffected -- it was already
+only blocked by `hasOpenSuppression`, and staying enabled once Done is exactly the intended next step.
+
+**Known limitation, flagged explicitly.** `req.suppressions` is a flat historical list spanning the SAST/DAST
+request's entire lifetime, not scoped to "the current Waiting For Fix visit" (there's no per-cycle or
+per-finding tracking to scope it by -- see section 134's own flagged approximation). So if a request cycles
+through Mark Fixed -> Rescan -> Validate Findings -> Waiting For Fix again and genuinely new/different
+findings emerge that need their own fresh suppression decision, this same `hasDoneSuppression` gate will
+still block raising one, because the earlier suppression on this same request is still `Done`. This matches
+the literal bug report (same request, same visit) and errs conservative rather than risk the original bug
+recurring, but if a later cycle legitimately needs a new suppression, that's now blocked too -- flagging this
+for the user to redirect if a per-cycle reset is actually needed (would require tracking which cycle a
+suppression belongs to, a larger change than this fix).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py` and `npx tsc
+--noEmit -p .` both clean. `rsync`+`diff -q` confirmed `suppression.py`, `SecurityScan.tsx`, `SAST.tsx`, and
+`DAST.tsx` match between `Documents/qa-portal/` and `outputs/qa-portal/`. Not exercised against a running
+app in this environment -- worth a manual check once deployed: on a Waiting For Fix request with a Done
+suppression, confirm Initiate/Link Suppression Request are both disabled with the new message, Mark Fixed
+stays enabled, and a direct `POST /api/suppressions` against the same linked request now 400s.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.

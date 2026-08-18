@@ -1,12 +1,12 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_TERMINAL_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole, hasDepartment } from '../../constants'
-import { SASTListOut, DASTListOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
+import { SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -126,20 +126,45 @@ function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
     // Picker candidates only -- fetches the lightweight PAG-005 list shape,
     // large page_size since this is a client-side-filtered autosuggest, not
     // a paginated table (see inScope/hasReachedScanning/isNotYetCompleted
-    // below).
+    // below). Only ever used for the manual "Change"/search picker now --
+    // see the separate direct-fetch effect below for the initialRequest
+    // (deep-linked) case.
     Promise.all([
       api.get<PageOut<SASTListOut>>('/api/sast-requests?page_size=100'),
       api.get<PageOut<DASTListOut>>('/api/dast-requests?page_size=100'),
     ])
-      .then(([sast, dast]) => {
-        setSastRequests(sast.items); setDastRequests(dast.items)
-        if (initialRequest) {
-          const pool = initialRequest.kind === 'SAST' ? sast.items : dast.items
-          const match = pool.find((r) => r.id === initialRequest.id)
-          if (match) selectRequest({ ...match, _kind: initialRequest.kind })
-        }
-      })
+      .then(([sast, dast]) => { setSastRequests(sast.items); setDastRequests(dast.items) })
       .catch(() => { /* autosuggest is a convenience -- fields stay manually editable if this fails */ })
+  }, [])
+
+  // Reported directly: "requester created suppression request from here,
+  // still it is not linked ... once request created from here, this should
+  // be automatically linked." The previous approach fetched the first 100
+  // SAST/DAST rows (above) and matched `initialRequest.id` against that
+  // page client-side -- if the exact request wasn't among those 100 rows,
+  // the match silently failed and the SAST/DAST Request ID field was left
+  // empty, so the eventual suppression either couldn't be submitted (the
+  // field is mandatory) or the requester had to notice and re-select it
+  // manually. Fetching the exact record directly by id instead removes any
+  // chance of that -- no pagination, no client-side search, always finds
+  // it (as long as it still exists and the requester can still see it,
+  // which the backend re-checks anyway on submit).
+  useEffect(() => {
+    if (!initialRequest) return
+    const apiBase = initialRequest.kind === 'SAST' ? '/api/sast-requests' : '/api/dast-requests'
+    api.get<SASTOut | DASTOut>(`${apiBase}/${initialRequest.id}`)
+      .then((r) => selectRequest({
+        id: r.id, request_id: r.request_id, status: r.status,
+        application_master_status: r.application_master_status,
+        requester_id: r.requester_id, security_lead_id: r.security_lead_id,
+        priority: r.priority, risk_category: r.risk_category,
+        application_name: r.application_name,
+        department: r.department, application_owner: r.application_owner,
+        findings_count: 0, has_open_suppression: false,
+        qa_request: r.qa_request, created_at: r.created_at, updated_at: r.updated_at,
+        _kind: initialRequest.kind,
+      }))
+      .catch((err) => setError(err))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -586,6 +611,8 @@ function worstSeverity(items: { severity: string }[]): string | null {
 }
 
 export default function Suppression() {
+  const { user } = useAuth()
+  const navigate = useNavigate()
   const [rows, setRows] = useState<SuppressionOut[]>([])
   const [showNew, setShowNew] = useState(false)
   const [selected, setSelected] = useState<SuppressionOut | null>(null)
@@ -629,9 +656,19 @@ export default function Suppression() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Anyone can raise a suppression request now (Application Owner step was
-  // removed from the flow entirely) -- see backend routers/suppression.py
-  // create_suppression, which just requires get_current_user.
+  // Reported directly: "Initiate Suppression Request should be from
+  // requester side, not QA side." Section 120 already locked this down at
+  // the backend (_require_requester_of_linked) and inside the picker
+  // (inScope, requester_id === user.id) -- a Security Analyst/QA team
+  // member could open this modal but would just find nothing selectable.
+  // The entry-point button itself was still shown to everyone, though (the
+  // comment it replaces was stale -- it predates that fix). Only
+  // REQUESTER/BUSINESS_ANALYST can ever raise the QA Request a SAST/DAST
+  // request is born from (see qa_requests.py's create_request/submit_request
+  // require_roles), so anyone without one of those two roles can never
+  // legitimately be a `requester_id` on a SAST/DAST request -- same
+  // role gate, reused here instead of a bespoke one. Admin still bypasses.
+  const canInitiateSuppression = hasRole(user, 'REQUESTER', 'BUSINESS_ANALYST', 'ADMIN')
 
   return (
     <div>
@@ -639,7 +676,9 @@ export default function Suppression() {
       <PageHeader
         title="Suppression / False Positive Register" count={rows.length}
         subtitle="Exception requests for SAST/DAST findings -- Requester raises it, then Draft -> SM -> Department Head -> Security Team verification -> Done."
-        actions={<button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Suppression Request</button>}
+        actions={canInitiateSuppression ? (
+          <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Suppression Request</button>
+        ) : undefined}
       />
       <Card>
         <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
@@ -662,7 +701,25 @@ export default function Suppression() {
         <NewSuppressionModal
           initialRequest={newRequestPrefill}
           onClose={() => { setShowNew(false); setNewRequestPrefill(undefined) }}
-          onCreated={() => { setShowNew(false); setNewRequestPrefill(undefined); load() }}
+          onCreated={(created) => {
+            setShowNew(false)
+            load()
+            // Reported directly: "once request created from here, this
+            // should be automatically linked" -- besides guaranteeing the
+            // link itself (NewSuppressionModal's direct-fetch effect
+            // above), jump straight back to the originating SAST/DAST
+            // request when this creation came from its own Findings tab
+            // ("Initiate Suppression Request"), so the requester sees it
+            // reflected immediately (Overview's "Suppression Requested?"
+            // flips to Yes, and the Findings tab's Initiate Suppression
+            // Request button disables) instead of having to go find it
+            // themselves. Manual creation (from this module's own "+ New
+            // Suppression Request", no prefill) stays here as before.
+            if (newRequestPrefill && created.linked_request) {
+              navigate(`${newRequestPrefill.kind === 'SAST' ? '/sast' : '/dast'}?open=${created.linked_request.request_id}`)
+            }
+            setNewRequestPrefill(undefined)
+          }}
         />
       )}
       {selected && <SuppressionDetail sup={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }} users={users} />}

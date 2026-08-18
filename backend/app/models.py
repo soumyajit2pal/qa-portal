@@ -9,7 +9,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, foreign
 from .db_base import Base
-from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES
+from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES, SUPPRESSION_TERMINAL_STATUSES
 
 # Unlike SQLite/PostgreSQL/MySQL, SQLAlchemy does NOT automatically make a
 # bare `Column(Integer, primary_key=True)` self-generating on Oracle -- Oracle
@@ -1017,6 +1017,19 @@ class SASTRequest(Base):
     def findings_count(self):
         return len(self.findings)
 
+    # 2026-08 "Findings Validation" doc restoration -- list-row Status badge
+    # needs to know (without a second query per row) whether a non-terminal
+    # Suppression / False Positive request is currently linked, so it can
+    # overlay "Suppression Approval Pending" over WAITING_FOR_FIX the same
+    # way application_master_status overlays "Application Owner Approval
+    # Pending" over SM_APPROVAL_PENDING. Mirrors the has_open_suppression
+    # check already used server-side (_pending_suppression_ids in
+    # routers/sast_dast.py); routers/sast_dast.py's list_sast selectinload's
+    # `suppressions` so this doesn't lazy-load per row.
+    @property
+    def has_open_suppression(self):
+        return any(s.status not in SUPPRESSION_TERMINAL_STATUSES for s in self.suppressions)
+
 
 class SASTComponent(Base):
     """One repository entry for a SAST request -- its own branch/commit/tech
@@ -1217,6 +1230,11 @@ class DASTRequest(Base):
     @property
     def findings_count(self):
         return len(self.findings)
+
+    # See SASTRequest.has_open_suppression above -- same idea, for DAST.
+    @property
+    def has_open_suppression(self):
+        return any(s.status not in SUPPRESSION_TERMINAL_STATUSES for s in self.suppressions)
 
 
 class DASTTarget(Base):

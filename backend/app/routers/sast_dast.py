@@ -581,15 +581,41 @@ def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_
 # Suppression Options") doesn't require routing through any of those first.
 SCAN_ACTIVE_STATUSES = {"SCANNING", "FINDING_VALIDATION", "REMEDIATION", "WAITING_FOR_FIX", "RESCAN"}
 
+# Reported directly: "I clicked on Assigned to Requester, button is not
+# behaving correctly, it should be disabled, and along with that, rescan
+# button also should be disabled, as it assigned to requester for fix. when
+# requester assigned to me then only i can do rescan." SCAN_ACTIVE_STATUSES
+# above is deliberately the FULL active-scan window (used for things like
+# canInitiateSuppression, which stays the requester's the whole time), but
+# Rescan/Mark Scan Complete/Assign to Requester are specifically the
+# assigned Security Analyst's OWN turn -- while a request is WAITING_FOR_FIX
+# the ball is in the requester's court (fix it or delegate it), and the
+# analyst can't act again until Mark Fixed hands it back (-> RESCAN).
+SCAN_ANALYST_ACTIVE_STATUSES = SCAN_ACTIVE_STATUSES - {"WAITING_FOR_FIX"}
+
 
 def _rescan_scan(db: Session, obj, kind: str, payload: schemas.SecurityScanStartIn, current_user):
-    _require(obj, SCAN_ACTIVE_STATUSES, "Rescan")
+    """Reported directly, full requirement doc pasted with a status-flow
+    diagram: "Assigned for Rescan" (RESCAN) -> re-run the scan -> "Scanning"
+    (SCANNING), a distinct edge from "Scanning" -> "Finding Validation" right
+    after it -- i.e. Rescan and Finding Validation are two separate,
+    explicit steps again, not one auto-inferred action. This narrows Rescan
+    back to firing only from RESCAN (previously reachable from the whole
+    SCAN_ANALYST_ACTIVE_STATUSES window as part of this session's earlier
+    flatter "Rescan/Mark Scan Complete direct from Scanning" model -- see the
+    module docstring above and _validate_findings below for the fuller
+    picture of what's being restored/superseded here), and -- new -- moves
+    the request back to SCANNING once the fresh results are in, so Validate
+    Findings is reachable again afterward, same as it was after the very
+    first Start Scan."""
+    _require(obj, "RESCAN", "Rescan")
     _require_assigned_security_analyst(obj, current_user)
     scan_result, snapshot = _import_scan_result(
         db, obj, kind, payload.application_name, payload.application_version, current_user,
     )
+    obj.status = "SCANNING"
     _log(
-        db, obj, SAST_DAST_STATUS_LABELS.get(obj.status, obj.status), current_user, "Rescan Imported",
+        db, obj, "Rescan", current_user, "Rescan Imported / Scanning Started",
         f"Fortify SSC application '{snapshot.application_name}', version '{snapshot.application_version}', "
         f"provider version ID {snapshot.project_version_id}; {snapshot.total_count} finding(s) across filter sets.",
     )
@@ -617,8 +643,12 @@ def _mark_scan_complete(db: Session, obj, kind: str, payload: schemas.CommentIn,
     outcome, including one sitting Rejected with no Done row at all, which
     happened to still block (for the wrong reason) via `pending`'s old,
     now-fixed definition. Replaced with `has_done`, an explicit check for at
-    least one Done suppression -- the correct, direct read of Rule 4."""
-    _require(obj, SCAN_ACTIVE_STATUSES, "Mark Scan Complete")
+    least one Done suppression -- the correct, direct read of Rule 4.
+
+    Uses SCAN_ANALYST_ACTIVE_STATUSES (excludes WAITING_FOR_FIX) for the
+    same reason as _rescan_scan above -- while waiting on the requester's
+    fix there's nothing new for the analyst to mark complete yet."""
+    _require(obj, SCAN_ANALYST_ACTIVE_STATUSES, "Mark Scan Complete")
     _require_assigned_security_analyst(obj, current_user)
     results = _scan_results(db, kind, obj.id)
     if not results:
@@ -720,31 +750,67 @@ def _auto_close_if_clean(db: Session, obj, current_user, sup_filter_col):
 
 
 def _validate_findings(db: Session, obj, current_user, sup_filter_col, kind: str):
-    """Moves from Finding Validation into Remediation if any findings need
-    fixing, or straight to Security Complete if the scan came back clean --
-    unless a suppression raised against this request is still outstanding,
-    in which case Security Complete stays blocked until it's Done.
+    """Reported directly, full requirement doc pasted with a status-flow
+    diagram: "Scanning Initiated" -> "Finding Validation" is a mandatory,
+    explicit step again -- "When the Security Analyst selects Finding
+    Validation, the system must require: Application Name, Application
+    Version, Scan completion details, Number of findings, Scan report or
+    supporting evidence." The first four are already on file the moment a
+    scan exists (Start Scan/Rescan capture Application Name/Version and
+    import the Fortify SSC snapshot, which is itself the "scan completion
+    details"/finding count); the fifth -- "scan report or supporting
+    evidence" -- is read as satisfied by that same Fortify SSC snapshot
+    (`audit_url`, already surfaced as "Open in Fortify SSC" in the Findings
+    tab) rather than a brand-new separate manual upload requirement, to keep
+    this restoration scoped to the status-flow diagram itself rather than
+    also standing up a new evidence-upload subsystem; worth flagging if a
+    literal separate document upload is actually wanted here too.
 
-    2026-08 -- this used to check `obj.findings` (the manually-logged
-    SASTFinding/DASTFinding list), which can never be populated anymore now
-    that "Log Finding" was removed (findings come from the Fortify SSC scan
-    import instead, see the "manually add finding... not required" fix
-    earlier) -- so this check was permanently vacuous (open_findings always
-    empty, every request silently took the "clean" branch regardless of the
-    real scan result). Now reads the latest SecurityScanResult's total_count
-    instead, the same real data source Rescan/Mark Scan Complete use."""
-    _require(obj, "FINDING_VALIDATION", "Validate findings")
+    This supersedes this session's earlier flatter model, where Rescan/Mark
+    Scan Complete acted directly from Scanning with no separate validation
+    step (see the module docstring above and _mark_scan_complete's own
+    docstring, both left in place for the historical record) -- reachable
+    now from SCANNING (previously FINDING_VALIDATION itself, which nothing
+    transitioned into anymore under that flatter model, making this
+    permanently unreachable).
+
+    No findings -> straight to Security Complete (auto-chaining through
+    Report Ready/Closed if nothing else blocks it -- see
+    _auto_close_if_clean). Findings, but every one of them already has an
+    approved (Done) suppression and nothing else is still genuinely
+    pending -- same "has_done and not pending" read of FR-06 Rule 4 that
+    _mark_scan_complete already established (see its own docstring) -- ALSO
+    reaches Security Complete: this is what lets the doc's own Section 5
+    rule ("Security Completed only when ... every unremediated finding has
+    an approved suppression request") actually work, since the flowchart's
+    single "No findings" edge is a simplification of that fuller rule.
+    Otherwise (findings with no adequate suppression yet) -> Remediation,
+    where Assign to Requester becomes the next available action."""
+    _require(obj, "SCANNING", "Validate findings")
     _require_assigned_security_analyst(obj, current_user)
     results = _scan_results(db, kind, obj.id)
-    open_count = results[0].total_count if results else 0
+    if not results:
+        raise HTTPException(400, "Start a scan and import Fortify SSC results before validating findings.")
+    current_scan = results[0]
+    open_count = current_scan.total_count
+    covered_by_suppression = False
     if open_count > 0:
-        obj.status = "REMEDIATION"
-        _log(db, obj, "Finding Validation", current_user, "Findings Confirmed",
-             f"{open_count} finding(s) on the latest scan require remediation")
-    else:
-        _require_no_pending_suppressions(db, obj, sup_filter_col, "Security Complete")
+        has_done = db.query(models.SuppressionRequest.id).filter(
+            sup_filter_col == obj.id, models.SuppressionRequest.status == "Done",
+        ).first() is not None
+        pending = _pending_suppression_ids(db, obj, sup_filter_col)
+        covered_by_suppression = has_done and not pending
+    if open_count <= 0 or covered_by_suppression:
         obj.status = "SECURITY_COMPLETE"
-        _log(db, obj, "Finding Validation", current_user, "No Findings", "Nothing to remediate")
+        _log(db, obj, "Scanning", current_user, "Finding Validation",
+             "No open findings on the latest scan" if open_count <= 0
+             else f"{open_count} finding(s) on the latest scan, all covered by an approved suppression request")
+        db.commit()
+        db.refresh(obj)
+        return _auto_close_if_clean(db, obj, current_user, sup_filter_col)
+    obj.status = "REMEDIATION"
+    _log(db, obj, "Scanning", current_user, "Finding Validation",
+         f"{open_count} finding(s) on the latest scan require remediation")
     db.commit()
     db.refresh(obj)
     return obj
@@ -756,23 +822,24 @@ def _assign_to_requester(db: Session, obj, kind: str, current_user):
     status (mirrors how QA Request's Submitted/SAST-DAST's own Submitted
     step is transient on the way to the next real checkpoint).
 
-    Reported directly: "where is waiting for fix, assign to requester...
-    if there are findings then it should show waiting for fix option."
-    This used to require status == "REMEDIATION" -- but nothing transitions
-    a request into Finding Validation/Remediation anymore under the
-    "Findings Validation" doc's Rescan/Mark Scan Complete flow (Start Scan
-    goes straight to SCANNING), so this action was permanently unreachable
-    for any new request. Reachable now from the same SCAN_ACTIVE_STATUSES
-    window as Rescan/Mark Scan Complete, with an explicit open-findings
-    check taking the place of the old REMEDIATION-implies-findings-exist
-    assumption."""
-    _require(obj, SCAN_ACTIVE_STATUSES, "Assign to requester")
+    Reported directly, full requirement doc pasted with a status-flow
+    diagram: "Findings Identified: 1. Security Analyst records/uploads
+    findings [Finding Validation, see _validate_findings above]. 2. Assign
+    to Requester option becomes available [i.e. once in Remediation]. 3.
+    Once assigned, status -> Waiting for Fix." Narrowed back to requiring
+    status == "REMEDIATION" (this session had earlier widened it to the
+    whole SCAN_ANALYST_ACTIVE_STATUSES window -- SCANNING included -- as
+    part of a flatter model that bypassed Finding Validation entirely; see
+    _validate_findings' own docstring for why that's being superseded).
+    The open-findings check is kept as a belt-and-suspenders safety net even
+    though reaching Remediation already implies findings > 0."""
+    _require(obj, "REMEDIATION", "Assign to requester")
     _require_assigned_security_analyst(obj, current_user)
     results = _scan_results(db, kind, obj.id)
     open_count = results[0].total_count if results else 0
     if open_count <= 0:
         raise HTTPException(400, "No open findings on the latest scan -- nothing to assign for remediation.")
-    _log(db, obj, SAST_DAST_STATUS_LABELS.get(obj.status, obj.status), current_user, "Assigned To Requester", None)
+    _log(db, obj, "Remediation", current_user, "Assigned To Requester", None)
     obj.status = "WAITING_FOR_FIX"
     _log(db, obj, "Waiting For Fix", current_user, "Awaiting Fix", None)
     db.commit()
@@ -780,18 +847,81 @@ def _assign_to_requester(db: Session, obj, kind: str, current_user):
     return obj
 
 
-def _mark_fixed(db: Session, obj, current_user):
-    """Requester (or a security analyst/admin) marks the fix as submitted --
-    hands it back to the Security Lead (transient Assigned To Lead) and moves
-    straight into Rescan."""
-    if obj.requester_id != current_user.id and not current_user.has_role(Role.SECURITY_ANALYST, Role.ADMIN):
-        raise HTTPException(403, "Only the requester, a security analyst, or an admin can mark this fixed")
+def _mark_fixed(db: Session, obj, current_user, sup_filter_col):
+    """Requester (or their active Delegate for Input) marks the fix as
+    submitted -- hands it back to the Security Lead (transient Assigned To
+    Lead) and moves straight into Rescan.
+
+    Reported directly (follow-up to section 130's Rescan/Assign to Requester
+    fix): "why still mark fixed is visible? why you are not going through
+    the codebase and not fixing all and not checking edge cases." This used
+    to also allow the assigned Security Analyst (or Admin) to self-mark-
+    fixed -- a deliberate, documented design choice from section 51/52, made
+    back when the old manual Finding Validation/Remediation/Waiting For
+    Fix/Rescan chain was the only path. It doesn't hold up against the
+    turn-based model section 126/130 actually built: "after fix requester
+    will reassign and then qa will scan" describes Mark Fixed as strictly
+    the requester's own action, the mirror image of Rescan/Assign to
+    Requester being strictly the analyst's. Narrowed to requester-or-Admin
+    (section 131), then extended to the active delegate below.
+
+    Reported directly (follow-up, again): "requester delegated, to qa. but
+    as status is Waiting For Fix, in qa side rescan button and all eligble
+    button not visible." Section 131 added an active-delegation guard that
+    blocked Mark Fixed OUTRIGHT while delegated (mirroring _resubmit), on
+    the assumption the delegate would edit/attach evidence and then Return
+    to Requester for the requester to click Mark Fixed themselves. In
+    practice that left the delegate with nothing reachable at all --
+    SAST/DAST's Documents and Checklist Evidence tabs are both locked solid
+    from Department Head approval onward (see _can_upload_documents), and
+    the request's own edit form is pre-approval-only, so there was no
+    "edit" for the delegate to actually do. Asked directly whether the
+    delegate should be a full stand-in for the requester (including Mark
+    Fixed itself) or edit-only-then-return; answered "Full stand-in for
+    requester." So unlike _resubmit's guard, the active delegate CAN call
+    this directly -- the original requester is still blocked from calling
+    it themselves while delegated out (mirrors requesterInputEditor's
+    mutual exclusion on the frontend), and the delegation auto-closes
+    (status -> RETURNED) once the fix is submitted, so the "Input assigned
+    to ..." badge and Return/Recall controls don't linger on a request
+    that's already moved on to Rescan.
+
+    Reported directly, full requirement doc pasted with a status-flow
+    diagram: while a suppression request is still genuinely pending a
+    decision ("Suppression Approval Pending"), the doc's own flow only lets
+    the requester "reassign" (Mark Fixed) once that suppression is resolved
+    one way or the other -- Approved ("requester can reassign the request
+    to the Security Analyst") or Rejected ("the request returns to Waiting
+    for Fix [and] the requester must remediate the findings or submit a
+    revised suppression request" -- i.e. still not reassignable until they
+    do one of those). So Mark Fixed now also requires no genuinely-open
+    suppression against this request -- same _pending_suppression_ids used
+    everywhere else this rule already applies (Security Complete, Report
+    Ready)."""
+    delegation = obj.active_delegation
+    is_active_delegate = bool(delegation and delegation.assigned_to_id == current_user.id)
+    if not (
+        current_user.has_role(Role.ADMIN)
+        or is_active_delegate
+        or (obj.requester_id == current_user.id and not delegation)
+    ):
+        raise HTTPException(403, "Only the requester (or their active delegate), or an admin, can mark this fixed")
     _require(obj, "WAITING_FOR_FIX", "Mark fixed")
-    if obj.requester_id != current_user.id:
-        _require_assigned_security_analyst(obj, current_user)
+    pending = _pending_suppression_ids(db, obj, sup_filter_col)
+    if pending:
+        raise HTTPException(
+            400,
+            "Cannot mark fixed -- suppression request(s) still pending a decision: "
+            + ", ".join(pending) + ". Wait for it to be approved or rejected first.",
+        )
     _log(db, obj, "Waiting For Fix", current_user, "Fix Submitted", "Assigned to Lead for rescan")
     obj.status = "RESCAN"
     _log(db, obj, "Rescan", current_user, "Rescanning", None)
+    if delegation:
+        delegation.status = "RETURNED"
+        delegation.closed_by_id = current_user.id
+        delegation.returned_at = models.now()
+        delegation.return_comments = "Auto-closed: fix marked complete, sent for rescan."
     db.commit()
     db.refresh(obj)
     return obj
@@ -875,6 +1005,10 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
     ).options(
         joinedload(models.SASTRequest.qa_request).joinedload(models.QARequest.application_master),
         selectinload(models.SASTRequest.findings),
+        # SASTListOut.has_open_suppression -- selectinload (not joinedload)
+        # for the same reason findings is, above: a one-to-many relationship
+        # joined in directly would multiply row count.
+        selectinload(models.SASTRequest.suppressions),
     )
     scope = dashboard_department_scope(current_user)
     delegated_to_user = models.QARequest.delegations.any(and_(
@@ -1104,7 +1238,8 @@ def sast_assign_to_requester(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/api/sast-requests/{req_id}/mark-fixed", response_model=schemas.SASTOut)
 def sast_mark_fixed(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return _mark_fixed(db, _get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
+    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    return _mark_fixed(db, obj, current_user, models.SuppressionRequest.sast_request_id)
 
 
 @router.post("/api/sast-requests/{req_id}/mark-report-ready", response_model=schemas.SASTOut)
@@ -1374,6 +1509,8 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
     ).options(
         joinedload(models.DASTRequest.qa_request).joinedload(models.QARequest.application_master),
         selectinload(models.DASTRequest.findings),
+        # See list_sast's matching comment just above -- identical reasoning.
+        selectinload(models.DASTRequest.suppressions),
     )
     scope = dashboard_department_scope(current_user)
     delegated_to_user = models.QARequest.delegations.any(and_(
@@ -1565,7 +1702,8 @@ def dast_assign_to_requester(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/api/dast-requests/{req_id}/mark-fixed", response_model=schemas.DASTOut)
 def dast_mark_fixed(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = _mark_fixed(db, _get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
+    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    obj = _mark_fixed(db, obj, current_user, models.SuppressionRequest.dast_request_id)
     return _dast_out(obj, current_user)
 
 

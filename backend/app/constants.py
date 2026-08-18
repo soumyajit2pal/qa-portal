@@ -718,13 +718,8 @@ DEFAULT_PERFORMANCE_CHECKLIST_ITEMS = [
     ("Teardown Procedure", "Environment Cleanup / Reset Procedure", True),
 ]
 
-# ---- Module 6: Suppression ----
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Informational"]
-# Requester raises (Draft) -> Submit to SM -> SM approves & assigns to
-# Department Head -> Department Head approves -> Security Team verifies
-# (Accept -> Done / Reject -> Rejected). A SAST/DAST request can only be
-# marked "Report Ready" once every Suppression request raised against it is
-# "Done" (see SAST_DAST_STATUSES docstring above).
+
 SUPPRESSION_STATUSES = [
     "Draft",
     "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
@@ -743,7 +738,7 @@ SUPPRESSION_STATUS_LABELS = {
     "Done": "Done",
     "Rejected": "Rejected",
 }
-# Terminal states for a suppression request.
+
 SUPPRESSION_TERMINAL_STATUSES = ["Done", "Rejected"]
 
 # ---- Application Name Master (see models.ApplicationMaster) ----
@@ -798,12 +793,9 @@ def application_name_block_message(app_status, stage: str) -> str:
         "before this request can be approved."
     )
 
-# ---- Module 7: Approval workflow engine ----
 APPROVAL_DECISIONS = ["Approved", "Rejected", "Returned"]
 
 WORKFLOW_STEPS = {
-    # The gateway QA Request itself has no approval workflow -- just intake
-    # (Drafted) -> Submitted -> Raised, or Cancelled while still Draft.
     "QA_REQUEST": ["Requester (Drafted)", "Submitted", "Raised / Cancelled"],
     "FUNCTIONAL_REQUEST": [
         "Requester", "SM Approval", "Department Head Approval", "QA Readiness Verification Pending", "Readiness Verification",
@@ -829,48 +821,14 @@ CERTIFICATE_TYPES = ["Full Clearance", "Conditional Clearance", "Clearance Denie
 SIGNOFF_TESTING_TYPES = ["Functional", "SAST", "DAST"]
 RISK_TIERS = ["Tier 1 (Critical)", "Tier 2 (High)", "Tier 3 (Medium)", "Tier 4 (Low)"]
 
-# QASignOff's own approval chain -- QA Engineer raises the certificate, a QA
-# Lead approves it, then Executive  gives the final approval that
-# issues it. Replaces the old, much simpler Draft/Issued-only flow (a QA Lead
-# alone could draft and immediately sign/issue) -- existing rows sitting at
-# the old "Draft"/"Issued" string values need a one-time data migration, see
-# ORACLE_MIGRATION_2026-07.md.
 SIGNOFF_STATUSES = [
     "DRAFT", "SUBMITTED", "SM_APPROVAL_PENDING", "RETURNED_BY_SM", "SM_REJECTED",
     "DEPT_HEAD_QA_APPROVAL_PENDING", "RETURNED_BY_DEPT_HEAD_COE", "DEPT_HEAD_COE_REJECTED",
     "ISSUED", "RETURNED_BY_REQUESTER",
 ]
-# SM_REJECTED ("Rejected by QA Lead" here -- see SIGNOFF_STATUS_LABELS)
-# deliberately NOT here -- reported directly, it's reopenable by the
-# requester (edit details + resubmit, same path as RETURNED_BY_SM) rather
-# than a dead end. DEPT_HEAD_COE_REJECTED is untouched/still terminal --
-# only SM/QA-Lead-tier rejection was asked to become reopenable.
-#
-# ISSUED stays listed here for the Sign-off module's OWN internal transition
-# engine (dashboards/counts/"open" queues, and there is deliberately no
-# generic resubmit/reopen button offered on an Issued certificate from
-# within this module) -- but it's no longer a true dead end. 2026-08,
-# reported directly: "on changes required it is starting the whole workflow
-# again, and for same request generating multiple certificate. this should
-# not be. it should enable generated QA certificate editing mode." A
-# Requester rejecting an ISSUED certificate at Functional Testing's own
-# Requester Verification step (routers/functional.py::requester_decision)
-# now moves THAT SAME certificate to RETURNED_BY_REQUESTER instead of the
-# Functional Request abandoning it and restarting the whole
-# QA-Lead-assignment-through-execution lifecycle to raise a brand new one --
-# see that function's own comment for the full reasoning.
+
 SIGNOFF_TERMINAL_STATUSES = ["ISSUED", "DEPT_HEAD_COE_REJECTED"]
-# QA requester's own editable statuses (Draft, or returned/rejected back to
-# them for changes). QA Lead additionally gets an edit window while a
-# certificate is freshly SM_APPROVAL_PENDING (legacy internal code; QA Lead
-# review) -- see routers/signoff.py::update_signoff, not folded into this
-# list since it's a different actor/condition, not a third
-# "requester-editable" status. RETURNED_BY_REQUESTER (see above) is editable
-# the same way RETURNED_BY_SM already is -- the QA Engineer revises the
-# certificate, then resubmits it (routers/signoff.py::resubmit_signoff)
-# straight back into SM_APPROVAL_PENDING, i.e. QA Lead approval first, then
-# Executive -- the full chain again, same as any other Return, per the
-# report's own "it will go for QA lead approval, then AGM approval."
+
 SIGNOFF_EDITABLE_STATUSES = ["DRAFT", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"]
 SIGNOFF_STATUS_LABELS = {
     "DRAFT": "Draft",
@@ -885,120 +843,36 @@ SIGNOFF_STATUS_LABELS = {
     "RETURNED_BY_REQUESTER": "Returned by Requester",
 }
 
-# ---- Module 10: Test Management (Project Management / Test Repository / Test Execution) ----
-# A Zephyr-style test case management layer -- see the header comment on
-# models.TestProject for the full rationale. Test Type/Priority/execution
-# Status values below match the attached xlsx upload template exactly
-# (routers/test_repository.py's import parser reads these same strings).
-#
-# 2026-08 "Test Management Revamp" SRS -- replaced the old 3-state Active/
-# Draft/Deprecated testcase lifecycle with the SRS's explicit 5-state
-# version-review workflow (Appendix A "Status Definitions"), and the old
-# 3-state, never-actually-enforced Not Started/In Progress/Completed cycle
-# status with the controlled five-state lifecycle. See models.py's
-# own "Module 10" header comment and TestCaseVersion/TestCycle docstrings for
-# the full architecture -- content moved into immutable TestCaseVersion rows,
-# TestCase itself now an identity + mirror of whichever version is "current"
-# for display/list-view backward compatibility (same mirror-column pattern
-# already established by TestExecution/TestExecutionRun below).
 TEST_CASE_TYPES = [
     "Functional Positive", "Functional Negative", "Regression", "Sanity",
     "Integration", "Security", "Performance", "UAT", "Other",
 ]
-# Version-level review lifecycle -- SRS section 6.5 "Testcase Review
-# Workflow" / Appendix A. Also written onto TestCase.status as a mirror of
-# whichever version (draft-if-any, else approved) is currently "live" for
-# that identity, exactly as before for Draft/Active -- see
-# models.TestCase.status docstring.
-#
-# 2026-08 "Test Approval Workflow" refactor (Test_Approval_Workflow_
-# Requirements.docx, sections 3/6) -- the single-stage review became a
-# strict two-stage chain (Author -> Reviewer -> QA Lead), requiring two new
-# statuses and one rename:
-#   "Rework Required" -> "Returned" (exact wording used throughout the spec;
-#     mechanically identical to the old value -- author-editable in place,
-#     resubmit moves back to "In Review". test_management_migration.py
-#     renames any existing row.)
-#   "Review Completed" (NEW) -- a Reviewer has recommended approval; sits
-#     between "In Review" and "Approved", waiting on QA Lead final action.
-#     Reviewer-tier alone cannot move a version past this point.
-#   "Rejected" (NEW, terminal) -- QA Lead's reject decision. Cannot be
-#     executed, added to a cycle, or edited in place (routers/
-#     test_repository.py::update_test_case spins a fresh Draft off a
-#     Rejected version's content instead, the same way it already does for
-#     Approved -- the Rejected version itself stays frozen/immutable in
-#     history for traceability, same as Approved/Archived).
+
 TEST_CASE_STATUSES = ["Draft", "In Review", "Review Completed", "Returned", "Approved", "Rejected", "Archived"]
-# 2026-08 "Simplified Test Management Review and Approval" requirement --
-# reported directly as a full SRS: project-level member management (Project
-# Lead/Reviewer/Approver/Viewer) is removed, and Stage 1/Stage 2 route to
-# the QA Group (QA_ENGINEER) / QA Lead Group (QA_LEAD/CHIEF_MANAGER_QA/
-# AGM_QA) system roles instead of an individually-assigned reviewer/QA Lead.
-# Confirmed via AskUserQuestion: applies to the whole module (not just
-# test-case approval), and only test cases still in Draft (not yet
-# submitted) when this shipped -- or newly created after -- follow this new
-# vocabulary; anything already sitting at "In Review"/"Review Completed"/
-# "Returned" keeps running the pre-existing individually-routed logic
-# unchanged until it reaches a terminal state (see routers/test_repository.py
-# ::_submit_draft/review_test_case for exactly how the two paths are told
-# apart). These four are additive, not replacements -- both vocabularies
-# stay valid simultaneously during the transition.
+
 TEST_CASE_NEW_STATUSES = [
     "Recommendation Pending", "QA Lead Approval Pending", "Returned by QA", "Returned by QA Lead",
 ]
 TEST_CASE_STATUSES = TEST_CASE_STATUSES + TEST_CASE_NEW_STATUSES
-# Statuses a TestCaseVersion can never be edited in place while sitting in
-# -- pending-decision statuses are frozen until that decision is made;
-# Rejected is permanently frozen (see above). Used by update_test_case.
+
 TEST_CASE_PENDING_DECISION_STATUSES = [
     "In Review", "Review Completed", "Recommendation Pending", "QA Lead Approval Pending",
 ]
 TEST_CASE_TERMINAL_STATUSES = ["Rejected"]
-# Alias kept for clarity at call sites that specifically mean "a
-# TestCaseVersion's own status" rather than "TestCase's mirrored status" --
-# same list, both names intentionally point at the one vocabulary so a
-# version and its identity's mirror can never drift into different value
-# sets.
+
 TEST_CASE_VERSION_STATUSES = TEST_CASE_STATUSES
-# Reuses the same Critical/High/Medium/Low vocabulary as PRIORITIES above
-# (kept as its own alias rather than importing PRIORITIES directly at every
-# call site, so this module's own statuses/labels read as a self-contained
-# block -- same convention SEVERITIES already follows for SAST/DAST).
+
 TEST_CASE_PRIORITIES = PRIORITIES
 
-# Controlled five-state Test Cycle workflow. Completed is terminal and makes
-# the cycle read-only; every transition is validated in test_execution.py.
 TEST_CYCLE_STATUSES = ["Draft", "Ready", "In Progress", "Blocked", "Completed"]
 TEST_CYCLE_LOCKED_STATUSES = ["Blocked", "Completed"]
 
-# Exact wording from the xlsx template's "Status (Pass/Fail/Blocked/NA/Retest
-# Passed)" column, plus "Not Executed" as this app's own default for a test
-# case that's been added to a cycle but not yet run (the template has no
-# equivalent since every row it ever contains was already executed).
 TEST_EXECUTION_STATUSES = ["Not Executed", "Pass", "Fail", "Blocked", "NA", "Retest Passed"]
-# Terminal in the sense of "this run is done, no further action expected" --
-# used to decide whether a test case still counts as pending within a cycle.
+
 TEST_EXECUTION_TERMINAL_STATUSES = ["Pass", "Fail", "NA", "Retest Passed"]
-# SRS DEF-001: a defect may only be linked against the LATEST attempt, and
-# only when that attempt's own result is one of these two.
+
 TEST_EXECUTION_DEFECT_ELIGIBLE_STATUSES = ["Fail", "Blocked"]
 
-# SRS section 4 "Roles and Governance" -- project-scoped roles, deliberately
-# separate from the app-wide Role enum (GOV-001: "project membership" grants
-# scoped repository/cycle/report access without granting any broader system
-# role). A user can hold a different TestProjectMember role on each project
-# they're a member of.
-# Reported directly: "QA lead, system QA lead keep as Keep lead, but project
-# qa lead rename to something else to proper understand" -- "QA Lead" here
-# used to be spelled identically to the app-wide Role.QA_LEAD (a completely
-# different mechanism: this is one person's role on ONE project; that's a
-# system-wide role active everywhere), which read as the same thing and
-# wasn't. Renamed to "Project Lead" everywhere this project-scoped value is
-# used -- see deps.py's role->capability sets and
-# test_execution.py::_require_scope_change_permission for the enforcement,
-# and test_management_migration.py::_migrate_project_lead_role_name for the
-# one-time rename of any row already saved under the old "QA Lead" spelling.
 TEST_PROJECT_ROLES = ["Owner", "Project Lead", "Author", "Tester", "Reviewer", "Viewer"]
 
-# ---- Module 11: Export ----
 EXPORT_FORMATS = ["xlsx", "pdf", "csv"]

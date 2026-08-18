@@ -91,13 +91,12 @@ def _require_linked_request(db: Session, data: dict):
 
 def _require_no_existing_pending_suppression(db: Session, linked, kind: str, exclude_id: int = None) -> None:
     """Reported directly: "if pending supression request there, then dont
-    allow to create new suppression request." One open suppression decision
-    against a given SAST/DAST request at a time -- if a suppression already
-    raised against this same linked request is still genuinely open (not
-    yet reached one of SUPPRESSION_TERMINAL_STATUSES -- Done or Rejected),
-    block starting another rather than letting them pile up in parallel.
-    `exclude_id` lets update_suppression re-check a re-linked request
-    without the suppression being edited blocking itself.
+    allow to create new suppression request." One suppression decision
+    against a given SAST/DAST request at a time -- current rule (see the two
+    follow-ups below): block a new one unless every existing suppression
+    against this linked request is Rejected. `exclude_id` lets
+    update_suppression re-check a re-linked request without the suppression
+    being edited blocking itself.
 
     Reported directly (follow-up bug): "Supression request is now rejected,
     but still user not able to create supression request." This originally
@@ -107,10 +106,21 @@ def _require_no_existing_pending_suppression(db: Session, linked, kind: str, exc
     here too, permanently locking a requester out of ever raising another
     suppression once one got rejected. Rejected is terminal for THIS check:
     the natural next step after a rejection is either remediate the finding
-    or raise a fresh, better-justified suppression, not a dead end."""
+    or raise a fresh, better-justified suppression, not a dead end.
+
+    Reported directly (follow-up, reversed for Done specifically): "for same
+    sast request, even though supression request is present and mark
+    completed, again asking for new supression request and relink." Treating
+    Done the same as Rejected here let a requester raise a SECOND suppression
+    against a request that already had an APPROVED one -- but per the
+    requirement doc's Section 4, once Approved the next step is reassigning
+    to the analyst (Mark Fixed), not another suppression. So Done blocks a
+    new suppression here (same as a still-pending one), while Rejected still
+    doesn't -- the frontend's canInitiateSuppression mirrors this exactly
+    (hasOpenSuppression OR hasDoneSuppression both disable Initiate/Link)."""
     sup_col = models.SuppressionRequest.sast_request_id if kind == "SAST" else models.SuppressionRequest.dast_request_id
     q = db.query(models.SuppressionRequest).filter(
-        sup_col == linked.id, models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES),
+        sup_col == linked.id, models.SuppressionRequest.status != "Rejected",
     )
     if exclude_id is not None:
         q = q.filter(models.SuppressionRequest.id != exclude_id)
@@ -118,8 +128,11 @@ def _require_no_existing_pending_suppression(db: Session, linked, kind: str, exc
     if existing:
         raise HTTPException(
             400,
-            f"A suppression request ({existing.suppression_id}) is already pending against this {kind} "
-            "request -- it must be resolved (marked Done) before another can be raised.",
+            f"A suppression request ({existing.suppression_id}) already exists against this {kind} request "
+            f"({'pending decision' if existing.status != 'Done' else 'already approved'}) -- "
+            + ("it must be resolved (marked Done) before another can be raised."
+               if existing.status != "Done"
+               else "reassign the request to the Security Analyst (Mark Fixed) instead of raising another one."),
         )
 
 
@@ -131,14 +144,38 @@ def _require_requester_of_linked(linked, current_user: models.User) -> None:
     team member with no relationship to the request, could raise a
     suppression against someone else's SAST/DAST request. Restricted to the
     linked request's own requester (or Admin, same bypass convention as
-    every other check in this file)."""
+    every other check in this file).
+
+    Reported directly (follow-up): "requester delegated, to qa ... Full
+    stand-in for requester" briefly extended this to the linked SAST/DAST
+    request's active Delegate for Input too, matching Mark Fixed's own
+    delegate stand-in.
+
+    Reported directly (reversed, immediately after seeing it in practice):
+    "INITIATE SUPPRESSION REQUEST SHOULD BE FROM REQUESTER SIDE, NOT QA
+    SIDE" -- the concrete case was a requester who'd delegated a
+    WAITING_FOR_FIX request to a Security Analyst (a completely normal,
+    intended use of "full stand-in"), and that analyst could then raise a
+    suppression against their own team's finding, which defeats the point
+    of suppression being the requester's own exception request. Suppression
+    is now carved OUT of delegate stand-in entirely -- it's the one
+    requester-side action that ALWAYS stays with the literal original
+    requester (or Admin), regardless of whether the linked request currently
+    has an active delegation. Since the delegate can no longer act here at
+    all, the original requester is correspondingly no longer blocked while
+    delegated out (there'd be nobody left who could raise a suppression
+    otherwise) -- every OTHER requester-side action (Mark Fixed, etc.) is
+    unaffected and stays exclusively the delegate's during an active
+    delegation, per sast_dast.py's _mark_fixed and the frontend's
+    requesterInputEditor."""
     if current_user.has_role(Role.ADMIN):
         return
     if linked.requester_id != current_user.id:
         raise HTTPException(
             403,
             "Only the requester of the linked SAST/DAST request (or an admin) can raise a suppression "
-            "request against it",
+            "request against it -- this is not delegable, even while the request has an active "
+            "Delegate for Input assigned.",
         )
 
 

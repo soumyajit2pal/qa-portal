@@ -192,6 +192,27 @@ export function applicationNameAwareStatusLabel(
   return undefined;
 }
 
+// 2026-08 "SAST/DAST Request Workflow Requirement" doc -- the flowchart's
+// "Suppression Approval Pending" node has no status value of its own; it's
+// treated here as a display-only overlay on top of the real WAITING_FOR_FIX
+// status (same pattern as applicationNameAwareStatusLabel just above), active
+// while a non-terminal Suppression / False Positive request is linked. This
+// only changes what's DISPLAYED via Badge's `label` prop -- every gate that
+// actually reads `status` (canInitiateSuppression, canMarkFixed, etc.) still
+// keys off the real WAITING_FOR_FIX value untouched. Pass to every
+// <Badge status={...} /> for a SAST/DAST request alongside
+// applicationNameAwareStatusLabel (mutually exclusive statuses, so callers
+// can just take whichever one returns a value).
+export function suppressionAwareStatusLabel(
+  status?: string | null,
+  hasOpenSuppression?: boolean
+): string | undefined {
+  if (status === "WAITING_FOR_FIX" && hasOpenSuppression) {
+    return "Suppression Approval Pending";
+  }
+  return undefined;
+}
+
 interface PageHeaderProps {
   title: ReactNode;
   eyebrow?: ReactNode;

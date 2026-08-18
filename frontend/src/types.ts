@@ -505,6 +505,11 @@ export interface SASTListOut {
   department?: string | null
   application_owner?: string | null
   findings_count: number
+  // 2026-08 "Findings Validation" doc -- lets the list Status column
+  // overlay "Suppression Approval Pending" over Waiting For Fix, mirroring
+  // application_master_status's overlay of Application Owner Approval
+  // Pending over SM Approval Pending. See backend schemas.SASTListOut.
+  has_open_suppression: boolean
   qa_request?: LinkedRequestRef | null
   created_at: string
   updated_at: string
@@ -599,6 +604,8 @@ export interface DASTListOut {
   department?: string | null
   application_owner?: string | null
   findings_count: number
+  // See SASTListOut.has_open_suppression above -- same idea, for DAST.
+  has_open_suppression: boolean
   qa_request?: LinkedRequestRef | null
   created_at: string
   updated_at: string

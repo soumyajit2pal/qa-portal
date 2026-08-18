@@ -224,6 +224,38 @@ def testcase_approval_summary(db: Session = Depends(get_db), current_user: model
     } for project in projects]
 
 
+def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
+    """Reported directly: "in dashboard sast dast findings showing 0
+    result." Every "Findings" figure below used to read
+    len(r.findings)/f.severity off models.SASTFinding/DASTFinding -- the
+    old manually-logged findings tables, retired when the "Findings
+    Validation" doc moved findings to Fortify SSC-backed imports (see
+    models.SecurityScanResult). Nothing has written a SASTFinding/
+    DASTFinding row since, so every report built on them read as zero/empty.
+    Same fix, same helper (by name and behavior) as routers/dashboard.py's
+    own copy -- kept local rather than shared across router files, matching
+    this codebase's existing per-file-locality convention.
+
+    Returns {request_id: latest SecurityScanResult row} for whichever of
+    `request_ids` have actually been scanned at least once."""
+    request_ids = [rid for rid in request_ids if rid is not None]
+    if not request_ids:
+        return {}
+    rows = (
+        db.query(models.SecurityScanResult)
+        .filter(models.SecurityScanResult.request_type == kind,
+                models.SecurityScanResult.request_id.in_(request_ids))
+        .order_by(models.SecurityScanResult.request_id,
+                  models.SecurityScanResult.imported_at.asc(),
+                  models.SecurityScanResult.id.asc())
+        .all()
+    )
+    latest: dict = {}
+    for row in rows:
+        latest[row.request_id] = row
+    return latest
+
+
 # ---------------- 4.10.2 Security Reports ----------------
 @router.get("/sast-scan")
 def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -232,30 +264,37 @@ def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
     # as list_sast in routers/sast_dast.py -- standalone SAST requests (no
     # qa_request_id) are excluded by this inner join for a scoped user, same
     # as they already resolve to department=None today.
-    q = db.query(models.SASTRequest).options(selectinload(models.SASTRequest.findings))
+    q = db.query(models.SASTRequest)
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
     rows = q.all()
+    latest_scans = _latest_scan_by_request(db, "SAST", [r.id for r in rows])
     return [{
         "Request ID": r.request_id, "Application": r.application_name, "Build": r.build_number,
-        "Status": r.status, "Findings": len(r.findings),
+        "Status": r.status,
+        # Latest imported Fortify SSC scan's open finding count -- 0 for a
+        # request that's never been scanned yet, same as an empty findings
+        # list used to render.
+        "Findings": latest_scans[r.id].total_count if r.id in latest_scans else 0,
     } for r in rows]
 
 
 @router.get("/dast-scan")
 def dast_scan_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # See sast_scan_report's matching comment just above -- identical reasoning.
-    q = db.query(models.DASTRequest).options(selectinload(models.DASTRequest.findings))
+    q = db.query(models.DASTRequest)
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
     rows = q.all()
+    latest_scans = _latest_scan_by_request(db, "DAST", [r.id for r in rows])
     return [{
         "Request ID": r.request_id, "Application URL": r.application_url, "Environment": r.environment,
-        "Status": r.status, "Findings": len(r.findings),
+        "Status": r.status,
+        "Findings": latest_scans[r.id].total_count if r.id in latest_scans else 0,
     } for r in rows]
 
 
@@ -291,22 +330,33 @@ def performance_testing_report(db: Session = Depends(get_db), current_user: mode
 
 
 def _security_severity_counts(db: Session, current_user: models.User):
-    # SASTFinding/DASTFinding have no department of their own -- scope via
-    # their parent SAST/DAST request's own department, same join pattern as
-    # sast_scan_report/dast_scan_report above.
-    sast_q = db.query(models.SASTFinding)
-    dast_q = db.query(models.DASTFinding)
+    # Reported directly: "in dashboard sast dast findings showing 0
+    # result." Used to read models.SASTFinding/DASTFinding -- see
+    # _latest_scan_by_request's own comment for why that's always empty
+    # now. Each in-scope SAST/DAST request's latest Fortify SSC scan
+    # (if it's been scanned at least once) supplies its own severity
+    # breakdown instead; SecurityScanResult itself has no department of
+    # its own, so scoping is done via the SAST/DAST request id lists
+    # (same join pattern as sast_scan_report/dast_scan_report above), not
+    # a join on SecurityScanResult directly.
     scope = dashboard_department_scope(current_user)
+    sast_q = db.query(models.SASTRequest.id)
+    dast_q = db.query(models.DASTRequest.id)
     if scope:
-        sast_q = sast_q.join(models.SASTRequest, models.SASTFinding.sast_request_id == models.SASTRequest.id) \
-                        .join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
+        sast_q = sast_q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
                         .filter(models.QARequest.department.in_(scope))
-        dast_q = dast_q.join(models.DASTRequest, models.DASTFinding.dast_request_id == models.DASTRequest.id) \
-                        .join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
+        dast_q = dast_q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
                         .filter(models.QARequest.department.in_(scope))
-    findings = sast_q.all() + dast_q.all()
+    sast_scans = _latest_scan_by_request(db, "SAST", [row[0] for row in sast_q.all()])
+    dast_scans = _latest_scan_by_request(db, "DAST", [row[0] for row in dast_q.all()])
     from collections import Counter
-    return dict(Counter(f.severity for f in findings))
+    counts = Counter()
+    for scan in list(sast_scans.values()) + list(dast_scans.values()):
+        counts["Critical"] += scan.critical_count
+        counts["High"] += scan.high_count
+        counts["Medium"] += scan.medium_count
+        counts["Low"] += scan.low_count
+    return dict(counts)
 
 
 @router.get("/severity-distribution")
