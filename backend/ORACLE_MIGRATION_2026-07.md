@@ -6276,6 +6276,96 @@ scripts/mock_fortify_ssc.py` clean (no backend changes -- `cr_number` is stored 
 column with no server-side format regex, so this was a frontend-only fix). `rsync`+`diff -q` confirmed
 `validation.ts` and `DetailsStep.tsx` match between `Documents/qa-portal/` and `outputs/qa-portal/`.
 
+## 140. `alembic check` failing -- three `use_alter` foreign keys never actually applied
+
+Reported directly, pasting `alembic check` output: three `add_fk` operations detected against
+`qap_application_master.qa_request_id`, `qap_test_cases.current_approved_version_id`, and
+`qap_test_cases.current_draft_version_id`.
+
+**Root cause.** All three are long-standing, deliberate `ForeignKeyConstraint(..., use_alter=True)`
+declarations in `models.py` (used for circular/forward-referencing pairs: `ApplicationMaster` <-> `QARequest`,
+and `TestCase` <-> `TestCaseVersion` -- each side is created before the table it points at, so Oracle can't
+accept the FK inline at `CREATE TABLE` time). The repo's only migration, `alembic/versions/
+1745115668f0_initial_production_schema.py` (a fresh single-file baseline, `down_revision=None`, generated
+earlier today), embedded these three constraints directly inside their own table's `op.create_table(...)`
+call -- which does NOT actually apply a `use_alter=True` constraint. That flag tells SQLAlchemy's DDL
+compiler to deliberately *skip* emitting the constraint as part of `CREATE TABLE` (the entire point of the
+flag); it only gets created if something later issues a separate `ALTER TABLE ... ADD CONSTRAINT`, which
+this baseline never did for any of the three. Confirmed by checking table creation order in the same file:
+`qap_application_master` is created (line 74) before `qap_requests` (line 239), and `qap_test_cases` (line
+658) before `qap_test_case_versions` (line 733) -- exactly the circular pattern `use_alter=True` exists to
+handle, and exactly why an inline FK there would have failed outright if Oracle had tried to honor it. So on
+any database built from this migration, all three tables exist but these three foreign keys were silently
+never created, even though `models.py` has always declared them -- precisely what `alembic check` caught.
+
+**Fix.** New migration `alembic/versions/c9bf647b9f80_add_deferred_use_alter_foreign_keys.py`
+(`down_revision = '1745115668f0'`) adds the missing `ALTER TABLE ADD CONSTRAINT` step explicitly via
+`op.create_foreign_key(...)` for all three, now that both sides of each circular pair already exist:
+`fk_qap_app_master_qa_req` (`qap_application_master.qa_request_id -> qap_requests.id`),
+`fk_qap_tc_current_approved` and `fk_qap_tc_current_draft` (both `qap_test_cases.*_version_id ->
+qap_test_case_versions.id`). `downgrade()` drops all three via `op.drop_constraint(..., type_='foreignkey')`.
+Safe to run against a database that already has `1745115668f0` applied (the exact situation `alembic check`
+was run against) -- it only adds constraints confirmed missing; it doesn't touch either table's data or
+columns.
+
+**Also noticed in passing (not fixed, flagging only).** An earlier entry in this changelog's own trailing
+historical note references "Alembic revision `20260814_0002`" for the notification-subsystem cleanup, but no
+such file exists anywhere in `alembic/versions/` -- only `1745115668f0` (today's fresh baseline) and this new
+`c9bf647b9f80`. Since `1745115668f0` is a brand-new single-file squash of the full current schema
+(`down_revision=None`, created today), any earlier incremental migrations -- including that one -- were
+evidently consolidated away when this baseline was generated. Harmless as a historical citation, but it no
+longer points to a real file; not changed here since it's describing a past event, not the current schema.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` clean. Could not run `alembic check`/`alembic upgrade head` itself against a live
+Oracle database in this environment (no DB connectivity here, and the repo's own `venv` was built on macOS --
+its `python3` symlink points at a `/Library/Frameworks/...` path that doesn't exist in this sandbox, so even
+running plain `alembic history` locally wasn't possible) -- so this migration's revision-chain correctness was
+checked by hand instead: `down_revision` matches `1745115668f0`'s own `revision` string exactly, table/column/
+constraint names were cross-checked directly against `models.py` (`qap_requests.id`, `qap_test_case_versions.
+id`, and each FK's exact declared name), and `op.create_foreign_key`'s argument order was double-checked
+against Alembic's own signature. Run `alembic upgrade head` against the real database next, then re-run
+`alembic check` to confirm it now passes clean.
+
+## 141. ORA-02014 on delegation actions -- `with_for_update()` combined with `.first()`
+
+Reported directly, pasting a live Oracle traceback ending in `sqlalchemy.exc.DatabaseError:
+(oracledb.exceptions.DatabaseError) ORA-02014: cannot select FOR UPDATE from view with DISTINCT, GROUP BY,
+etc.`, with the failing SQL shown: `SELECT ... FROM qap_requests WHERE qap_requests.id = :id_1 FETCH FIRST 1
+ROWS ONLY FOR UPDATE`.
+
+**Root cause.** `.first()` compiles to a `FETCH FIRST 1 ROWS ONLY` clause on Oracle (12c+ dialect). Oracle
+implements that internally as an inline view wrapping the query, and rejects `FOR UPDATE` against that
+generated view -- ORA-02014, despite the underlying query itself being a plain single-table `WHERE id = ?`
+lookup with nothing resembling a real DISTINCT/GROUP BY. This is a known Oracle/SQLAlchemy interaction, not
+specific to this query -- any `.with_for_update().first()` pairing on this dialect hits it. Confirmed the
+already-correct pattern exists elsewhere in this same codebase (`test_repository.py`'s own
+`with_for_update().one_or_none()`, no LIMIT/FETCH FIRST clause at all), which is what every fix below now
+matches.
+
+**Fix (`routers/qa_requests.py`), five call sites, all `.first()` -> `.one_or_none()`:**
+- `assign_for_input` -- locks the QA Request row before creating a delegation.
+- `return_delegated_request` -- locks it before closing the active delegation (Returned).
+- `recall_delegated_request` -- locks it before closing the active delegation (Recalled).
+- `_child_delegation_target` -- locks a Functional/SAST/DAST/Performance child row (only when `lock=True`;
+  the unlocked read path through the same line is unaffected either way).
+- `_active_child_delegation` -- locks the active child delegation row (same `lock=True` conditionality).
+
+`.one_or_none()` fetches without any `LIMIT`/`FETCH FIRST` clause -- it returns the single match, `None` if
+there are zero, or raises if there are genuinely more than one. Every one of these five queries filters on
+either a primary key (`id`) or a maintained "at most one active row" invariant (`status == "ACTIVE"` for a
+given target, already enforced by the "This request already has an active delegation" checks right next to
+each of these), so the observable result is identical to `.first()` in every real case -- only the generated
+SQL changes, dropping the clause Oracle rejects under `FOR UPDATE`.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` clean. Re-grepped every `with_for_update()` call site in the backend afterward (6
+total) to confirm none remain paired with `.first()` -- the other two are `test_repository.py`'s own
+`.all()` (line 158, no LIMIT involved, never affected) and its already-correct `.one_or_none()` (line 1380).
+Could not exercise this against a live Oracle database in this environment (no DB connectivity here) --
+worth a manual check once deployed: retry the exact reported action (assigning/returning/recalling a
+delegation) and confirm ORA-02014 no longer occurs.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.

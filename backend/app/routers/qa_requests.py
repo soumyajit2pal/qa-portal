@@ -513,10 +513,22 @@ def assign_for_input(req_id: int, payload: schemas.QARequestDelegationCreate,
                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # Serialize assignment changes on the parent request so two near-simultaneous
     # clicks cannot both observe "no active delegation" and create duplicates.
+    #
+    # Reported directly (ORA-02014, live Oracle traceback): "cannot select
+    # FOR UPDATE from view with DISTINCT, GROUP BY, etc." -- `.first()`
+    # compiles to a `FETCH FIRST 1 ROWS ONLY` limit clause, and Oracle
+    # rejects combining that with `FOR UPDATE` (the FETCH FIRST wrapping is
+    # implemented as an inline view, which Oracle's FOR UPDATE restriction
+    # then trips on -- a well-known Oracle/SQLAlchemy interaction, not
+    # specific to this query). `.one_or_none()` fetches without any LIMIT/
+    # FETCH FIRST clause instead -- identical result here since `id` is the
+    # primary key (at most one row either way), but Oracle-safe. Mirrors the
+    # already-correct pattern in test_repository.py's own with_for_update()
+    # + one_or_none() usage.
     obj = (db.query(models.QARequest)
            .filter(models.QARequest.id == req_id)
            .with_for_update()
-           .first())
+           .one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
@@ -558,10 +570,11 @@ def assign_for_input(req_id: int, payload: schemas.QARequestDelegationCreate,
 @router.post("/{req_id}/delegations/return", response_model=schemas.QARequestOut)
 def return_delegated_request(req_id: int, payload: schemas.QARequestDelegationClose,
                              db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # See assign_for_input's matching comment above (ORA-02014) -- same fix.
     obj = (db.query(models.QARequest)
            .filter(models.QARequest.id == req_id)
            .with_for_update()
-           .first())
+           .one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
     delegation = obj.active_delegation
@@ -590,10 +603,11 @@ def return_delegated_request(req_id: int, payload: schemas.QARequestDelegationCl
 @router.post("/{req_id}/delegations/recall", response_model=schemas.QARequestOut)
 def recall_delegated_request(req_id: int, payload: schemas.QARequestDelegationClose,
                              db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # See assign_for_input's matching comment above (ORA-02014) -- same fix.
     obj = (db.query(models.QARequest)
            .filter(models.QARequest.id == req_id)
            .with_for_update()
-           .first())
+           .one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
@@ -655,7 +669,11 @@ def _child_delegation_target(db: Session, qa_request_id: int, target_type: str,
     query = db.query(model).filter(model.id == target_id, model.qa_request_id == qa_request_id)
     if lock:
         query = query.with_for_update()
-    target = query.first()
+    # ORA-02014 when lock=True -- see assign_for_input's comment in this same
+    # file for the full explanation. .one_or_none() instead of .first() is
+    # identical here (model.id is the primary key, so at most one row either
+    # way) but avoids the FETCH FIRST clause Oracle rejects under FOR UPDATE.
+    target = query.one_or_none()
     if not target:
         raise HTTPException(404, f"{normalized.title()} request not found under this QA Request")
     return normalized, target, requester_statuses, audit_entity_type
@@ -669,7 +687,13 @@ def _active_child_delegation(db: Session, target_type: str, target_id: int, *, l
     )
     if lock:
         query = query.with_for_update()
-    return query.first()
+    # ORA-02014 when lock=True -- see assign_for_input's comment above for
+    # the full explanation. .one_or_none() instead of .first() is identical
+    # here (at most one ACTIVE delegation per target is a maintained
+    # invariant -- see "This request already has an active delegation"
+    # above) but avoids the FETCH FIRST clause Oracle rejects under FOR
+    # UPDATE.
+    return query.one_or_none()
 
 
 def _log_child_delegation(db: Session, entity_type: str, entity_id: int,
