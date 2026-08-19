@@ -7289,6 +7289,90 @@ still clean) and `python3 -c "import yaml; yaml.safe_load(open('docker-compose.y
 widely-used, well-established community pattern, but please smoke-test both scripts on your own
 machine before relying on either in production.
 
+## 160. Remove demo functionality from the login UI
+
+**Request:** "remove demo functionality from UI"
+
+**Scope decision:** interpreted as UI-only, per the literal wording. Left untouched: `backend/app/seed.py`'s
+`DEMO_USERS`/`DEMO_PASSWORD` seeding logic, and `README.md`'s "Demo accounts" table. Both are separate,
+independent concerns from what the login screen displays -- happy to remove those too if wanted.
+
+**Changed -- `frontend/src/Login.tsx`:**
+- Removed the `DEMO_ACCOUNTS` array (12 role/username pairs).
+- `username`/`password` state no longer pre-fills `'requester1'`/`'Password@123'` -- both now default to
+  `''`, so the form loads empty and a real credential must be entered.
+- Removed `chooseDemoAccount()`.
+- Removed the "Demo environment" divider and "Explore by role" dropdown block between the sign-in form and
+  the "Need access?" help line.
+
+**Changed -- `frontend/src/index.css`:** removed all `.login-divider` and `.demo-access` rules across the
+three locations they appeared in (base rule block, the `max-width: 390px` mobile media query, and the
+themed-override section) -- all were exclusively used by the JSX block just removed, confirmed via grep
+across `frontend/src` before deleting.
+
+**Verified:** grep for `demo-access|login-divider|DEMO_ACCOUNTS|chooseDemoAccount` across `frontend/src`
+returns zero matches. `npx tsc --noEmit -p .` passes clean.
+
+## 161. Rename "sign off" to "Clearance" everywhere it appears in the UI
+
+**Request:** "whenever sign off word is present in system, rename it to Clearance"
+
+**Scope decision:** asked the user how deep to go (UI text only / + code identifiers / + DB and routes),
+since a full survey turned up 646 occurrences across 37 files. Chose **UI text only** -- every user-visible
+string now reads "Clearance", but no Python/Pydantic/TS class or field names, component/file names, CSS
+classes, route paths (`/api/signoffs`, `/signoff`), or the `qap_signoffs` table/`signoff_id`
+column/`entity_type="SIGNOFF"` discriminator were touched. Zero migration risk; URLs and API responses'
+field names are unchanged.
+
+**Backend changes:**
+- `constants.py`: `SIGNOFF_PENDING`/`QA_SIGNOFF_PENDING` status labels -> "Clearance Pending"/"QA Clearance
+  Pending" (unchanged, already correct); `SIGNED_OFF`/`QA_SIGNED_OFF` -> "Cleared"/"QA Cleared"; the
+  Performance workflow-stage tracker list's "Sign-off" entry -> "Clearance".
+- `routers/functional.py`: `_require()` action labels ("Request sign-off" -> "Request clearance", "Confirm
+  sign-off" -> "Confirm clearance"), the "signoff_id does not reference an existing sign-off certificate"
+  error text -> "...clearance certificate", and the stored audit-log decision strings ("Sign-off Requested"
+  -> "Clearance Requested", "Signed Off" -> "Cleared"). Only new rows get the new wording -- existing
+  history/audit rows keep whatever text was current when they were written, same as any other copy change.
+- `routers/performance.py`: `sign_off()`'s `_require()` action label and its `_log()` step/decision strings
+  -> "Clearance"/"Cleared".
+- `routers/reports.py`: application-quality-scorecard column header "Issued Sign-offs" -> "Issued
+  Clearances".
+- `routers/dashboard.py`: `QA_COMPLETED` status label "Sign-off Request Pending" -> "Clearance Request
+  Pending".
+- `routers/signoff.py`: "Sign-off certificate not found" -> "Clearance certificate not found" (both call
+  sites); `_sync_linked_functional_request`'s stored decision string "Signed Off" -> "Cleared".
+
+**Frontend changes:**
+- `constants.ts`: same `QA_SIGNED_OFF`/`SIGNOFF_PENDING`/`SIGNED_OFF` label mirrors as the backend (kept in
+  sync, per this file's existing convention); Application Quality Scorecard description "issued sign-off
+  position" -> "issued clearance position".
+- `SignOff.tsx`: "+ New Sign-off Certificate" button -> "+ New Clearance Certificate" (the page title already
+  read "QA Clearance Certificates").
+- `Functional.tsx`: `LIFECYCLE_STAGES` preview list and all three return-path workflow-tracker arrays'
+  "Sign-off" entries -> "Clearance"; "Linked Sign-off Certificate" section title -> "Linked Clearance
+  Certificate"; "Request Sign-off" button -> "Request Clearance"; page subtitle "...tracked here from
+  approval to sign-off" -> "...to clearance".
+- `Performance.tsx` (specialised-testing): terminal "Sign Off" button -> "Grant Clearance"; page subtitle's
+  "...and sign-off." -> "...and clearance."
+- `Dashboard.tsx`: workflow-stage column `{ key: 'signoff', label: 'Sign-off' }` -> `label: 'Clearance'`
+  (key left as the internal identifier).
+- `DAST.tsx` / `SAST.tsx`: page subtitles' "...report sign-off." -> "...report clearance."
+- `Approvals.tsx`: page subtitle "...Performance, Suppression and Sign-off..." -> "...and Clearance..."
+- `RequestDetail.tsx`: linked-records chip `type: "Sign-off"` -> `type: "Clearance"`.
+- `Login.tsx`: capability tagline "Audit-ready sign-off" -> "Audit-ready clearance".
+- `Help.tsx`: six prose spots updated (rename-impact explainer, two workflow-step lists, the Change
+  Description propagation sentence, the global-search CR-number explainer, the near-complete progress-band
+  legend, and the entity-filter list); search `keywords` string kept `signoff` and gained `clearance`
+  alongside it so search still matches either term.
+- `README.md`: three router-table description cells (`functional.py`, `automation.py`, `performance.py`)
+  updated to say "clearance" in their lifecycle-summary prose; file/route names (`signoff.py`, `SignOff.tsx`,
+  `/api/signoffs`) deliberately left as-is (code identifiers, out of the chosen scope).
+
+**Verified:** case-insensitive grep sweep across `frontend/src` for `sign[ -]?off`/`signed off` restricted to
+quoted-string and JSX-text contexts confirms every remaining hit is a code identifier, route path, CSS class,
+or comment -- no user-facing string still reads "sign off"/"sign-off"/"signed off" anywhere in the app.
+`python3 -m py_compile` on all backend modules and `npx tsc --noEmit -p .` on the frontend both pass clean.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.

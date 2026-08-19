@@ -1123,7 +1123,7 @@ export default function SAST() {
       <ErrorText error={error} />
       <PageHeader
         title="SAST Requests" count={total}
-        subtitle="Static Application Security Testing(SAST) requests, from submission through findings and report sign-off. Raised via a QA Request (include SAST in its request types)."
+        subtitle="Static Application Security Testing(SAST) requests, from submission through findings and report clearance. Raised via a QA Request (include SAST in its request types)."
       />
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}

@@ -42,7 +42,7 @@ export default function Approvals() {
       <ErrorText error={error} />
       <PageHeader
         title="Approval Workflow Log" count={total}
-        subtitle="Full audit / decision trail across QA Requests, Functional Testing, SAST/DAST, Performance, Suppression and Sign-off — who acted, what they decided, and when."
+        subtitle="Full audit / decision trail across QA Requests, Functional Testing, SAST/DAST, Performance, Suppression and Clearance — who acted, what they decided, and when."
       />
       <div className="toolbar">
         <ClearableSearchInput

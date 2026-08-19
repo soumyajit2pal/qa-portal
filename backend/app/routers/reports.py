@@ -445,7 +445,7 @@ def quality_scorecard(db: Session = Depends(get_db), current_user: models.User =
         "DAST Requests": dast_counts[app],
         "Performance Requests": performance_counts[app],
         "Open Defects": open_defect_counts[app],
-        "Issued Sign-offs": issued_counts[app],
+        "Issued Clearances": issued_counts[app],
     } for app in sorted(qa_counts)]
 
 

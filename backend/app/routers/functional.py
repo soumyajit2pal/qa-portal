@@ -848,7 +848,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
                      db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
     obj = _get_or_404(db, req_id)
-    _require(obj, QAStatus.QA_COMPLETED, "Request sign-off")
+    _require(obj, QAStatus.QA_COMPLETED, "Request clearance")
     # 2026-08 -- reported directly: "'Request Sign Off' button is not
     # enable[d] for QA lead ... if tester [is] no[t] available then at
     # least [o]n behalf of QA he can raise the request." Previously this
@@ -867,10 +867,10 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
     if payload.signoff_id is not None:
         cert = db.query(models.QASignOff).get(payload.signoff_id)
         if not cert:
-            raise HTTPException(400, "signoff_id does not reference an existing sign-off certificate")
+            raise HTTPException(400, "signoff_id does not reference an existing clearance certificate")
         obj.signoff_id = payload.signoff_id
     obj.status = QAStatus.QA_SIGNOFF_PENDING
-    _log(db, obj.id, "QA Completed", current_user, "Sign-off Requested", None)
+    _log(db, obj.id, "QA Completed", current_user, "Clearance Requested", None)
     db.commit()
     db.refresh(obj)
     return obj
@@ -893,14 +893,14 @@ def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session 
     only while status is still QA_SIGNOFF_PENDING, which the auto-sync above
     already moves past for every certificate it successfully links."""
     obj = _get_or_404(db, req_id)
-    _require(obj, QAStatus.QA_SIGNOFF_PENDING, "Confirm sign-off")
+    _require(obj, QAStatus.QA_SIGNOFF_PENDING, "Confirm clearance")
     if payload.signoff_id is not None:
         cert = db.query(models.QASignOff).get(payload.signoff_id)
         if not cert:
-            raise HTTPException(400, "signoff_id does not reference an existing sign-off certificate")
+            raise HTTPException(400, "signoff_id does not reference an existing clearance certificate")
         obj.signoff_id = payload.signoff_id
     obj.status = QAStatus.QA_SIGNED_OFF
-    _log(db, obj.id, "QA Clearance", current_user, "Signed Off", payload.comments)
+    _log(db, obj.id, "QA Clearance", current_user, "Cleared", payload.comments)
     obj.status = QAStatus.REQUESTER_VERIFICATION
     _log(db, obj.id, "Requester Verification", current_user, "Pending", "Sent for requester verification")
     db.commit()

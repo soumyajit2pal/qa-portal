@@ -324,7 +324,7 @@ const LIFECYCLE_STAGES = [
   { key: 'sm-approval', label: 'SM Approval' },
   { key: 'department-head-approval', label: 'Department Head Approval' },
   { key: 'qa-activity', label: 'QA Activity' },
-  { key: 'signoff', label: 'Sign-off' },
+  { key: 'signoff', label: 'Clearance' },
   { key: 'closed', label: 'Closed' },
 ]
 

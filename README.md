@@ -24,11 +24,11 @@ that renders each one.
 |---|---|---|
 | `auth.py` | `src/Login.tsx` | JWT login, `/auth/me`, user directory, Admin CRUD |
 | `qa_requests.py` | `src/QARequests.tsx` | The cross-module request gateway/inbox — raise a request, pick its type, route it |
-| `functional.py` | **Functional** (`src/modules/functional/`) | Functional QA request lifecycle: SM/dept-head decisions, readiness checklist, planning → test design → execution → defects → retest → regression → sign-off, documents, history |
+| `functional.py` | **Functional** (`src/modules/functional/`) | Functional QA request lifecycle: SM/dept-head decisions, readiness checklist, planning → test design → execution → defects → retest → regression → clearance, documents, history |
 | `sast_dast.py` | **Security** (`src/modules/security/`) | SAST and DAST request lifecycle: readiness, scan configuration/execution, findings, documents, history |
 | `suppression.py` | **Security** (`src/modules/security/`) | False-positive/suppression requests: app-owner and dept-head decisions, security-team decision, documents, history |
-| `automation.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Automation request lifecycle: feasibility, engineer assignment, script development, review, CI/CD integration, sign-off |
-| `performance.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Performance testing lifecycle: readiness, baseline, load test, result analysis, defect fix/retest, report, sign-off |
+| `automation.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Automation request lifecycle: feasibility, engineer assignment, script development, review, CI/CD integration, clearance |
+| `performance.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Performance testing lifecycle: readiness, baseline, load test, result analysis, defect fix/retest, report, clearance |
 | `approvals.py` | **Governance** (`src/modules/governance/`) | Cross-module workflow-decision feed (`/approvals`, `/approvals/pending-mine`) |
 | `audit.py` | **Governance** (`src/modules/governance/AuditLog.tsx`) | Immutable authentication, API-access, data-change and access-management audit trail |
 | `signoff.py` | **Governance** (`src/modules/governance/`) | Formal QA Clearance issuance, history, documents |

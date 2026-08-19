@@ -1122,7 +1122,7 @@ STAGE_LABELS = {
     QAStatus.DEFECT_RAISED: "Fix Pending",
     QAStatus.WAITING_FOR_FIX: "Fix Pending",
     QAStatus.RETESTING: "Retesting In Progress",
-    QAStatus.QA_COMPLETED: "Sign-off Request Pending",
+    QAStatus.QA_COMPLETED: "Clearance Request Pending",
     QAStatus.QA_SIGNOFF_PENDING: "QA Clearance Pending",
     QAStatus.QA_SIGNED_OFF: "Requester Verification Pending",
     QAStatus.REQUESTER_VERIFICATION: "Requester Verification Pending",

@@ -340,7 +340,7 @@ QA_REQUEST_STATUS_LABELS = {
     QAStatus.RETESTING: "Retesting",
     QAStatus.QA_COMPLETED: "QA Completed",
     QAStatus.QA_SIGNOFF_PENDING: "QA Clearance Pending",
-    QAStatus.QA_SIGNED_OFF: "QA Signed Off",
+    QAStatus.QA_SIGNED_OFF: "QA Cleared",
     QAStatus.REQUESTER_VERIFICATION: "Requester Verification",
     QAStatus.CLOSED: "Closed",
     QAStatus.CANCELLED: "Cancelled",
@@ -632,7 +632,7 @@ PERFORMANCE_STATUS_LABELS = {
     "ENVIRONMENT_SETUP": "Environment Setup", "SCRIPT_DEVELOPMENT": "Script Development",
     "BASELINE": "Baseline", "LOAD_TEST_EXECUTION": "Load Test Execution",
     "RESULT_ANALYSIS": "Result Analysis", "DEFECT_FIX_RETEST": "Defect / Fix / Retest", "REPORT": "Report",
-    "SIGNOFF_PENDING": "Sign-off Pending", "SIGNED_OFF": "Signed Off",
+    "SIGNOFF_PENDING": "Clearance Pending", "SIGNED_OFF": "Cleared",
     "REQUESTER_VERIFICATION": "Requester Verification", "CLOSED": "Closed", "CANCELLED": "Cancelled",
 }
 # Linear order of the execution-side stages (after Department Head approval,
@@ -782,7 +782,7 @@ WORKFLOW_STEPS = {
     "PERFORMANCE": [
         "Requester", "SM Approval", "Department Head Approval", "Readiness Verification Pending", "Readiness", "Feasibility", "Planning",
         "Environment Setup", "Script Development", "Baseline", "Load Test Execution", "Result Analysis",
-        "Defect/Fix/Retest", "Report", "Sign-off", "Requester Verification",
+        "Defect/Fix/Retest", "Report", "Clearance", "Requester Verification",
     ],
     "SUPPRESSION": ["Requester", "SM Approval", "Department Head Approval", "Security Team Verification"],
 }

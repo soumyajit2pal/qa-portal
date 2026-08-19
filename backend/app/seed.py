@@ -9,8 +9,6 @@ from . import models
 from .auth import hash_password
 from .constants import Role, LoginType, SEED_DEPARTMENTS
 
-# Base.metadata.create_all(bind=engine)
-
 DEMO_PASSWORD = "Password@123"
 
 # (username, full_name, role, department) -- one user per role, in the exact

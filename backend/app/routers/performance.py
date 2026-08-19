@@ -632,9 +632,9 @@ def complete_report(req_id: int, db: Session = Depends(get_db),
 def sign_off(req_id: int, db: Session = Depends(get_db),
              current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     obj = _get_or_404(db, req_id)
-    _require(obj, "SIGNOFF_PENDING", "Sign off")
+    _require(obj, "SIGNOFF_PENDING", "Clearance")
     _require_assigned_qa_lead(obj, current_user)
-    _log(db, obj.id, "Sign-off", current_user, "Signed Off", None)
+    _log(db, obj.id, "Clearance", current_user, "Cleared", None)
     obj.status = "REQUESTER_VERIFICATION"
     _log(db, obj.id, "Requester Verification", current_user, "Pending", None)
     db.commit()

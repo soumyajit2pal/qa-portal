@@ -39,7 +39,7 @@ def _require(obj, expected_statuses, action: str):
 def _get_or_404(db: Session, signoff_id: int) -> "models.QASignOff":
     obj = db.query(models.QASignOff).get(signoff_id)
     if not obj:
-        raise HTTPException(404, "Sign-off certificate not found")
+        raise HTTPException(404, "Clearance certificate not found")
     return obj
 
 
@@ -50,7 +50,7 @@ def _get_visible_or_404(db: Session, signoff_id: int, user: models.User) -> "mod
     if scope and obj.request_department not in scope:
         # Deliberately 404 instead of 403 so another department cannot use
         # sequential IDs to discover whether a private certificate exists.
-        raise HTTPException(404, "Sign-off certificate not found")
+        raise HTTPException(404, "Clearance certificate not found")
     return obj
 
 
@@ -75,7 +75,7 @@ def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", curren
         fr.status = QAStatus.QA_SIGNED_OFF
         db.add(models.ApprovalAction(
             entity_type="FUNCTIONAL_REQUEST", entity_id=fr.id, step_name="QA Clearance",
-            actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Signed Off",
+            actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Cleared",
             comments=f"Certificate {obj.certificate_id} issued by Executive",
         ))
         fr.status = QAStatus.REQUESTER_VERIFICATION

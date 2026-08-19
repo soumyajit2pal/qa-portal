@@ -407,7 +407,7 @@ const LIFECYCLE_STAGES = [
   "SM Approval",
   "Dept. Head Approval",
   "QA Activity",
-  "Sign-off",
+  "Clearance",
   "Closed",
 ];
 
@@ -595,13 +595,13 @@ function LifecyclePreview({
   // progress at the reviewer who returned it. Keep the stages genuinely
   // reached before the decision, then show where the request is now.
   if (status === "RETURNED_BY_SM" || status === "SM_REJECTED") {
-    stages = ["Draft", "SM Approval", "Requester Action", "Dept. Head Approval", "QA Activity", "Sign-off", "Closed"];
+    stages = ["Draft", "SM Approval", "Requester Action", "Dept. Head Approval", "QA Activity", "Clearance", "Closed"];
     effectiveActiveIndex = 2;
   } else if (status === "RETURNED_BY_DEPARTMENT_HEAD") {
-    stages = ["Draft", "SM Approval", "Dept. Head Approval", "Requester Action", "QA Activity", "Sign-off", "Closed"];
+    stages = ["Draft", "SM Approval", "Dept. Head Approval", "Requester Action", "QA Activity", "Clearance", "Closed"];
     effectiveActiveIndex = 3;
   } else if (status === "RETURNED_BY_QA_LEAD") {
-    stages = ["Draft", "SM Approval", "Dept. Head Approval", "QA Activity", "Requester Action", "Sign-off", "Closed"];
+    stages = ["Draft", "SM Approval", "Dept. Head Approval", "QA Activity", "Requester Action", "Clearance", "Closed"];
     effectiveActiveIndex = 4;
   }
 
@@ -1264,7 +1264,7 @@ function FunctionalDetail({
             // its own QA Clearance certificate. Mirrors the "Linked Test
             // Cycle" section above; deep-links via SignOff.tsx's existing
             // `?open=<certificate_id>` pattern.
-            <DetailSection title="Linked Sign-off Certificate">
+            <DetailSection title="Linked Clearance Certificate">
               <DetailField label={req.signoff_certificate_id}>
                 <Link className="linked-cycle-link" to={`/signoff?open=${req.signoff_certificate_id}`}>
                   <strong>{req.signoff_certificate_id}</strong>
@@ -1640,7 +1640,7 @@ function FunctionalDetail({
                   disabled={!!busyAction}
                   onClick={() => setShowSignoffModal(true)}
                 >
-                  Request Sign-off
+                  Request Clearance
                 </button>
               )}
 
@@ -1914,7 +1914,7 @@ export default function Functional() {
       <PageHeader
         title="Functional QA Requests"
         count={total}
-        subtitle="Functional, Regression, Sanity Testing and UAT Support are raised through a QA Request and tracked here from approval to sign-off."
+        subtitle="Functional, Regression, Sanity Testing and UAT Support are raised through a QA Request and tracked here from approval to clearance."
       />
       {/* <div className="toolbar">
         <select

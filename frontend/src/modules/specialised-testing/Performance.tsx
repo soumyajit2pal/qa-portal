@@ -713,7 +713,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
             )}
             {canCompleteDefectFixRetest && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-defect-fix-retest')}>Complete Defect / Fix / Retest</button>}
             {canCompleteReport && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-report')}>Complete Report</button>}
-            {canSignOff && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('sign-off')}>Sign Off</button>}
+            {canSignOff && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('sign-off')}>Grant Clearance</button>}
             {canRequesterDecide && (
               <WorkflowDecisionPanel busy={busy} title="Requester verification decision" options={[
                 { key: 'accept', label: 'Accept & Close', description: 'Confirm the result and complete the request', tone: 'approve', onClick: () => act('requester-decision', { decision: 'Accepted', comments }) },
@@ -842,7 +842,7 @@ export default function Performance() {
       <ErrorText error={error} />
       <PageHeader
         title="Performance Testing Requests" count={total}
-        subtitle="Load/performance testing requests, from submission through baseline, load test execution, and sign-off. Raised via a QA Request (include Performance Testing in its request types)."
+        subtitle="Load/performance testing requests, from submission through baseline, load test execution, and clearance. Raised via a QA Request (include Performance Testing in its request types)."
       />
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}

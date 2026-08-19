@@ -513,7 +513,7 @@ export function RequestDetail({
     })),
     ...(req.linked_signoffs || []).map((s) => ({
       key: `signoff-${s.id}`,
-      type: "Sign-off",
+      type: "Clearance",
       request_id: s.request_id,
       status: s.status,
       path: "/signoff",

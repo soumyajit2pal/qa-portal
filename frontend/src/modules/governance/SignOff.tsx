@@ -805,7 +805,7 @@ export default function SignOff() {
       <PageHeader
         title="QA Clearance Certificates" count={rows.length}
         subtitle="COE - Quality Assurance clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive approval."
-        actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Sign-off Certificate</button>}
+        actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Clearance Certificate</button>}
       />
       <Card>
         <div className="signoff-register-toolbar">

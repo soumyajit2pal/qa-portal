@@ -290,7 +290,7 @@ export const QA_STATUS_LABELS: Record<string, string> = {
   PLANNING: 'Planning', TESTER_ASSIGNED: 'Tester Assigned', TEST_DESIGN: 'Test Design',
   EXECUTION_IN_PROGRESS: 'Execution In Progress', DEFECT_RAISED: 'Defect Raised',
   WAITING_FOR_FIX: 'Waiting For Fix', RETESTING: 'Retesting',
-  QA_COMPLETED: 'QA Completed', QA_SIGNOFF_PENDING: 'QA Clearance Pending', QA_SIGNED_OFF: 'QA Signed Off',
+  QA_COMPLETED: 'QA Completed', QA_SIGNOFF_PENDING: 'QA Clearance Pending', QA_SIGNED_OFF: 'QA Cleared',
   REQUESTER_VERIFICATION: 'Requester Verification', CLOSED: 'Closed', CANCELLED: 'Cancelled',
 }
 
@@ -584,7 +584,7 @@ export const PERFORMANCE_STATUS_LABELS: Record<string, string> = {
   ENVIRONMENT_SETUP: 'Environment Setup', SCRIPT_DEVELOPMENT: 'Script Development',
   BASELINE: 'Baseline', LOAD_TEST_EXECUTION: 'Load Test Execution',
   RESULT_ANALYSIS: 'Result Analysis', DEFECT_FIX_RETEST: 'Defect / Fix / Retest', REPORT: 'Report',
-  SIGNOFF_PENDING: 'Sign-off Pending', SIGNED_OFF: 'Signed Off',
+  SIGNOFF_PENDING: 'Clearance Pending', SIGNED_OFF: 'Cleared',
   REQUESTER_VERIFICATION: 'Requester Verification', CLOSED: 'Closed', CANCELLED: 'Cancelled',
 }
 // SM_REJECTED deliberately NOT here -- reopenable by the requester, not a
@@ -812,7 +812,7 @@ export const REPORTS: ReportDef[] = [
   { key: 'severity-distribution', label: 'Security Finding Severity Distribution', group: 'Security', description: 'Combined SAST and DAST finding counts by severity.' },
   { key: 'suppression-register', label: 'Suppression Register', group: 'Security', description: 'Finding-level suppression requests and all governed decisions.' },
   { key: 'testcase-approval-summary', label: 'Testcase Approval Backlog', group: 'Management', description: 'Draft, recommendation, QA Lead approval and approved counts by project.' },
-  { key: 'application-quality-scorecard', label: 'Application Quality Scorecard', group: 'Management', description: 'Cross-module request, testing, defect and issued sign-off position by application.' },
+  { key: 'application-quality-scorecard', label: 'Application Quality Scorecard', group: 'Management', description: 'Cross-module request, testing, defect and issued clearance position by application.' },
   { key: 'qa-signoff-register', label: 'QA Clearance Register', group: 'Management', description: 'Certificate workflow, validity, signatories and final issuance status.' },
   { key: 'audit-evidence', label: 'Approval Audit Evidence', group: 'Management', description: 'Chronological workflow decisions with actor, role, comments and timestamp.' },
 ]

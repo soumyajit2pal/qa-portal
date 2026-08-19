@@ -1098,7 +1098,7 @@ export default function DAST() {
       <ErrorText error={error} />
       <PageHeader
         title="DAST Requests" count={total}
-        subtitle="Dynamic Application Security Testing requests, from submission through findings and report sign-off. Raised via a QA Request (include DAST in its request types)."
+        subtitle="Dynamic Application Security Testing requests, from submission through findings and report clearance. Raised via a QA Request (include DAST in its request types)."
       />
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}

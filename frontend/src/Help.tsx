@@ -54,7 +54,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'workflows', number: '06', title: 'Approval and testing workflows',
     summary: 'Functional, Performance, SAST, DAST, Suppression, and QA Clearance lifecycles.',
-    keywords: 'workflow sm department head qa lead tester security analyst approval readiness scanning execution signoff suppression false positive coe decision design identity confirmation return reject approval workflow log search',
+    keywords: 'workflow sm department head qa lead tester security analyst approval readiness scanning execution signoff clearance suppression false positive coe decision design identity confirmation return reject approval workflow log search',
   },
   {
     id: 'evidence', number: '07', title: 'Readiness, evidence, and decisions',
@@ -337,7 +337,7 @@ export default function Help() {
               <SopSteps items={[
                 { title: 'Assign or correct the owning department', text: 'Search for the application, choose the correct system department from the dropdown (active departments only), and select Update. If the currently assigned department has since been deactivated, the row shows an “Inactive department” badge and keeps that value selectable so it stays visible until you pick a replacement.' },
                 { title: 'Rename an application', text: 'Edit the application name directly in its row and select Rename. The name is normalized and checked for a collision with another application before saving.' },
-                { title: 'Understand the rename impact', text: 'A rename updates every existing QA Request, Functional, SAST, DAST, Performance, Suppression, Sign-off, and Defect record that already used the old name so they read the new one too—nothing is left behind under the old spelling.' },
+                { title: 'Understand the rename impact', text: 'A rename updates every existing QA Request, Functional, SAST, DAST, Performance, Suppression, Clearance, and Defect record that already used the old name so they read the new one too—nothing is left behind under the old spelling.' },
                 { title: 'Bulk-seed known-good names', text: 'Use Download Template, complete the Application Name (and optional Department) columns, then Upload & Seed to approve a batch of names in one step instead of one at a time through the request wizard.' },
               ]} />
               <Callout tone="warning" title="Rename before renaming a department, not after">
@@ -364,13 +364,13 @@ export default function Help() {
                 When Change Type is Bug Fix, you may optionally select an earlier completed request for the same application and department. This records where the original implementation was tested and completed.
               </Callout>
               <Callout title="Change Description is mandatory">
-                Every gateway requires a short Change Description explaining what is changing and why. It is collected once on the QA Request and carried automatically onto every linked Functional, SAST, DAST, Performance, and Sign-off record—so it also appears in each of their own list and detail views, and in the Dashboard’s My Requests & My Department table—without needing to be re-entered anywhere.
+                Every gateway requires a short Change Description explaining what is changing and why. It is collected once on the QA Request and carried automatically onto every linked Functional, SAST, DAST, Performance, and Clearance record—so it also appears in each of their own list and detail views, and in the Dashboard’s My Requests & My Department table—without needing to be re-entered anywhere.
               </Callout>
               <Callout title="Delegation is temporary input access">
                 Use Delegate for Input while drafting or whenever SM, Department Head, QA Lead, Security Lead, or Performance QA returns the request for correction. The assignee can edit details, attach evidence, upload documents, and then Return to Requester with mandatory comments. They cannot submit, resubmit, cancel, approve, or change the request department. Assignment, return, and recall are recorded in Activity.
               </Callout>
               <Callout title="Lifecycle paths reflect actual movement">
-                Returned requests show Requester Action as the current destination. Rejected or cancelled requests that close early connect directly to Closed without marking unreached QA or Sign-off stages as complete.
+                Returned requests show Requester Action as the current destination. Rejected or cancelled requests that close early connect directly to Closed without marking unreached QA or Clearance stages as complete.
               </Callout>
             </ManualSection>
           )}
@@ -378,13 +378,13 @@ export default function Help() {
           {visibleIds.has('workflows') && (
             <ManualSection {...topic('workflows')}>
               <Workflow label="Functional testing" steps={['Requester', 'SM', 'Department Head', 'QA Lead readiness', 'QA Tester', 'QA Clearance', 'Requester verification', 'Closed']} />
-              <Workflow label="Performance testing" steps={['Requester', 'SM', 'Department Head', 'QA Lead readiness', 'QA execution', 'Results & report', 'Sign-off', 'Closed']} />
+              <Workflow label="Performance testing" steps={['Requester', 'SM', 'Department Head', 'QA Lead readiness', 'QA execution', 'Results & report', 'Clearance', 'Closed']} />
               <Workflow label="SAST / DAST" steps={['Requester', 'SM', 'Department Head', 'QA Lead readiness', 'Security Analyst', 'Finding validation', 'Remediation / rescan', 'Report ready']} />
               <Workflow label="Suppression / false positive" steps={['Requester', 'SM', 'Department Head', 'Security verification', 'Done / Rejected']} />
               <Workflow label="QA Clearance" steps={['QA Engineer raises', 'QA Lead approves', 'Executive approves', 'Issued']} />
               <div className="help-rule-grid">
                 <article><strong>Functional</strong><p>The Department Head assigns a COE - Quality Assurance QA Lead. The QA Lead verifies readiness and assigns one or more QA Testers.</p></article>
-                <article><strong>Performance</strong><p>The Department Head assigns COE - Quality Assurance for readiness; QA owns planning, execution, analysis, reporting, and sign-off.</p></article>
+                <article><strong>Performance</strong><p>The Department Head assigns COE - Quality Assurance for readiness; QA owns planning, execution, analysis, reporting, and clearance.</p></article>
                 <article><strong>SAST / DAST</strong><p>The QA Lead performs Security Readiness and assigns a COE - Quality Assurance Security Analyst for scan execution and findings.</p></article>
                 <article><strong>QA Clearance</strong><p>Only COE - Quality Assurance can raise the request. It follows QA Engineer → QA Lead → Executive , with no SM stage.</p></article>
               </div>
@@ -533,7 +533,7 @@ export default function Help() {
           {visibleIds.has('find-report') && (
             <ManualSection {...topic('find-report')}>
               <div className="help-card-grid three">
-                <article><IconSearch /><h3>Global search</h3><p>Search a full TQA ID from the top bar. Short test-case input such as TC-02 is normalized to TQA-TC-02 automatically. A CR or EPIC number (e.g. CR-1042) jumps to the QA Requests list showing every request raised under that exact CR, with its linked Functional/SAST/DAST/Performance/Sign-off requests alongside each row.</p></article>
+                <article><IconSearch /><h3>Global search</h3><p>Search a full TQA ID from the top bar. Short test-case input such as TC-02 is normalized to TQA-TC-02 automatically. A CR or EPIC number (e.g. CR-1042) jumps to the QA Requests list showing every request raised under that exact CR, with its linked Functional/SAST/DAST/Performance/Clearance requests alongside each row.</p></article>
                 <article><IconChart /><h3>Dashboard</h3><p>Dashboard date controls provide All time, Last hour, Last 3 days, Last 15 days, Last month, and a custom From/To range. QA-only views include tester assignments and capacity.</p></article>
                 <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request ID. Approval Workflow Log supports server-side search and entity filtering across the decision trail.</p></article>
               </div>
@@ -558,7 +558,7 @@ export default function Help() {
                     <tr><td><strong>Configuration, validation, baseline, or retest</strong></td><td>0.75</td><td>Performance baseline/retest; Security configuration, validation, or rescan; Functional retesting.</td></tr>
                     <tr><td><strong>Queued or remediation</strong></td><td>0.50</td><td>Tester assigned, defect raised, or Security remediation.</td></tr>
                     <tr><td><strong>Analysis</strong></td><td>0.25</td><td>Performance result analysis.</td></tr>
-                    <tr><td><strong>Near complete</strong></td><td>0.05–0.15</td><td>QA completed/sign-off/verification, report, or security-complete stages.</td></tr>
+                    <tr><td><strong>Near complete</strong></td><td>0.05–0.15</td><td>QA completed/clearance/verification, report, or security-complete stages.</td></tr>
                     <tr><td><strong>Waiting</strong></td><td>0.00</td><td>Waiting for fix does not consume planned active capacity.</td></tr>
                   </tbody>
                 </table>
@@ -573,7 +573,7 @@ export default function Help() {
               <h3 className="help-subheading">Approval Workflow Log search</h3>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Search by request ID, workflow step, decision, actor, actor role, previous/new status, or comment text.</li>
-                <li><IconCheckCircle />Combine text search with the Entity filter to narrow results to QA Request, Functional, SAST, DAST, Performance, Suppression, or Sign-off.</li>
+                <li><IconCheckCircle />Combine text search with the Entity filter to narrow results to QA Request, Functional, SAST, DAST, Performance, Suppression, or Clearance.</li>
                 <li><IconCheckCircle />Results are searched and paginated on the server. Clear the search to restore the complete accessible log.</li>
               </ul>
               <ul className="help-check-list">
