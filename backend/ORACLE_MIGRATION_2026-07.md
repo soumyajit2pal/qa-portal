@@ -7137,6 +7137,158 @@ alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean (no frontend files
 is backend-only). No new migration -- no schema/column changes, only added exception handling around
 existing constraints.
 
+## 158. Enable HTTPS (Let's Encrypt via Certbot, terminated in the frontend nginx container)
+
+Reported directly: "how to enable http to https". Investigated the current deployment stack
+first: `frontend/nginx.conf` only ever `listen 80`-ed, `docker-compose.yml` only mapped
+`8080:80`/`8000:8000`, and there was no TLS scaffolding (no cert volumes, no HTTPS-redirect
+middleware, no `listen 443`) anywhere -- so this was greenfield, not a fix. Asked the user where
+TLS should terminate (`AskUserQuestion`: in this stack's own nginx vs. an external load
+balancer/ingress) -- picked "in this stack's own nginx container", i.e. a self-contained
+Let's Encrypt setup requiring no external infrastructure.
+
+**New files:**
+- `frontend/nginx.conf.template` -- replaces the old static `nginx.conf` as the file actually
+  built into the image. Two `server` blocks: `listen 80` serves the Let's Encrypt HTTP-01
+  challenge path and 301-redirects everything else to HTTPS; `listen 443 ssl` carries the actual
+  app (same `/api/*` proxy, SPA fallback, and static-asset caching the old config had), plus an
+  HSTS header. `${DOMAIN_NAME}` is substituted at container **start** (not build time) by the
+  official `nginx:1.27-alpine` image's own `docker-entrypoint.d` envsubst-on-templates mechanism --
+  every other `$variable` in the file (`$scheme`, `$host`, `$remote_addr`,
+  `$proxy_add_x_forwarded_for`, `$uri`, `$request_uri`) is nginx's own runtime variable and is left
+  alone by envsubst, since none of them collide with an uppercase-by-convention environment
+  variable name.
+- `scripts/init-letsencrypt.sh` -- one-time bootstrap solving the standard nginx/Certbot
+  chicken-and-egg problem (nginx won't start without a cert file to point at; Certbot can't issue
+  the first cert until something is already serving its challenge on port 80, which is nginx):
+  creates a throwaway self-signed cert so nginx can start, requests the real one from Let's Encrypt
+  against that running nginx via the shared webroot volume, swaps it in, reloads. Supports
+  `CERTBOT_STAGING=1` to test against Let's Encrypt's staging environment first (untrusted cert,
+  but no real rate-limit cost). Every `docker compose run`/`exec` invocation inside it passes
+  `DOMAIN_NAME`/`CERTBOT_EMAIL`/`STAGING_ARG` in via `-e` (container environment) rather than
+  interpolating them into a quoted shell string, specifically to avoid nested-quote escaping bugs.
+
+  **Bug hit and fixed while writing this script:** an early draft's
+  `: "${CERTBOT_EMAIL:?Set CERTBOT_EMAIL in .env first (Let's Encrypt uses this ...)}"` failed
+  `bash -n` with a confusing "unexpected EOF while looking for matching `''`" that `grep`-based
+  quote-balance checking couldn't explain (the apostrophe was inside an outer double-quoted
+  string, which should be inert). Root cause, confirmed with a minimal repro
+  (`: "${X:?abc (Let's Encrypt) def}"` alone reproduces it): bash re-parses the `word` portion of
+  `${parameter:?word}` for its own quoting purposes even when the whole expansion sits inside an
+  outer double-quoted string -- an unescaped apostrophe there breaks the parse regardless of the
+  outer quoting. Fixed by rewriting that one message without a contraction ("Let us Encrypt"
+  instead of "Let's Encrypt"); documented inline in the script so the same mistake doesn't get
+  reintroduced later.
+
+**Changed files:**
+- `frontend/Dockerfile` -- copies `nginx.conf.template` to `/etc/nginx/templates/default.conf.template`
+  (the base image's own convention) instead of copying the old `nginx.conf` straight to
+  `/etc/nginx/conf.d/default.conf`; `EXPOSE 80 443` (previously just `80`).
+- `frontend/nginx.conf` -- left in place, not deleted (deleting a pre-existing repo file needs the
+  user's own `git rm` decision, not an automated one), but its header now says it's superseded and
+  no longer what the Dockerfile builds; kept as a documented fallback for the "don't want HTTPS in
+  this stack" case (see README).
+- `docker-compose.yml` -- `frontend` service: added `"80:80"`/`"443:443"` port mappings (kept the
+  original `"8080:80"` too, for unchanged local/dev access), a `DOMAIN_NAME` environment passthrough,
+  and read-only mounts of two new named volumes (`certbot_conf` at `/etc/letsencrypt`,
+  `certbot_www` at `/var/www/certbot`). New `certbot` service (image `certbot/certbot`) running a
+  `certbot renew` polling loop every ~12h (Certbot itself only actually renews within 30 days of
+  expiry, so this is a cheap safe interval, not 12h of real work) -- this service only renews; the
+  one-time first issuance is the bootstrap script above, run manually.
+- `README.md` -- new "Enable HTTPS" subsection under Deployment (prerequisites, the two required
+  `.env` variables, running the bootstrap script, and the renewal-reload cron caveat below);
+  updated the file-tree listing and the nginx-proxy paragraph to reference
+  `nginx.conf.template` instead of the old `nginx.conf`; a short cross-reference added to
+  Production notes' existing `TRUSTED_PROXY_CIDRS` bullet (nginx now also forwards
+  `X-Forwarded-Proto` once HTTPS is enabled).
+
+**Known operational caveat, documented in both the script's own output and the README:** the
+`certbot` service renews the certificate FILE but does not reload nginx -- nginx keeps serving
+whatever certificate it loaded at its own last start/reload until told otherwise. README
+recommends a weekly host cron entry (`docker compose exec frontend nginx -s reload`) to close that
+gap; skipping it just means the certificate silently goes stale in nginx's memory until the
+container is next restarted some other way (a redeploy, etc.), which is likely to happen well
+within Let's Encrypt's 90-day validity in most deployments, but isn't guaranteed.
+
+**Scope decision:** implemented only the "terminate in this stack's own nginx" path the user
+selected. The external-load-balancer/ingress path (TLS terminated upstream, this stack only ever
+sees plain HTTP behind it) needs no code changes at all -- the nginx config already forwards
+`X-Forwarded-Proto` either way -- so it wasn't built out as a separate config variant, just
+mentioned in the README as the alternative to reach for instead of this section's redirect-to-HTTPS
+behavior, which would actively conflict with an external terminator.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean (no backend/frontend source files
+touched by this section, run anyway per this document's own convention). `docker-compose.yml`
+parsed successfully with `python3 -c "import yaml; yaml.safe_load(...)"`. `scripts/
+init-letsencrypt.sh` passes `bash -n` (after the apostrophe fix above) and is executable
+(`chmod +x`, confirmed surviving the sync to the user's actual repo). **Not verified**: an actual
+`docker compose up`/Let's Encrypt issuance run -- no Docker daemon or internet-reachable domain
+available in this sandboxed environment (same standing limitation noted in this README's own
+"Verification status" section for the rest of the Docker/Compose setup). Please run the bootstrap
+script with `CERTBOT_STAGING=1` against a real domain before a production (non-staging) run.
+
+## 159. HTTPS Path B -- self-signed local CA for IP-only / private-network deployments
+
+Reported directly, immediately following section 158: "i have ip address only, domain name is not
+created as of now." Section 158's HTTPS setup was Let's Encrypt-only (Path A), which cannot work
+here at all -- not a configuration gap, a hard constraint: Let's Encrypt only ever validates domain
+ownership over the real public internet, so a server reachable only on a private network (or with
+no domain, just a bare IP) can never obtain a certificate from it no matter what. Asked the user
+whether the server is public-internet-reachable (in which case a free wildcard-DNS trick like
+sslip.io would still make Path A work without buying a domain) or private/internal-only
+(`AskUserQuestion`) -- answered private/internal-only, which rules out any public CA entirely.
+
+**New file: `scripts/init-selfsigned.sh` (Path B).** Generates a small private Certificate
+Authority (once, reused on re-run) plus a leaf certificate for `DOMAIN_NAME` (the IP address or
+internal hostname) signed by it -- deliberately not a single bare self-signed certificate, so a
+device only ever needs to trust the CA ONCE and every certificate it later signs (including future
+rotations) is then trusted automatically, instead of every device re-approving a warning on every
+single certificate change. Uses a SAN (`IP:x.x.x.x` or `DNS:name`, auto-detected from
+`DOMAIN_NAME`'s shape) since modern browsers validate the certificate's Subject Alternative Name
+against exactly how the address was typed, not the legacy CN field alone. Writes into the exact
+same `/etc/letsencrypt/live/$DOMAIN_NAME/{fullchain.pem,privkey.pem}` path
+`frontend/nginx.conf.template` already expects from section 158 -- **zero nginx config changes
+needed** to switch between Path A and Path B; only which bootstrap script gets run differs. Also
+extracts the CA certificate to `./certs/qa-portal-local-ca.crt` on the host (via `docker compose
+run ... | > file`, no bind mount needed) for distributing to client devices.
+
+Reused the `certbot` service's container (via `docker compose run --rm --entrypoint sh certbot -c
+...`, same override pattern `init-letsencrypt.sh` already used for its own dummy-cert step) purely
+as a shell+openssl environment -- nothing here talks to Let's Encrypt or Certbot's own renewal
+logic at all; the `certbot` service's long-running `certbot renew` loop simply no-ops harmlessly
+against a certificate it never issued and has no renewal config for.
+
+**Fix (`.gitignore`).** Two additions found/needed while wiring this up: `/certs/` (the extracted
+CA cert above -- not secret, but machine/deployment-specific, not source), and `/.env` at the repo
+root -- a genuine pre-existing gap noticed in passing: only `backend/.env` and `frontend/.env` were
+previously ignored, not the root `.env` `docker-compose.yml` actually reads via `env_file: .env`
+(confirmed via section 158's own research that this file already holds `DATABASE_URL`/`SECRET_KEY`
+and would now also hold `DOMAIN_NAME`/`CERTBOT_EMAIL`). Fixed alongside this section rather than
+filed separately, since it was directly in scope of "what env vars does the HTTPS setup touch."
+
+**Fix (`README.md`).** Restructured "Enable HTTPS" into a decision point up front (public domain →
+Path A / IP or private network → Path B) followed by two clearly separated subsections, plus a
+step-by-step CA-trust guide per OS/browser (Windows, macOS, Linux, Firefox's own separate trust
+store, iOS/Android) for Path B, and a note that Path B has no automatic renewal (re-run the script
+before the default 10-year validity lapses; no device needs to re-trust anything when you do, since
+the CA itself doesn't change).
+
+**Bug hit and fixed while writing this script:** same class of `${VAR:?message}`-apostrophe parse
+bug documented in section 158 was checked for proactively this time (no new instance found -- the
+one `:?` message in this script was written without a contraction from the start, informed by
+that earlier fix).
+
+**Verified:** `bash -n scripts/init-selfsigned.sh` and `bash -n scripts/init-letsencrypt.sh` (both
+still clean) and `python3 -c "import yaml; yaml.safe_load(open('docker-compose.yml'))"` all pass.
+`chmod +x` confirmed surviving the sync to the user's actual repo. **Not verified**: an actual
+`docker compose run`/openssl execution -- no Docker daemon available in this sandboxed environment
+(same standing limitation as section 158). The certbot/certbot image is assumed to include the
+`openssl` CLI (not just Python's `cryptography`/`ssl` libraries) -- this is the same assumption
+`init-letsencrypt.sh`'s own dummy-certificate step already relied on in section 158, and is a
+widely-used, well-established community pattern, but please smoke-test both scripts on your own
+machine before relying on either in production.
+
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer
 > part of the current application. See Alembic revision `20260814_0002` for cleanup.

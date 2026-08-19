@@ -1,0 +1,92 @@
+# Two server blocks: plain HTTP on 80 (only ever used for the Let's
+# Encrypt ACME HTTP-01 challenge, and to redirect every other request to
+# HTTPS) and TLS on 443 (the actual app). ${DOMAIN_NAME} is substituted at
+# container start by the official nginx image's own envsubst-on-templates
+# entrypoint (see /etc/nginx/templates/*.template in the base image docs) --
+# set DOMAIN_NAME in your root .env before starting this stack. Every other
+# `$variable` below (`$scheme`, `$host`, `$remote_addr`,
+# `$proxy_add_x_forwarded_for`, `$uri`, `$request_uri`) is nginx's own
+# runtime variable, not touched by envsubst, since none of them match a
+# defined (uppercase, by convention) environment variable name.
+#
+# First-time setup: nginx will fail to start if the certificate files below
+# don't exist yet -- run scripts/init-letsencrypt.sh once before `docker
+# compose up` on a brand-new host/domain (it creates a temporary dummy
+# certificate, starts nginx, then requests the real one from Let's
+# Encrypt). See README.md's "Enable HTTPS" section.
+
+server {
+    listen 80;
+    server_name ${DOMAIN_NAME};
+
+    # Let's Encrypt's HTTP-01 challenge -- certbot (see docker-compose.yml's
+    # certbot service) writes the challenge file here via the shared
+    # certbot_www volume; nginx just needs to serve it back over plain HTTP,
+    # both for the very first certificate and every renewal after.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    # Every other plain-HTTP request -- redirect to the same URL on HTTPS.
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name ${DOMAIN_NAME};
+    root /usr/share/nginx/html;
+    index index.html;
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN_NAME}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # Tells browsers to always use HTTPS for this host going forward, once
+    # you're confident HTTPS is working reliably end-to-end (a
+    # misconfiguration or a cert that fails to renew in time would then lock
+    # returning visitors' browsers out of the plain-HTTP fallback for up to
+    # max-age seconds). Verify a few full renewal cycles before raising
+    # max-age much beyond this, and consider removing `always` from
+    # preloading unless you've deliberately opted into HSTS preload lists.
+    add_header Strict-Transport-Security "max-age=63072000" always;
+
+    # Same-origin API proxy so the built app's relative /api/* fetches (see
+    # src/api.ts -- BASE_URL defaults to '' unless VITE_API_BASE_URL was set
+    # at build time) reach the backend without any CORS setup. "backend"
+    # resolves via Docker's internal DNS when this runs through
+    # docker-compose.yml (the backend service there is named "backend"). If
+    # you deploy this image outside that compose network, either rebuild
+    # with VITE_API_BASE_URL pointing at the API's real URL instead (see
+    # .env.example) and delete this location block, or edit proxy_pass below
+    # to your backend's real host.
+    location /api/ {
+        proxy_pass http://backend:8000/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Client-side routed React app (react-router-dom) -- any path that isn't
+    # a real static file falls back to index.html so deep links (e.g.
+    # /functional-requests) work on a hard refresh, not just via in-app nav.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Long-cache hashed build assets (Vite fingerprints filenames), never
+    # cache index.html itself so a new deploy is picked up immediately.
+    location ~* \.(?:js|css|woff2?|png|jpg|jpeg|svg|ico)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+}

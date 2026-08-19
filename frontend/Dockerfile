@@ -21,5 +21,11 @@ RUN npm run build
 
 FROM nginx:1.27-alpine
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
+# nginx.conf.template (not the old static nginx.conf) -- copied into the
+# base image's own templates directory, where its docker-entrypoint scripts
+# envsubst it into /etc/nginx/conf.d/default.conf at container START (not
+# build time), substituting ${DOMAIN_NAME} from the environment. See
+# README.md's "Enable HTTPS" section and nginx.conf.template's own header
+# comment for the full HTTP->HTTPS setup this enables.
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+EXPOSE 80 443

@@ -80,7 +80,28 @@ services:
       dockerfile: Dockerfile
 
     ports:
+      # 8080:80 kept for local/dev use (plain HTTP, no domain needed). The
+      # real HTTPS entry points are 80 (redirects to 443) and 443 itself --
+      # both only work once DOMAIN_NAME is set below and
+      # scripts/init-letsencrypt.sh has been run once. See README.md's
+      # "Enable HTTPS" section.
       - "8080:80"
+      - "80:80"
+      - "443:443"
+
+    environment:
+      # Substituted into nginx.conf.template at container start (see that
+      # file's own header comment) -- required for the 443 server block to
+      # find its certificate under /etc/letsencrypt/live/${DOMAIN_NAME}/.
+      # Leave unset (or run scripts/init-letsencrypt.sh) and nginx falls
+      # back to whatever default.conf.template resolves to with an empty
+      # DOMAIN_NAME, which will fail to start -- HTTPS is opt-in, not
+      # automatic, on a fresh checkout.
+      - DOMAIN_NAME=${DOMAIN_NAME:-}
+
+    volumes:
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
 
     depends_on:
       backend:
@@ -88,7 +109,26 @@ services:
 
     restart: unless-stopped
 
+
+  # Renews the Let's Encrypt certificate every 12h (certbot itself only
+  # actually renews when a cert is within 30 days of expiry, so this is
+  # just a cheap, safe polling interval, not 12h of real renewal work).
+  # Does NOT obtain the FIRST certificate -- that one-time bootstrap is
+  # scripts/init-letsencrypt.sh, run manually before `docker compose up` on
+  # a brand-new host/domain. This service only needs to run at all if
+  # you're using HTTPS; it's harmless (idle) otherwise.
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h & wait $${!}; done"
+    restart: unless-stopped
+
 volumes:
   qa_portal_uploads:
   qa_portal_redis:
   qa_portal_logs:
+  certbot_conf:
+  certbot_www:
