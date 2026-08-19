@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
 
 from .. import models, pagination, schemas
 from ..database import get_db
@@ -28,7 +29,7 @@ router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
 #   Department Head Approval (assigns a COE - Quality Assurance QA Lead) -> that lead starts
 #   Readiness Verification -> QA Activity (Planning -> Tester
 #   Assignment -> Test Design -> Execution, with a Defect -> Waiting For Fix
-#   -> Retesting -> Regression Testing cycle) -> QA Completed -> QA Sign-off
+#   -> Retesting -> Regression Testing cycle) -> QA Completed -> QA Clearance
 #   -> Requester Verification -> Closed.
 # ---------------------------------------------------------------------------
 
@@ -659,7 +660,20 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
         db, obj.id, "Test Design", current_user, "Execution Started",
         f"Linked test cycle {cycle.cycle_key} - {cycle.name}" if cycle else "Started without a linked test cycle",
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Reported directly (vague at first -- "sometimes getting key
+        # issue" on an unnamed modal): the `cycle_link` pre-check above
+        # (line ~649) gives a fast, friendly 400 in the common case, but
+        # leaves a race window between two near-simultaneous "Start
+        # Execution, link this cycle" calls for the SAME cycle from
+        # different requests -- both pass the check, both insert into
+        # qap_test_cycle_child_links (unique on cycle_id alone), and the
+        # second commit trips that constraint. Same fix shape as
+        # test_execution.py's create_cycle_folder_access.
+        db.rollback()
+        raise HTTPException(400, f"Test cycle {cycle.cycle_key} was just linked to another request -- refresh and try again" if cycle else "This test cycle was just linked to another request -- refresh and try again")
     db.refresh(obj)
     return obj
 
@@ -828,7 +842,7 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     return obj
 
 
-# ---- QA Sign-off -> Requester Verification -> Closed ----
+# ---- QA Clearance -> Requester Verification -> Closed ----
 @router.post("/{req_id}/request-signoff", response_model=schemas.FunctionalOut)
 def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.RequestSignoffIn(),
                      db: Session = Depends(get_db),
@@ -845,7 +859,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
     # on a request they own, same "QA Lead group OR current tester" shape
     # as tester reassignment.
     _require_assigned_qa_lead_or_current_tester(obj, current_user, "request sign-off on this request")
-    # The frontend now creates the QA Sign-off Certificate (POST /api/signoffs)
+    # The frontend now creates the QA Clearance Certificate (POST /api/signoffs)
     # right before calling this, via SignOff.tsx's NewSignOffModal opened from
     # this request's own "Request Sign-off" button -- link it immediately
     # rather than leaving it to confirm-signoff, so the certificate is
@@ -865,7 +879,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
 @router.post("/{req_id}/confirm-signoff", response_model=schemas.FunctionalOut)
 def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
-    """Confirms the QA Sign-off certificate (optionally linking a Module 8 QASignOff
+    """Confirms the QA Clearance certificate (optionally linking a Module 8 QASignOff
     record created via /api/signoffs) and hands the request to the requester for
     final verification.
 
@@ -886,7 +900,7 @@ def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session 
             raise HTTPException(400, "signoff_id does not reference an existing sign-off certificate")
         obj.signoff_id = payload.signoff_id
     obj.status = QAStatus.QA_SIGNED_OFF
-    _log(db, obj.id, "QA Sign-off", current_user, "Signed Off", payload.comments)
+    _log(db, obj.id, "QA Clearance", current_user, "Signed Off", payload.comments)
     obj.status = QAStatus.REQUESTER_VERIFICATION
     _log(db, obj.id, "Requester Verification", current_user, "Pending", "Sent for requester verification")
     db.commit()

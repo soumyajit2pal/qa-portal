@@ -193,6 +193,76 @@ def update_application_department(
     return obj
 
 
+# Every one of these tables denormalises application_name as a plain
+# String(150) rather than deriving it live via a relationship to
+# ApplicationMaster (see models.py -- only FunctionalRequest/DASTRequest
+# derive it live, via a @property reading qa_request.application_name).
+# Renaming an ApplicationMaster row therefore has to cascade an UPDATE
+# across every one of these, or the request-level name and the master
+# record silently diverge the moment a rename happens. None of these
+# columns carry a unique constraint or index (confirmed against models.py),
+# so a plain string-match bulk UPDATE is safe here.
+_APPLICATION_NAME_CASCADE_MODELS = [
+    models.QARequest,
+    models.SASTRequest,
+    models.SecurityScanResult,
+    models.PerformanceRequest,
+    models.SuppressionRequest,
+    models.QASignOff,
+    models.Defect,
+]
+
+
+@router.patch("/{app_id}/name", response_model=schemas.ApplicationMasterOut)
+def rename_application_master(
+    app_id: int,
+    payload: schemas.ApplicationMasterRenameUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    """Renaming the canonical Application Name -- reported directly: "edit
+    option for renaming the application name" on the Existing Application
+    Master admin screen. There was previously no way to fix a typo/rename an
+    application once it had already been proposed/approved short of raising
+    a brand-new name from scratch and abandoning the old one.
+
+    Normalises the same way resolve_application_name does (strip + upper) so
+    a rename can never itself create a second, differently-cased row for
+    what's meant to be the same application. Blocks the rename if another
+    ApplicationMaster row already owns the target name (name is
+    unique=True) -- the caller should reuse/merge into that existing row
+    instead of renaming onto a collision.
+
+    Cascades the rename across every denormalised application_name column
+    (see _APPLICATION_NAME_CASCADE_MODELS above) so every existing QA
+    Request/child request/finding/defect that already used the old name
+    reads the new one too, instead of silently freezing at whatever name was
+    in effect on the day the request was raised."""
+    obj = db.query(models.ApplicationMaster).get(app_id)
+    if not obj:
+        raise HTTPException(404, "Application not found")
+    new_name = payload.name.strip().upper()
+    if not new_name:
+        raise HTTPException(400, "Application name is required")
+    old_name = obj.name
+    if new_name == old_name:
+        return obj
+    collision = (db.query(models.ApplicationMaster)
+                 .filter(models.ApplicationMaster.name == new_name,
+                         models.ApplicationMaster.id != app_id).first())
+    if collision:
+        raise HTTPException(400, f"Application name '{new_name}' is already in use")
+    obj.name = new_name
+    for model_cls in _APPLICATION_NAME_CASCADE_MODELS:
+        (db.query(model_cls)
+           .filter(model_cls.application_name == old_name)
+           .update({model_cls.application_name: new_name}, synchronize_session=False))
+    db.commit()
+    db.refresh(obj)
+    _invalidate_approved_names_cache()
+    return obj
+
+
 @router.get("/pending-app-owner", response_model=List[schemas.ApplicationMasterOut])
 def list_pending_app_owner_names(db: Session = Depends(get_db),
                                   current_user: models.User = Depends(require_roles(Role.APPLICATION_OWNER, Role.ADMIN))):

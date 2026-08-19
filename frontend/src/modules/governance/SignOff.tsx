@@ -257,7 +257,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // ever filled in via picking a Testing Request above.
     if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and CR Number/EPIC Number are derived from it.'); return }
     if (!hasRole(user, 'ADMIN') && !hasDepartment(user, QA_DEPARTMENT)) {
-      setError(`QA Sign-off is restricted to the ${QA_DEPARTMENT} department.`)
+      setError(`QA Clearance is restricted to the ${QA_DEPARTMENT} department.`)
       return
     }
     const validityErr = validityError(form.validity_from, form.validity_to)
@@ -300,7 +300,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   }
 
   return (
-    <Modal title="New QA Sign-off Certificate" onClose={onClose} wide>
+    <Modal title="New QA Clearance Certificate" onClose={onClose} wide>
       <form onSubmit={submit}>
         <Field label="Testing Request ID *">
           {presetRequest ? (
@@ -636,6 +636,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
         <div><strong>Status:</strong> <Badge status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /></div>
         <div><strong>Testing Request ID:</strong> {item.testing_request_id || '—'}</div>
         <div><strong>CR Number/EPIC Number:</strong> {item.change_request_ids || '—'}</div>
+        <div><strong>Change Description:</strong> {item.change_description || '—'}</div>
         <div><strong>Application Owner:</strong> {item.application_owner || '—'}</div>
         <div><strong>Request Department:</strong> {item.request_department || '—'}</div>
         <div><strong>QA Approval Department:</strong> {item.department || QA_DEPARTMENT}</div>
@@ -802,7 +803,7 @@ export default function SignOff() {
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="QA Sign-off Certificates" count={rows.length}
+        title="QA Clearance Certificates" count={rows.length}
         subtitle="COE - Quality Assurance clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive approval."
         actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Sign-off Certificate</button>}
       />
@@ -838,6 +839,9 @@ export default function SignOff() {
             filterValue: (r) => r.certificate_id,
           },
           { key: 'application_name', header: 'Application' },
+          { key: 'change_description', header: 'Change Description', render: (r) => (
+            <span className="truncate-cell" title={r.change_description || ''}>{r.change_description || '—'}</span>
+          ), filterValue: (r) => r.change_description || '' },
           { key: 'request_department', header: 'Department', render: (r) => r.request_department || '—' },
           { key: 'requester_id', header: 'Requested By', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'reviewed_by_id', header: 'Reviewed By', render: (r) => userName(users, r.reviewed_by_id) || '—', filterValue: (r) => userName(users, r.reviewed_by_id) || '' },

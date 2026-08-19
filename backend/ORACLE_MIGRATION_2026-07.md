@@ -1422,7 +1422,7 @@ images the same way regardless of which field or which workflow action they came
 backend files touched, re-run as a no-op sanity check). Documents and outputs copies re-synced and confirmed
 identical via `diff -rq` (only the standard `.env`/`logs`/`uploads` exclusions differ).
 
-## 33. QA Sign-off Certificate -- screenshots in rich text + "Save Draft Certificate not working"
+## 33. QA Clearance Certificate -- screenshots in rich text + "Save Draft Certificate not working"
 
 **Reported:** "While new Qa sign off certificate is raising with screenshots uplaod in rich text, save raft
 certificate not working." `SignOff.tsx`'s three rich-text fields (Exit Criteria Validation Notes, Open Defect
@@ -2364,7 +2364,7 @@ corrected to `CHIEF_MANAGER_QA`, baked into the constant's value itself, not jus
   `routers/test_execution.py`, `routers/test_repository.py`, `routers/auth.py` (local-admin assignable-role
   logic and both local-admin `require_roles(...)` gates), `routers/pending_approvals.py`, and --
   the one place this is a genuine authorization-narrowing change, not just a rename -- `routers/signoff.py`'s
-  `executive_coe_decision` and `_can_view_signoff` (the Executive  / QA Sign-off checkpoint) now check
+  `executive_coe_decision` and `_can_view_signoff` (the Executive  / QA Clearance checkpoint) now check
   `Role.CHIEF_MANAGER_QA, Role.AGM_QA` (2 roles) instead of `Role.CHEIF_MANAGER_COE, Role.CHEIF_MANAGER_QA,
   Role.AGM_COE` (3 roles) -- confirmed directly this is the intended checkpoint the "Executive Group" describes.
   `seed.py`'s demo users consolidated from 3 (`cm1`/`cheifmanagerqa1`/`agm1`) to 2.
@@ -2535,7 +2535,7 @@ residual-defect cycle-completion override all treat `QA_LEAD`/`CHIEF_MANAGER_QA`
 deliberately exclude `AGM_QA` -- consistently, on both backend and its frontend mirrors (`TestExecution.tsx`'s
 `CAN_EXEC_ROLES`, `Defects.tsx`'s manager checks). This reads as a genuine, pre-existing, well-commented
 design distinct from the Aug-2026 Executive-role consolidation (which only ever claimed "identical authority
-at the Executive  / QA Sign-off checkpoint," never blanket parity everywhere) -- not something to widen
+at the Executive  / QA Clearance checkpoint," never blanket parity everywhere) -- not something to widen
 without being asked, since it's a real authorization change in a banking app. Flagging in case the intent is
 actually full parity: if so, the fix is adding `Role.AGM_QA` to `defects.py`'s `CREATE_ROLES`/`_is_manager`
 (both call sites) and `test_execution.py`'s residual-defect override, plus the two frontend mirrors.
@@ -4177,7 +4177,7 @@ component used for every other confirmation on this page (e.g. `cycleToDelete` r
 Request?" / "Unlink \<key\> from \<cycle\>? ... will remain unchanged." / Unlink · Cancel. `unlinkCycleRequest()`
 itself now runs only from `onConfirm`, no longer reads `window.confirm`'s return value, and on success shows
 an `InfoModal` ("Request unlinked" / "\<key\> has been unlinked from \<cycle\>.") -- new `InfoModal` import,
-matching the existing "OK, got it" acknowledgement pattern used elsewhere (e.g. QA Sign-off Save Draft). On
+matching the existing "OK, got it" acknowledgement pattern used elsewhere (e.g. QA Clearance Save Draft). On
 failure the existing `ErrorText`/`setError(err)` path is unchanged.
 
 New state: `pendingUnlinkCycleRequest` (boolean, drives the ConfirmModal), `unlinkedCycleRequestNotice`
@@ -4540,11 +4540,11 @@ if that field also needs to change.
 
 **Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
 
-## 97. QA Sign-off certificate's Environment Tested / Target Promotion Environment now linked, same as the QA Request form
+## 97. QA Clearance certificate's Environment Tested / Target Promotion Environment now linked, same as the QA Request form
 
 **Reported:** "Under New QA Signoff certificate, Environment Tested * and Target Promotion Environment *
 should be linked like qa request form have. use the same method instead of creating duplicate method." Both
-fields (New QA Sign-off Certificate creation, and its Edit Details modal) were two fully independent
+fields (New QA Clearance Certificate creation, and its Edit Details modal) were two fully independent
 dropdowns -- Target Promotion Environment even offered every `ENVIRONMENTS` value including "Dev", and
 picking an earlier Target than the already-picked Environment Tested (e.g. Environment Tested=UAT, Target=
 SIT) was silently allowed, unlike the QA Request wizard (`DetailsStep.tsx`) and Functional's Edit Details
@@ -4857,7 +4857,7 @@ destructive action.
 **Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean;
 `rsync`+`diff -rq` confirmed `outputs/qa-portal/` matches `Documents/qa-portal/`.
 
-## 104. QA Sign-off certificate -- clearer download once Issued
+## 104. QA Clearance certificate -- clearer download once Issued
 
 Reported directly: "ONCE certificate issued, give to download the certificate. also inside of this 'Export
 PDF' is too much generic, once certificate issue it should be like download certificate." Purely a frontend
@@ -6365,6 +6365,777 @@ total) to confirm none remain paired with `.first()` -- the other two are `test_
 Could not exercise this against a live Oracle database in this environment (no DB connectivity here) --
 worth a manual check once deployed: retry the exact reported action (assigning/returning/recalling a
 delegation) and confirm ORA-02014 no longer occurs.
+
+## 142. New mandatory "Change Description" field on the QA Request wizard
+
+Reported directly, with a screenshot of the "Application & Change Details" step: add a new mandatory
+"Change Description" field.
+
+**Scope decision, flagged explicitly.** Several sibling fields on this same step (`change_type`,
+`vendor_si_partner`, `technology_stack`, `release_version`, `build_number`, `target_promotion_environment`)
+are copied once into the auto-created `PerformanceRequest` at raise time (see `_sync_linked_child_requests`)
+and independently editable there afterward. `change_description` was **not** extended there, or into
+`QASignOff` (which also happens to have its own `vendor_si_partner`/`technology_stack` columns, for an
+unrelated reason -- it's a certificate generated off Functional Testing completion, not part of this
+wizard's delegation chain at all). Both would each need their own model column, schema fields, creation-time
+copy, PDF export line, and possibly a UI display/edit field to do properly -- meaningfully larger than what
+was asked, and risked landing half-finished. Kept to the QA Request gateway itself, same as `remarks`
+(already gateway-only, delegated nowhere). Happy to extend to Performance/Sign-off if that's actually wanted.
+
+**Backend.**
+- `models.py` -- new `QARequest.change_description = Column(Text)`, nullable (like every other
+  UI-mandatory field on this table -- `application_owner`, `cr_number`, `technology_stack`, etc.;
+  `application_name` is the one deliberate `NOT NULL` exception). Real enforcement is at the wizard level
+  (see frontend below), not the database, so this needed no backfill for existing rows.
+- `schemas.py` -- added `change_description: Optional[str] = None` to `QARequestCreate` (inherited by
+  `QARequestUpdate`) and `QARequestOut`. Both `create_request` and `edit_request` pick it up automatically
+  via their existing generic `**data`/`setattr(obj, k, v)` handling -- no special-casing needed, same as
+  every other plain top-level gateway field.
+- `routers/qa_requests.py`'s PDF export (`export_request`) -- added `("Change Description",
+  obj.change_description)` to the "Application & Change" section, next to the existing CR Number/Change
+  Type/Vendor-SI-Partner/Technology Stack lines.
+- New migration `alembic/versions/4cfa97fbdd97_add_qa_request_change_description.py` (`down_revision =
+  'c9bf647b9f80'`, this cycle's other new migration) -- adds the nullable `qap_requests.change_description`
+  column.
+
+**Frontend.**
+- `QARequests/types.ts` -- added `change_description: ''` to `EMPTY_FORM`/`QARequestForm`.
+- `QARequests/validation.ts` -- added `{ key: 'change_description', label: 'Change Description' }` to
+  `REQUIRED_DETAIL_FIELDS`, so `detailsStepError()` actually blocks Next/Submit when it's left blank (same
+  gate every other `*` field on this step already goes through).
+- `QARequests/steps/DetailsStep.tsx` -- new `<Field label="Change Description *">` with a `required`
+  `<textarea>`, placed right after Change Type (and its conditional Bug Fix field) and before Vendor / SI
+  Partner.
+- `QARequests/NewRequestModal.tsx`'s `buildInitialForm` -- pre-fills `change_description` when reopening an
+  existing (still-Draft) request for editing, same pattern as every other field here.
+- `types.ts` -- added `change_description?: string | null` to the frontend `QARequestOut` interface.
+- `QARequests/RequestDetail.tsx` -- new `<DetailField label="Change Description">` in the "Application &
+  Change" section, next to CR Number/Change Type/Vendor-SI-Partner/Technology Stack.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean. Not exercised against a running app in this
+environment -- worth a manual check once deployed: raise a new QA Request, confirm Next is blocked with
+Change Description left blank and its error message names it, fill it in and complete the wizard, then
+confirm it shows on the request's Overview and in the exported PDF.
+
+## 143. QA Requests list -- CR Number/EPIC Number column always blank; add Change Description column
+
+Reported directly, with a screenshot of the QA Requests list: "why CR number is blank, though input is
+provide[d]", plus a request to add the new Change Description field (section 142) as its own list column
+too.
+
+**Root cause.** `schemas.QARequestListOut` (the lightweight PAG-005 schema backing `GET /api/qa-requests`,
+the list endpoint) only ever carried the legacy `epic_number` column -- it never had `cr_number` at all,
+even though every current request actually writes its CR/EPIC value to `cr_number` (the consolidated field,
+see section 22/section 142's own neighbors and `NewRequestModal.tsx`'s `cr_number: editing.cr_number ||
+editing.epic_number || ''` fallback). `index.tsx`'s "CR Number/EPIC Number" column (`{ key: "cr_number", ...
+}`, no custom `render`) read `r.cr_number` off every row, which the backend simply never sent -- always
+`undefined`, always blank, regardless of what was typed. The detail view (`GET /api/qa-requests/{id}`,
+`QARequestOut`) was never affected -- `cr_number` has always been there; this was specific to the list
+endpoint's own separate, lightweight schema.
+
+**Fix.**
+- `schemas.py` -- added `cr_number: Optional[str] = None` to `QARequestListOut`. `list_requests` needed no
+  query changes -- it already returns full ORM objects, so the new schema field just reads the existing
+  column directly, same as everything else on this schema.
+- `types.ts` (frontend) -- added `cr_number?: string | null` to the matching `QARequestListOut` interface.
+- `QARequests/index.tsx` -- the CR Number column now has an explicit `render: (r) => r.cr_number ||
+  r.epic_number || "—"` (plus a matching `filterValue`) instead of relying on the default raw-field
+  rendering -- falls back to `epic_number` for older rows that predate the consolidated field, the same
+  fallback `NewRequestModal.tsx` already uses when reopening a Draft.
+
+**Change Description column (same request, done together).** Added `change_description: Optional[str] =
+None` to `QARequestListOut` and the matching frontend type, and a new "Change Description" column in
+`index.tsx` (truncated with a full-text tooltip, same `.truncate-cell` pattern the existing "Priority / Risk
+(per type)" column already uses).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean. Not exercised against a running app in this
+environment -- worth a manual check once deployed: confirm the CR Number/EPIC Number column now shows the
+value typed at raise time, a legacy Draft with only `epic_number` set still shows something (not blank), and
+the new Change Description column shows section 142's field with a truncating tooltip on long text.
+
+## 144. Change Description column added to every gateway's list table, not just QA Requests
+
+Follow-up in the same conversation as section 143: "Chnage description column should be present every
+where in the request label table" -- section 143 only added the column to `QARequests/index.tsx` itself.
+`change_description` (section 142) is deliberately a column on `QARequest` only, not on
+`FunctionalRequest`/`SASTRequest`/`DASTRequest`/`PerformanceRequest`/`QASignOff` -- so each of those five
+list tables needed a *delegated* read-only value, the same pattern already used for `cr_number`,
+`department`, `application_owner`, etc. on those same models.
+
+**Backend (`models.py`)** -- new `change_description` `@property` on each, delegating to the linked
+`qa_request`:
+- `FunctionalRequest.change_description`, `SASTRequest.change_description`,
+  `DASTRequest.change_description`, `PerformanceRequest.change_description` -- straight one-hop
+  `self.qa_request.change_description if self.qa_request else None`, next to each model's existing
+  `cr_number`/`department` delegated properties.
+- `QASignOff.change_description` -- two hops, since `QASignOff` has no `qa_request_id` of its own, only a
+  view-only `source_functional_request` link (matched on business ID): reads
+  `self.source_functional_request.change_description` (which itself delegates to *its* `qa_request`).
+
+**Backend (`schemas.py`)** -- added `change_description: Optional[str] = None` to `FunctionalListOut`,
+`SASTListOut`, `DASTListOut`, `PerformanceListOut`, and `SignOffOut` (used for both SignOff's list and
+detail views).
+
+**Backend (`routers/signoff.py`)** -- `list_signoffs`'s existing `joinedload(QASignOff.source_functional_request)`
+(added previously to fix an N+1 on `request_department`) got a chained
+`.joinedload(FunctionalRequest.qa_request)` so the new two-hop `change_description` doesn't reintroduce the
+same per-row query cost that comment was written to eliminate. `functional.py`/`sast_dast.py`/`performance.py`
+needed no changes -- their list endpoints already eager-load `qa_request` for the existing delegated fields.
+
+**Frontend (`types.ts`)** -- added `change_description?: string | null` to `FunctionalListOut`,
+`SASTListOut`, `DASTListOut`, `PerformanceListOut`, and `SignOffOut`.
+
+**Frontend (list columns)** -- added a "Change Description" column, truncated with a full-text tooltip
+(`.truncate-cell`, same pattern as section 143's `QARequests/index.tsx` column), to:
+- `modules/functional/Functional.tsx` (after CR Number/EPIC Number)
+- `modules/security/SAST.tsx` and `DAST.tsx` (after Application -- neither list table has its own CR
+  Number column to sit next to)
+- `modules/specialised-testing/Performance.tsx` (after Application)
+- `modules/governance/SignOff.tsx` (after Application)
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean. Not exercised against a running app --
+worth a manual check once deployed, in particular the `QASignOff` two-hop (a sign-off certificate whose
+source Functional request has since been unlinked/deleted should show "—", not error).
+
+## 145. Change Description also added to each gateway's own detail view (not just its list table)
+
+Follow-up, same conversation, right after section 144: "Inner section of each request, change
+description also should be visible" -- with a screenshot of a Functional request's detail view
+("Application & Change" section) confirming Change Description wasn't there. Section 144 only reached
+the five list tables; the click-through detail modal for each of those five request types is a separate
+view with its own backend schema and frontend interface, so it needed the same field added a second time.
+
+**Backend (`schemas.py`)** -- added `change_description: Optional[str] = None` to the four *detail*
+schemas (distinct from the *List* schemas section 144 already touched): `FunctionalOut`, `SASTOut`,
+`DASTOut`, `PerformanceOut`, each right next to that schema's existing `cr_number` field. `SignOffOut`
+needed no backend change -- it already serves both SignOff's list and detail views, so section 144
+already covered it.
+
+**Frontend (`types.ts`)** -- added `change_description?: string | null` to the matching four detail
+interfaces (`FunctionalOut`, `SASTOut`, `DASTOut`, `PerformanceOut`), next to `cr_number`.
+
+**Frontend (detail views)** -- added a `<DetailField label="Change Description">{req.change_description
+|| "—"}</DetailField>` right after the existing "CR Number/EPIC Number" field, in the "Application &
+Change" section of:
+- `modules/functional/Functional.tsx` (its detail modal, ~line 1186)
+- `modules/security/SAST.tsx` and `DAST.tsx` (~line 702 / 687)
+- `modules/specialised-testing/Performance.tsx` (~line 523)
+
+`modules/governance/SignOff.tsx`'s detail modal uses a plain `<div><strong>Label:</strong>
+{value}</div>` grid rather than `DetailSection`/`DetailField` -- added `<div><strong>Change
+Description:</strong> {item.change_description || "—"}</div>` right after the existing "CR
+Number/EPIC Number" line, matching that file's own pattern instead of importing `DetailField`.
+
+No router/eager-loading changes needed here -- all five list endpoints already eager-load `qa_request`
+(and `signoff.py`'s nested `.joinedload(FunctionalRequest.qa_request)` from section 144) for the
+existing delegated fields these detail schemas also expose (`cr_number`, `department`, etc.); detail
+endpoints fetch a single row by ID, so the two-hop `QASignOff.change_description` property is a single
+extra lazy load per request, not a per-row N+1 concern the way the list endpoint was.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean. Not exercised against a running app.
+
+## 146. Test Repository's "Current view" stat cards now scoped to the selected folder
+
+Reported directly, with a screenshot of the Test Repository screen: "Here Testcases count and all should
+be updated based on folder. otherwise creating confusion." Clicking a folder in the left "Repository
+Structure" tree (Unfiled, Archived, Recycle Bin, or any real folder) already scoped the results
+table/pill correctly (`{total} test cases`, from the paginated case-list endpoint's own `folder_id`
+filter) -- but the four "Current view" stat cards just below it (Test cases / Approved / Pending review
+/ Critical) always showed `GET .../test-cases/summary`'s project-wide totals, unchanged no matter which
+folder was open. Confirmed by the endpoint's own docstring, which said as much on purpose: "regardless of
+which page/folder/filter the main list currently has selected." That was a deliberate design choice when
+the summary endpoint was first built (it also powers the sidebar's fixed "All test cases"/"Archived"/
+"Recycle Bin" badge counts, which correctly must NOT change when a different folder is opened) -- but
+having both a correctly-scoped results pill and an always-project-wide stat bar sitting a few pixels
+apart, both claiming to describe "the current view," is exactly the confusion reported.
+
+**Fix -- added scoping alongside the existing project-wide fields, not instead of them** (the sidebar
+badges still need the unscoped totals):
+- `schemas.py` -- `TestCaseSummaryOut` gets four new fields: `scoped_total`, `scoped_approved_count`,
+  `scoped_in_review_count`, `scoped_critical_count`. `total`/`approved_count`/`in_review_count`/
+  `critical_count` (and `folder_counts`/`unfiled_count`/`archived_count`/`recycle_bin_count`/`tags`) are
+  untouched and stay project-wide.
+- `routers/test_repository.py::get_test_case_summary` -- new optional `folder_id` query param, same
+  numeric-id/`'unfiled'` semantics `list_test_cases` already uses, plus a summary-only `'archived'` value
+  (the Archive pseudo-folder reaches the list endpoint via a `status=Archived` filter instead, since it's
+  project-wide by design, not a real folder_id -- `'archived'` here reproduces that same scope for the
+  stat cards). Omitted `folder_id` (the "All test cases" view) leaves the four scoped fields equal to the
+  project-wide ones. Same underlying `base` query as the existing counts, just filtered down further, so
+  no new N+1 or full-row fetch.
+- `types.ts` -- matching `scoped_total`/`scoped_approved_count`/`scoped_in_review_count`/
+  `scoped_critical_count` fields on `TestCaseSummaryOut`.
+- `TestRepository.tsx` -- new `summaryFolderParam` derived from `selectedFolder` (mirrors the case list's
+  own `extra.folder_id` calculation, plus the `'archived'` special case above); `loadSummary` now takes
+  and forwards it as a `?folder_id=` query param. Split the old single `useEffect` (folders + summary,
+  keyed only on `projectId`) into two -- folders stays project-only, summary now re-fires on
+  `summaryFolderParam` too, so switching folders alone (without switching project) reloads it.
+  `refreshCases` (called after create/edit/delete/bulk actions) also now passes `summaryFolderParam`
+  through, so those stay in sync with whatever folder is open when they fire. The four stat card `<div>`s
+  under "Current view" now read `summary?.scoped_total`/`scoped_approved_count`/`scoped_in_review_count`/
+  `scoped_critical_count` instead of the project-wide fields; the sidebar tree's "All test cases"/
+  "Unfiled"/"Archived"/"Recycle Bin" badges are untouched (still the project-wide fields, correctly).
+
+**Deliberately left alone:** the "Review queue (N)" / "Final approval queue (N)" toolbar buttons below
+the stat cards still show `summary?.in_review_count`/`review_completed_count` (project-wide) -- read as
+project-wide inbox shortcuts rather than "how many in the current folder," similar to a mail client's
+unread count. Not mentioned in the report; flagging in case that reads as the same inconsistency once
+this is live.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean. Not exercised against a running app --
+worth a manual check once deployed: open a folder with a mix of statuses/priorities and confirm the four
+stat cards match what's actually in that folder, then click "All test cases" and confirm they go back to
+matching the project-wide sidebar badge.
+
+## 147. Test Cycle Folders -- department/user access restriction on Test Execution
+
+Reported directly, with a screenshot of the Test Execution screen ("Test Cycles" listed flat under a
+project, no folder concept at all): "Create Test Cycle Folder, in which I can give access department
+based or user level, same behaviour like project has. Under this folder create test cycle." A
+substantial new feature, not a bug fix -- three design questions were resolved with the user directly
+(via `AskUserQuestion`) before building anything:
+
+1. **Access semantics: RESTRICT, not widen.** Test Projects already have `TestProjectViewGrant`, but that
+   only ever WIDENS visibility (everyone in the project's home department already sees everything; a
+   grant just adds cross-department visibility for someone who wouldn't otherwise have it). The user
+   confirmed the opposite is wanted here: a folder with at least one access grant becomes a real access
+   boundary -- ONLY the named department(s)/user(s) can see its test cycles, even other people who could
+   otherwise execute in the same project. A folder with zero grants stays unrestricted (same as an
+   Unfiled cycle today) -- this was a deliberate default, not an oversight, so a freshly created empty
+   folder isn't invisible to its own creator.
+2. **Flat, not nested.** Confirmed: one level of folders directly under a project, no sub-folders --
+   avoids an access-inheritance-down-the-tree question the nested Test Repository folder tree doesn't
+   have to answer, since TestFolder there carries no access rules of its own at all.
+3. **Existing cycles land in an "Unfiled" pseudo-folder**, exactly the same convention
+   `TestCase.folder_id` already uses in the Test Repository -- no migration/backfill of existing rows
+   into a new default folder.
+
+**New tables (`alembic/versions/e2a7c19d4f3b_add_test_cycle_folders.py`, `down_revision='4cfa97fbdd97'`).**
+`qap_test_cycle_folders` (id, project_id FK, name, created_by_id, created_at) and
+`qap_test_cycle_folder_access` (id, folder_id FK, department, user_id FK, granted_by_id, created_at --
+exactly one of department/user_id per row, enforced application-side same as `TestProjectViewGrant`'s own
+"exactly one of" convention, not at the DB level). `qap_test_cycles` gets a new nullable, indexed
+`folder_id` FK (added via a separate `op.create_foreign_key` after both tables exist, not embedded in
+`create_table`'s constraint list -- see section 140's own note on why `use_alter=True` embedded in
+`create_table` silently never applies on Oracle). NULL `folder_id` means Unfiled.
+
+**Backend models (`models.py`).** `TestCycleFolder` (flat, `cycles`/`access_grants` relationships) and
+`TestCycleFolderAccess` (one grant row). `TestCycle` gets `folder_id`/`folder` relationship/`folder_name`
+property. `TestProject` gets a new `cycle_folders` relationship (cascade delete, same as `folders`/
+`cycles`).
+
+**Backend access check (`deps.py::can_view_cycle_folder`/`require_can_view_cycle_folder`).** Deliberately
+the *opposite* of `viewable_project_ids`/`TestProjectViewGrant` (which only ever widen). Bypasses: QA Lead
+Group (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA -- same "governs everything in this module" convention
+`can_manage_project`/`can_execute_project` already use), the project's own owner, and the folder's own
+creator (so nobody can restrict themselves out of a folder they just made) -- `has_role()` already
+bypasses Admin. A folder with zero access rows is unrestricted for everyone else too.
+
+**Backend endpoints (`routers/test_execution.py`), all new:**
+- `GET/POST /projects/{id}/cycle-folders` -- list (restricted folders the caller can't see are omitted
+  entirely, not just their cycles -- "fail closed", matching this app's other access boundaries) /
+  create (same `_EXEC_ROLES` + `require_can_execute_project` gate as `create_cycle`).
+- `PATCH /cycle-folders/{id}` -- rename only (flat folders have no parent to reassign).
+- `DELETE /cycle-folders/{id}` -- QA Lead Group/Admin only (`require_can_manage_execution_governance`,
+  the same gate `delete_cycle` already uses), only when empty (mirrors Test Repository's own
+  delete_folder "never silently orphan/cascade real content" rule).
+- `GET/POST /cycle-folders/{id}/access`, `DELETE /cycle-folders/{id}/access/{grant_id}` -- the actual
+  restriction grants, gated the same as folder deletion (QA Lead Group/Admin) -- mirrors
+  `test_projects.py`'s own `view-access` endpoints closely, but restricting instead of widening.
+- `list_cycles` gets a new `folder_id` query param (numeric id / `'unfiled'` / omitted for "every cycle
+  this user can see project-wide," which now excludes any restricted folder's cycles the caller doesn't
+  have a grant for -- `_hidden_cycle_folder_ids` helper).
+- `create_cycle`/`update_cycle` accept `folder_id` (validated same-project + access-checked before
+  assignment); `TestCycleCreate`/`TestCycleUpdate`/`TestCycleOut` all carry it now.
+- `get_cycle` (the one endpoint the frontend actually uses to open a cycle) now also checks folder access
+  before returning a cycle. **Deliberately NOT threaded through every other cycle-scoped endpoint** (add/
+  remove/bulk-assign/bulk-result executions, exports, activity, etc. -- dozens of call sites all go
+  through `_get_cycle_or_404`, which doesn't have `current_user` in scope) -- doing so would mean passing
+  `current_user` into a helper called from every execution endpoint in this router, a much larger, riskier
+  change than this feature asked for. Practical effect: a restricted folder's cycles are hidden from
+  every list/browse path, but someone who already knows a specific cycle_id could still act on it via
+  those other endpoints directly. Flagging this gap explicitly rather than silently leaving it
+  undocumented -- happy to close it if it matters in practice.
+
+**Frontend (`types.ts`).** New `TestCycleFolderOut`/`TestCycleFolderAccessOut`/`TestCycleFolderListOut`
+interfaces; `TestCycleOut` gets `folder_id`/`folder_name`.
+
+**Frontend (`modules/test-management/TestExecution.tsx`).**
+- New `NewCycleFolderModal` (name only, create/rename) and `CycleFolderAccessModal` (grant/revoke
+  department-or-user access -- deliberately styled as the RESTRICTING counterpart to
+  `TestProjects.tsx`'s `ManageViewAccessModal`, reusing the same department-list fetch and layout).
+- The "Test Cycles" sidebar (`tm-cycle-panel`, already a `tm-tree-panel`) gained a folder selector above
+  the cycle list, reusing Test Repository's existing `.tm-folder-row`/`.link-btn`/`.tm-tree-add` styling
+  (no new CSS needed) -- "All cycles" / "Unfiled" pseudo-entries plus real folders, each showing a 🔒 if
+  restricted and a per-row Manage-access/Rename/Delete action set.
+- `CycleModal` (new/edit cycle) gained a Folder picker (`-- Unfiled --` + folders, restricted ones marked)
+  defaulting to whatever folder is currently selected in the sidebar.
+- `loadCycles` now forwards the selected folder as `folder_id`; creating/editing a cycle into a folder
+  other than the one currently open switches the sidebar to follow it there (new cycles sort first by
+  `created_at desc`, so the existing "auto-select the first cycle in the loaded list" fallback picks it
+  up correctly with no extra state needed).
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean. Not exercised against a running app or a
+live database (no DB connectivity in this environment, same limitation as every other migration this
+session) -- worth a manual check once deployed: create a folder, restrict it to one department, confirm a
+user outside that department can no longer see it in the sidebar or via `GET /cycle-folders`, and that a
+cycle already opened via direct link (get_cycle) by that same user is now correctly blocked too.
+
+## 148. Follow-up: QA Group also bypasses folder restriction, not just QA Lead Group
+
+Asked directly: "along with QA Lead Group (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA)/Admin, add QA group as
+well." `QA_ENGINEER`
+added to `deps.py::can_view_cycle_folder`'s bypass check, alongside QA_LEAD/CHIEF_MANAGER_QA/AGM_QA
+(Admin already bypassed via `has_role()`). Since `can_execute_project` only ever grants execution access
+to exactly those four roles, this means every account capable of executing test cycles at all now sees
+every Test Cycle Folder regardless of its access grants -- a folder's restriction only has a real effect
+on accounts holding none of those four roles (e.g. a business-department user, who can otherwise still
+view Test Execution today since `list_cycles`/`get_cycle` carry no role gate of their own, only this
+folder-level one). Confirmed this is the intended scope in the same follow-up rather than assumed.
+`py_compile` clean; no other files touched.
+
+## 149. Follow-up: QA Engineer blocked from granting/revoking folder access
+
+Reported directly, with the exact error text hit: "Your project role on this Test Project doesn't
+include cycle deletion governance -- ask the project owner to change your role to Project Lead or
+Owner. why this coming? practically qa enginner can also grant access." Root cause: `create_cycle_folder_access`/
+`delete_cycle_folder_access` (routers/test_execution.py) were gated with
+`require_can_manage_execution_governance` (QA Lead Group -- QA_LEAD/CHIEF_MANAGER_QA/AGM_QA -- only,
+same governance tier as deleting a whole cycle, hence that message's "cycle deletion governance"
+wording), even though the frontend's "Manage access" 🔑 button was already shown to any `canExec` user
+(including a plain QA_ENGINEER, per `Functional.tsx`/`TestExecution.tsx`'s existing `canExec` gate) --
+a QA_ENGINEER could open the modal and attempt a grant, then get rejected server-side with a
+governance-tier message that (per its own stale text, predating the 2026-08 "no more project-membership
+carve-out" simplification -- see delete_cycle's own comment) doesn't even match how this app's roles
+actually work anymore.
+
+**Fix.** Both endpoints now use `require_can_execute_project` (QA_ENGINEER/QA_LEAD/CHIEF_MANAGER_QA/
+AGM_QA) instead -- the same gate `create_cycle_folder` itself already uses. Granting/revoking access to
+a folder is now treated as an ordinary authoring action on a folder someone with execute access already
+made, not a governance-tier one. Folder **deletion** (`delete_cycle_folder`) deliberately keeps the
+stricter `require_can_manage_execution_governance` gate -- unlike a grant (reversible, narrow-blast-
+radius), deleting a folder is destructive and was never the specific ask here.
+
+No frontend change needed -- the "Manage access" button was already visible to `canExec` (QA_ENGINEER
+included); only the backend gate was out of sync with it. The "Delete folder" × button stays behind
+`canManageExecutionGovernance` (QA Lead Group only) client-side too, matching the still-unchanged
+backend gate.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` clean. No frontend files touched, so `tsc` re-run wasn't necessary, but was run
+anyway as a sanity check (`npx tsc --noEmit -p .` clean).
+
+## 150. Test Cycle Folders sidebar -- cycles nested visually under their folder
+
+Reported directly, with a screenshot of the sidebar showing "CBS Deposit" (selected) and "CBS LOANS" as
+two flat folder rows, then "Cycle 1" as a separate box below the whole folder list with no visual link
+back to which folder it belonged to: "MAKE child hierarchy based, more easier to visulaize." This is
+purely a presentation change -- section 147's "flat, not nested" decision for the FOLDERS themselves is
+unchanged (still confirmed the right call, not being revisited); this is about visually showing which
+cycles belong to the currently selected folder, which previously wasn't obvious from the layout alone.
+
+**Fix (`modules/test-management/TestExecution.tsx`).** The folder tree (`ul.plain-list`, "All cycles" /
+"Unfiled" / real folders) and the cycles list used to be two separate, sequential blocks in the sidebar.
+`cycles` was already scoped server-side to whichever one is currently selected (section 147's own
+`folder_id` query param) -- only the RENDERING wasn't reflecting that relationship. Extracted the cycle
+list into a `nestedCycleList` JSX value computed once, then rendered it inside the `<li>` of whichever
+row (`All cycles`/`Unfiled`/a specific folder) is currently `selectedCycleFolder`, right below that row's
+own button -- so the cycles visually hang off the one folder they actually belong to, connected by a left
+border/indent, instead of sitting in an unrelated list past the whole tree. The old standalone
+`.tm-cycle-list` block (and its own separate "+ Create cycle" button) was removed; "+ Create cycle" now
+lives inside `nestedCycleList` itself, right after that folder's own cycles.
+
+**New CSS (`index.css`)**, added right after the existing `.tm-cycle-list` rules it reuses styling from:
+`.tm-cycle-nested` (indented rail with a left border, same visual technique Test Repository's own nested
+sub-folder tree already uses via `padding-left`, just applied to cycles-under-folder instead of
+folders-under-folder), `.tm-cycle-nested .tm-cycle-row` (narrower/smaller variant of the existing row
+button), `.tm-cycle-empty`, `.tm-cycle-nested-add`. No existing selectors were changed.
+
+**Verified:** `npx tsc --noEmit -p .` clean (only `TestExecution.tsx` and `index.css` touched -- no
+backend changes this round, so `py_compile` wasn't re-run). Not exercised against a running app -- worth
+a manual check once deployed: click through All cycles/Unfiled/each folder and confirm the nested cycle
+list updates to match, and that a folder with zero cycles shows "No cycles here yet." in the nested slot
+rather than an empty gap.
+
+## 151. Change Description added to the Dashboard's "My Requests & My Department" table
+
+Reported directly: "IN dashboard also show change description" -- the one remaining place that lists
+individual requests and didn't have it yet, after sections 143-145 covered the QA Requests list/detail
+and all five linked child gateways' own lists/details. `Dashboard.tsx`'s "My Requests & My Department"
+table (`MyRequestsTab`) merges QA Request/Functional/SAST/DAST/Performance rows into one combined list
+via its own `UnifiedRequestRow` type and `toUnified`/`toUnifiedDast` mapper functions -- unlike the other
+five, this table never went through a backend endpoint of its own; it's built entirely client-side from
+the same `QARequestListOut`/`FunctionalListOut`/`SASTListOut`/`DASTListOut`/`PerformanceListOut` rows the
+individual module list pages already fetch (all five already carry `change_description`, from sections
+143-144), so no backend change was needed here at all -- only the frontend mapping/rendering.
+
+**Fix (`Dashboard.tsx`).** `UnifiedRequestRow` gets a new `change_description?: string | null` field;
+both `toUnified()` (generic mapper, used for QA Request/Functional QA/SAST/Performance) and
+`toUnifiedDast()` (DAST's own mapper, kept separate for its own `—` fallback) now copy it through from
+each source row. `MyRequestsTab`'s `<Table>` gets a new "Change Description" column (truncated with a
+full-text tooltip, same `.truncate-cell` pattern as every other Change Description column added this
+session) right after Application.
+
+**Verified:** `npx tsc --noEmit -p .` clean. Only `Dashboard.tsx` touched -- no backend files, so
+`py_compile` wasn't re-run.
+
+## 152. Application Master admin screen -- inactive-department indicator + Application Name rename
+
+Reported directly, against a screenshot of the "Existing Application Master / Application departments"
+Admin screen: "active inactive department option / also edit option for renaming the application name" --
+two separate asks on the same screen.
+
+**(a) Active/inactive department indicator.** The department `<select>` on each row (`Admin.tsx`'s
+`ApplicationSeedCard`) was already correctly built from `departmentOptions`, which the parent `Admin`
+component filters to active departments only (`departments.filter((d) => d.is_active).map((d) => d.name)`).
+The gap: `draftDepartments` seeds straight from `application.department` (a plain denormalised string on
+`ApplicationMaster`, not a live FK lookup) with no check that department is still active. If a department
+gets deactivated later (from the Departments section's own pre-existing active/inactive toggle --
+`PATCH /api/departments/{id}` already supports both rename and `is_active`, see `routers/departments.py`),
+the row assigned to it would just silently show a value the `<select>`'s own option list no longer
+contains -- confusing, with no indication why. This is the same problem the Test Cycle Folder Environment
+field's `(Legacy)` option pattern solved. No backend change was needed: the parent `Admin` component was
+already fetching the FULL department list (`/api/departments/all`, including inactive ones) for its own
+`DepartmentManagerCard` -- `ApplicationSeedCard` just wasn't receiving it.
+
+**Fix (`Admin.tsx`, frontend only).** `ApplicationSeedCard` now also takes a `departments: DepartmentOut[]`
+prop (passed from the existing `departments` state at the `<ApplicationSeedCard>` call site). A
+`departmentActiveByName` lookup flags any row whose `application.department` maps to an inactive
+`Department` row, surfaced two ways: an "· Inactive department" badge next to the department name text,
+and the current value kept as a selectable `(Inactive)` option in the `<select>` (rather than disappearing)
+so the row stays editable without forcing a department change just to see/keep its current value.
+
+**(b) Application Name rename.** No rename capability existed anywhere for `ApplicationMaster.name` --
+`routers/applications.py` only ever had `update_application_department` (department only). Investigated
+whether `app/application_names.py`'s `resolve_application_name` (the shared create-or-reuse helper used by
+every Admin-only Application Name edit in functional.py/sast_dast.py/performance.py) already covered a
+rename path -- it doesn't; it only ever resolves a *given* name to an existing-or-new `ApplicationMaster`
+row, never mutates an existing row's `name` in place. `ApplicationMaster.name` is `unique=True`, and --
+confirmed directly against `models.py` -- is independently denormalised as a plain `String(150)` column
+(no FK, no unique/index constraint) on seven other tables: `QARequest`, `SASTRequest`,
+`SecurityScanResult`, `PerformanceRequest`, `SuppressionRequest`, `QASignOff`, `Defect` (only
+`FunctionalRequest`/`DASTRequest` derive their `application_name` live via a `@property`). A rename that
+only touched `ApplicationMaster.name` would leave every existing request permanently showing the old name.
+
+**Fix (`routers/applications.py`, Admin-only, new endpoint).** `PATCH /api/application-names/{app_id}/name`
+(`schemas.ApplicationMasterRenameUpdate`, `{name: str}`, gated `require_roles(Role.ADMIN)` same as the
+department endpoint) -- normalises the same way `resolve_application_name` does (strip + upper, so a
+rename can't itself create a differently-cased duplicate), 400s if another `ApplicationMaster` row already
+owns the target name, otherwise renames the row and cascades a bulk `UPDATE ... SET application_name =
+:new WHERE application_name = :old` across all seven denormalised tables listed above (a plain string-match
+update -- none of those columns carry a unique/index constraint, confirmed against `models.py`, so no
+migration or extra handling was needed) and invalidates the same `_APPROVED_NAMES_CACHE_KEY` the department
+endpoint already invalidates. A no-op rename (new name equal to current, after normalising) returns
+immediately without touching the cascade.
+
+**Fix (`Admin.tsx`, frontend).** The application row's `<strong>{application.name}</strong>` (read-only)
+is replaced with a per-row controlled `<input>` (`draftNames`/`renamingApplicationId`/
+`renamedApplicationId` state, mirroring the existing `draftDepartments`/`savingApplicationId`/
+`savedApplicationId` triple) plus its own "Rename" button, disabled while empty/unchanged/in-flight, with
+a "✓ Renamed" confirmation matching the department column's own "✓ Updated". The row's CSS
+(`.application-department-row`) switched from a fixed 4-column grid to a wrapping flex layout, since the
+row now holds two independent edit-and-save controls (name, department) instead of one.
+
+**Scope decision:** the rename cascade is a plain exact-string-match `UPDATE`, not a fuzzy/case-insensitive
+one. This relies on every one of those seven tables' `application_name` having been written via the same
+upper-cased normalisation `qa_requests.py`'s `create_request`/`edit_request` already use
+(`(application_name_in or "").strip().upper()`), confirmed by reading both handlers directly. Any row that
+somehow predates that normalisation with different casing would not be picked up by the cascade and should
+be treated as a pre-existing data-quality issue, not something this endpoint is responsible for detecting.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py alembic/versions/*.py`
+and `npx tsc --noEmit -p .` both clean. No new migration needed -- no schema/column changes, only a new
+endpoint and cascade `UPDATE`s against existing columns.
+
+## 153. Help & User Manual updated for recent functionality
+
+Reported directly: "update Help & User Manual section based on recent functionality". Reviewed
+`frontend/src/Help.tsx` (the single, self-contained source for the `/help` page -- content is plain JSX
+driven by a `MANUAL_TOPICS` array + per-topic `ManualSection` render blocks, no markdown/API fetch
+involved) against everything shipped in sections 143-152 and confirmed four things were live in the app
+but undocumented in the manual: the mandatory Change Description field (143-145, 151), Test Cycle Folders
+(147-150), Test Repository's folder-scoped stat cards (146 -- formerly documented nowhere either way), and
+the Application Master admin screen's inactive-department indicator + rename capability (152, this
+session's own preceding work). No topic previously existed for Application Master administration at all.
+
+**Fix (`Help.tsx`, frontend only, no backend touched).**
+- **Change Description** -- new Callout in the `qa-request` section (05) right after the existing "Bug Fix
+  traceability" callout, explaining it's collected once on the QA Request and carried automatically onto
+  every linked child gateway's list/detail views and the Dashboard table. Added `change description`/`cr
+  number` to that topic's search keywords.
+- **Test Cycle Folders** -- new first SOP step in `test-management`'s (08) "Execution SOP" ("Organize
+  cycles into folders"), covering folder creation, the default-open/restrict-once-granted access model,
+  the bypass role list, and the stricter deletion gate -- placed ahead of the existing "Create or edit a
+  test cycle" step, which itself now also mentions placing a cycle in a folder.
+  - Test Repository stat cards -- new Callout right after the Repository SOP's `SopSteps` block explaining
+  the Total/Approved/In Review/Critical cards follow whichever folder (or Unfiled, or whole project) is
+  currently selected. Topic summary/keywords updated to mention folders and folder-scoped stats.
+- **Application Master administration** -- new subsection appended to the end of `role-sop` (04, chosen
+  over a brand-new top-level topic since it's another Administrator-only registry-management SOP alongside
+  the existing user/role SOPs already in that section): a new "SOP: administer the Application Master
+  list" heading with `SopSteps` covering department assignment (including the new inactive-department
+  badge/legacy-selectable behaviour), the new rename control and its cross-record cascade, and the
+  pre-existing bulk-seed flow, plus a callout clarifying that renaming an application is separate from
+  renaming/deactivating a department. Topic summary/keywords updated accordingly.
+- "Last reviewed" hero date bumped from 13 August 2026 to 19 August 2026.
+
+**Verified:** `npx tsc --noEmit -p .` clean. Only `Help.tsx` touched -- no backend files, so `py_compile`
+wasn't re-run.
+
+## 154. Global search by CR number returns every request raised under it, including Sign-off
+
+Reported directly: "in global search if any one wants to search by cr number as well, can we get all
+requests details based on that cr?" Investigated first (see this section's own follow-up decision below):
+typing a CR number into the topbar search already fell through to `/qa-requests?search=<term>` (it's not a
+recognised TQA-* ID prefix), which already ilike-matches `QARequest.cr_number` alongside `request_id`/
+`application_name`, and each returned row already carried its linked Functional/SAST/DAST/Performance IDs.
+Two real gaps: (1) that substring match is too loose for "give me every request raised under this exact
+CR" -- CR-102 would also match CR-1023/CR-1024; (2) Sign-off was the one request type never among the
+linked-request fields, since `QASignOff` has no FK to `QARequest` (matched only by a business-ID string
+against a linked `FunctionalRequest.request_id`, via `testing_request_id`/`source_functional_request`).
+Asked the user how far to take this (`AskUserQuestion`) -- reuse-and-fix vs. a whole new consolidated CR
+view vs. no code change; picked "Minimal fix": keep the existing QA Requests list as the destination, make
+the CR match exact, and surface Sign-off alongside the other 4 linked types.
+
+**Fix (`routers/qa_requests.py`, `list_requests`).** New optional `cr_number` query param, applied as an
+exact case-insensitive match (`func.upper(QARequest.cr_number) == cr_number.strip().upper()`) alongside
+(not replacing) the existing free-text `search` param -- the topbar only ever sends one or the other, never
+both. Also, after `pagination.paginate()` runs, sign-offs for the whole returned page are attached in one
+batched extra query (collect every linked Functional `request_id` already loaded on the page, then a single
+`testing_request_id IN (...)` lookup) rather than one query per row -- same perf discipline as the
+`selectinload`s already on this endpoint (see this file's own 2026-08 perf-tuning comment). Same batching
+done (for a single row) in `get_request` (`GET /api/qa-requests/{id}`) so the detail drawer gets it too.
+
+**Fix (`models.py`).** `QASignOff.request_id` -- new alias `@property` returning `self.certificate_id`
+(Sign-off's own business-ID column has a different name than every other request type's `request_id`), so
+it fits the same `LinkedRequestRef` shape (`id`/`request_id`/`status`/`priority`/`risk_...`) already used
+for the other 4 linked-request types without changing that shared schema.
+
+**Fix (`schemas.py`).** New `linked_signoffs: List[LinkedRequestRef] = []` field on both `QARequestListOut`
+and `QARequestOut`.
+
+**Fix (frontend).**
+- `Layout.tsx`'s `submitSearch` -- new `CR_OR_EPIC_NUMBER_REGEX` (same shape as
+  `QARequests/validation.ts`'s own `CR_OR_EPIC_NUMBER_REGEX`, kept as a separate copy rather than an
+  import across that module boundary). A typed term matching it now navigates to
+  `/qa-requests?cr_number=<term>` instead of `?search=<term>`.
+- `QARequests/index.tsx` -- new `crNumber` state (read from the `cr_number` URL param, re-synced on every
+  `location.search` change same as `search` already was) drives the list's `extra.cr_number` param and
+  suppresses the free-text `search` filter while active (redundant otherwise, not wrong, just pointless).
+  Hand-editing the search box clears `crNumber` and reverts to ordinary substring search. An "Exact match:
+  CR-xxxx" badge shows next to the search box while the exact filter is active.
+- `RequestDetail.tsx` -- the gateway drawer's "Linked Requests" table now includes a "Sign-off" row per
+  entry in `req.linked_signoffs`, opening `/signoff?open=<certificate_id>` the same `?open=` deep-link
+  pattern the other 4 types already use (confirmed `SignOff.tsx` already matches rows against
+  `certificate_id` via this exact param).
+- `Help.tsx` -- "Global search" card (find-report, 10) updated to mention CR/EPIC number search and what
+  it returns; keywords updated.
+
+**Scope decision:** per the user's "Minimal fix" choice, this reuses the existing QA Requests list rather
+than building a separate consolidated CR-summary view -- each matching QA Request row already shows its
+own linked child IDs (now including Sign-off), so opening each row remains the way to see per-request
+detail; there is no single flattened "every child request across every matching CR" list.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean. No new migration -- no schema/column
+changes, only a new query param, a batched query, and a property alias.
+
+## 155. Fixed ORA-00001 on a second department/user access grant (Test Cycle Folders + Test Project view grants)
+
+Reported directly, live Oracle traceback: granting a second department-only access grant on a Test Cycle
+Folder raised
+```
+sqlalchemy.exc.IntegrityError: (oracledb.exceptions.IntegrityError) ORA-00001: unique constraint
+(QA_PORTAL.UQ_QAP_TCFA_FOLDER_USER) violated on table QA_PORTAL.QAP_TEST_CYCLE_FOLDER_ACCESS
+columns (FOLDER_ID, USER_ID)
+ORA-03301: (ORA-00001 details) row with column values (FOLDER_ID:1, USER_ID:NULL) already exists
+```
+
+**Root cause.** `TestCycleFolderAccess` (added in section 147) had two plain composite
+`UniqueConstraint`s -- `(folder_id, department)` and `(folder_id, user_id)` -- meant to stop the same
+department (or user) being granted twice on one folder. Exactly one of `department`/`user_id` is populated
+per row (department grants leave `user_id` NULL; user grants leave `department` NULL). This is a genuine
+Postgres-vs-Oracle NULL-handling difference: Postgres treats every NULL in a composite unique index as
+distinct from every other NULL, so any number of rows can share `(folder_id=1, user_id=NULL)`. Oracle only
+skips creating an index entry when EVERY indexed column is NULL -- since `folder_id` is never null, Oracle
+enforces uniqueness across `(folder_id, NULL)` too, so a second department-only grant collided with the
+first one's identical `(folder_id, user_id=NULL)` pair on `uq_qap_tcfa_folder_user`. Symmetrically, a
+second user-only grant would collide on `uq_qap_tcfa_folder_department`. Net effect under Oracle: at most
+one department grant and one user grant, total, per folder -- silently far short of the feature's own
+design (multiple departments and/or multiple users per folder).
+
+While fixing it, found the exact same bug, same shape, already live in production on a separate,
+pre-existing feature: `TestProjectViewGrant` (project-level view-access grants, present since the initial
+schema baseline `1745115668f0`, well before this session) has the identical "exactly one of
+department/user_id" design with the identical two plain `UniqueConstraint`s -- so granting a second
+department or second user view-access to the same Test Project would already ORA-00001 the same way, for
+anyone who happened to trigger it. Fixed alongside the reported incident rather than left for whoever hits
+it here next.
+
+**Fix (`models.py`, both `TestCycleFolderAccess` and `TestProjectViewGrant`).** Replaced each pair of plain
+`UniqueConstraint`s with a function-based unique `Index` per grant type, whose first expression collapses
+to NULL whenever that row isn't actually of that grant type:
+```python
+Index("uq_qap_tcfa_folder_department",
+      text("(CASE WHEN department IS NOT NULL THEN folder_id END)"), "department", unique=True)
+Index("uq_qap_tcfa_folder_user",
+      text("(CASE WHEN user_id IS NOT NULL THEN folder_id END)"), "user_id", unique=True)
+```
+When `department` is NULL (a user-only grant row), the first expression is also NULL, so BOTH indexed
+values are NULL -- matching Oracle's own "skip the index entry when every column is NULL" rule, excluding
+that row from the department index's uniqueness check entirely. This reproduces Postgres' one-NULL-per-
+column-is-always-distinct behaviour for exactly this "ignore rows where this grant type isn't in use" case,
+without changing the application-layer "exactly one of department/user_id" rule those routers already
+enforce. Same pattern applied to `TestProjectViewGrant`'s two constraints.
+
+**Migration (`9b1f4d7c2a63_fix_null_composite_unique_constraints.py`, new revision on top of
+`e2a7c19d4f3b`).** Drops all four old `UniqueConstraint`s and creates the four new function-based unique
+indexes via raw `op.execute(...)` (Oracle `CREATE UNIQUE INDEX ... ON table ((CASE WHEN ... END), col)`) --
+a plain `op.create_index()` call can't express a CASE-expression index column, so this uses raw DDL the
+same way this app already does for other Oracle-specific DDL it can't express portably. `downgrade()`
+restores the original (broken) plain unique constraints, for symmetry/rollback only -- not a recommended
+target state.
+
+**Scope decision:** did not touch the "exactly one of department/user_id" application-layer validation
+itself (already correct and unrelated to this bug) -- only the DB-level uniqueness enforcement underneath
+it, which is what actually broke.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` clean. No live Oracle instance available in this environment to run `alembic
+upgrade head`/`alembic check` directly (same limitation as every other migration this session) -- the new
+revision was reviewed by hand for revision-chain correctness (`down_revision = 'e2a7c19d4f3b'`, confirmed
+as the current head before this change) and Oracle DDL syntax.
+
+## 156. "Link existing defect" now also offers governed defects already linked elsewhere
+
+Reported directly, quoting the picker's own banner text: "Select a previously opened, unlinked governed
+defect. This execution's Cycle, Test Case, and latest attempt will be linked automatically. -- instead of
+[that], show linked defect as well." The "Link existing defect" modal (TestExecution.tsx) only ever fetched
+`queue=unlinked` (`execution_id IS NULL`) governed defects, because `POST /api/defects/{id}/link-execution`
+unconditionally rejected linking a defect that already had a DIFFERENT primary execution ("This defect is
+already linked to another primary execution"). Asked the user how "show linked defects too" should actually
+behave (`AskUserQuestion`, since a defect's `execution_id`/`cycle_id`/`primary_test_case_id` govern its
+assignment/closure/retest workflow and simply re-pointing them would be destructive) -- picked "Additional
+link, non-destructive": the same governed defect can now also be traced to a second Failed/Blocked
+execution (e.g. the same underlying bug also failed a different test case), leaving its original primary
+link untouched.
+
+**Design precedent reused.** `models.Defect` already had exactly this "one primary field + a separate
+many-to-many table for extra links" shape for test cases: `primary_test_case_id` plus
+`DefectTestCaseLink`/`test_case_links`. The fix mirrors that pattern for executions instead of inventing a
+new one.
+
+**Fix (`models.py`).** New `DefectExecutionLink` (`qap_defect_execution_links`, unique on
+`(defect_id, execution_id)` -- both columns `NOT NULL` here, so no repeat of section 155's Oracle NULL-
+composite-unique-constraint issue). `cycle_id`/`cycle_key`/`project_id`/`test_case_key`/`status` are all
+`@property`s reading through to `execution`, same convention as `Defect.cycle_key`/`test_case_key`.
+`Defect.execution_links` (`back_populates`, `cascade="all,delete-orphan"`) added alongside the existing
+`test_case_links`.
+
+**Migration (`c4e8a1f6d2b7_add_defect_execution_links.py`, on top of `9b1f4d7c2a63`).** Creates
+`qap_defect_execution_links` and its two indexes.
+
+**Fix (`routers/defects.py`).**
+- `_link_run_defect` -- extracted from the old `_link_to_execution` (the `TestRunDefect` attempt-linking
+  logic, unchanged behaviour), now shared by both the primary and additional link paths so the "at most one
+  defect per attempt, a fresh retest attempt can carry a different one" rule applies uniformly to both.
+- `_link_to_execution` -- now ONLY sets the primary link (`execution_id`/`cycle_id`/`primary_test_case_id`/
+  `retest_tester_id`); no longer raises 400 itself (the caller decides which path to take, see below).
+- New `_ensure_execution_link`/`_link_additional_execution` -- mirrors `_ensure_case_link` exactly
+  (session's own pending `db.new` checked first, same autoflush=False caution documented on the original).
+  `_link_additional_execution` adds a `DefectExecutionLink` row and a test-case link, and calls
+  `_link_run_defect` -- but never touches the defect's primary fields.
+- `link_defect_execution` -- branches on `obj.execution_id`: unset or already equal to the target execution
+  goes through `_link_to_execution` (primary link, unchanged); set to a DIFFERENT execution now goes through
+  `_link_additional_execution` instead of raising 400. Audit log entry text distinguishes "Linked to..." from
+  "Also linked to... (primary execution unchanged)".
+- `create_defect` unaffected -- a brand-new defect never has a primary execution yet, so it always takes the
+  primary-link path exactly as before.
+
+**Fix (`schemas.py`).** New `DefectExecutionLinkOut` (id, execution_id, cycle_id, cycle_key, project_id,
+test_case_key, status). New `execution_links: List[DefectExecutionLinkOut] = []` on `DefectOut` (detail
+schema only -- `DefectListOut` stays lean per its own docstring, same convention as `linked_test_case_ids`/
+`linked_test_case_keys` before it).
+
+**Fix (frontend).**
+- `TestExecution.tsx`'s `LinkExistingDefectModal` -- dropped `queue=unlinked` from the fetch (keeps the
+  existing non-terminal status filter, so the picker now shows every open governed defect). Options for an
+  already-linked defect append "· already linked to {cycle} / {test case}" to the label so the choice is
+  informed, not a surprise. Banner and empty-state copy updated to match.
+- `Defects.tsx` -- the detail view's trace grid (QA Request / Test Cycle / Test Case / Execution, which
+  always shows the PRIMARY link) gets a new "Also linked to" chip row underneath, one chip per
+  `execution_links` entry, each navigating to that execution the same way the primary Execution button does.
+- `types.ts` -- new `DefectExecutionLinkOut` interface; `execution_links` added to `DefectOut`.
+- `Help.tsx` -- "Link defects" step (test-management, 08) updated to mention this.
+
+**Scope decision:** the `queue=unlinked` filter on `GET /api/defects` itself is unchanged -- it still means
+"no primary execution at all," which remains the correct meaning for every OTHER caller of that filter
+(e.g. anywhere that specifically wants defects that have never been traced to anything yet). Only the
+picker's own fetch call stopped applying it.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean. No live Oracle instance available to run
+`alembic upgrade head` in this environment (same limitation noted in section 155) -- reviewed the migration
+by hand for revision-chain correctness (`down_revision = '9b1f4d7c2a63'`, the head before this change).
+
+## 157. Proactive audit: closed race-condition duplicate-key windows on grant/link modals
+
+Reported directly, vaguely: "check any issue database modal, sometimes getting key issue" -- no exact
+error text or screenshot available, and the user didn't name a specific modal when asked. "Sometimes"
+pointed at a race condition rather than a deterministic bug (sections 155/156 were both deterministic --
+same input, same failure every time), so this was investigated as a proactive audit rather than a targeted
+lookup: every check-then-insert helper across the backend (query "does this unique row already exist?",
+`db.add()` only if not) was reviewed for the TOCTOU window between the check and the commit, where two
+near-simultaneous requests can both pass the check and both insert, tripping the underlying unique
+constraint on the second commit and surfacing as a raw, uncaught 500 (confirmed against `main.py`'s
+catch-all exception handler -- no dedicated `IntegrityError` handler existed for any of these routes,
+so a raced duplicate really would show a generic "unexpected server error" to the user, matching a vague
+"key issue" report).
+
+Also checked (per section 155's precedent) for any OTHER table with the Oracle NULL-composite-unique-
+constraint bug beyond the two already fixed -- none found; every other composite `UniqueConstraint` in
+`models.py` has all-`NOT NULL` columns, so that specific bug class is fully remediated.
+
+**Fixed, highest-risk first -- both combine a real grant/link modal with a genuine race window:**
+
+- `routers/test_execution.py::create_cycle_folder_access` (POST `/cycle-folders/{folder_id}/access`,
+  behind Test Execution's "Manage access" modal) -- two near-simultaneous grants for the same
+  department/user on the same folder both passed the `existing` pre-check and both inserted, tripping
+  the very functional unique index section 155 just added.
+- `routers/test_projects.py::create_project_view_grant` (POST `/{project_id}/view-access`, behind Test
+  Projects' "Manage view access" modal) -- identical shape, `uq_qap_tpvg_project_department`/
+  `uq_qap_tpvg_project_user` (also fixed by section 155).
+- `routers/functional.py::start_execution` (the `TestCycleChildRequestLink` cycle-linking step) -- two
+  near-simultaneous "Start Execution, link this cycle" calls for the same cycle from different requests
+  both passed the `cycle_link` pre-check and both inserted (unique on `cycle_id` alone).
+- `routers/departments.py::create_department` -- same shape on `Department.name` (unique), lower risk
+  (Admin-only) but fixed for consistency.
+
+**Fix pattern (same shape in all four, mirroring the existing precedent in `auth.py`'s concurrent-first-
+login handling):** keep the existing pre-check (still gives a fast, friendly error in the normal,
+non-racing case), but wrap the `db.commit()` in `try/except IntegrityError: db.rollback(); raise
+HTTPException(409 or 400, "<friendly already-exists message>")` as the race-safe fallback for the rare
+case both requests got past the pre-check. `sqlalchemy.exc.IntegrityError` newly imported in each of the
+four router files.
+
+**Not changed:** two lower-priority check-then-insert sites the audit also found (a rare, single-admin
+project-ownership-transfer path in `test_projects.py`, and the standalone "add project member" endpoint,
+which is already disabled and returns 409 unconditionally) -- left as-is; low real-world likelihood of two
+concurrent requests, and not worth the added complexity for this pass. `defects.py`'s own
+`_ensure_case_link`/`_ensure_execution_link` (section 156) already check `db.new` first, which narrows but
+doesn't close the cross-request race -- not further hardened here since defect-linking races are already
+rare in practice (one QA engineer recording one attempt at a time) and section 156 was scoped to the
+feature itself, not this broader hardening pass.
+
+**Verified:** `python3 -m py_compile app/*.py app/routers/*.py scripts/mock_fortify_ssc.py
+alembic/versions/*.py` and `npx tsc --noEmit -p .` both clean (no frontend files touched -- this section
+is backend-only). No new migration -- no schema/column changes, only added exception handling around
+existing constraints.
 
 > Historical implementation record: notification and walkthrough features described below
 > were retired on 2026-08-14. Their routes, UI, models, and database tables are no longer

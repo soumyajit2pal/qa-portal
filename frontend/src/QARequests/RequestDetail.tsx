@@ -466,7 +466,8 @@ export function RequestDetail({
     req.linked_functional_requests?.length > 0 ||
     req.linked_sast_requests?.length > 0 ||
     req.linked_dast_requests?.length > 0 ||
-    req.linked_performance_requests?.length > 0;
+    req.linked_performance_requests?.length > 0 ||
+    req.linked_signoffs?.length > 0;
 
   // One row per linked request across all four request types, feeding the
   // "Linked Requests" table below. `path` is that type's own module page --
@@ -509,6 +510,13 @@ export function RequestDetail({
       request_id: p.request_id,
       status: p.status,
       path: "/performance",
+    })),
+    ...(req.linked_signoffs || []).map((s) => ({
+      key: `signoff-${s.id}`,
+      type: "Sign-off",
+      request_id: s.request_id,
+      status: s.status,
+      path: "/signoff",
     })),
   ];
 
@@ -673,6 +681,9 @@ export function RequestDetail({
                 {req.bug_fix_source_request_id || "—"}
               </DetailField>
             )}
+            <DetailField label="Change Description">
+              {req.change_description || "—"}
+            </DetailField>
             <DetailField label="Vendor / SI Partner">
               {req.vendor_si_partner || "—"}
             </DetailField>
@@ -1194,9 +1205,8 @@ export function RequestDetail({
         <InfoModal title="Request Submitted" onClose={() => setRaisedNotice(null)}>
           <p style={{ marginTop: -4 }}>
             <strong>{raisedNotice.request_id}</strong> has been submitted, but
-            not raised yet — its Application Name{" "}
-            <strong>{raisedNotice.application_name || "—"}</strong> is a
-            brand-new entry and needs Application Owner approval first.
+            not raised yet — Application Name{" "}
+            <strong>{raisedNotice.application_name || "—"}</strong> needs Application Owner approval first.
           </p>
           <p className="muted small">
             No Functional/SAST/DAST/Performance request has been created yet.

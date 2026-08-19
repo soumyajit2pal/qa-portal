@@ -477,6 +477,16 @@ class QARequest(Base):
     target_release_date = Column(Date)
     supporting_doc_path = Column(String(255))
     remarks = Column(Text)
+    # Reported directly: a new mandatory field describing the change itself
+    # (distinct from Change Type's New/Enhancement/Bug Fix classification).
+    # Nullable here like every other "mandatory" wizard field on this table
+    # (application_owner, cr_number, technology_stack, ...) -- application_name
+    # is the one deliberate NOT NULL exception (see its own comment). Real
+    # enforcement is at the wizard level (validation.ts's REQUIRED_DETAIL_FIELDS
+    # + DetailsStep.tsx's `required`), the same reasoning validation.ts's own
+    # header comment gives for why that has to be explicit instead of relying
+    # on the browser's native `required` attribute alone.
+    change_description = Column(Text)
 
     # Staging area, JSON-encoded, for the SAST/DAST/Performance detail fields
     # (and the requester's readiness-checklist self-declaration ticks)
@@ -702,7 +712,7 @@ class FunctionalRequest(Base):
     department_head_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # who performed Department Head Approval
     qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # COE - Quality Assurance QA Lead assigned by Department Head
     assigned_tester_ids = Column(String(255))     # comma-separated QA Engineer user ids (Tester Assigned step)
-    signoff_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)    # linked QA Sign-off certificate
+    signoff_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)    # linked QA Clearance certificate
     # Set when auto-created from a QA Request gateway (always, for new rows --
     # standalone creation is disabled, see routers/functional.py); nullable
     # only for symmetry with the other linked-request models.
@@ -732,7 +742,7 @@ class FunctionalRequest(Base):
         return [link.cycle for link in self.test_cycle_links if link.cycle]
 
     # 2026-08 -- reported directly: "LINK THE CERTIFICATE ONCE GENERATED" --
-    # this request's detail view had no way to see the QA Sign-off
+    # this request's detail view had no way to see the QA Clearance
     # certificate it's linked to (signoff_id above) even after one existed.
     # Delegated the same way as application_name/department/application_owner
     # above rather than adding duplicate columns.
@@ -801,6 +811,13 @@ class FunctionalRequest(Base):
     def cr_number(self):
         return self.qa_request.cr_number if self.qa_request else None
 
+    # Same delegation pattern as cr_number above -- requested so the Change
+    # Description entered on the QA Request wizard also shows on this
+    # request's own list/overview, not just the parent gateway's list.
+    @property
+    def change_description(self):
+        return self.qa_request.change_description if self.qa_request else None
+
     @property
     def change_type(self):
         return self.qa_request.change_type if self.qa_request else None
@@ -825,7 +842,7 @@ class FunctionalRequest(Base):
     def build_number(self):
         return self.qa_request.build_number if self.qa_request else None
 
-    # Added specifically so the QA Sign-off Certificate modal (raised from
+    # Added specifically so the QA Clearance Certificate modal (raised from
     # this request once QA Completed -- see routers/functional.py::
     # request_signoff and frontend SignOff.tsx) can auto-populate "Technology
     # Stack" the same way it auto-populates every other delegated field above.
@@ -961,6 +978,11 @@ class SASTRequest(Base):
     @property
     def application_owner(self):
         return self.qa_request.application_owner if self.qa_request else None
+
+    # Same delegation pattern as department/application_owner above.
+    @property
+    def change_description(self):
+        return self.qa_request.change_description if self.qa_request else None
 
     # Deployment/target promotion environment aren't columns on SASTRequest
     # itself -- collected once, on the QA Request gateway, same delegation
@@ -1189,6 +1211,11 @@ class DASTRequest(Base):
     def cr_number(self):
         return self.qa_request.cr_number if self.qa_request else None
 
+    # Same delegation pattern as cr_number above.
+    @property
+    def change_description(self):
+        return self.qa_request.change_description if self.qa_request else None
+
     # Named "deployment_environment" (not "environment") to avoid clashing
     # with the `environment` property above, which surfaces the first
     # target's own scan environment instead -- this is the gateway's own
@@ -1382,6 +1409,11 @@ class PerformanceRequest(Base):
     @property
     def department(self):
         return self.qa_request.department if self.qa_request else None
+
+    # Same delegation pattern as department above.
+    @property
+    def change_description(self):
+        return self.qa_request.change_description if self.qa_request else None
 
     @property
     def bug_fix_source_request_id(self):
@@ -1707,7 +1739,7 @@ class RequestDocument(Base):
 
 
 # ---------------------------------------------------------------------------
-# Module 8: QA Sign-off Management
+# Module 8: QA Clearance Management
 # ---------------------------------------------------------------------------
 class QASignOff(Base):
     __tablename__ = "qap_signoffs"
@@ -1779,6 +1811,27 @@ class QASignOff(Base):
     @property
     def request_department(self):
         return self.source_functional_request.department if self.source_functional_request else None
+
+    @property
+    def request_id(self):
+        """Alias so a QASignOff can be serialized through the same
+        LinkedRequestRef shape (id/request_id/status/priority/risk_...)
+        already used for the 4 relationship-backed linked-request types --
+        QASignOff's own business ID column is certificate_id, not
+        request_id. See routers/qa_requests.py list_requests' batched
+        linked_signoffs attach, added so a CR-number lookup surfaces every
+        request tied to that CR, Sign-off included."""
+        return self.certificate_id
+
+    # Two-hop delegation (QASignOff -> source_functional_request ->
+    # qa_request.change_description) -- QASignOff has no qa_request_id of
+    # its own, only a view-only link to the FunctionalRequest it was raised
+    # from, so it has to go through that request's own delegated property.
+    @property
+    def change_description(self):
+        if not self.source_functional_request:
+            return None
+        return self.source_functional_request.change_description
 
 
 # ---------------------------------------------------------------------------
@@ -1903,6 +1956,7 @@ class TestProject(Base):
     folders = relationship("TestFolder", back_populates="project", cascade="all,delete-orphan")
     test_cases = relationship("TestCase", back_populates="project", cascade="all,delete-orphan")
     cycles = relationship("TestCycle", back_populates="project", cascade="all,delete-orphan")
+    cycle_folders = relationship("TestCycleFolder", back_populates="project", cascade="all,delete-orphan")
     members = relationship("TestProjectMember", back_populates="project", cascade="all,delete-orphan")
     view_grants = relationship("TestProjectViewGrant", back_populates="project", cascade="all,delete-orphan")
 
@@ -1994,9 +2048,19 @@ class TestProjectViewGrant(Base):
     those roles alone was never sufficient without also being in-department
     prior to this feature."""
     __tablename__ = "qap_test_project_view_grants"
+    # Same Oracle NULL-handling fix as TestCycleFolderAccess above (see that
+    # model's docstring for the full explanation) -- this table has carried
+    # the identical latent bug since the initial schema baseline: a second
+    # department-only or user-only grant on the same project would raise
+    # ORA-00001 the same way. Fixed alongside the reported TestCycleFolder
+    # incident rather than left for whoever hits it here next. See
+    # ORACLE_MIGRATION_2026-07.md section 155 and alembic revision
+    # 9b1f4d7c2a63.
     __table_args__ = (
-        UniqueConstraint("project_id", "department", name="uq_qap_tpvg_project_department"),
-        UniqueConstraint("project_id", "user_id", name="uq_qap_tpvg_project_user"),
+        Index("uq_qap_tpvg_project_department",
+              text("(CASE WHEN department IS NOT NULL THEN project_id END)"), "department", unique=True),
+        Index("uq_qap_tpvg_project_user",
+              text("(CASE WHEN user_id IS NOT NULL THEN project_id END)"), "user_id", unique=True),
     )
     id = pk_column()
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
@@ -2538,6 +2602,95 @@ class TestCaseVersionStep(Base):
     version = relationship("TestCaseVersion", back_populates="steps")
 
 
+class TestCycleFolder(Base):
+    """Flat (non-nested, by design) organizational folder for a Project's
+    Test Cycles, plus an OPTIONAL access restriction (see
+    TestCycleFolderAccess below). Unlike TestFolder (Test Repository), which
+    is purely organizational and always inherits its Project's own access
+    rules, a TestCycleFolder with at least one TestCycleFolderAccess row
+    becomes visible ONLY to the department(s)/user(s) it names (plus the
+    project owner, this folder's own creator, and the QA Lead Group/Admin,
+    who bypass every governance gate in this module already) -- everyone
+    else who can otherwise execute in this project is excluded, even though
+    they could see every OTHER (unrestricted) folder and every Unfiled
+    cycle. A folder with zero access rows is unrestricted -- visible to
+    anyone who can already execute in the project, same as an Unfiled cycle
+    today. Reported directly: "Create Test Cycle Folder, in which I can give
+    access department based or user level, same behaviour like project
+    has." This is deliberately the OPPOSITE of TestProjectViewGrant (which
+    only ever WIDENS a project's visibility, never restricts it) -- see
+    deps.py::can_view_cycle_folder for the actual check, and
+    ORACLE_MIGRATION_2026-07.md section 147 for the full design decision
+    (restrict, not widen; flat, not nested; existing cycles land in an
+    Unfiled pseudo-folder rather than a migrated default folder)."""
+    __tablename__ = "qap_test_cycle_folders"
+    id = pk_column()
+    project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    project = relationship("TestProject", back_populates="cycle_folders")
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    cycles = relationship("TestCycle", back_populates="folder")
+    access_grants = relationship("TestCycleFolderAccess", back_populates="folder", cascade="all,delete-orphan")
+
+    @property
+    def created_by_name(self):
+        return self.created_by.full_name if self.created_by else None
+
+
+class TestCycleFolderAccess(Base):
+    """One department-or-user access grant on a TestCycleFolder -- see that
+    model's own docstring for the restrict-not-widen semantics. Exactly one
+    of `department`/`user_id` is set per row, enforced in
+    routers/test_execution.py, same application-layer-only convention as
+    TestProjectViewGrant and this app's other "exactly one of" rules (e.g.
+    auth.py's department/departments payload resolution).
+
+    Reported directly (live Oracle traceback): a SECOND department-only
+    grant on the same folder raised ORA-00001 on what used to be a plain
+    UniqueConstraint("folder_id", "user_id") -- Postgres treats every NULL
+    in a composite unique index as distinct from every other NULL, so any
+    number of rows can share (folder_id=1, user_id=NULL); Oracle only skips
+    creating an index entry when EVERY indexed column is NULL, and folder_id
+    is never null, so Oracle enforced uniqueness across (folder_id, NULL)
+    instead -- capping each folder at exactly one department grant and one
+    user grant, total. Fixed via two function-based unique indexes below
+    instead: each one's first expression collapses to NULL whenever the row
+    isn't actually that grant type, so Oracle's own "skip when every column
+    is NULL" rule excludes it from that index entirely -- reproducing
+    Postgres' behaviour without changing the "exactly one of
+    department/user_id" application-layer rule. See
+    ORACLE_MIGRATION_2026-07.md section 155 and alembic revision
+    9b1f4d7c2a63."""
+    __tablename__ = "qap_test_cycle_folder_access"
+    __table_args__ = (
+        Index("uq_qap_tcfa_folder_department",
+              text("(CASE WHEN department IS NOT NULL THEN folder_id END)"), "department", unique=True),
+        Index("uq_qap_tcfa_folder_user",
+              text("(CASE WHEN user_id IS NOT NULL THEN folder_id END)"), "user_id", unique=True),
+    )
+    id = pk_column()
+    folder_id = Column(Integer, ForeignKey("qap_test_cycle_folders.id"), nullable=False, index=True)
+    department = Column(String(150), nullable=True)
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    granted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    folder = relationship("TestCycleFolder", back_populates="access_grants")
+    user = relationship("User", foreign_keys=[user_id])
+    granted_by = relationship("User", foreign_keys=[granted_by_id])
+
+    @property
+    def user_name(self):
+        return self.user.full_name if self.user else None
+
+    @property
+    def granted_by_name(self):
+        return self.granted_by.full_name if self.granted_by else None
+
+
 class TestCycle(Base):
     """Test Execution module -- a named run (e.g. 'Sprint 12 Regression',
     'CR-XX UAT Cycle 1') under a Project. Test cases are explicitly added to
@@ -2568,12 +2721,23 @@ class TestCycle(Base):
     environment = Column(String(60), nullable=True)
     build = Column(String(100), nullable=True)
     owner_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    # Reported directly: "Create Test Cycle Folder... Under this folder
+    # create test cycle." Nullable -- a cycle with no folder is "Unfiled",
+    # same convention as TestCase.folder_id in the Test Repository. See
+    # TestCycleFolder's own docstring for the (optional) access restriction
+    # a folder can carry.
+    folder_id = Column(Integer, ForeignKey("qap_test_cycle_folders.id"), nullable=True, index=True)
 
     project = relationship("TestProject", back_populates="cycles")
     created_by = relationship("User", foreign_keys=[created_by_id])
     owner = relationship("User", foreign_keys=[owner_id])
+    folder = relationship("TestCycleFolder", back_populates="cycles")
     executions = relationship("TestExecution", back_populates="cycle", cascade="all,delete-orphan")
     child_request_link = relationship("TestCycleChildRequestLink", back_populates="cycle", cascade="all,delete-orphan", uselist=False)
+
+    @property
+    def folder_name(self):
+        return self.folder.name if self.folder else None
 
     @property
     def linked_request_id(self):
@@ -2873,6 +3037,17 @@ class Defect(Base):
     retest_tester = relationship("User", foreign_keys=[retest_tester_id])
     duplicate_of = relationship("Defect", remote_side=[id], foreign_keys=[duplicate_of_id])
     test_case_links = relationship("DefectTestCaseLink", back_populates="defect", cascade="all,delete-orphan")
+    # Reported directly: the "Link existing defect" picker only ever offered
+    # never-linked defects (execution_id IS NULL), so a QA engineer who
+    # spotted the SAME already-governed defect failing a different
+    # execution had no way to trace it there too -- "instead of [unlinked
+    # only], show linked defect as well." execution_id/cycle_id/
+    # primary_test_case_id above stay this defect's single PRIMARY
+    # execution, unchanged; execution_links is every ADDITIONAL execution
+    # it's also been traced to, mirroring test_case_links'/
+    # DefectTestCaseLink's own established "primary field + separate
+    # many-to-many table for extra links" pattern exactly.
+    execution_links = relationship("DefectExecutionLink", back_populates="defect", cascade="all,delete-orphan")
 
     @property
     def reporter_name(self):
@@ -2935,6 +3110,51 @@ class DefectTestCaseLink(Base):
     test_case_id = Column(Integer, ForeignKey("qap_test_cases.id"), nullable=False, index=True)
     defect = relationship("Defect", back_populates="test_case_links")
     test_case = relationship("TestCase")
+
+
+class DefectExecutionLink(Base):
+    """An ADDITIONAL execution a governed Defect has been traced to, beyond
+    its one primary execution (Defect.execution_id) -- see Defect.
+    execution_links' own comment. Added so routers/defects.py's
+    link-execution endpoint can attach the SAME governed defect to a second
+    (or third...) Failed/Blocked execution -- e.g. the same underlying bug
+    also failed a different test case -- without moving or overwriting the
+    defect's original primary link, which stays the one used for
+    assignment/closure/retest workflow. Deliberately excludes the primary
+    execution itself (routers/defects.py never creates a row here for
+    execution_id == Defect.execution_id, only for genuinely additional
+    ones) so this table and the primary FK never disagree about which
+    execution is "the" primary."""
+    __tablename__ = "qap_defect_execution_links"
+    __table_args__ = (UniqueConstraint("defect_id", "execution_id", name="uq_qap_def_exec"),)
+    id = pk_column()
+    defect_id = Column(Integer, ForeignKey("qap_defects.id"), nullable=False, index=True)
+    execution_id = Column(Integer, ForeignKey("qap_test_executions.id"), nullable=False, index=True)
+    linked_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+    defect = relationship("Defect", back_populates="execution_links")
+    execution = relationship("TestExecution", foreign_keys=[execution_id])
+    linked_by = relationship("User", foreign_keys=[linked_by_id])
+
+    @property
+    def cycle_id(self):
+        return self.execution.cycle_id if self.execution else None
+
+    @property
+    def cycle_key(self):
+        return self.execution.cycle.cycle_key if self.execution and self.execution.cycle else None
+
+    @property
+    def project_id(self):
+        return self.execution.cycle.project_id if self.execution and self.execution.cycle else None
+
+    @property
+    def test_case_key(self):
+        return self.execution.test_case.test_case_key if self.execution and self.execution.test_case else None
+
+    @property
+    def status(self):
+        return self.execution.status if self.execution else None
 
 
 # ---------------------------------------------------------------------------

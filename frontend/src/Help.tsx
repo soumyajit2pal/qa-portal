@@ -43,17 +43,17 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'role-sop', number: '04', title: 'Role-management SOP',
-    summary: 'Create, review, change, deactivate, reactivate, and periodically certify access.',
-    keywords: 'sop provision create user ldap role review department coordinator admin deactivate reactivate access certification managed by admin',
+    summary: 'Create, review, change, deactivate, reactivate, and periodically certify access; administer the Application Master list.',
+    keywords: 'sop provision create user ldap role review department coordinator admin deactivate reactivate access certification managed by admin application master application name rename inactive department department not assigned',
   },
   {
     id: 'qa-request', number: '05', title: 'Raise and track a QA request',
     summary: 'Prepare evidence, complete the gateway form, submit, and follow linked requests.',
-    keywords: 'qa request form draft submit gateway functional sast dast performance evidence readiness checklist returned edit details',
+    keywords: 'qa request form draft submit gateway functional sast dast performance evidence readiness checklist returned edit details change description cr number what changed',
   },
   {
     id: 'workflows', number: '06', title: 'Approval and testing workflows',
-    summary: 'Functional, Performance, SAST, DAST, Suppression, and QA Sign-off lifecycles.',
+    summary: 'Functional, Performance, SAST, DAST, Suppression, and QA Clearance lifecycles.',
     keywords: 'workflow sm department head qa lead tester security analyst approval readiness scanning execution signoff suppression false positive coe decision design identity confirmation return reject approval workflow log search',
   },
   {
@@ -63,8 +63,8 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'test-management', number: '08', title: 'Test case management',
-    summary: 'Projects, sharing, repository, testcase versions, cycles, assignment, execution, defects, and export.',
-    keywords: 'project shared with you view access view only repository folder tag testcase test case version major minor superseded compare details bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete my executions qa group runner assign reassign reason change attempt defect rejected duplicate not a defect blocked checkout checkin export actual result image',
+    summary: 'Projects, sharing, repository, testcase versions, cycles, folders, assignment, execution, defects, and export.',
+    keywords: 'project shared with you view access view only repository folder tag testcase test case version major minor superseded compare details bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete my executions qa group runner assign reassign reason change attempt defect rejected duplicate not a defect blocked checkout checkin export actual result image test cycle folder department access restricted unfiled folder scoped stats summary cards',
   },
   {
     id: 'collaboration', number: '09', title: 'Comments and collaboration',
@@ -74,7 +74,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'find-report', number: '10', title: 'Find, monitor, and report',
     summary: 'Global search, dashboard periods, tester tracking, occupancy, approval search, and exports.',
-    keywords: 'search id tqa tc dashboard insights columns date range last 3 days 15 days one month custom from to qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals report export workflow log',
+    keywords: 'search id tqa tc dashboard insights columns date range last 3 days 15 days one month custom from to qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals report export workflow log cr number epic number exact match',
   },
   {
     id: 'audit', number: '11', title: 'Audit and control',
@@ -94,10 +94,10 @@ const ROLE_ROWS = [
   ['Application Owner', 'Approve or reject a newly proposed application name for the same department.', 'Same-department application-name decisions.'],
   ['SM', 'Review the requester’s submission before Department Head review.', 'Same department; cannot approve their own request.'],
   ['Chief Manager / AGM – Department', 'Approve or return a request and assign a COE - Quality Assurance QA Lead.', 'Business department checkpoint; Department Coordinator access.'],
-  ['QA Engineer (QA)', 'Author test cases, execute assigned work, record results, link defects, and raise QA Sign-off.', 'COE - Quality Assurance working role.'],
-  ['QA Lead', 'Verify readiness, assign QA/Security work, review test cases, manage testing, and approve QA Sign-off.', 'Cross-department QA delivery role.'],
+  ['QA Engineer (QA)', 'Author test cases, execute assigned work, record results, link defects, and raise QA Clearance.', 'COE - Quality Assurance working role.'],
+  ['QA Lead', 'Verify readiness, assign QA/Security work, review test cases, manage testing, and approve QA Clearance.', 'Cross-department QA delivery role.'],
   ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'COE - Quality Assurance security delivery role.'],
-  ['Chief Manager / AGM – COE', 'Approve QA Sign-off and coordinate QA-team working roles.', 'COE - Quality Assurance governance role; Department Coordinator access.'],
+  ['Chief Manager / AGM – COE', 'Approve QA Clearance and coordinate QA-team working roles.', 'COE - Quality Assurance governance role; Department Coordinator access.'],
   ['Administrator', 'Manage all accounts, departments, privileged roles, checklist configuration, and system-wide access.', 'System-wide; assign only when operationally required.'],
 ]
 
@@ -209,7 +209,7 @@ export default function Help() {
         <div className="help-hero-meta">
           <span>Audience</span><strong>All portal users</strong>
           <span>Manual status</span><strong>Current portal workflow</strong>
-          <span>Last reviewed</span><strong>13 August 2026</strong>
+          <span>Last reviewed</span><strong>19 August 2026</strong>
         </div>
       </div>
 
@@ -332,6 +332,17 @@ export default function Help() {
                 <li><IconCheckCircle />Reactivate only after confirming the current department and least-privilege role set.</li>
                 <li><IconCheckCircle />Use “Managed by Admin Only” for accounts that Department Coordinators must not modify.</li>
               </ul>
+              <h3 className="help-subheading">SOP: administer the Application Master list</h3>
+              <p>Administrator-only, from Admin → Applications. This is the same registry every QA request draws its Application Name from, so a correction here is reflected everywhere that name is used.</p>
+              <SopSteps items={[
+                { title: 'Assign or correct the owning department', text: 'Search for the application, choose the correct system department from the dropdown (active departments only), and select Update. If the currently assigned department has since been deactivated, the row shows an “Inactive department” badge and keeps that value selectable so it stays visible until you pick a replacement.' },
+                { title: 'Rename an application', text: 'Edit the application name directly in its row and select Rename. The name is normalized and checked for a collision with another application before saving.' },
+                { title: 'Understand the rename impact', text: 'A rename updates every existing QA Request, Functional, SAST, DAST, Performance, Suppression, Sign-off, and Defect record that already used the old name so they read the new one too—nothing is left behind under the old spelling.' },
+                { title: 'Bulk-seed known-good names', text: 'Use Download Template, complete the Application Name (and optional Department) columns, then Upload & Seed to approve a batch of names in one step instead of one at a time through the request wizard.' },
+              ]} />
+              <Callout tone="warning" title="Rename before renaming a department, not after">
+                Renaming an application only changes the application’s own name. If a department itself needs a new name or must be retired, use the Departments section’s own rename/active-inactive toggle instead.
+              </Callout>
             </ManualSection>
           )}
 
@@ -352,6 +363,9 @@ export default function Help() {
               <Callout title="Bug Fix traceability">
                 When Change Type is Bug Fix, you may optionally select an earlier completed request for the same application and department. This records where the original implementation was tested and completed.
               </Callout>
+              <Callout title="Change Description is mandatory">
+                Every gateway requires a short Change Description explaining what is changing and why. It is collected once on the QA Request and carried automatically onto every linked Functional, SAST, DAST, Performance, and Sign-off record—so it also appears in each of their own list and detail views, and in the Dashboard’s My Requests & My Department table—without needing to be re-entered anywhere.
+              </Callout>
               <Callout title="Delegation is temporary input access">
                 Use Delegate for Input while drafting or whenever SM, Department Head, QA Lead, Security Lead, or Performance QA returns the request for correction. The assignee can edit details, attach evidence, upload documents, and then Return to Requester with mandatory comments. They cannot submit, resubmit, cancel, approve, or change the request department. Assignment, return, and recall are recorded in Activity.
               </Callout>
@@ -363,16 +377,16 @@ export default function Help() {
 
           {visibleIds.has('workflows') && (
             <ManualSection {...topic('workflows')}>
-              <Workflow label="Functional testing" steps={['Requester', 'SM', 'Department Head', 'QA Lead readiness', 'QA Tester', 'QA Sign-off', 'Requester verification', 'Closed']} />
+              <Workflow label="Functional testing" steps={['Requester', 'SM', 'Department Head', 'QA Lead readiness', 'QA Tester', 'QA Clearance', 'Requester verification', 'Closed']} />
               <Workflow label="Performance testing" steps={['Requester', 'SM', 'Department Head', 'QA Lead readiness', 'QA execution', 'Results & report', 'Sign-off', 'Closed']} />
               <Workflow label="SAST / DAST" steps={['Requester', 'SM', 'Department Head', 'QA Lead readiness', 'Security Analyst', 'Finding validation', 'Remediation / rescan', 'Report ready']} />
               <Workflow label="Suppression / false positive" steps={['Requester', 'SM', 'Department Head', 'Security verification', 'Done / Rejected']} />
-              <Workflow label="QA Sign-off" steps={['QA Engineer raises', 'QA Lead approves', 'Executive approves', 'Issued']} />
+              <Workflow label="QA Clearance" steps={['QA Engineer raises', 'QA Lead approves', 'Executive approves', 'Issued']} />
               <div className="help-rule-grid">
                 <article><strong>Functional</strong><p>The Department Head assigns a COE - Quality Assurance QA Lead. The QA Lead verifies readiness and assigns one or more QA Testers.</p></article>
                 <article><strong>Performance</strong><p>The Department Head assigns COE - Quality Assurance for readiness; QA owns planning, execution, analysis, reporting, and sign-off.</p></article>
                 <article><strong>SAST / DAST</strong><p>The QA Lead performs Security Readiness and assigns a COE - Quality Assurance Security Analyst for scan execution and findings.</p></article>
-                <article><strong>QA Sign-off</strong><p>Only COE - Quality Assurance can raise the request. It follows QA Engineer → QA Lead → Executive , with no SM stage.</p></article>
+                <article><strong>QA Clearance</strong><p>Only COE - Quality Assurance can raise the request. It follows QA Engineer → QA Lead → Executive , with no SM stage.</p></article>
               </div>
             </ManualSection>
           )}
@@ -385,7 +399,7 @@ export default function Help() {
                 <article className="reject"><IconWarning /><h3>Reject</h3><p>Use for a decision that should not proceed. Provide the business, control, or technical reason.</p></article>
               </div>
               <Callout title="The decision panel is consistent across workflows">
-                Select Add e-signature, review the locked logged-in identity, choose Professional, Classic, or Handwritten style, accept the electronic-signature consent statement, and apply the signature. Then choose Approve, Return to Requester, or Reject in Workflow Decision. Approval records the signer, selected style, intent, signature reference, account, role, and authoritative server timestamp in the Approval Workflow Log. QA Sign-off details and exported certificates show the selected signature style together with its full Signature ID and signing time.
+                Select Add e-signature, review the locked logged-in identity, choose Professional, Classic, or Handwritten style, accept the electronic-signature consent statement, and apply the signature. Then choose Approve, Return to Requester, or Reject in Workflow Decision. Approval records the signer, selected style, intent, signature reference, account, role, and authoritative server timestamp in the Approval Workflow Log. QA Clearance details and exported certificates show the selected signature style together with its full Signature ID and signing time.
               </Callout>
               <p className="help-inline-note">This is an auditable in-application electronic signature. A certificate-based PKI signature using a USB token, DSC provider, or enterprise signing gateway requires a separately configured trust-provider integration.</p>
               <h3 className="help-subheading">Evidence rules</h3>
@@ -421,6 +435,9 @@ export default function Help() {
                 { title: 'Use check-out for editing', text: 'Check Out reserves the case so others know it is being edited. Save the work, then Check In to release the editing reservation.' },
                 { title: 'Maintain in bulk', text: 'Use tags to filter matching test cases. Bulk update can change Test Type, Folder, Module Name, and Priority. Confirm the selected count before bulk update or delete.' },
               ]} />
+              <Callout title="Stat cards follow the selected folder">
+                The Total, Approved, In Review, and Critical counts above the test case list reflect whichever folder (or Unfiled, or the whole project) is currently selected—not the whole project regardless of folder. Select a different folder to see that folder’s own counts.
+              </Callout>
               <h3 className="help-subheading">Testcase versioning and comparison</h3>
               <div className="help-rule-grid">
                 <article><strong>Minor version</strong><p>Normal approved revisions increment the number after the decimal: v1.8 → v1.9 → v1.10. Version numbers are numeric components, so v1.10 follows v1.9.</p></article>
@@ -436,14 +453,15 @@ export default function Help() {
               ]} />
               <h3 className="help-subheading">Execution SOP</h3>
               <SopSteps items={[
-                { title: 'Create or edit a test cycle', text: 'Choose an active project and provide the mandatory start and end dates. You can also define the cycle scope and optionally link it to a child Functional, SAST, DAST, or Performance request ID. Existing cycles can be edited.' },
+                { title: 'Organize cycles into folders', text: 'Create a Test Cycle Folder to group related cycles, then create cycles under it (or leave a cycle Unfiled). A folder starts open to everyone with project access; use Manage Access to restrict it to specific departments and/or users—once at least one grant exists, only those departments/users (plus QA Lead Group, QA Engineer, the project owner, and the folder’s creator) can see that folder and its cycles. Folder deletion requires the same governance-tier role as other destructive QA Lead Group actions, and only an empty folder can be deleted.' },
+                { title: 'Create or edit a test cycle', text: 'Choose an active project and provide the mandatory start and end dates. You can also define the cycle scope, place it in a folder, and optionally link it to a child Functional, SAST, DAST, or Performance request ID. Existing cycles can be edited.' },
                 { title: 'Add approved test cases', text: 'Open Add Test Cases to load approved candidates on demand. Search and move through cursor-based pages, select individual rows, or use Select all matching. Already-linked and unapproved cases are excluded by the database.' },
                 { title: 'Mark the cycle ready', text: 'A cycle can move from Draft to Ready once it has at least one approved testcase and valid dates. Testcases do not all need to be assigned at this stage.' },
                 { title: 'Assign runners', text: 'While the cycle is Ready, assign each testcase before its execution attempt. Any COE - Quality Assurance QA Engineer or QA Lead can assign or reassign cases to an eligible active QA Engineer or QA Lead.' },
                 { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. An In Progress cycle can be blocked with a mandatory reason and resumed. Completion remains blocked until every testcase has an execution result; Completed is final.' },
                 { title: 'Execute an attempt', text: 'While the cycle is In Progress, the assigned runner opens the test case, reviews all repository details, and records status, actual result, comments, and evidence.' },
                 { title: 'Use rich Actual Result', text: 'Format text, add bullets, paste images, or upload supported images. Keep results specific enough for another person to reproduce.' },
-                { title: 'Link defects', text: 'For Fail or Blocked outcomes, add the defect reference and explain the observed behavior. Use a new execution attempt for retest history rather than overwriting evidence.' },
+                { title: 'Link defects', text: 'For Fail or Blocked outcomes, add the defect reference and explain the observed behavior. Use a new execution attempt for retest history rather than overwriting evidence. Link existing defect also accepts a governed defect that already has a primary execution elsewhere -- it is added as an additional trace on this execution too, without moving its original link.' },
                 { title: 'Operate in bulk', text: 'Use bulk assignment, execution, or removal after checking the confirmation summary. Adding more than 500 testcases, Excel imports, and lifecycle/repository exports run as background jobs so the page does not wait on one long API request.' },
                 { title: 'Maintain request links', text: 'Link or unlink a child request from either Functional Request details or Test Lifecycle while the cycle remains active.' },
               ]} />
@@ -515,7 +533,7 @@ export default function Help() {
           {visibleIds.has('find-report') && (
             <ManualSection {...topic('find-report')}>
               <div className="help-card-grid three">
-                <article><IconSearch /><h3>Global search</h3><p>Search a full TQA ID from the top bar. Short test-case input such as TC-02 is normalized to TQA-TC-02 automatically.</p></article>
+                <article><IconSearch /><h3>Global search</h3><p>Search a full TQA ID from the top bar. Short test-case input such as TC-02 is normalized to TQA-TC-02 automatically. A CR or EPIC number (e.g. CR-1042) jumps to the QA Requests list showing every request raised under that exact CR, with its linked Functional/SAST/DAST/Performance/Sign-off requests alongside each row.</p></article>
                 <article><IconChart /><h3>Dashboard</h3><p>Dashboard date controls provide All time, Last hour, Last 3 days, Last 15 days, Last month, and a custom From/To range. QA-only views include tester assignments and capacity.</p></article>
                 <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request ID. Approval Workflow Log supports server-side search and entity filtering across the decision trail.</p></article>
               </div>
@@ -560,7 +578,7 @@ export default function Help() {
               </ul>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Use module filters and status badges to narrow operational lists.</li>
-                <li><IconCheckCircle />Use Reports & Export Centre for the QA request register, cycle execution summary, defect/retest register, performance and security registers, testcase approval backlog, application scorecard, QA sign-off register, and approval audit evidence.</li>
+                <li><IconCheckCircle />Use Reports & Export Centre for the QA request register, cycle execution summary, defect/retest register, performance and security registers, testcase approval backlog, application scorecard, QA Clearance register, and approval audit evidence.</li>
                 <li><IconCheckCircle />Use Repository and Test Execution exports for detailed test assets and run results.</li>
                 <li><IconCheckCircle />Inactive projects remain discoverable through the project status filter but cannot accept new repository or execution changes until reactivated.</li>
                 <li><IconCheckCircle />QA Certificate validation notes, defect review, and residual-risk sections support rich text, lists, and tables; exported PDFs preserve the formatted content.</li>

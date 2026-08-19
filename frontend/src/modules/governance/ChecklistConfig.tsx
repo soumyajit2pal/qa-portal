@@ -10,7 +10,7 @@ import { ChecklistTemplateItemOut } from '../../types'
 // configuration will automatically behave like that configuration, for
 // example if I make any checklist mandatory in that configuration, that will
 // be mandatory." This page is that configuration surface for all four
-// checklists in the app (Functional/SAST/DAST/Performance -- QA Sign-off has
+// checklists in the app (Functional/SAST/DAST/Performance -- QA Clearance has
 // no checklist). See backend checklist_config.py/routers/checklist_config.py
 // and models.ChecklistTemplateItem for the full reasoning: editing an item
 // here only ever affects requests raised from this point forward, never

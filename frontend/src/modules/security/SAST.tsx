@@ -700,6 +700,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
               )}
             </DetailField>
             <DetailField label="CR Number/EPIC Number">{req.cr_number || req.epic_number || '—'}</DetailField>
+            <DetailField label="Change Description">{req.change_description || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
             <DetailField label="Application Owner">{req.application_owner || '—'}</DetailField>
           </DetailSection>
@@ -1134,6 +1135,9 @@ export default function SAST() {
             render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
           },
           { key: 'application_name', header: 'Application' },
+          { key: 'change_description', header: 'Change Description', render: (r) => (
+            <span className="truncate-cell" title={r.change_description || ''}>{r.change_description || '—'}</span>
+          ), filterValue: (r) => r.change_description || '' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'security_lead_id', header: 'Assigned Group', render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '—', filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },

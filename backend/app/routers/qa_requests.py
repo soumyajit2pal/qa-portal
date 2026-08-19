@@ -2,7 +2,7 @@ import json
 import os
 import shutil
 import uuid
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -371,6 +371,7 @@ def _unstash_draft_details(raw: Optional[str]):
 @router.get("", response_model=pagination.Page[schemas.QARequestListOut])
 def list_requests(params: pagination.PageParams = Depends(),
                    application_name: Optional[str] = None,
+                   cr_number: Optional[str] = None,
                    requester_id: Optional[int] = None,
                    assigned_to_me: bool = False,
                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
@@ -438,6 +439,18 @@ def list_requests(params: pagination.PageParams = Depends(),
     # list's own search field) -- matches Request ID, Application Name, or
     # The consolidated CR/EPIC identifier is stored in cr_number.
     q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.application_name, models.QARequest.cr_number)
+    # Exact CR/EPIC number lookup -- reported directly: "in global search if
+    # any one wants to search by cr number as well, can we get all requests
+    # details based on that cr?" The `search` param above already ilike-
+    # matches cr_number as a substring alongside request_id/application_name,
+    # which is fine for the free-text QA Requests search box but too loose
+    # for "give me every request raised under this exact CR" -- e.g. typing
+    # CR-102 would also match CR-1023/CR-1024 via substring search. This
+    # dedicated param does an exact (case-insensitive) match instead; the
+    # topbar global search uses it whenever the typed term matches the
+    # CR-<digits>/EPIC-<digits> pattern (see Layout.tsx's submitSearch).
+    if cr_number:
+        q = q.filter(func.upper(models.QARequest.cr_number) == cr_number.strip().upper())
     if not current_user.has_role(Role.ADMIN):
         # Draft and Cancelled gateways are both scratch work that was never
         # actually raised (Cancelled is only ever reached FROM Draft -- see
@@ -457,6 +470,27 @@ def list_requests(params: pagination.PageParams = Depends(),
         "target_release_date": models.QARequest.target_release_date,
     }, default_column=models.QARequest.created_at, id_column=models.QARequest.id)
     result = pagination.paginate(q, params)
+    # Sign-offs aren't reachable via a normal relationship -- QASignOff has
+    # no FK to QARequest, it's matched by business ID string against
+    # FunctionalRequest.request_id (see models.QASignOff.testing_request_id /
+    # source_functional_request), so they can't be selectinload()'d above
+    # like the other 4 linked-request types. Batched here in one extra query
+    # instead of one per row: collect every linked Functional request_id
+    # already loaded on this page, then a single `testing_request_id IN
+    # (...)` query finds every sign-off for the whole page at once. Added so
+    # a CR-number lookup (see cr_number param above) returns every request
+    # tied to that CR, including its Sign-off, not just the 4 relationship-
+    # backed types.
+    func_ids_by_qa_id: Dict[int, List[str]] = {
+        row.id: [f.request_id for f in row.linked_functional_requests] for row in result.items
+    }
+    all_func_ids = [fid for ids in func_ids_by_qa_id.values() for fid in ids]
+    signoffs_by_func_id: Dict[str, List[models.QASignOff]] = {}
+    if all_func_ids:
+        for so in db.query(models.QASignOff).filter(models.QASignOff.testing_request_id.in_(all_func_ids)).all():
+            signoffs_by_func_id.setdefault(so.testing_request_id, []).append(so)
+    for row in result.items:
+        row.linked_signoffs = [so for fid in func_ids_by_qa_id[row.id] for so in signoffs_by_func_id.get(fid, [])]
     return pagination.to_page_response(result, params)
 
 
@@ -505,6 +539,14 @@ def get_request(req_id: int, db: Session = Depends(get_db), current_user: models
         raise HTTPException(404, "QA Request not found")
     if not _can_view_gateway(obj, current_user):
         raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
+    # Same batched-in-list_requests() reasoning applies here for a single
+    # row -- QASignOff has no FK to QARequest, only a business-ID match
+    # against a linked FunctionalRequest's own request_id.
+    func_ids = [f.request_id for f in obj.linked_functional_requests]
+    obj.linked_signoffs = (
+        db.query(models.QASignOff).filter(models.QASignOff.testing_request_id.in_(func_ids)).all()
+        if func_ids else []
+    )
     return obj
 
 
@@ -1573,6 +1615,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
             ("CR Number/EPIC Number", obj.cr_number),
             ("Change Type", obj.change_type),
             ("Previous Completed Request ID", obj.bug_fix_source_request_id if obj.change_type == "Bug Fix" else None),
+            ("Change Description", obj.change_description),
             ("Vendor / SI Partner", obj.vendor_si_partner),
             ("Technology Stack", obj.technology_stack),
         ]),

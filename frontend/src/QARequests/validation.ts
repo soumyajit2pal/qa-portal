@@ -27,6 +27,7 @@ const REQUIRED_DETAIL_FIELDS: { key: keyof QARequestForm; label: string }[] = [
   { key: 'application_owner', label: 'Application Owner' },
   { key: 'cr_number', label: 'CR Number/EPIC Number' },
   { key: 'technology_stack', label: 'Technology Stack' },
+  { key: 'change_description', label: 'Change Description' },
   // { key: 'release_version', label: 'Release Version / Hash Value' },
   // { key: 'build_number', label: 'Build Number / Hash Value' },
 ]

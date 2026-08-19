@@ -422,7 +422,7 @@ const LIFECYCLE_STAGES = [
 // QA_COMPLETED by Role.QA_LEAD) to whichever group is genuinely holding the
 // request right now. Returns null for every requester-owned/terminal/
 // Sign-off-phase status (Draft, Submitted, any RETURNED_BY_*/*_REJECTED,
-// QA Sign-off phase, Requester Verification, Closed, Cancelled) -- those
+// QA Clearance phase, Requester Verification, Closed, Cancelled) -- those
 // aren't sitting with a review group at all, so the field shows "—" instead
 // of a misleading group.
 // Derived from QA_PENDING_WITH (constants.ts) -- the same table that already
@@ -787,7 +787,7 @@ function FunctionalDetail({
     }
   }
 
-  // Called once the QA Sign-off Certificate modal has successfully created
+  // Called once the QA Clearance Certificate modal has successfully created
   // its Draft certificate (POST /api/signoffs) -- immediately links it to
   // this request and moves the request to QA_SIGNOFF_PENDING via the
   // existing request-signoff transition (see routers/functional.py::
@@ -1081,7 +1081,7 @@ function FunctionalDetail({
   // _sync_linked_functional_request), so there's nothing left to manually
   // confirm here. While a certificate is still working through its own
   // Tester -> SM -> Department Head COE chain, this request just sits at
-  // "QA Sign-off Pending" with no action available on this side -- correct,
+  // "QA Clearance Pending" with no action available on this side -- correct,
   // since it's genuinely waiting on someone else's decision, not on QA.
   const canRequesterDecide =
     isRequesterVerifier && status === "REQUESTER_VERIFICATION";
@@ -1186,6 +1186,9 @@ function FunctionalDetail({
             <DetailField label="CR Number/EPIC Number">
               {req.cr_number || req.epic_number || "—"}
             </DetailField>
+            <DetailField label="Change Description">
+              {req.change_description || "—"}
+            </DetailField>
             <DetailField label="Change Type">
               {req.change_type || "—"}
             </DetailField>
@@ -1258,7 +1261,7 @@ function FunctionalDetail({
           {req.signoff_certificate_id && (
             // 2026-08 -- reported directly: "LINK THE CERTIFICATE ONCE
             // GENERATED" -- this request previously had no visible link to
-            // its own QA Sign-off certificate. Mirrors the "Linked Test
+            // its own QA Clearance certificate. Mirrors the "Linked Test
             // Cycle" section above; deep-links via SignOff.tsx's existing
             // `?open=<certificate_id>` pattern.
             <DetailSection title="Linked Sign-off Certificate">
@@ -1950,6 +1953,16 @@ export default function Functional() {
               key: "cr_number",
               header: "CR Number/EPIC Number",
               render: (r) => r.cr_number || r.epic_number || "—",
+            },
+            {
+              key: "change_description",
+              header: "Change Description",
+              render: (r) => (
+                <span className="truncate-cell" title={r.change_description || ""}>
+                  {r.change_description || "—"}
+                </span>
+              ),
+              filterValue: (r) => r.change_description || "",
             },
             {
               key: "requester_id",

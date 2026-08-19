@@ -410,7 +410,7 @@ function UploadStorageCard() {
 // rejected rows are each handled), instead of every name only ever entering
 // the master list one at a time via a requester typing "Other" on the QA
 // Request wizard and waiting on Application Owner review.
-function ApplicationSeedCard({ departmentOptions }: { departmentOptions: string[] }) {
+function ApplicationSeedCard({ departmentOptions, departments }: { departmentOptions: string[]; departments: DepartmentOut[] }) {
   const [file, setFile] = useState<File | null>(null)
   const [downloadingTemplate, setDownloadingTemplate] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -421,12 +421,25 @@ function ApplicationSeedCard({ departmentOptions }: { departmentOptions: string[
   const [draftDepartments, setDraftDepartments] = useState<Record<number, string>>({})
   const [savingApplicationId, setSavingApplicationId] = useState<number | null>(null)
   const [savedApplicationId, setSavedApplicationId] = useState<number | null>(null)
+  // "edit option for renaming the application name" -- per-row inline
+  // rename input, mirrors the draftDepartments/savingApplicationId/
+  // savedApplicationId triple already used for the department column.
+  const [draftNames, setDraftNames] = useState<Record<number, string>>({})
+  const [renamingApplicationId, setRenamingApplicationId] = useState<number | null>(null)
+  const [renamedApplicationId, setRenamedApplicationId] = useState<number | null>(null)
+
+  // "active inactive department option" -- a row's assigned department can
+  // be deactivated later from the Departments section without this list
+  // knowing; look it up by name so a stale/deactivated department is
+  // flagged instead of silently looking like any other value.
+  const departmentActiveByName = Object.fromEntries(departments.map((d) => [d.name, d.is_active]))
 
   const loadApplications = useCallback(async () => {
     try {
       const rows = await api.get<ApplicationMasterOut[]>('/api/application-names')
       setApplications(rows)
       setDraftDepartments(Object.fromEntries(rows.map((row) => [row.id, row.department || ''])))
+      setDraftNames(Object.fromEntries(rows.map((row) => [row.id, row.name])))
     } catch (err) { setError(err) }
   }, [])
 
@@ -441,6 +454,18 @@ function ApplicationSeedCard({ departmentOptions }: { departmentOptions: string[
       setApplications((rows) => rows.map((row) => row.id === updated.id ? updated : row))
       setSavedApplicationId(application.id)
     } catch (err) { setError(err) } finally { setSavingApplicationId(null) }
+  }
+
+  async function renameApplication(application: ApplicationMasterOut) {
+    const name = (draftNames[application.id] || '').trim()
+    if (!name) { setError(new Error('Application name is required')); return }
+    setRenamingApplicationId(application.id); setRenamedApplicationId(null); setError(null)
+    try {
+      const updated = await api.patch<ApplicationMasterOut>(`/api/application-names/${application.id}/name`, { name })
+      setApplications((rows) => rows.map((row) => row.id === updated.id ? updated : row))
+      setDraftNames((values) => ({ ...values, [application.id]: updated.name }))
+      setRenamedApplicationId(application.id)
+    } catch (err) { setError(err) } finally { setRenamingApplicationId(null) }
   }
 
   const visibleApplications = applications.filter((application) => (
@@ -534,10 +559,32 @@ function ApplicationSeedCard({ departmentOptions }: { departmentOptions: string[
           {visibleApplications.map((application) => {
             const selected = draftDepartments[application.id] || ''
             const unchanged = selected === (application.department || '')
+            const deptIsInactive = !!application.department && departmentActiveByName[application.department] === false
+            const nameDraft = draftNames[application.id] ?? application.name
+            const nameUnchanged = nameDraft.trim() === application.name
             return <div className="application-department-row" key={application.id}>
-              <div><strong>{application.name}</strong><small>{application.department || 'Department not assigned'}</small></div>
+              <div className="application-department-rename">
+                <input
+                  className="application-name-input"
+                  value={nameDraft}
+                  onChange={(event) => { setDraftNames((values) => ({ ...values, [application.id]: event.target.value })); setRenamedApplicationId(null) }}
+                />
+                <small>
+                  {application.department || 'Department not assigned'}
+                  {deptIsInactive && <span className="application-department-inactive-badge"> · Inactive department</span>}
+                </small>
+              </div>
+              <button
+                type="button" className="btn btn-sm"
+                disabled={!nameDraft.trim() || nameUnchanged || renamingApplicationId === application.id}
+                onClick={() => renameApplication(application)}
+              >
+                {renamingApplicationId === application.id ? 'Renaming…' : 'Rename'}
+              </button>
+              {renamedApplicationId === application.id && <span className="application-department-saved">✓ Renamed</span>}
               <select value={selected} onChange={(event) => { setDraftDepartments((values) => ({ ...values, [application.id]: event.target.value })); setSavedApplicationId(null) }}>
                 <option value="">Select department</option>
+                {selected && deptIsInactive && <option value={selected}>{selected} (Inactive)</option>}
                 {departmentOptions.map((department) => <option key={department} value={department}>{department}</option>)}
               </select>
               <button type="button" className="btn btn-sm btn-primary" disabled={!selected || unchanged || savingApplicationId === application.id} onClick={() => updateDepartment(application)}>
@@ -751,7 +798,7 @@ export default function Admin() {
       </div>}
 
       {section === 'applications' && <div className="access-workspace-panel access-departments-section">
-        <ApplicationSeedCard departmentOptions={departmentOptions} />
+        <ApplicationSeedCard departmentOptions={departmentOptions} departments={departments} />
       </div>}
 
       {section === 'storage' && <div className="access-workspace-panel access-departments-section">

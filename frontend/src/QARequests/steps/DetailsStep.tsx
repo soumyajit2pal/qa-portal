@@ -240,6 +240,14 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               </p>
             </Field>
           )}
+          <Field label="Change Description *">
+            <textarea
+              required
+              placeholder="Describe the change being requested"
+              value={form.change_description}
+              onChange={(e) => set("change_description", e.target.value)}
+            />
+          </Field>
           <Field label="Vendor / SI Partner">
             <input
               value={form.vendor_si_partner}

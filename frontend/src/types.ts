@@ -238,6 +238,10 @@ export interface QARequestListOut {
   request_date?: string | null
   department?: string | null
   application_name: string
+  // See backend schemas.QARequestListOut's own comment -- previously
+  // missing from this lightweight list schema entirely, which is why the
+  // "CR Number/EPIC Number" list column always showed blank.
+  cr_number?: string | null
   epic_number?: string | null
   target_release_date?: string | null
   status: string
@@ -250,6 +254,11 @@ export interface QARequestListOut {
   linked_sast_requests: LinkedRequestRef[]
   linked_dast_requests: LinkedRequestRef[]
   linked_performance_requests: LinkedRequestRef[]
+  // Sign-off has no FK to QARequest (matched by business ID string) so it's
+  // populated explicitly server-side rather than auto-linked like the 4
+  // fields above -- see backend schemas.QARequestListOut's own comment.
+  linked_signoffs: LinkedRequestRef[]
+  change_description?: string | null
 }
 
 export interface QARequestOut {
@@ -274,6 +283,7 @@ export interface QARequestOut {
   target_release_date?: string | null
   supporting_doc_path?: string | null
   remarks?: string | null
+  change_description?: string | null
   status: string
   requester_id?: number | null
   created_at: string
@@ -288,6 +298,10 @@ export interface QARequestOut {
   linked_sast_requests: LinkedRequestRef[]
   linked_dast_requests: LinkedRequestRef[]
   linked_performance_requests: LinkedRequestRef[]
+  // Sign-off has no FK to QARequest (matched by business ID string) so it's
+  // populated explicitly server-side rather than auto-linked like the 4
+  // fields above -- see backend routers/qa_requests.py's get_request().
+  linked_signoffs: LinkedRequestRef[]
   // Whatever the wizard's SAST/DAST/Performance/checklist steps collected on
   // an earlier Draft save (see models.QARequest.draft_child_details) --
   // read-only, used to pre-fill "Edit Request" instead of showing these
@@ -323,6 +337,7 @@ export interface FunctionalListOut {
   application_name?: string | null
   epic_number?: string | null
   cr_number?: string | null
+  change_description?: string | null
   department?: string | null
   application_owner?: string | null
   qa_request?: LinkedRequestRef | null
@@ -359,6 +374,7 @@ export interface FunctionalOut {
   // which writes these through to the parent qa_request) -- see
   // models.FunctionalRequest.
   cr_number?: string | null
+  change_description?: string | null
   change_type?: string | null
   bug_fix_source_request_id?: string | null
   environment?: string | null
@@ -504,6 +520,7 @@ export interface SASTListOut {
   // Suppression.tsx's cross-module SAST/DAST request picker.
   department?: string | null
   application_owner?: string | null
+  change_description?: string | null
   findings_count: number
   // 2026-08 "Findings Validation" doc -- lets the list Status column
   // overlay "Suppression Approval Pending" over Waiting For Fix, mirroring
@@ -521,6 +538,7 @@ export interface SASTOut {
   application_name: string
   epic_number?: string | null
   cr_number?: string | null
+  change_description?: string | null
   risk_category?: string | null
   priority?: string | null
   hash_value?: string | null
@@ -603,6 +621,7 @@ export interface DASTListOut {
   // See the matching comment on SASTListOut above -- same reasoning.
   department?: string | null
   application_owner?: string | null
+  change_description?: string | null
   findings_count: number
   // See SASTListOut.has_open_suppression above -- same idea, for DAST.
   has_open_suppression: boolean
@@ -643,6 +662,7 @@ export interface DASTOut {
   application_name?: string | null
   epic_number?: string | null
   cr_number?: string | null
+  change_description?: string | null
   deployment_environment?: string | null
   target_promotion_environment?: string | null
   // One row per scan target -- see DASTTargetOut above.
@@ -688,6 +708,7 @@ export interface PerformanceListOut {
   // Cheap to include -- already eager-loaded server-side. Needed by
   // Dashboard.tsx's "My Department" unified-request filter.
   department?: string | null
+  change_description?: string | null
   qa_request?: LinkedRequestRef | null
   created_at: string
   updated_at: string
@@ -699,6 +720,7 @@ export interface PerformanceOut {
   application_name: string
   epic_number?: string | null
   cr_number?: string | null
+  change_description?: string | null
   tool_used?: string | null
   target_load?: string | null
   environment?: string | null
@@ -767,7 +789,7 @@ export interface SuppressionOut {
   created_at: string
 }
 
-// ---------------- QA Sign-off ----------------
+// ---------------- QA Clearance ----------------
 export interface SignOffOut {
   id: number
   certificate_id: string
@@ -780,6 +802,7 @@ export interface SignOffOut {
   application_owner?: string | null
   department?: string | null
   request_department?: string | null
+  change_description?: string | null
   vendor_si_partner?: string | null
   technology_stack?: string | null
   risk_tier?: string | null
@@ -1154,6 +1177,17 @@ export interface TestCaseSummaryOut {
   tags: string[]
   archived_count: number
   recycle_bin_count: number
+  // Reported directly: "Testcases count and all should be updated based on
+  // folder" -- scoped to whatever folder_id was passed to GET .../summary
+  // (see backend routers/test_repository.py::get_test_case_summary); equal
+  // to total/approved_count/in_review_count/critical_count above when no
+  // folder_id was passed (the "All test cases" view). Power the "Current
+  // view" stat cards only -- every other field above stays project-wide,
+  // powering the sidebar's fixed per-folder badges.
+  scoped_total: number
+  scoped_approved_count: number
+  scoped_in_review_count: number
+  scoped_critical_count: number
 }
 
 export type TestCaseVersionStepOut = TestStepIn & { id: number; version_id: number }
@@ -1276,6 +1310,44 @@ export interface TestCycleOut {
   owner_name?: string | null
   created_by_id?: number | null
   created_at: string
+  // Reported directly: "Create Test Cycle Folder ... Under this folder
+  // create test cycle." null/undefined means Unfiled.
+  folder_id?: number | null
+  folder_name?: string | null
+}
+
+// Reported directly: "Create Test Cycle Folder, in which I can give access
+// department based or user level, same behaviour like project has." A
+// folder with any access_grants is RESTRICTED to those departments/users
+// (plus the project owner, this folder's creator, and the QA Lead Group/
+// Admin) -- the opposite of TestProjectViewGrantOut below, which only ever
+// widens visibility. Empty access_grants means unrestricted.
+export interface TestCycleFolderAccessOut {
+  id: number
+  folder_id: number
+  department?: string | null
+  user_id?: number | null
+  user_name?: string | null
+  granted_by_id?: number | null
+  granted_by_name?: string | null
+  created_at: string
+}
+
+export interface TestCycleFolderOut {
+  id: number
+  project_id: number
+  name: string
+  created_by_id?: number | null
+  created_by_name?: string | null
+  created_at: string
+  access_grants: TestCycleFolderAccessOut[]
+  cycle_count: number
+}
+
+export interface TestCycleFolderListOut {
+  folders: TestCycleFolderOut[]
+  unfiled_count: number
+  total: number
 }
 
 // One immutable historical attempt -- see backend models.TestExecutionRun.
@@ -1434,6 +1506,16 @@ export interface DefectQualityOut {
   retest_success_rate_pct: number
 }
 
+export interface DefectExecutionLinkOut {
+  id: number
+  execution_id: number
+  cycle_id?: number | null
+  cycle_key?: string | null
+  project_id?: number | null
+  test_case_key?: string | null
+  status?: string | null
+}
+
 export interface DefectOut {
   id: number
   defect_key: string
@@ -1456,6 +1538,10 @@ export interface DefectOut {
   execution_id?: number | null
   linked_test_case_ids: number[]
   linked_test_case_keys: string[]
+  // Additional executions this same governed defect has also been traced
+  // to, beyond its primary one above -- see the "Link existing defect"
+  // picker (TestExecution.tsx), widened to offer already-linked defects too.
+  execution_links: DefectExecutionLinkOut[]
   application_name: string
   module_feature: string
   environment: string
@@ -1606,7 +1692,7 @@ export interface ProjectPortfolioOut {
 // exactly how "awaiting this user" is worked out per category (Application
 // Name Application Owner/SM tiers, Functional/SAST/DAST/Performance SM/
 // Department Head/Readiness, Suppression SM/Department Head/Security Team,
-// QA Sign-off QA Lead/Executive , Test Project activation). Not tied to
+// QA Clearance QA Lead/Executive , Test Project activation). Not tied to
 // any single entity's own Out type -- built up from many different tables
 // on the backend, so this is its own flat shape.
 export interface PendingApprovalItem {

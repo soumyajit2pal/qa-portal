@@ -341,7 +341,7 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
 
 
 def _signoff_items(db: Session, user: models.User) -> List[dict]:
-    """QA Sign-off's own QA Lead / Executive  checkpoints -- gated by the
+    """QA Clearance's own QA Lead / Executive  checkpoints -- gated by the
     REVIEWER's own department being COE - Quality Assurance (see routers/signoff.py::
     _require_qa_department), not by matching the certificate's own
     (requesting) department -- unlike every SM/Department Head checkpoint
@@ -360,8 +360,8 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
     if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         for obj in _query("SM_APPROVAL_PENDING").order_by(models.QASignOff.created_at).all():
             results.append(_item(
-                "QA Sign-off -- QA Lead Approval", "SIGNOFF", obj.id, obj.certificate_id,
-                f"QA Sign-off: {obj.application_name or '—'}", obj.status,
+                "QA Clearance -- QA Lead Approval", "SIGNOFF", obj.id, obj.certificate_id,
+                f"QA Clearance: {obj.application_name or '—'}", obj.status,
                 SIGNOFF_STATUS_LABELS.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
                 obj.created_at, f"/signoff?open={obj.certificate_id}",
             ))
@@ -371,8 +371,8 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
             q = q.filter(or_(models.QASignOff.reviewed_by_id.is_(None), models.QASignOff.reviewed_by_id != user.id))
         for obj in q.order_by(models.QASignOff.created_at).all():
             results.append(_item(
-                "QA Sign-off -- Executive Approval", "SIGNOFF", obj.id, obj.certificate_id,
-                f"QA Sign-off: {obj.application_name or '—'}", obj.status,
+                "QA Clearance -- Executive Approval", "SIGNOFF", obj.id, obj.certificate_id,
+                f"QA Clearance: {obj.application_name or '—'}", obj.status,
                 SIGNOFF_STATUS_LABELS.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
                 obj.created_at, f"/signoff?open={obj.certificate_id}",
             ))

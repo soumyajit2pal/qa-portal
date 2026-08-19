@@ -15,7 +15,7 @@ from .. import documents as doc_store
 router = APIRouter(prefix="/api/signoffs", tags=["signoff"])
 
 # ---------------------------------------------------------------------------
-# Module 8: QA Sign-off Certificate lifecycle -- Draft (QA Engineer fills
+# Module 8: QA Clearance Certificate lifecycle -- Draft (QA Engineer fills
 # in the certificate) -> QA Lead Approval -> Executive  Approval -> Issued.
 # The linked application may belong to any department, but this certificate
 # workflow is owned entirely by COE - Quality Assurance.
@@ -57,7 +57,7 @@ def _get_visible_or_404(db: Session, signoff_id: int, user: models.User) -> "mod
 def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", current_user: models.User):
     """A certificate reaching ISSUED after Executive  final approval
     previously never moved the linked Functional Testing Request off
-    "QA Sign-off Pending" -- that hop only ever happened via a separate,
+    "QA Clearance Pending" -- that hop only ever happened via a separate,
     manual "Confirm Sign-off" button (routers/functional.py::confirm_signoff)
     that a QA Lead had to remember to click themselves, and which didn't even
     check that the certificate was actually Issued before letting them.
@@ -67,14 +67,14 @@ def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", curren
     syncs automatically the moment the certificate is Issued, and the
     Functional Testing Request's own "Confirm Sign-off" button has been
     removed from the frontend (see Functional.tsx). Mirrors confirm_signoff's
-    own two-step log (QA Sign-off "Signed Off", then Requester Verification
+    own two-step log (QA Clearance "Signed Off", then Requester Verification
     "Pending") so the History tab reads identically either way."""
     linked = (db.query(models.FunctionalRequest)
               .filter_by(signoff_id=obj.id, status=QAStatus.QA_SIGNOFF_PENDING).all())
     for fr in linked:
         fr.status = QAStatus.QA_SIGNED_OFF
         db.add(models.ApprovalAction(
-            entity_type="FUNCTIONAL_REQUEST", entity_id=fr.id, step_name="QA Sign-off",
+            entity_type="FUNCTIONAL_REQUEST", entity_id=fr.id, step_name="QA Clearance",
             actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Signed Off",
             comments=f"Certificate {obj.certificate_id} issued by Executive",
         ))
@@ -92,7 +92,7 @@ def _require_qa_department(user: models.User) -> None:
     if not user.has_department(QA_DEPARTMENT):
         raise HTTPException(
             403,
-            f"QA Sign-off is restricted to the '{QA_DEPARTMENT}' department. "
+            f"QA Clearance is restricted to the '{QA_DEPARTMENT}' department. "
             f"Your profile is mapped to '{', '.join(user.departments) or 'no department'}'.",
         )
 
@@ -116,7 +116,7 @@ def _validate_rich_text_before_progress(obj: models.QASignOff) -> None:
     if oversized:
         raise HTTPException(
             400,
-            "Cannot continue the QA Sign-off workflow because rich-text content exceeds the limit: "
+            "Cannot continue the QA Clearance workflow because rich-text content exceeds the limit: "
             + "; ".join(oversized)
             + ". Edit the certificate and reduce each field to 10,000 characters or fewer.",
         )
@@ -136,8 +136,14 @@ def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Dep
     # source_functional_request (a viewonly relationship matched on business
     # ID, not a normal FK), previously lazy-loaded once per row. joinedload
     # here turns that into a single extra LEFT JOIN for the whole page
-    # instead of one query per certificate.
-    q = db.query(models.QASignOff).options(joinedload(models.QASignOff.source_functional_request))
+    # instead of one query per certificate. Nested .qa_request load added
+    # alongside it so the new SignOffOut.change_description (two-hop via
+    # models.QASignOff.change_description) doesn't reintroduce the same
+    # N+1 this comment was written to fix.
+    q = db.query(models.QASignOff).options(
+        joinedload(models.QASignOff.source_functional_request)
+        .joinedload(models.FunctionalRequest.qa_request)
+    )
     scope = dashboard_department_scope(current_user)
     if scope:
         q = (q.join(
@@ -182,7 +188,7 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    _log(db, obj.id, "Requester", current_user, "Drafted", "QA Sign-off Certificate created as draft")
+    _log(db, obj.id, "Requester", current_user, "Drafted", "QA Clearance Certificate created as draft")
     db.commit()
     db.refresh(obj)
     return obj
@@ -374,7 +380,7 @@ def signoff_history(signoff_id: int, db: Session = Depends(get_db), current_user
 
 @router.get("/{signoff_id}/export")
 def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    """Every field on this QA Sign-off Certificate, plus who requested,
+    """Every field on this QA Clearance Certificate, plus who requested,
     reviewed and approved it and when, as one downloadable PDF -- the
     offline/printable copy of the certificate itself."""
     obj = _get_visible_or_404(db, signoff_id, current_user)
@@ -454,7 +460,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
 
     buf = build_request_detail_pdf(
         title=f"{obj.certificate_id} — {obj.application_name}",
-        subtitle="QA Sign-off Certificate — Full Detail Export",
+        subtitle="QA Clearance Certificate — Full Detail Export",
         sections=sections, history=history,
         history_title=None,
         generated_by=current_user.full_name,

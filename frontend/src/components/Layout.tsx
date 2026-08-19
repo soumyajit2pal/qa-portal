@@ -89,7 +89,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
     {
       label: 'Governance',
       items: [
-        { to: '/signoff', label: 'QA Sign-off', icon: IconCertificate },
+        { to: '/signoff', label: 'QA Clearance', icon: IconCertificate },
         { to: '/pending-approvals', label: 'Pending Approvals', icon: IconBell },
         { to: '/approvals', label: 'Approval Workflow Log', icon: IconApprove },
         { to: '/reports', label: 'Reports & Export Centre', icon: IconChart },
@@ -148,6 +148,13 @@ const ID_PREFIX_ROUTES: { prefix: string; path: string }[] = [
 // of this list because legacy records already use the real `SUP-*` prefix;
 // rewriting those would make valid historical IDs impossible to open.
 const TQA_ID_SHORTHAND = /^(FUNC|SAST|DAST|PERF|SIGN|PROJ|TC|CYCLE)-/i
+
+// Same CR/EPIC number shape QARequests/validation.ts enforces at wizard
+// submit time (CR_OR_EPIC_NUMBER_REGEX) -- kept as its own copy here rather
+// than importing across the QARequests/components boundary, since this is
+// only used to recognise the shape of a typed search term, not to validate
+// a form field.
+const CR_OR_EPIC_NUMBER_REGEX = /^(?:CR-[0-9]{1,12}|EPIC-[0-9]{1,10})$/
 
 function initials(name?: string | null): string {
   if (!name) return '?'
@@ -269,6 +276,16 @@ export default function Layout({ children }: { children?: ReactNode }) {
     const idRoute = ID_PREFIX_ROUTES.find((r) => normalizedUpper.startsWith(r.prefix))
     if (idRoute) {
       navigate(`${idRoute.path}?open=${encodeURIComponent(normalizedTerm)}`)
+    } else if (CR_OR_EPIC_NUMBER_REGEX.test(normalizedUpper)) {
+      // Reported directly: "if any one wants to search by cr number as
+      // well, can we get all requests details based on that cr?" -- a CR/
+      // EPIC number goes to the QA Requests list's own exact-match
+      // cr_number param (GET /api/qa-requests?cr_number=...) rather than
+      // the free-text `search` param, so CR-102 doesn't also pull in
+      // CR-1023/CR-1024 via substring matching. The list shows every QA
+      // Request raised under that exact CR, and each row's own linked
+      // Functional/SAST/DAST/Performance/Sign-off IDs alongside it.
+      navigate(`/qa-requests?cr_number=${encodeURIComponent(normalizedUpper)}`)
     } else {
       navigate(`/qa-requests?search=${encodeURIComponent(normalizedTerm)}`)
     }

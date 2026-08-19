@@ -113,47 +113,18 @@ ROLE_LABELS = {
 # runtime without a redeploy. This constant is kept ONLY as the one-time seed
 # list consumed by seed.py on first run -- nothing else should import it.
 SEED_DEPARTMENTS = [
-"Agriculture",
-"Alternate Business Channel",
-"Business Development"
-"Cash Management",
-"Chairman Secretariat",
-"CISO",
-"Compliance",
-"CORPORATE CREDIT & INT FINANC",
-"Corporate Services",
-"Credit -Comm and Corp",
-"Credit Monitoring",
-"DATA CENTER",
-"Digital Banking IT",
-"Digital Business Zone",
-"FI SLBC",
-"FM & A",
-"GOVERNMENT SCHEMES",
-"HRM",
 "IT - Software",
 "COE - Quality Assurance",
-"Inspection and Audit",
-"Integrated Risk Management",
-"Legal Services",
-"Marketing",
-"MSME",
-"NRI SERVICES",
-"Operation Department",
-"Planning & Development",
-"PMO",
-"Rajbhasha Vibhag",
-"Recovery",
-"Retail",
-"Security",
-"Strategic Data Management",
-"STRATEGY",
-"TIBD",
-"Transaction Monitoring Department",
-"Vigilance",
+"CBS PMO - Core Banking",
+"CBS PMO - Deposit",
+"CBS PMO - Loan",
+"CBS PMO - Exim",
+"CBS PMO - Remittance",
+"CBS PMO - API Interface",
+"CBS PMO - IBU (International Banking Unit)",
 ]
 
-# Central department that owns the QA Sign-off Certificate workflow. Its
+# Central department that owns the QA Clearance Certificate workflow. Its
 # linked testing request may belong to any business department, but the
 # certificate itself is raised and approved entirely inside COE - Quality Assurance.
 QA_DEPARTMENT = "COE - Quality Assurance"
@@ -222,7 +193,7 @@ class QAStatus:
     Submit to SM -> SM approval -> Department Head approval (also assigns
     the QA Lead) -> QA Lead readiness verification -> QA activity (planning/
     tester assignment/test design/execution, with a defect-fix-retest
-    cycle) -> QA sign-off -> Requester verification -> Closed.
+    cycle) -> QA Clearance -> Requester verification -> Closed.
 
     Can only be marked QA_COMPLETED once every SAST/DAST/Performance request
     linked to the *same gateway QA Request* (see
@@ -368,7 +339,7 @@ QA_REQUEST_STATUS_LABELS = {
     QAStatus.WAITING_FOR_FIX: "Waiting For Fix",
     QAStatus.RETESTING: "Retesting",
     QAStatus.QA_COMPLETED: "QA Completed",
-    QAStatus.QA_SIGNOFF_PENDING: "QA Sign-off Pending",
+    QAStatus.QA_SIGNOFF_PENDING: "QA Clearance Pending",
     QAStatus.QA_SIGNED_OFF: "QA Signed Off",
     QAStatus.REQUESTER_VERIFICATION: "Requester Verification",
     QAStatus.CLOSED: "Closed",
@@ -800,7 +771,7 @@ WORKFLOW_STEPS = {
     "FUNCTIONAL_REQUEST": [
         "Requester", "SM Approval", "Department Head Approval", "QA Readiness Verification Pending", "Readiness Verification",
         "QA Activity (Planning/Tester Assignment/Design/Execution)", "Defect-Retest-Regression Cycle",
-        "QA Sign-off", "Requester Verification",
+        "QA Clearance", "Requester Verification",
     ],
     "TEST_CASE": ["Author", "Reviewer", "QA Lead"],
     "SAST_DAST": [
@@ -816,7 +787,7 @@ WORKFLOW_STEPS = {
     "SUPPRESSION": ["Requester", "SM Approval", "Department Head Approval", "Security Team Verification"],
 }
 
-# ---- Module 8: QA Sign-off ----
+# ---- Module 8: QA Clearance ----
 CERTIFICATE_TYPES = ["Full Clearance", "Conditional Clearance", "Clearance Denied"]
 SIGNOFF_TESTING_TYPES = ["Functional", "SAST", "DAST"]
 RISK_TIERS = ["Tier 1 (Critical)", "Tier 2 (High)", "Tier 3 (Medium)", "Tier 4 (Low)"]

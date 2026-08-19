@@ -301,16 +301,36 @@ def _ensure_case_link(db: Session, defect_id: int, test_case_id: int) -> None:
         db.add(models.DefectTestCaseLink(defect_id=defect_id, test_case_id=test_case_id))
 
 
-def _link_to_execution(db: Session, obj: models.Defect, execution: models.TestExecution,
-                       cycle: models.TestCycle, test_case: models.TestCase,
-                       user: models.User) -> None:
-    if obj.execution_id and obj.execution_id != execution.id:
-        raise HTTPException(400, "This defect is already linked to another primary execution")
-    obj.execution_id = execution.id
-    obj.cycle_id = cycle.id
-    obj.primary_test_case_id = test_case.id
-    obj.retest_tester_id = obj.retest_tester_id or execution.assigned_to_id or user.id
-    _ensure_case_link(db, obj.id, test_case.id)
+def _ensure_execution_link(db: Session, defect_id: int, execution_id: int) -> None:
+    """Same autoflush=False caution as _ensure_case_link above -- add a
+    DefectExecutionLink for (defect_id, execution_id) unless one already
+    exists, checking the session's own pending inserts first (in case one
+    was just added earlier in this same request) and then the DB."""
+    already_pending = any(
+        isinstance(pending, models.DefectExecutionLink)
+        and pending.defect_id == defect_id and pending.execution_id == execution_id
+        for pending in db.new
+    )
+    if already_pending:
+        return
+    existing = db.query(models.DefectExecutionLink).filter_by(
+        defect_id=defect_id, execution_id=execution_id,
+    ).first()
+    if not existing:
+        db.add(models.DefectExecutionLink(defect_id=defect_id, execution_id=execution_id))
+
+
+def _link_run_defect(db: Session, obj: models.Defect, execution: models.TestExecution, user: models.User) -> None:
+    """Attaches obj's defect_key to `execution`'s latest attempt
+    (TestRunDefect) -- shared by both _link_to_execution (primary link) and
+    _link_additional_execution below, so the attempt-level traceability rule
+    (at most one defect per attempt; a fresh retest attempt can carry a
+    different one) applies uniformly regardless of which kind of link this
+    is. TestRunDefect's own uniqueness is per (run_id, defect_key), not per
+    defect globally, so the same defect_key linking to a DIFFERENT
+    execution's run here was already unproblematic at this layer -- the
+    only thing that used to block it was Defect.execution_id's own single-
+    primary-execution guard in the two callers below."""
     latest_run = execution.runs[-1] if execution.runs else None
     if not latest_run:
         raise HTTPException(400, "The Failed or Blocked execution has no recorded attempt to link")
@@ -335,6 +355,41 @@ def _link_to_execution(db: Session, obj: models.Defect, execution: models.TestEx
             defect_url=f"/defects?open={obj.defect_key}", title=obj.title,
             defect_status=obj.status, linked_by_id=user.id, notes="Governed portal defect",
         ))
+
+
+def _link_to_execution(db: Session, obj: models.Defect, execution: models.TestExecution,
+                       cycle: models.TestCycle, test_case: models.TestCase,
+                       user: models.User) -> None:
+    """Sets `execution` as obj's PRIMARY execution -- only ever called when
+    obj has no primary execution yet, or `execution` already IS its primary
+    (idempotent re-link); see link_defect_execution's own branch below for
+    the "already primary-linked elsewhere" case, which goes to
+    _link_additional_execution instead rather than raising 400 as this used
+    to unconditionally."""
+    obj.execution_id = execution.id
+    obj.cycle_id = cycle.id
+    obj.primary_test_case_id = test_case.id
+    obj.retest_tester_id = obj.retest_tester_id or execution.assigned_to_id or user.id
+    _ensure_case_link(db, obj.id, test_case.id)
+    _link_run_defect(db, obj, execution, user)
+
+
+def _link_additional_execution(db: Session, obj: models.Defect, execution: models.TestExecution,
+                               cycle: models.TestCycle, test_case: models.TestCase,
+                               user: models.User) -> None:
+    """Reported directly: the "Link existing defect" picker used to only
+    offer never-linked defects -- "instead of [unlinked only], show linked
+    defect as well." Traces this SAME governed defect to a second (or
+    third...) Failed/Blocked execution -- e.g. the same underlying bug also
+    failed a different test case -- WITHOUT touching obj.execution_id/
+    cycle_id/primary_test_case_id (its one primary execution, which keeps
+    governing assignment/closure/retest workflow exactly as before). Only a
+    DefectExecutionLink row is added, mirroring _ensure_case_link's own
+    "primary field + separate many-to-many table" pattern for extra test
+    cases."""
+    _ensure_execution_link(db, obj.id, execution.id)
+    _ensure_case_link(db, obj.id, test_case.id)
+    _link_run_defect(db, obj, execution, user)
 
 
 _TERMINAL_STATUSES = ("Closed", "Rejected", "Duplicate", "Not a Defect")
@@ -626,8 +681,16 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
         raise HTTPException(400, f"A {obj.status} defect cannot be linked to a new execution")
     execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request)
     _require_execution_link_access(db, cycle, current_user)
-    _link_to_execution(db, obj, execution, cycle, test_case, current_user)
-    _audit(db, obj, current_user, "Linked", f"Linked to {cycle.cycle_key} / {test_case.test_case_key} / execution #{execution.id}.", step_name="Traceability")
+    if obj.execution_id and obj.execution_id != execution.id:
+        # Already has a DIFFERENT primary execution -- add this as an
+        # additional link instead of the 400 this used to always raise.
+        _link_additional_execution(db, obj, execution, cycle, test_case, current_user)
+        _audit(db, obj, current_user, "Linked",
+               f"Also linked to {cycle.cycle_key} / {test_case.test_case_key} / execution #{execution.id} "
+               "(primary execution unchanged).", step_name="Traceability")
+    else:
+        _link_to_execution(db, obj, execution, cycle, test_case, current_user)
+        _audit(db, obj, current_user, "Linked", f"Linked to {cycle.cycle_key} / {test_case.test_case_key} / execution #{execution.id}.", step_name="Traceability")
     db.commit(); db.refresh(obj)
     return obj
 

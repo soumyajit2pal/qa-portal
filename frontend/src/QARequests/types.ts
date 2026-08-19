@@ -44,6 +44,10 @@ export function blankDastComponent(): DastComponent {
 export const EMPTY_FORM = {
   department: '', application_name: '', application_owner: '', cr_number: '',
   epic_number: '', change_type: 'New', bug_fix_source_request_id: '', vendor_si_partner: '', technology_stack: '',
+  // Reported directly: new mandatory field describing the change itself,
+  // distinct from Change Type's New/Enhancement/Bug Fix classification --
+  // see validation.ts's REQUIRED_DETAIL_FIELDS and DetailsStep.tsx.
+  change_description: '',
   release_version: '', build_number: '', environment: 'SIT', target_promotion_environment: 'UAT',
   request_types: [] as string[],
   target_release_date: '', remarks: '', checked_items: [] as string[],

@@ -1,6 +1,7 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from .. import cache, models, schemas
 from ..database import get_db
@@ -53,7 +54,16 @@ def create_department(payload: schemas.DepartmentCreate, db: Session = Depends(g
         raise HTTPException(400, f"Department '{name}' already exists")
     obj = models.Department(name=name, is_active=True)
     db.add(obj)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Race-safe fallback for the same check-then-insert window as
+        # test_execution.py's create_cycle_folder_access -- see that
+        # function's own comment. Two admins (or one double-click)
+        # creating the same department name near-simultaneously both pass
+        # the pre-check above and both insert.
+        db.rollback()
+        raise HTTPException(400, f"Department '{name}' already exists")
     db.refresh(obj)
     _invalidate_departments_cache()
     return obj

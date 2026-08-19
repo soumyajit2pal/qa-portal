@@ -5,7 +5,7 @@ export const ROLE_LABELS: Record<string, string> = {
   QA_LEAD: 'QA Lead',
   // 2026-08: CHIEF_MANAGER_QA/AGM_QA are now the sole "QA Executive Group" --
   // any active holder of either role has identical authority at the
-  // Executive  / QA Sign-off checkpoint (reported directly -- "no ther
+  // Executive  / QA Clearance checkpoint (reported directly -- "no ther
   // pair is required, creating lots of confusion"). Previously split into a
   // second pair, CHEIF_MANAGER_COE/AGM_COE, with identical authority but a
   // separate label; those two roles are retired -- existing accounts were
@@ -72,7 +72,7 @@ export const QA_ADMIN_ASSIGNABLE_ROLES: string[] = [
   'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST',
 ]
 
-// QA Sign-off is a COE - Quality Assurance-owned workflow even when its linked testing
+// QA Clearance is a COE - Quality Assurance-owned workflow even when its linked testing
 // request came from another business department.
 export const QA_DEPARTMENT = 'COE - Quality Assurance'
 
@@ -290,7 +290,7 @@ export const QA_STATUS_LABELS: Record<string, string> = {
   PLANNING: 'Planning', TESTER_ASSIGNED: 'Tester Assigned', TEST_DESIGN: 'Test Design',
   EXECUTION_IN_PROGRESS: 'Execution In Progress', DEFECT_RAISED: 'Defect Raised',
   WAITING_FOR_FIX: 'Waiting For Fix', RETESTING: 'Retesting',
-  QA_COMPLETED: 'QA Completed', QA_SIGNOFF_PENDING: 'QA Sign-off Pending', QA_SIGNED_OFF: 'QA Signed Off',
+  QA_COMPLETED: 'QA Completed', QA_SIGNOFF_PENDING: 'QA Clearance Pending', QA_SIGNED_OFF: 'QA Signed Off',
   REQUESTER_VERIFICATION: 'Requester Verification', CLOSED: 'Closed', CANCELLED: 'Cancelled',
 }
 
@@ -813,7 +813,7 @@ export const REPORTS: ReportDef[] = [
   { key: 'suppression-register', label: 'Suppression Register', group: 'Security', description: 'Finding-level suppression requests and all governed decisions.' },
   { key: 'testcase-approval-summary', label: 'Testcase Approval Backlog', group: 'Management', description: 'Draft, recommendation, QA Lead approval and approved counts by project.' },
   { key: 'application-quality-scorecard', label: 'Application Quality Scorecard', group: 'Management', description: 'Cross-module request, testing, defect and issued sign-off position by application.' },
-  { key: 'qa-signoff-register', label: 'QA Sign-off Register', group: 'Management', description: 'Certificate workflow, validity, signatories and final issuance status.' },
+  { key: 'qa-signoff-register', label: 'QA Clearance Register', group: 'Management', description: 'Certificate workflow, validity, signatories and final issuance status.' },
   { key: 'audit-evidence', label: 'Approval Audit Evidence', group: 'Management', description: 'Chronological workflow decisions with actor, role, comments and timestamp.' },
 ]
 

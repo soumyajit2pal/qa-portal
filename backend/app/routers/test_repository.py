@@ -613,8 +613,30 @@ def list_test_cases(
 
 
 @router.get("/projects/{project_id}/test-cases/summary", response_model=schemas.TestCaseSummaryOut)
-def get_test_case_summary(project_id: int, db: Session = Depends(get_db),
-                           current_user: models.User = Depends(get_current_user)):
+def get_test_case_summary(
+    project_id: int,
+    folder_id: Optional[str] = Query(
+        None,
+        description="Reported directly: 'Testcases count and all should be "
+                    "updated based on folder' -- when set, scopes the "
+                    "scoped_total/scoped_approved_count/scoped_in_review_count/"
+                    "scoped_critical_count fields to one folder's direct "
+                    "contents by numeric id, the literal 'unfiled' for "
+                    "folder_id IS NULL, or the literal 'archived' for every "
+                    "Archived case project-wide (mirrors the Repository UI's "
+                    "own 'Archived' pseudo-folder, which shows every archived "
+                    "case regardless of its real folder -- see "
+                    "list_test_cases). Omitted (the 'All test cases' view) "
+                    "leaves those four equal to the project-wide fields "
+                    "below. Every other field on this response is always "
+                    "project-wide regardless of this param, powering the "
+                    "sidebar's fixed per-folder/Archived/Recycle-Bin badges, "
+                    "which must never change just because a different folder "
+                    "is currently open.",
+    ),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """The folder tree's per-folder/unfiled counts, the tag filter dropdown's
     options, and the "Test cases / Approved / Pending review / Critical"
     stat bar all used to be computed in the browser from the complete
@@ -622,7 +644,10 @@ def get_test_case_summary(project_id: int, db: Session = Depends(get_db),
     paginated, none of those has enough data on hand any more. This is the
     one place that recomputes all of them, via SQL COUNT/GROUP BY against
     the whole project regardless of which page/folder/filter the main list
-    currently has selected -- never a full-row fetch."""
+    currently has selected -- never a full-row fetch. The stat bar itself
+    used to be part of that same "always project-wide" set too, until it was
+    reported as confusing (see the folder_id param above) -- it's now scoped
+    separately via scoped_total/scoped_approved_count/etc below."""
     _get_project_or_404(db, project_id)
     # 2026-08 "Recycle Bin" requirement -- every count here mirrors what the
     # default (non-Archived, non-deleted) list actually shows; a soft-
@@ -664,11 +689,38 @@ def get_test_case_summary(project_id: int, db: Session = Depends(get_db),
         .filter(models.TestCase.project_id == project_id)
         .distinct().order_by(models.TestCaseTag.tag).all()
     ]
+
+    # Current-view stat cards -- same `base` (project, not soft-deleted), scoped
+    # down to whatever the caller's folder_id says, mirroring list_test_cases'
+    # own folder_id handling. 'archived' is a stat-cards-only value (the list
+    # endpoint gets there via status=Archived instead, since Archive is a
+    # project-wide pseudo-folder, not a real folder_id) -- everything else
+    # (including no folder_id at all) excludes Archived, same as the
+    # project-wide total/approved_count/etc above.
+    if folder_id == "archived":
+        scoped = base.filter(models.TestCase.status == "Archived")
+    else:
+        scoped = base.filter(models.TestCase.status != "Archived")
+        if folder_id == "unfiled":
+            scoped = scoped.filter(models.TestCase.folder_id.is_(None))
+        elif folder_id:
+            try:
+                folder_id_int = int(folder_id)
+            except ValueError:
+                raise HTTPException(400, "folder_id must be numeric, 'unfiled', or 'archived'")
+            scoped = scoped.filter(models.TestCase.folder_id == folder_id_int)
+    scoped_total = scoped.count()
+    scoped_approved_count = scoped.filter(models.TestCase.current_approved_version_id.isnot(None)).count()
+    scoped_in_review_count = scoped.filter(models.TestCase.status.in_(("In Review", "Recommendation Pending"))).count()
+    scoped_critical_count = scoped.filter(models.TestCase.priority == "Critical").count()
+
     return schemas.TestCaseSummaryOut(
         total=total, unfiled_count=unfiled_count, folder_counts=folder_counts,
         approved_count=approved_count, in_review_count=in_review_count,
         review_completed_count=review_completed_count, critical_count=critical_count,
         tags=tags, archived_count=archived_count, recycle_bin_count=recycle_bin_count,
+        scoped_total=scoped_total, scoped_approved_count=scoped_approved_count,
+        scoped_in_review_count=scoped_in_review_count, scoped_critical_count=scoped_critical_count,
     )
 
 
