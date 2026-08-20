@@ -39,11 +39,18 @@ interface UnifiedRequestRow {
   status: string
   requester_id?: number | null
   created_at: string
+  // Reported directly: "IN dashboard also show change description" --
+  // delegated from the QA Request gateway on every source type this unifies
+  // (see backend models.QARequest.change_description and each child
+  // request's own delegated property), same as application_name/department
+  // above.
+  change_description?: string | null
 }
 
 function toUnified(type: string, rows: {
   id: number; request_id?: string | null; application_name?: string | null
   department?: string | null; status: string; requester_id?: number | null; created_at: string
+  change_description?: string | null
 }[]): UnifiedRequestRow[] {
   return rows.map((r) => ({
     // A still-Draft QA Request gateway has no request_id yet -- see the
@@ -51,6 +58,7 @@ function toUnified(type: string, rows: {
     // placeholder rather than showing a blank/undefined cell here.
     id: r.id, uid: `${type}-${r.id}`, request_id: r.request_id || `Draft #${r.id}`, type, application_name: r.application_name || '—',
     department: r.department, status: r.status, requester_id: r.requester_id, created_at: r.created_at,
+    change_description: r.change_description,
   }))
 }
 
@@ -66,6 +74,7 @@ function toUnifiedDast(rows: DASTListOut[]): UnifiedRequestRow[] {
     id: r.id, uid: `DAST-${r.id}`, request_id: r.request_id, type: 'DAST',
     application_name: r.application_name || '—',
     department: r.department, status: r.status, requester_id: r.requester_id, created_at: r.created_at,
+    change_description: r.change_description,
   }))
 }
 
@@ -315,7 +324,7 @@ const LIFECYCLE_STAGES = [
   { key: 'sm-approval', label: 'SM Approval' },
   { key: 'department-head-approval', label: 'Department Head Approval' },
   { key: 'qa-activity', label: 'QA Activity' },
-  { key: 'signoff', label: 'Sign-off' },
+  { key: 'signoff', label: 'Clearance' },
   { key: 'closed', label: 'Closed' },
 ]
 
@@ -940,6 +949,16 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
               { key: 'type', header: 'Type' },
               { key: 'request_id', header: 'Request ID' },
               { key: 'application_name', header: 'Application' },
+              {
+                key: 'change_description',
+                header: 'Change Description',
+                render: (r) => (
+                  <span className="truncate-cell" title={r.change_description || ''}>
+                    {r.change_description || '—'}
+                  </span>
+                ),
+                filterValue: (r) => r.change_description || '',
+              },
               { key: 'department', header: 'Department', render: (r) => r.department || '—' },
               { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} /> },
               { key: 'created_at', header: 'Raised', render: (r) => timeAgo(r.created_at) },

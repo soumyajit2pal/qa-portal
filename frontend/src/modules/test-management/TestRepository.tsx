@@ -2668,14 +2668,38 @@ export default function TestRepository() {
     try { setFolders(await api.get<TestFolderOut[]>(`/api/test-repository/projects/${pid}/folders`)) }
     catch (err) { setError(err) }
   }, [])
-  const loadSummary = useCallback(async (pid: number) => {
-    try { setSummary(await api.get<TestCaseSummaryOut>(`/api/test-repository/projects/${pid}/test-cases/summary`)) }
-    catch (err) { setError(err) }
+  // Reported directly: "Testcases count and all should be updated based on
+  // folder. otherwise creating confusion" -- the "Current view" stat cards
+  // (Test cases/Approved/Pending review/Critical) used to always show
+  // GET .../summary's project-wide total/approved_count/etc regardless of
+  // which folder was selected in the sidebar. `folderParam` mirrors the
+  // same folder_id semantics the main case list's own `extra.folder_id`
+  // already sends (see the `extra` object below), plus a distinct 'archived'
+  // value for the Archive pseudo-folder (which the list reaches via a
+  // status filter instead, since it's project-wide, not folder-scoped) --
+  // passed to the summary endpoint so its new scoped_total/
+  // scoped_approved_count/scoped_in_review_count/scoped_critical_count
+  // fields reflect the folder actually on screen. Recycle Bin has no stat
+  // cards at all (see the isRecycleBinView branch below), so its own value
+  // here is never rendered -- left as undefined (whole project) for
+  // simplicity rather than adding a fifth branch nothing reads.
+  const summaryFolderParam = selectedFolder === ARCHIVE_VIEW ? 'archived'
+    : selectedFolder === UNFILED ? 'unfiled'
+    : selectedFolder === '' || selectedFolder === RECYCLE_BIN ? undefined
+    : String(selectedFolder)
+  const loadSummary = useCallback(async (pid: number, folderParam?: string) => {
+    try {
+      const qs = folderParam ? `?folder_id=${encodeURIComponent(folderParam)}` : ''
+      setSummary(await api.get<TestCaseSummaryOut>(`/api/test-repository/projects/${pid}/test-cases/summary${qs}`))
+    } catch (err) { setError(err) }
   }, [])
   useEffect(() => {
     setSelectedCaseIds(new Set())
-    if (projectId) { loadFolders(projectId); loadSummary(projectId) } else { setFolders([]); setSummary(null) }
-  }, [projectId, loadFolders, loadSummary])
+    if (projectId) { loadFolders(projectId) } else { setFolders([]) }
+  }, [projectId, loadFolders])
+  useEffect(() => {
+    if (projectId) { loadSummary(projectId, summaryFolderParam) } else { setSummary(null) }
+  }, [projectId, summaryFolderParam, loadSummary])
 
   useEffect(() => {
     if (!projectId) { setMyAccess(null); return }
@@ -2728,8 +2752,8 @@ export default function TestRepository() {
   )
   const refreshCases = useCallback(() => {
     reloadCases()
-    if (projectId) loadSummary(projectId)
-  }, [reloadCases, loadSummary, projectId])
+    if (projectId) loadSummary(projectId, summaryFolderParam)
+  }, [reloadCases, loadSummary, projectId, summaryFolderParam])
   // Selection is only ever meaningful against whatever's currently loaded --
   // switching project/folder/page/filters changes what's on screen, so any
   // held-over selection from before would silently refer to rows the user
@@ -3194,10 +3218,10 @@ export default function TestRepository() {
               <span>{total} test case{total !== 1 ? 's' : ''}</span>
             </div>
             <div className="tm-repository-summary">
-              <div><small>Test cases</small><strong>{summary?.total ?? 0}</strong></div>
-              <div><small>Approved</small><strong>{summary?.approved_count ?? 0}</strong></div>
-              <div><small>Pending review</small><strong>{summary?.in_review_count ?? 0}</strong></div>
-              <div><small>Critical</small><strong>{summary?.critical_count ?? 0}</strong></div>
+              <div><small>Test cases</small><strong>{summary?.scoped_total ?? 0}</strong></div>
+              <div><small>Approved</small><strong>{summary?.scoped_approved_count ?? 0}</strong></div>
+              <div><small>Pending review</small><strong>{summary?.scoped_in_review_count ?? 0}</strong></div>
+              <div><small>Critical</small><strong>{summary?.scoped_critical_count ?? 0}</strong></div>
             </div>
             <div className="tm-list-toolbar">
               <ClearableSearchInput value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear test case search" wrapperClassName="search-grow" placeholder="Search cases, epics, features, or stories…" />

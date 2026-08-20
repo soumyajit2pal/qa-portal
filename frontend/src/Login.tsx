@@ -4,15 +4,9 @@ import { useAuth } from './context/AuthContext'
 import { IconApprove, IconCertificate, IconEyeOff, IconLock, IconShield, IconUsers, IconWorkflow } from './components/Icons'
 import { ErrorText } from './components/Common'
 
-const DEMO_ACCOUNTS: [string, string][] = [
-  ['requester1', 'Requester 1 (Developer) / Others'], ['requester1', 'Requester 2 (Developer) / Others'],['ba1', 'Business Analyst'], ['qa1', 'QA Engineer (QA 1)'],['qa2', 'QA Engineer (QA 2)']
-  ,['cheifmanagerqa1', 'Chief Manager - QA'],['agm1', 'Assistant General Manager - QA'],
-  ['appowner1', 'Application Owner'], ['depthead1', 'Department Head - CM'],['depthead2', 'Department Head - AGM'],
-  ['sm1', 'SM'], ['sm2', 'SM With App Owner'], ['admin', 'Administrator'],
-]
 export default function Login() {
-  const [username, setUsername] = useState('requester1')
-  const [password, setPassword] = useState('Password@123')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -31,13 +25,6 @@ export default function Login() {
     } finally {
       setBusy(false)
     }
-  }
-
-  function chooseDemoAccount(value: string) {
-    if (!value) return
-    setUsername(value)
-    setPassword('Password@123')
-    setError(null)
   }
 
   return (
@@ -66,7 +53,7 @@ export default function Login() {
             <div className="login-capabilities">
               <div><span><IconWorkflow /></span><strong>Orchestrated workflows</strong><small>Track every request through a clear, governed lifecycle.</small></div>
               <div><span><IconShield /></span><strong>Security built in</strong><small>SAST, DAST, and suppression reviews in one place.</small></div>
-              <div><span><IconCertificate /></span><strong>Audit-ready sign-off</strong><small>Decisions and evidence remain complete and traceable.</small></div>
+              <div><span><IconCertificate /></span><strong>Audit-ready clearance</strong><small>Decisions and evidence remain complete and traceable.</small></div>
             </div>
           </div>
 
@@ -120,15 +107,6 @@ export default function Login() {
               {!busy && <span aria-hidden="true">→</span>}
             </button>
           </form>
-
-          <div className="login-divider"><span>Demo environment</span></div>
-          <div className="demo-access">
-            <div><strong>Explore by role</strong><small>Credentials are filled automatically.</small></div>
-            <select value={DEMO_ACCOUNTS.some(([u]) => u === username) ? username : ''} onChange={(e) => chooseDemoAccount(e.target.value)} aria-label="Choose a demo role">
-              <option value="">Choose role</option>
-              {DEMO_ACCOUNTS.map(([user, role]) => <option value={user} key={user}>{role}</option>)}
-            </select>
-          </div>
 
           <p className="login-help">Need access? Contact your QualityOps administrator.</p>
           {/* Reported directly: "Help & user Manual should come on login page

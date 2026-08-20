@@ -2,6 +2,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
 
 from .. import models, schemas, pagination
 from ..database import get_db
@@ -498,6 +499,7 @@ def create_project_view_grant(project_id: int, payload: schemas.TestProjectViewG
     if bool(department) == bool(user_id):
         raise HTTPException(400, "Grant exactly one of a department or a user, not both and not neither.")
     if department:
+        who = department
         department_row = db.query(models.Department).filter(
             models.Department.name == department,
             models.Department.is_active == True,  # noqa: E712 - Oracle boolean column
@@ -513,14 +515,24 @@ def create_project_view_grant(project_id: int, payload: schemas.TestProjectViewG
         target_user = get_or_404(db, models.User, user_id, "User")
         if target_user.has_department(obj.department):
             raise HTTPException(400, "This user is already in the project's own department -- no grant needed")
+        who = target_user.full_name
         existing = db.query(models.TestProjectViewGrant).filter_by(project_id=obj.id, user_id=user_id).first()
         if existing:
-            raise HTTPException(409, f"{target_user.full_name} already has view access to this project")
+            raise HTTPException(409, f"{who} already has view access to this project")
     grant = models.TestProjectViewGrant(
         project_id=obj.id, department=department, user_id=user_id, granted_by_id=current_user.id,
     )
     db.add(grant)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Same race-safe fallback as test_execution.py's
+        # create_cycle_folder_access -- see that function's own comment.
+        # Reported directly (vague at first -- "sometimes getting key
+        # issue" on an unnamed modal); this project-view-grant modal has
+        # the identical check-then-insert race window.
+        db.rollback()
+        raise HTTPException(409, f"{who} already has view access to this project")
     db.refresh(grant)
     return grant
 

@@ -521,6 +521,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
               )}
             </DetailField>
             <DetailField label="CR Number/EPIC Number">{req.cr_number || req.epic_number || '—'}</DetailField>
+            <DetailField label="Change Description">{req.change_description || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
             <DetailField label="Application Owner">{req.application_owner || '—'}</DetailField>
             <DetailField label="Change Type">{req.change_type || '—'}</DetailField>
@@ -712,7 +713,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
             )}
             {canCompleteDefectFixRetest && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-defect-fix-retest')}>Complete Defect / Fix / Retest</button>}
             {canCompleteReport && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('complete-report')}>Complete Report</button>}
-            {canSignOff && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('sign-off')}>Sign Off</button>}
+            {canSignOff && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('sign-off')}>Grant Clearance</button>}
             {canRequesterDecide && (
               <WorkflowDecisionPanel busy={busy} title="Requester verification decision" options={[
                 { key: 'accept', label: 'Accept & Close', description: 'Confirm the result and complete the request', tone: 'approve', onClick: () => act('requester-decision', { decision: 'Accepted', comments }) },
@@ -841,7 +842,7 @@ export default function Performance() {
       <ErrorText error={error} />
       <PageHeader
         title="Performance Testing Requests" count={total}
-        subtitle="Load/performance testing requests, from submission through baseline, load test execution, and sign-off. Raised via a QA Request (include Performance Testing in its request types)."
+        subtitle="Load/performance testing requests, from submission through baseline, load test execution, and clearance. Raised via a QA Request (include Performance Testing in its request types)."
       />
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}
@@ -853,6 +854,9 @@ export default function Performance() {
             render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
           },
           { key: 'application_name', header: 'Application' },
+          { key: 'change_description', header: 'Change Description', render: (r) => (
+            <span className="truncate-cell" title={r.change_description || ''}>{r.change_description || '—'}</span>
+          ), filterValue: (r) => r.change_description || '' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'engineer_id', header: 'Assigned Group', render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '—', filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },

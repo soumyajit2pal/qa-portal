@@ -568,3 +568,51 @@ def can_manage_project(project: models.TestProject, current_user: models.User) -
 def require_can_manage_project(project: models.TestProject, current_user: models.User) -> None:
     if not can_manage_project(project, current_user):
         raise HTTPException(403, "Only this Test Project's owner or a QA Lead/Administrator can edit its details.")
+
+
+def can_view_cycle_folder(folder: models.TestCycleFolder, current_user: models.User) -> bool:
+    """Reported directly: "Create Test Cycle Folder, in which I can give
+    access department based or user level, same behaviour like project
+    has." Deliberately the OPPOSITE of viewable_project_ids/
+    TestProjectViewGrant above (which only ever WIDEN visibility) -- a
+    TestCycleFolder with at least one TestCycleFolderAccess row RESTRICTS
+    visibility to just the department(s)/user(s) it names. A folder with no
+    access rows at all is unrestricted (same as an Unfiled cycle, or every
+    folder before this feature existed).
+
+    Reported directly as a follow-up: QA Group (QA_ENGINEER) added to the
+    bypass list alongside QA Lead Group -- both groups, plus the project's
+    own owner, always bypass, same "QA Group/QA Lead Group govern everything"
+    convention can_manage_project/can_execute_project already use elsewhere
+    in this module -- plus this folder's own creator, so nobody can
+    restrict themselves out of a folder they just made. has_role() already
+    bypasses for ADMIN too. In practice this means a folder's access grants
+    only ever matter for accounts that hold none of these roles (e.g. a
+    business department user who can otherwise view Test Execution at all,
+    since list_cycles/get_cycle carry no role gate of their own) -- every
+    QA_ENGINEER/QA_LEAD/CHIEF_MANAGER_QA/AGM_QA account sees every folder
+    regardless of grants."""
+    if current_user.has_role(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+        return True
+    if folder.project and folder.project.owner_id == current_user.id:
+        return True
+    if folder.created_by_id == current_user.id:
+        return True
+    grants = folder.access_grants
+    if not grants:
+        return True
+    for grant in grants:
+        if grant.user_id == current_user.id:
+            return True
+        if grant.department and current_user.has_department(grant.department):
+            return True
+    return False
+
+
+def require_can_view_cycle_folder(folder: models.TestCycleFolder, current_user: models.User) -> None:
+    if not can_view_cycle_folder(folder, current_user):
+        raise HTTPException(
+            403,
+            "You don't have access to this Test Cycle Folder -- ask the project owner or a QA Lead "
+            "to grant your department or account access.",
+        )

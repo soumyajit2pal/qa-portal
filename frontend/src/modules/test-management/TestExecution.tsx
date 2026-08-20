@@ -6,7 +6,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import { ENVIRONMENTS, hasRole, hasDepartment, hasRetestEligibleHistory, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
-import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut } from '../../types'
+import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import InfoModal from '../../components/InfoModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
@@ -27,17 +27,28 @@ const CAN_EXEC_ROLES = ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA']
 // QA_ENGINEER (who may execute but, per this change, may no longer remove
 // a testcase from a cycle or delete a cycle).
 const QA_LEAD_GROUP_ROLES = ['QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
+// Reported directly: "Create Test Cycle Folder, in which I can give access
+// department based or user level, same behaviour like project has. Under
+// this folder create test cycle." Sentinel for the sidebar's "Unfiled"
+// pseudo-folder, same convention as TestRepository.tsx's own UNFILED.
+const CYCLE_UNFILED = '__unfiled__'
 
-function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
+function CycleModal({ projectId, requests, users, folders, defaultFolderId, editing, onClose, onSaved }: {
   projectId: number
   requests: QARequestListOut[]
   users: UserOut[]
+  // Reported directly: "Create Test Cycle Folder ... Under this folder
+  // create test cycle." '' means Unfiled -- same convention as
+  // TestRepository.tsx's own folder picker.
+  folders: TestCycleFolderOut[]
+  defaultFolderId: number | ''
   editing?: TestCycleOut | null
   onClose: () => void
   onSaved: (c: TestCycleOut) => void
 }) {
   const [name, setName] = useState(editing?.name || '')
   const [description, setDescription] = useState(editing?.description || '')
+  const [folderId, setFolderId] = useState<number | ''>(editing ? (editing.folder_id ?? '') : defaultFolderId)
   const [startDate, setStartDate] = useState(editing?.start_date || '')
   const [endDate, setEndDate] = useState(editing?.end_date || '')
   const [linkedRequest, setLinkedRequest] = useState(editing?.linked_request_type && editing.linked_request_id ? `${editing.linked_request_type}:${editing.linked_request_id}` : '')
@@ -79,6 +90,7 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
         cycle_type: cycleType || null,
         environment: environment || null, build: build || null,
         owner_id: ownerId || null,
+        folder_id: folderId || null,
         ...(isOwnerReassignment ? { reason: ownerReassignReason.trim() } : {}),
       }
       const saved = editing
@@ -96,6 +108,17 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
         </Field>
         <Field label="Description">
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
+        </Field>
+        <Field label="Folder">
+          <SearchableSelect
+            value={folderId === '' ? '' : String(folderId)}
+            onChange={(v) => setFolderId(v ? Number(v) : '')}
+            placeholder="-- Unfiled --"
+            options={[{ value: '', label: '-- Unfiled --' }, ...folders.map((f) => ({
+              value: String(f.id),
+              label: f.access_grants.length ? `${f.name} (restricted)` : f.name,
+            }))]}
+          />
         </Field>
         <div className="grid grid-2">
           <Field label="Cycle Type">
@@ -156,6 +179,155 @@ function CycleModal({ projectId, requests, users, editing, onClose, onSaved }: {
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
           <button className="btn btn-primary" disabled={busy || (isOwnerReassignment && !ownerReassignReason.trim())}>{busy ? 'Saving…' : editing ? 'Save Changes' : 'Create Cycle'}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+// Reported directly: "Create Test Cycle Folder, in which I can give access
+// department based or user level, same behaviour like project has." Flat --
+// no nesting, no rename-with-reparent complexity (see
+// ORACLE_MIGRATION_2026-07.md section 147) -- just a name.
+function NewCycleFolderModal({ projectId, editing, onClose, onSaved }: {
+  projectId: number
+  editing?: TestCycleFolderOut | null
+  onClose: () => void
+  onSaved: (f: TestCycleFolderOut) => void
+}) {
+  const [name, setName] = useState(editing?.name || '')
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!name.trim()) { setError(new Error('Folder name cannot be blank')); return }
+    setBusy(true); setError(null)
+    try {
+      const saved = editing
+        ? await api.patch<TestCycleFolderOut>(`/api/test-execution/cycle-folders/${editing.id}`, { name: name.trim() })
+        : await api.post<TestCycleFolderOut>(`/api/test-execution/projects/${projectId}/cycle-folders`, { name: name.trim() })
+      onSaved(saved)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={editing ? 'Rename Folder' : 'New Test Cycle Folder'} onClose={onClose}>
+      <form onSubmit={submit}>
+        <Field label="Folder Name *">
+          <input autoFocus required value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <ErrorText error={error} />
+        <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : editing ? 'Save' : 'Create Folder'}</button>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+// Reported directly: "give access department based or user level, same
+// behaviour like project has." Deliberately the OPPOSITE of Test Projects'
+// own ManageViewAccessModal (which only ever WIDENS a project's visibility)
+// -- adding even one grant here RESTRICTS this folder's cycles to just the
+// department(s)/user(s) listed (plus the project owner, this folder's own
+// creator, and the QA Lead Group/Admin, who bypass every governance gate in
+// this module already) -- see backend models.TestCycleFolder's own
+// docstring. Gated the same as folder deletion (QA Lead Group/Admin only).
+function CycleFolderAccessModal({ folder, departments, onClose, onChanged }: {
+  folder: TestCycleFolderOut
+  departments: DepartmentOut[]
+  onClose: () => void
+  onChanged: (grants: TestCycleFolderAccessOut[]) => void
+}) {
+  const [grants, setGrants] = useState<TestCycleFolderAccessOut[]>(folder.access_grants)
+  const [allUsers, setAllUsers] = useState<UserOut[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [grantType, setGrantType] = useState<'department' | 'user'>('department')
+  const [department, setDepartment] = useState('')
+  const [userId, setUserId] = useState('')
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api.get<UserOut[]>('/api/auth/users').then((u) => { setAllUsers(u); setLoaded(true) }).catch((err) => { setError(err); setLoaded(true) })
+  }, [])
+
+  function report(next: TestCycleFolderAccessOut[]) {
+    setGrants(next)
+    onChanged(next)
+  }
+
+  async function addGrant(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    if (grantType === 'department' && !department) { setError(new Error('Select a department')); return }
+    if (grantType === 'user' && !userId) { setError(new Error('Select a user')); return }
+    setBusy(true)
+    try {
+      const created = await api.post<TestCycleFolderAccessOut>(`/api/test-execution/cycle-folders/${folder.id}/access`, {
+        department: grantType === 'department' ? department : null,
+        user_id: grantType === 'user' ? Number(userId) : null,
+      })
+      report([...grants, created])
+      setDepartment(''); setUserId('')
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  async function removeGrant(grant: TestCycleFolderAccessOut) {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.del(`/api/test-execution/cycle-folders/${folder.id}/access/${grant.id}`)
+      report(grants.filter((g) => g.id !== grant.id))
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  const grantedDepartments = new Set(grants.filter((g) => g.department).map((g) => g.department))
+  const grantedUserIds = new Set(grants.filter((g) => g.user_id != null).map((g) => g.user_id))
+  const departmentOptions = departments.filter((d) => !grantedDepartments.has(d.name))
+  const userOptions = allUsers.filter((u) => u.is_active && !grantedUserIds.has(u.id))
+
+  return (
+    <Modal title={`Folder access — ${folder.name}`} onClose={onClose}>
+      <p className="muted small">
+        {grants.length === 0
+          ? 'No access restriction yet -- this folder is visible to anyone who can already execute in this project, same as an Unfiled cycle.'
+          : 'This folder is RESTRICTED -- only the department(s)/user(s) below (plus the project owner, this folder\'s creator, and the QA Lead Group/Admin) can see its test cycles.'}
+      </p>
+      {!loaded ? <p className="muted">Loading...</p> : (
+        <div className="tm-view-access-list">
+          {grants.map((grant) => (
+            <div key={grant.id} className="tm-view-access-row">
+              <span>
+                {grant.department ? <><strong>{grant.department}</strong> <small className="muted">(department)</small></> : (
+                  <><strong>{grant.user_name || `User #${grant.user_id}`}</strong> <small className="muted">(user)</small></>
+                )}
+              </span>
+              <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={() => removeGrant(grant)}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <form onSubmit={addGrant} style={{ marginTop: 14 }}>
+        <div className="pill-tabs" style={{ marginBottom: 10 }}>
+          <button type="button" className={grantType === 'department' ? 'active' : ''} onClick={() => setGrantType('department')}>Department</button>
+          <button type="button" className={grantType === 'user' ? 'active' : ''} onClick={() => setGrantType('user')}>Particular user</button>
+        </div>
+        {grantType === 'department' ? (
+          <Field label="Department">
+            <SearchableSelect value={department} onChange={setDepartment} placeholder="Select department…" options={departmentOptions.map((d) => ({ value: d.name, label: d.name }))} />
+          </Field>
+        ) : (
+          <Field label="User">
+            <SearchableSelect value={userId} onChange={setUserId} placeholder="Select user…" options={userOptions.map((u) => ({ value: String(u.id), label: `${u.full_name} (${u.department || 'no department'})` }))} />
+          </Field>
+        )}
+        <ErrorText error={error} />
+        <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+          <button className="btn btn-primary" disabled={busy}>{busy ? 'Granting...' : 'Grant access'}</button>
+          <button type="button" className="btn" onClick={onClose}>Close</button>
         </div>
       </form>
     </Modal>
@@ -723,14 +895,18 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   useEffect(() => {
-    // SRS 7.2 pagination rollout -- `queue=unlinked` (execution_id IS NULL)
-    // plus the explicit non-terminal status list reproduce the previous
-    // client-side `!item.execution_id && !['Closed','Rejected',
-    // 'Duplicate'].includes(item.status)` filter entirely server-side.
+    // Reported directly: this used to send `queue=unlinked` (execution_id
+    // IS NULL), so a governed defect already primary-linked to a DIFFERENT
+    // execution never showed up here at all -- "instead of [unlinked
+    // only], show linked defect as well." Dropped the queue filter; the
+    // explicit non-terminal status list alone now reproduces "every open
+    // governed defect", linked or not. Picking an already-linked one adds
+    // this execution as an ADDITIONAL trace (see routers/defects.py's
+    // _link_additional_execution) without moving its original link.
     // page_size=100 is a practical ceiling for this picker, same compromise
     // as Defects.tsx's own duplicate-defect candidate pool.
     const openStatuses = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
-    const qs = new URLSearchParams({ queue: 'unlinked', page_size: '100' })
+    const qs = new URLSearchParams({ page_size: '100' })
     openStatuses.forEach((s) => qs.append('status', s))
     api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}`).then((p) => setDefects(p.items)).catch(setError)
   }, [])
@@ -745,9 +921,9 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
   }
   return <Modal title="Link existing defect" onClose={onClose} variant="dialog" preventBackdropClose wide>
     <form onSubmit={submit}>
-      <div className="defect-trace-banner"><strong>{execution.test_case?.test_case_key} · {execution.status}</strong><span>Select a previously opened, unlinked governed defect. This execution's Cycle, Test Case, and latest attempt will be linked automatically.</span></div>
-      <Field label="Unlinked Defect *"><SearchableSelect value={defectId} onChange={setDefectId} placeholder="Select open defect…" options={defects.map((defect) => ({ value: String(defect.id), label: `${defect.defect_key} · ${defect.title} · ${defect.qa_request_key || 'QA Request'}` }))} /></Field>
-      {!defects.length && <p className="muted small">No unlinked open defects are available. Use Open Defect in Defect Management first.</p>}
+      <div className="defect-trace-banner"><strong>{execution.test_case?.test_case_key} · {execution.status}</strong><span>Select a previously opened governed defect. This execution's Cycle, Test Case, and latest attempt will be linked automatically. A defect already linked elsewhere is added as an additional trace, without disturbing its original link.</span></div>
+      <Field label="Governed Defect *"><SearchableSelect value={defectId} onChange={setDefectId} placeholder="Select open defect…" options={defects.map((defect) => ({ value: String(defect.id), label: `${defect.defect_key} · ${defect.title} · ${defect.qa_request_key || 'QA Request'}${defect.execution_id ? ` · already linked to ${defect.cycle_key || 'a cycle'} / ${defect.test_case_key || 'a test case'}` : ''}` }))} /></Field>
+      {!defects.length && <p className="muted small">No open defects are available. Use Open Defect in Defect Management first.</p>}
       <ErrorText error={error} title="Defect could not be linked" />
       <div className="modal-actions"><button className="btn btn-primary" disabled={busy || !defectId}>{busy ? 'Linking…' : 'Link Defect'}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></div>
     </form>
@@ -1619,6 +1795,20 @@ export default function TestExecution() {
   const [projectId, setProjectId] = useState<number | ''>('')
   const [cycles, setCycles] = useState<TestCycleOut[]>([])
   const [cycleId, setCycleId] = useState<number | ''>('')
+  // Reported directly: "Create Test Cycle Folder, in which I can give
+  // access department based or user level, same behaviour like project
+  // has. Under this folder create test cycle." Flat folders, restrict-not-
+  // widen access (see backend models.TestCycleFolder's own docstring).
+  // '' means "All cycles", CYCLE_UNFILED means the Unfiled pseudo-folder.
+  const [cycleFolders, setCycleFolders] = useState<TestCycleFolderOut[]>([])
+  const [cycleFolderTotals, setCycleFolderTotals] = useState<{ unfiled_count: number; total: number }>({ unfiled_count: 0, total: 0 })
+  const [selectedCycleFolder, setSelectedCycleFolder] = useState<number | typeof CYCLE_UNFILED | ''>('')
+  const [showNewCycleFolder, setShowNewCycleFolder] = useState(false)
+  const [editingCycleFolder, setEditingCycleFolder] = useState<TestCycleFolderOut | null>(null)
+  const [managingCycleFolderAccess, setManagingCycleFolderAccess] = useState<TestCycleFolderOut | null>(null)
+  const [cycleFolderToDelete, setCycleFolderToDelete] = useState<TestCycleFolderOut | null>(null)
+  const [deletingCycleFolder, setDeletingCycleFolder] = useState(false)
+  const [departments, setDepartments] = useState<DepartmentOut[]>([])
   // SRS 7.2 pagination rollout -- the folder-tree-style "everything at
   // Full-repository and full execution-ID fetches are intentionally absent;
   // the Add Test Cases modal queries its own database-filtered candidates.
@@ -1680,6 +1870,13 @@ export default function TestExecution() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams])
 
+  // Loaded once, up front, rather than only when the (rarely-opened) folder
+  // access modal is reachable -- same tradeoff TestProjects.tsx already
+  // made for its own ManageViewAccessModal's department picker.
+  useEffect(() => {
+    api.get<DepartmentOut[]>('/api/departments').then(setDepartments).catch(() => setDepartments([]))
+  }, [])
+
   // Picker data is loaded only when a control that needs it is reachable.
   // This includes the Record Result dialog and the cycle table's inline
   // assignment controls -- previously only New/Edit Cycle and Add Cases
@@ -1703,16 +1900,35 @@ export default function TestExecution() {
     return () => { active = false }
   }, [projectId])
 
-  const loadCycles = useCallback(async (pid: number) => {
+  // Reported directly: "Create Test Cycle Folder ... Under this folder
+  // create test cycle." folderParam mirrors TestRepository.tsx's own
+  // summaryFolderParam calculation -- numeric folder id, the literal
+  // 'unfiled', or omitted for every cycle this user can see across the
+  // whole project.
+  const loadCycles = useCallback(async (pid: number, folderParam?: string) => {
     try {
-      const cPage = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${pid}/cycles?page_size=100`)
+      const qs = new URLSearchParams({ page_size: '100' })
+      if (folderParam) qs.set('folder_id', folderParam)
+      const cPage = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${pid}/cycles?${qs.toString()}`)
       const c = cPage.items
       setCycles(c)
       const requestedCycle = Number(searchParams.get('cycle'))
       setCycleId(c.some((cycle) => cycle.id === requestedCycle) ? requestedCycle : (c.length ? c[0].id : ''))
     } catch (err) { setError(err) }
   }, [searchParams])
-  useEffect(() => { if (projectId) loadCycles(projectId) }, [projectId, loadCycles])
+  const loadCycleFolders = useCallback(async (pid: number) => {
+    try {
+      const data = await api.get<TestCycleFolderListOut>(`/api/test-execution/projects/${pid}/cycle-folders`)
+      setCycleFolders(data.folders)
+      setCycleFolderTotals({ unfiled_count: data.unfiled_count, total: data.total })
+    } catch (err) { setError(err) }
+  }, [])
+  const cycleFolderParam = selectedCycleFolder === '' ? undefined : selectedCycleFolder === CYCLE_UNFILED ? 'unfiled' : String(selectedCycleFolder)
+  useEffect(() => {
+    if (projectId) loadCycleFolders(projectId)
+    else { setCycleFolders([]); setCycleFolderTotals({ unfiled_count: 0, total: 0 }) }
+  }, [projectId, loadCycleFolders])
+  useEffect(() => { if (projectId) loadCycles(projectId, cycleFolderParam) }, [projectId, cycleFolderParam, loadCycles])
 
   // SRS 7.2 pagination rollout -- the main execution list is now
   // server-paginated/server-filtered (status/assignment become query params
@@ -1900,6 +2116,19 @@ export default function TestExecution() {
     } catch (err) { setError(err); setCycleToDelete(null) } finally { setDeletingCycle(false) }
   }
 
+  async function deleteCycleFolder() {
+    if (!cycleFolderToDelete || !projectId) return
+    const folder = cycleFolderToDelete
+    setError(null)
+    setDeletingCycleFolder(true)
+    try {
+      await api.del(`/api/test-execution/cycle-folders/${folder.id}`)
+      if (selectedCycleFolder === folder.id) setSelectedCycleFolder('')
+      loadCycleFolders(projectId)
+      setCycleFolderToDelete(null)
+    } catch (err) { setError(err); setCycleFolderToDelete(null) } finally { setDeletingCycleFolder(false) }
+  }
+
   async function exportCycle() {
     if (!cycleId || !selectedCycle) return
     setExportingCycle(true); setError(null)
@@ -1934,6 +2163,33 @@ export default function TestExecution() {
     } catch (err) { setError(err); setPendingUnlinkCycleRequest(false) } finally { setUnlinkingCycleLink(false) }
   }
 
+  // Reported directly: "MAKE child hierarchy based, more easier to
+  // visulaize" -- `cycles` (already scoped to whichever folder/pseudo-
+  // folder is currently selected -- see loadCycles/cycleFolderParam above)
+  // now renders nested directly under that one selected row in the tree
+  // below, instead of in an entirely separate list sitting past the whole
+  // folder section with no visual link back to which folder it belongs to.
+  // Folders themselves stay flat (no sub-folders -- that was a deliberate,
+  // separate decision, see ORACLE_MIGRATION_2026-07.md section 147) -- only
+  // "which cycles are these" is now shown as a visual parent/child
+  // relationship, not the folders themselves.
+  const nestedCycleList = (
+    <ul className="tm-cycle-nested">
+      {cycles.map((cycle) => (
+        <li className="tm-cycle-row" key={cycle.id}>
+          <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)}>
+            <span><strong>{cycle.name}</strong><small>{cycle.cycle_key}</small></span><Badge status={cycle.status} />
+          </button>
+          {canDeleteCycle && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title="Delete test cycle" aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}>×</button>}
+        </li>
+      ))}
+      {cycles.length === 0 && <li className="tm-cycle-empty">No cycles here yet.</li>}
+      {canExec && projectIsActive && (
+        <li><button type="button" className="tm-cycle-nested-add" onClick={() => setShowNewCycle(true)}>+ Create cycle</button></li>
+      )}
+    </ul>
+  )
+
   return (
     <div className="tm-page">
       <ErrorText error={error} />
@@ -1945,7 +2201,7 @@ export default function TestExecution() {
           <div style={{ display: 'flex', gap: 8 }}>
             <SearchableSelect
               value={projectId === '' ? '' : String(projectId)}
-              onChange={(v) => setProjectId(v ? Number(v) : '')}
+              onChange={(v) => { setProjectId(v ? Number(v) : ''); setSelectedCycleFolder('') }}
               placeholder={projects.length === 0 ? 'No Test Projects yet' : 'Select a project...'}
               style={{ minWidth: 220 }}
               options={projects.map((p) => ({
@@ -1979,18 +2235,56 @@ export default function TestExecution() {
                 >{cycleSidebarCollapsed ? '›' : '‹'}</button>
               </div>
             </div>
-            {!cycleSidebarCollapsed && <div className="tm-cycle-list">
-              {cycles.map((cycle) => (
-                <div className="tm-cycle-row" key={cycle.id}>
-                  <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)}>
-                    <span><strong>{cycle.name}</strong><small>{cycle.cycle_key}</small></span><Badge status={cycle.status} />
+            {/* Reported directly: "Create Test Cycle Folder, in which I can
+                give access department based or user level, same behaviour
+                like project has. Under this folder create test cycle."
+                Flat -- no nesting -- same `.tm-folder-row`/`.link-btn`
+                styling Test Repository's own folder tree already uses
+                (this aside shares its `tm-tree-panel` class). A folder with
+                a lock icon has at least one access grant and is RESTRICTED
+                to those departments/users -- see backend
+                models.TestCycleFolder's own docstring. Whichever row is
+                currently selected shows its own cycles nested directly
+                beneath it (nestedCycleList, computed above) -- see that
+                variable's own comment for why. */}
+            {!cycleSidebarCollapsed && <ul className="plain-list">
+              <li>
+                <div className="tm-folder-row">
+                  <button type="button" className={`link-btn ${selectedCycleFolder === '' ? 'active' : ''}`} onClick={() => setSelectedCycleFolder('')}>
+                    <span>▦</span> All cycles <em>{cycleFolderTotals.total}</em>
                   </button>
-                  {canDeleteCycle && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title="Delete test cycle" aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}>×</button>}
                 </div>
+                {selectedCycleFolder === '' && nestedCycleList}
+              </li>
+              <li>
+                <div className="tm-folder-row">
+                  <button type="button" className={`link-btn ${selectedCycleFolder === CYCLE_UNFILED ? 'active' : ''}`} onClick={() => setSelectedCycleFolder(CYCLE_UNFILED)}>
+                    <span>◇</span> Unfiled <em>{cycleFolderTotals.unfiled_count}</em>
+                  </button>
+                </div>
+                {selectedCycleFolder === CYCLE_UNFILED && nestedCycleList}
+              </li>
+              {cycleFolders.map((f) => (
+                <li key={f.id}>
+                  <div className="tm-folder-row">
+                    <button type="button" className={`link-btn ${selectedCycleFolder === f.id ? 'active' : ''}`} onClick={() => setSelectedCycleFolder(f.id)}>
+                      <span>{f.access_grants.length ? '🔒' : '📁'}</span> {f.name} <em>{f.cycle_count}</em>
+                    </button>
+                    {canExec && projectIsActive && (
+                      <div className="tm-folder-actions">
+                        <button type="button" className="tm-folder-action" title="Manage access" aria-label={`Manage access for ${f.name}`} onClick={() => setManagingCycleFolderAccess(f)}>🔑</button>
+                        <button type="button" className="tm-folder-action" title="Rename folder" aria-label={`Rename ${f.name}`} onClick={() => setEditingCycleFolder(f)}>✎</button>
+                        {canManageExecutionGovernance && (
+                          <button type="button" className="tm-folder-action tm-folder-delete" title="Delete folder" aria-label={`Delete ${f.name}`} onClick={() => setCycleFolderToDelete(f)}>×</button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {selectedCycleFolder === f.id && nestedCycleList}
+                </li>
               ))}
-              {cycles.length === 0 && <p>No cycles created yet.</p>}
-            </div>}
-            {!cycleSidebarCollapsed && canExec && projectIsActive && <button className="tm-tree-add" onClick={() => setShowNewCycle(true)}>+ Create cycle</button>}
+            </ul>}
+            {!cycleSidebarCollapsed && canExec && projectIsActive && <button type="button" className="tm-tree-add" onClick={() => setShowNewCycleFolder(true)}>+ Add folder</button>}
           </aside>
           <section className="tm-main-panel">
           {cycleId ? (
@@ -2153,8 +2447,26 @@ export default function TestExecution() {
           projectId={projectId}
           requests={qaRequests}
           users={users}
+          folders={cycleFolders}
+          defaultFolderId={typeof selectedCycleFolder === 'number' ? selectedCycleFolder : ''}
           onClose={() => setShowNewCycle(false)}
-          onSaved={(c) => { setCycles((prev) => [c, ...prev]); setCycleId(c.id); setShowNewCycle(false) }}
+          onSaved={(c) => {
+            loadCycleFolders(projectId)
+            const matchesCurrentView = cycleFolderParam === undefined ? true
+              : cycleFolderParam === 'unfiled' ? c.folder_id == null
+              : Number(cycleFolderParam) === c.folder_id
+            if (matchesCurrentView) {
+              setCycles((prev) => [c, ...prev])
+              setCycleId(c.id)
+            } else {
+              // Created into a different folder than the one currently open
+              // in the sidebar -- switch to it so the new cycle is visible
+              // and selected (the folder-scoped effect reloads `cycles` and
+              // picks it, since it's the newest -- see loadCycles).
+              setSelectedCycleFolder(c.folder_id ?? CYCLE_UNFILED)
+            }
+            setShowNewCycle(false)
+          }}
         />
       )}
       {linkingExistingExecution && cycleId && <LinkExistingDefectModal execution={linkingExistingExecution} onClose={() => setLinkingExistingExecution(null)} onLinked={() => { refreshExecutions(); setLinkingExistingExecution(null) }} />}
@@ -2163,9 +2475,59 @@ export default function TestExecution() {
           projectId={projectId}
           requests={qaRequests}
           users={users}
+          folders={cycleFolders}
+          defaultFolderId={typeof selectedCycleFolder === 'number' ? selectedCycleFolder : ''}
           editing={editingCycle}
           onClose={() => setEditingCycle(null)}
-          onSaved={(saved) => { setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle)); setEditingCycle(null) }}
+          onSaved={(saved) => {
+            loadCycleFolders(projectId)
+            const matchesCurrentView = cycleFolderParam === undefined ? true
+              : cycleFolderParam === 'unfiled' ? saved.folder_id == null
+              : Number(cycleFolderParam) === saved.folder_id
+            if (matchesCurrentView) {
+              setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle))
+            } else {
+              // Moved to a folder outside the current view -- drop it from
+              // the local list and follow it to wherever it landed.
+              setCycles((current) => current.filter((cycle) => cycle.id !== saved.id))
+              setSelectedCycleFolder(saved.folder_id ?? CYCLE_UNFILED)
+            }
+            setEditingCycle(null)
+          }}
+        />
+      )}
+      {showNewCycleFolder && projectId && (
+        <NewCycleFolderModal
+          projectId={projectId}
+          onClose={() => setShowNewCycleFolder(false)}
+          onSaved={() => { loadCycleFolders(projectId); setShowNewCycleFolder(false) }}
+        />
+      )}
+      {editingCycleFolder && (
+        <NewCycleFolderModal
+          projectId={editingCycleFolder.project_id}
+          editing={editingCycleFolder}
+          onClose={() => setEditingCycleFolder(null)}
+          onSaved={() => { if (projectId) loadCycleFolders(projectId); setEditingCycleFolder(null) }}
+        />
+      )}
+      {managingCycleFolderAccess && (
+        <CycleFolderAccessModal
+          folder={managingCycleFolderAccess}
+          departments={departments}
+          onClose={() => setManagingCycleFolderAccess(null)}
+          onChanged={(grants) => {
+            setCycleFolders((current) => current.map((f) => f.id === managingCycleFolderAccess.id ? { ...f, access_grants: grants } : f))
+            setManagingCycleFolderAccess((current) => current ? { ...current, access_grants: grants } : current)
+          }}
+        />
+      )}
+      {cycleFolderToDelete && (
+        <ConfirmModal
+          title="Delete folder?"
+          message={<p>Delete <strong>{cycleFolderToDelete.name}</strong> from this project? Only an empty folder (no test cycles in it) can be deleted.</p>}
+          confirmLabel="Delete folder" cancelLabel="Keep folder" destructive busy={deletingCycleFolder}
+          onConfirm={deleteCycleFolder} onCancel={() => setCycleFolderToDelete(null)}
         />
       )}
       {linkingCycleRequest && projectIsActive && (

@@ -221,71 +221,78 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
 // Action buttons are rendered here (rather than back in SAST.tsx/DAST.tsx's
 // own action bar) so both modules automatically stay in sync -- one shared
 // component, matching this file's existing SecurityScanDialog convention.
+//
+// 2026-08, reported directly, full requirement doc pasted with a status-flow
+// diagram: this session had earlier built a flatter model where Rescan/Mark
+// Scan Complete acted directly from Scanning with no separate validation
+// step. That's superseded here -- Finding Validation is a mandatory,
+// explicit gate again (Scanning -> Validate Findings -> Security Complete
+// or Remediation -> Assign to Requester -> Waiting For Fix -> Mark Fixed ->
+// Rescan -> back to Scanning). Each action button below is now gated on the
+// SPECIFIC status it's valid from (see sast_dast.py's matching functions),
+// not a broad "somewhere in the active-scan window" set -- only one action
+// is ever the right one to show at a time.
 export function SecurityScanResults({
-  kind, results, summary, canAct, canInitiateSuppression, canAssignToRequester, canMarkFixed, busy,
-  suppressionPending, hasOpenSuppression, openSuppressionIds, rejectedSuppressionIds,
-  onRescan, onMarkComplete, onInitiateSuppression, onAssignToRequester, onMarkFixed, onLinkSuppression,
+  kind, results, summary, canValidateFindings, canRescan, canAssignToRequester, canMarkFixed,
+  canInitiateSuppression, busy, hasOpenSuppression, openSuppressionIds, hasDoneSuppression, doneSuppressionIds,
+  onValidateFindings, onRescan, onAssignToRequester, onMarkFixed, onInitiateSuppression, onLinkSuppression,
 }: {
   kind: 'SAST' | 'DAST'
   results: SecurityScanResultOut[]
   summary: SecurityScanSummaryOut | null
-  // Gates Rescan / Mark Scan Complete -- the assigned Security Analyst's own
-  // scan-lifecycle actions.
-  canAct: boolean
+  // Reachable only from Scanning -- the assigned Security Analyst's
+  // mandatory "selects Finding Validation" step (sast_dast.py's
+  // _validate_findings). Branches automatically to Security Complete (no
+  // open findings, or every open finding already has an approved
+  // suppression) or Remediation (open findings, Assign to Requester becomes
+  // available next).
+  canValidateFindings: boolean
+  // Reachable only from Rescan status -- re-imports Fortify SSC results and
+  // returns the request to Scanning, so Validate Findings is reachable
+  // again on the fresh data.
+  canRescan: boolean
+  // Reachable only from Remediation -- hands the request to the requester
+  // (-> Waiting For Fix).
+  canAssignToRequester: boolean
+  // Reachable only from Waiting For Fix, and only for the requester (or
+  // their active Delegate for Input, section 132) -- "after fix requester
+  // will reassign and then qa will scan / then again the same process".
+  // Sends the request to Rescan.
+  canMarkFixed: boolean
   // Reported directly: "suppression requests CAN ONLY be raised by
   // requester, so this should be enable for requester, not QA team." --
-  // Initiate Suppression Request is deliberately its own, separate gate
-  // (the linked SAST/DAST request's requester), not folded into canAct,
-  // since it's the one 4.4 action that belongs to a different person than
-  // Rescan/Mark Scan Complete.
+  // the requester's own action, reachable only from Waiting For Fix per the
+  // requirement doc's Section 4 ("After reviewing the findings, the
+  // requester may choose..." -- Option A: fix, Option B: raise a
+  // suppression).
   canInitiateSuppression: boolean
   busy: boolean
-  // 2026-08 doc, 4.4: "If Suppression Pending: Disable [Mark Scan Complete]"
-  // -- FR-06's own rule text: ANY status other than "Done" (Rejected
-  // included) blocks scan completion, since a rejected suppression means
-  // the finding is real and still open -- this stays deliberately broad
-  // (see sast_dast.py's _pending_suppression_ids, same definition). Only
-  // the *message wording* below distinguishes open vs. Rejected -- the
-  // block itself doesn't.
-  suppressionPending?: boolean
   // Reported directly (bug): "Supression request is now rejected, but
-  // still user not able to create supression request." Initiate Suppression
-  // Request needs a NARROWER gate than suppressionPending above -- Rejected
-  // must NOT block raising a new one (it's terminal; the natural next step
-  // is either remediate or try again with a better justification), only a
-  // genuinely still-open suppression should. Mirrors suppression.py's
-  // SUPPRESSION_TERMINAL_STATUSES-based _require_no_existing_pending_
-  // suppression, which the same bug was fixed in server-side.
+  // still user not able to create supression request." Excludes both
+  // SUPPRESSION_TERMINAL_STATUSES (Done AND Rejected) -- only a genuinely
+  // still-open suppression blocks Initiate/Mark Fixed below, mirrors
+  // suppression.py's SUPPRESSION_TERMINAL_STATUSES-based
+  // _require_no_existing_pending_suppression.
   hasOpenSuppression?: boolean
-  // Reported directly (follow-up): "Pending suppression requests exist:
-  // though request is rejected still it is showing like that" -- the block
-  // on Mark Scan Complete while a suppression is Rejected is correct (FR-06
-  // Rule 3), but labelling a Rejected decision "pending" is wrong; it's a
-  // finished (unfavourable) decision, not one still awaiting action.
-  // openSuppressionIds names genuinely still-in-flight ones (kept from
-  // above); rejectedSuppressionIds is new -- lets the message say "rejected"
-  // for those instead of "pending".
   openSuppressionIds?: string[]
-  rejectedSuppressionIds?: string[]
-  // Reported directly: "where is waiting for fix, assign to requester ...
-  // if there are findings then it should show waiting for fix option, then
-  // give option to delegate" -- Assign to Requester (-> Waiting For Fix) is
-  // now a Findings-tab action next to Rescan, reachable whenever findings
-  // exist, instead of the old dead REMEDIATION-only Overview button. Same
-  // assigned-analyst gate as canAct (see SAST.tsx/DAST.tsx's
-  // canAssignToRequester = canScanAct).
-  canAssignToRequester?: boolean
-  // Mark Fixed (-> Rescan) closes the loop: requester (or the analyst) says
-  // the finding is fixed, which is what makes Rescan reachable again --
-  // "after fix requester will reassign and then qa will scan / then again
-  // the same process". Independent of hasFindings below since it only
-  // applies once already in WAITING_FOR_FIX.
-  canMarkFixed?: boolean
+  // Reported directly: "for same sast request, even though supression
+  // request is present and mark completed, again asking for new supression
+  // request and relink." Initiate/Link Suppression used to only check
+  // hasOpenSuppression above, so once that same suppression reached Done
+  // (no longer "open"), the button re-enabled and offered to raise ANOTHER
+  // one against the same request -- but per the requirement doc's Section 4,
+  // once a suppression is Approved the requester's next move is to reassign
+  // to the analyst (Mark Fixed), not raise a second suppression. Blocks
+  // Initiate/Link the same way hasOpenSuppression does, for as long as the
+  // request stays in this same Waiting For Fix visit (Mark Fixed moves it
+  // to Rescan, which is the natural reset point for a fresh cycle).
+  hasDoneSuppression?: boolean
+  doneSuppressionIds?: string[]
+  onValidateFindings: () => void
   onRescan: () => void
-  onMarkComplete: () => void
+  onAssignToRequester: () => void
+  onMarkFixed: () => void
   onInitiateSuppression: () => void
-  onAssignToRequester?: () => void
-  onMarkFixed?: () => void
   // Opens LinkSuppressionModal above -- same requester gate as
   // canInitiateSuppression (it's the requester's own suppression to
   // re-point), so no separate boolean prop needed.
@@ -294,7 +301,6 @@ export function SecurityScanResults({
   if (!results.length || !summary) return null
   const current = summary.current!
   const initial = summary.initial!
-  const hasFindings = current.total_count > 0
 
   return (
     <section className="security-scan-results" aria-label="Fortify SSC scan results">
@@ -356,69 +362,93 @@ export function SecurityScanResults({
         />
       </div>
 
-      {/* 4.4 Action Buttons -- Rescan/Mark Scan Complete/Assign to Requester
-          (canAct/canAssignToRequester, the assigned Security Analyst),
-          Initiate Suppression Request (canInitiateSuppression, the
-          requester), and Mark Fixed (canMarkFixed, requester or analyst,
-          only once already Waiting For Fix) are independent gates; only
-          render this whole block if at least one of them applies. */}
-      {(canAct || canMarkFixed || (hasFindings && (canInitiateSuppression || canAssignToRequester))) && (
+      {/* 4.4 Action Buttons -- each gate is now specific to the ONE status
+          it applies from (see the props above), so at most one of
+          Validate Findings / Rescan / Assign to Requester is ever shown at
+          once, plus the requester's own Initiate/Link Suppression Request
+          and Mark Fixed while Waiting For Fix. */}
+      {(canValidateFindings || canRescan || canAssignToRequester || canInitiateSuppression || canMarkFixed) && (
         <div className="security-scan-actions">
-          {hasFindings ? (
-            <>
-              {canAct && <button className="btn btn-sm" disabled={busy} onClick={onRescan}>Rescan</button>}
-              {/* Reported directly: "if there are findings then it should
-                  show waiting for fix option" -- Assign to Requester next to
-                  Rescan, whenever the latest scan still has open findings. */}
-              {canAssignToRequester && (
-                <button className="btn btn-sm" disabled={busy} onClick={onAssignToRequester}>
-                  Assign to Requester (Waiting for Fix)
-                </button>
-              )}
-              {canInitiateSuppression && (
-                <button className="btn btn-sm" disabled={busy || hasOpenSuppression} onClick={onInitiateSuppression}>
-                  Initiate Suppression Request
-                </button>
-              )}
-              {/* "give option to link and delink supression request from
-                  sast request and supression both" -- lets the requester
-                  point one of their own already-raised open suppressions
-                  at this request instead of drafting a new one. Same
-                  hasOpenSuppression gate as Initiate above (only one open
-                  suppression per SAST/DAST request at a time). */}
-              {canInitiateSuppression && onLinkSuppression && (
-                <button className="btn btn-sm" disabled={busy || hasOpenSuppression} onClick={onLinkSuppression}>
-                  Link Existing Suppression Request
-                </button>
-              )}
-            </>
-          ) : (
-            canAct && <button className="btn btn-primary btn-sm" disabled={busy || suppressionPending} onClick={onMarkComplete}>Mark Scan Complete</button>
+          {/* Scanning -> the analyst must explicitly validate findings
+              before anything else can happen -- "When the Security Analyst
+              selects Finding Validation, the system must require:
+              Application Name, Application Version, Scan completion
+              details, Number of findings, Scan report or supporting
+              evidence" (all already on file from the scan import itself,
+              shown above). */}
+          {canValidateFindings && (
+            <button className="btn btn-primary btn-sm" disabled={busy} onClick={onValidateFindings}>
+              Validate Findings
+            </button>
+          )}
+          {/* Remediation -> hands the findings to the requester. */}
+          {canAssignToRequester && (
+            <button className="btn btn-sm" disabled={busy} onClick={onAssignToRequester}>
+              Assign to Requester (Waiting for Fix)
+            </button>
+          )}
+          {/* Rescan status -> re-run the scan and return to Scanning, where
+              Validate Findings becomes available again on the fresh data. */}
+          {canRescan && (
+            <button className="btn btn-sm" disabled={busy} onClick={onRescan}>
+              Rescan
+            </button>
+          )}
+          {/* Waiting For Fix -> the requester's own choice: fix and mark
+              fixed, or raise/link a suppression instead. Also blocked once a
+              suppression already reached Done (see hasDoneSuppression above)
+              -- that decision is already made; Mark Fixed is the next step,
+              not another suppression. */}
+          {canInitiateSuppression && (
+            <button className="btn btn-sm" disabled={busy || hasOpenSuppression || hasDoneSuppression} onClick={onInitiateSuppression}>
+              Initiate Suppression Request
+            </button>
+          )}
+          {/* "give option to link and delink supression request from sast
+              request and supression both" -- lets the requester point one
+              of their own already-raised open suppressions at this request
+              instead of drafting a new one. Same hasOpenSuppression/
+              hasDoneSuppression gates as Initiate above (only one open
+              suppression per SAST/DAST request at a time, and none needed
+              once one's already Done). */}
+          {canInitiateSuppression && onLinkSuppression && (
+            <button className="btn btn-sm" disabled={busy || hasOpenSuppression || hasDoneSuppression} onClick={onLinkSuppression}>
+              Link Existing Suppression Request
+            </button>
           )}
           {/* "then give option to delegate / then after fix requester will
               reassign and then qa will scan / then again the same process" --
               Mark Fixed is what sends a Waiting For Fix request back to
               Rescan (see sast_dast.py::_mark_fixed); delegation itself is
               the existing "Delegate for Input" control on the Overview tab
-              (ChildRequestDelegation), now extended to WAITING_FOR_FIX. */}
+              (ChildRequestDelegation), now extended to WAITING_FOR_FIX.
+              Reported directly, full requirement doc: while a suppression
+              is still awaiting a decision ("Suppression Approval Pending"),
+              the requester can't reassign yet -- only once it's Approved or
+              Rejected -- so this is disabled the same way Initiate above is. */}
           {canMarkFixed && (
-            <button className="btn btn-primary btn-sm" disabled={busy} onClick={onMarkFixed}>
+            <button className="btn btn-primary btn-sm" disabled={busy || hasOpenSuppression} onClick={onMarkFixed}>
               Mark Fixed (send to Rescan)
             </button>
           )}
-          {canAct && suppressionPending && (
+          {(canInitiateSuppression || canMarkFixed) && hasOpenSuppression && (
             <p className="security-scan-suppression-blocked">
-              {openSuppressionIds && openSuppressionIds.length > 0 && (
-                <>Pending suppression requests exist: {openSuppressionIds.join(', ')}. </>
-              )}
-              {rejectedSuppressionIds && rejectedSuppressionIds.length > 0 && (
-                <>Suppression request{rejectedSuppressionIds.length > 1 ? 's' : ''} rejected: {rejectedSuppressionIds.join(', ')} -- findings must be remediated (or a new suppression approved) before the scan can be marked complete.</>
-              )}
+              Suppression Approval Pending{openSuppressionIds && openSuppressionIds.length > 0 ? `: ${openSuppressionIds.join(', ')}` : ''} --
+              {canMarkFixed ? ' wait for it to be approved or rejected before reassigning.' : ' only one open suppression request per SAST/DAST request at a time.'}
             </p>
           )}
-          {canInitiateSuppression && hasOpenSuppression && (
+          {/* Reported directly: "for same sast request, even though
+              supression request is present and mark completed, again
+              asking for new supression request and relink." Only shown once
+              hasOpenSuppression's own message above no longer applies (a
+              suppression can't be both open and Done at once, but this
+              keeps the two messages from ever appearing together) -- tells
+              the requester why Initiate/Link disappeared instead of just
+              silently graying out. */}
+          {canInitiateSuppression && !hasOpenSuppression && hasDoneSuppression && (
             <p className="security-scan-suppression-blocked">
-              Pending suppression requests exist{openSuppressionIds && openSuppressionIds.length > 0 ? `: ${openSuppressionIds.join(', ')}` : ''}.
+              This request already has an approved suppression{doneSuppressionIds && doneSuppressionIds.length > 0 ? `: ${doneSuppressionIds.join(', ')}` : ''} --
+              reassign it to the Security Analyst via Mark Fixed instead of raising another one.
             </p>
           )}
         </div>

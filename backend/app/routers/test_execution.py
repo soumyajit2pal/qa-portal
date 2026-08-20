@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from fastapi.responses import FileResponse
 from sqlalchemy import and_, exists, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.exc import IntegrityError
 
 from .. import models, schemas, pagination
 from ..database import get_db
@@ -13,6 +14,7 @@ from ..database import SessionLocal
 from ..deps import (
     get_current_user, require_roles, viewable_project_ids,
     require_can_execute_project, require_can_manage_execution_governance,
+    can_view_cycle_folder, require_can_view_cycle_folder,
     get_project_or_404 as _get_project_or_404,
 )
 from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
@@ -111,6 +113,13 @@ def _get_cycle_or_404(db: Session, cycle_id: int) -> models.TestCycle:
     obj = db.query(models.TestCycle).get(cycle_id)
     if not obj:
         raise HTTPException(404, "Test Cycle not found")
+    return obj
+
+
+def _get_cycle_folder_or_404(db: Session, folder_id: int) -> models.TestCycleFolder:
+    obj = db.query(models.TestCycleFolder).get(folder_id)
+    if not obj:
+        raise HTTPException(404, "Test Cycle Folder not found")
     return obj
 
 
@@ -690,9 +699,206 @@ def _latest_run_or_404(db: Session, obj: models.TestExecution) -> models.TestExe
     return run
 
 
+# ---- Cycle Folders ----
+# Reported directly: "Create Test Cycle Folder, in which I can give access
+# department based or user level, same behaviour like project has. Under
+# this folder create test cycle." Flat (no nesting -- see
+# models.TestCycleFolder's own docstring and ORACLE_MIGRATION_2026-07.md
+# section 147 for the full design decision), and deliberately RESTRICTING
+# (the opposite of TestProjectViewGrant's widen-only semantics) once a
+# folder has at least one access grant.
+def _hidden_cycle_folder_ids(db: Session, project_id: int, current_user: models.User) -> List[int]:
+    """Folder ids in this project this user cannot view (see
+    deps.py::can_view_cycle_folder) -- used to exclude their cycles from the
+    whole-project ("All cycles", no folder_id) list. Unfiled cycles
+    (folder_id IS NULL) are never affected by this."""
+    folders = (
+        db.query(models.TestCycleFolder).filter_by(project_id=project_id)
+        .options(selectinload(models.TestCycleFolder.access_grants))
+        .all()
+    )
+    return [f.id for f in folders if f.access_grants and not can_view_cycle_folder(f, current_user)]
+
+
+@router.get("/projects/{project_id}/cycle-folders", response_model=schemas.TestCycleFolderListOut)
+def list_cycle_folders(project_id: int, db: Session = Depends(get_db),
+                        current_user: models.User = Depends(get_current_user)):
+    """A restricted folder this user has no access to is omitted entirely,
+    not just its cycles -- a restricted folder's very existence is part of
+    what it restricts, same as this app's other access boundaries fail
+    closed rather than half-revealing what's hidden."""
+    _get_project_or_404(db, project_id)
+    all_folders = (
+        db.query(models.TestCycleFolder).filter_by(project_id=project_id)
+        .options(selectinload(models.TestCycleFolder.access_grants))
+        .order_by(models.TestCycleFolder.name)
+        .all()
+    )
+    visible = [f for f in all_folders if can_view_cycle_folder(f, current_user)]
+    counts = dict(
+        db.query(models.TestCycle.folder_id, func.count(models.TestCycle.id))
+        .filter(models.TestCycle.project_id == project_id, models.TestCycle.folder_id.isnot(None))
+        .group_by(models.TestCycle.folder_id).all()
+    )
+    for f in visible:
+        f.cycle_count = counts.get(f.id, 0)
+    unfiled_count = db.query(models.TestCycle).filter_by(project_id=project_id, folder_id=None).count()
+    hidden_ids = [f.id for f in all_folders if f not in visible]
+    total_q = db.query(models.TestCycle).filter(models.TestCycle.project_id == project_id)
+    if hidden_ids:
+        total_q = total_q.filter(or_(models.TestCycle.folder_id.is_(None), ~models.TestCycle.folder_id.in_(hidden_ids)))
+    total = total_q.count()
+    return schemas.TestCycleFolderListOut(folders=visible, unfiled_count=unfiled_count, total=total)
+
+
+@router.post("/projects/{project_id}/cycle-folders", response_model=schemas.TestCycleFolderOut)
+def create_cycle_folder(project_id: int, payload: schemas.TestCycleFolderCreate, db: Session = Depends(get_db),
+                         current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    _require_active_project(db, project_id)
+    require_can_execute_project(db, project_id, current_user)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name cannot be blank")
+    obj = models.TestCycleFolder(project_id=project_id, name=name, created_by_id=current_user.id)
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.patch("/cycle-folders/{folder_id}", response_model=schemas.TestCycleFolderOut)
+def rename_cycle_folder(folder_id: int, payload: schemas.TestCycleFolderCreate, db: Session = Depends(get_db),
+                         current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    obj = _get_cycle_folder_or_404(db, folder_id)
+    _require_active_project(db, obj.project_id)
+    require_can_execute_project(db, obj.project_id, current_user)
+    require_can_view_cycle_folder(obj, current_user)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name cannot be blank")
+    obj.name = name
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.delete("/cycle-folders/{folder_id}", status_code=204)
+def delete_cycle_folder(folder_id: int, db: Session = Depends(get_db),
+                         current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    """Governance-tier action, same as Test Repository's own delete_folder
+    (require_can_manage_execution_governance -- QA Lead Group only; Admin
+    always bypasses via has_role). Only an EMPTY folder can be deleted --
+    move its cycles out first, same "never silently orphan/cascade-delete
+    real content just by removing its folder" convention."""
+    obj = _get_cycle_folder_or_404(db, folder_id)
+    _require_active_project(db, obj.project_id)
+    require_can_manage_execution_governance(db, obj.project_id, current_user)
+    has_cycles = db.query(models.TestCycle).filter_by(folder_id=folder_id).first()
+    if has_cycles:
+        raise HTTPException(400, "This folder still has test cycles in it -- move or delete them first")
+    db.delete(obj)
+    db.commit()
+
+
+@router.get("/cycle-folders/{folder_id}/access", response_model=List[schemas.TestCycleFolderAccessOut])
+def list_cycle_folder_access(folder_id: int, db: Session = Depends(get_db),
+                              current_user: models.User = Depends(get_current_user)):
+    obj = _get_cycle_folder_or_404(db, folder_id)
+    require_can_view_cycle_folder(obj, current_user)
+    return (
+        db.query(models.TestCycleFolderAccess).filter_by(folder_id=obj.id)
+        .order_by(models.TestCycleFolderAccess.created_at).all()
+    )
+
+
+@router.post("/cycle-folders/{folder_id}/access", response_model=schemas.TestCycleFolderAccessOut)
+def create_cycle_folder_access(folder_id: int, payload: schemas.TestCycleFolderAccessCreate,
+                                db: Session = Depends(get_db),
+                                current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    """Grants restricted access to this folder to a department or a
+    specific user -- see models.TestCycleFolder's own docstring for the
+    restrict-not-widen semantics. Reported directly: "practically qa
+    engineer can also grant access" -- gated the same as folder creation
+    itself (require_can_execute_project -- QA_ENGINEER/QA_LEAD/
+    CHIEF_MANAGER_QA/AGM_QA), NOT require_can_manage_execution_governance
+    (QA Lead Group only), which folder DELETION still uses -- granting/
+    revoking access is treated as an ordinary authoring action on a folder
+    someone with execute access already made, not a governance-tier one."""
+    obj = _get_cycle_folder_or_404(db, folder_id)
+    _require_active_project(db, obj.project_id)
+    require_can_execute_project(db, obj.project_id, current_user)
+    department = (payload.department or "").strip() or None
+    user_id = payload.user_id
+    if bool(department) == bool(user_id):
+        raise HTTPException(400, "Grant exactly one of a department or a user, not both and not neither.")
+    if department:
+        who = department
+        department_row = db.query(models.Department).filter(
+            models.Department.name == department,
+            models.Department.is_active == True,  # noqa: E712 - Oracle boolean column
+        ).first()
+        if not department_row:
+            raise HTTPException(400, "Select an active department from the system department list")
+        existing = db.query(models.TestCycleFolderAccess).filter_by(folder_id=obj.id, department=department).first()
+        if existing:
+            raise HTTPException(409, f"{department} already has access to this folder")
+    else:
+        target_user = db.query(models.User).get(user_id)
+        if not target_user:
+            raise HTTPException(404, "User not found")
+        who = target_user.full_name
+        existing = db.query(models.TestCycleFolderAccess).filter_by(folder_id=obj.id, user_id=user_id).first()
+        if existing:
+            raise HTTPException(409, f"{who} already has access to this folder")
+    grant = models.TestCycleFolderAccess(
+        folder_id=obj.id, department=department, user_id=user_id, granted_by_id=current_user.id,
+    )
+    db.add(grant)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Reported directly (vague at first -- "sometimes getting key
+        # issue" on an unnamed modal): the `existing` pre-check above gives
+        # a fast, friendly error in the common case, but leaves a race
+        # window between two near-simultaneous grant requests for the same
+        # department/user -- both pass the check, both insert, and the
+        # second one's commit trips uq_qap_tcfa_folder_department/
+        # uq_qap_tcfa_folder_user (ORA-00001), previously uncaught and
+        # surfaced as a raw 500. Same fix shape as auth.py's own
+        # concurrent-first-login handling.
+        db.rollback()
+        raise HTTPException(409, f"{who} already has access to this folder")
+    db.refresh(grant)
+    return grant
+
+
+@router.delete("/cycle-folders/{folder_id}/access/{grant_id}", status_code=204)
+def delete_cycle_folder_access(folder_id: int, grant_id: int, db: Session = Depends(get_db),
+                                current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    """Same gate as create_cycle_folder_access above -- see that function's
+    own docstring."""
+    obj = _get_cycle_folder_or_404(db, folder_id)
+    _require_active_project(db, obj.project_id)
+    require_can_execute_project(db, obj.project_id, current_user)
+    grant = db.query(models.TestCycleFolderAccess).filter_by(id=grant_id, folder_id=obj.id).first()
+    if not grant:
+        raise HTTPException(404, "Access grant not found")
+    db.delete(grant)
+    db.commit()
+
+
 # ---- Cycles ----
 @router.get("/projects/{project_id}/cycles", response_model=pagination.Page[schemas.TestCycleOut])
 def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
+                 folder_id: Optional[str] = Query(
+                     None,
+                     description="Filter to one folder's cycles by numeric id, the literal "
+                                 "'unfiled' for folder_id IS NULL, or omitted for every cycle "
+                                 "this user can see across the whole project (a restricted "
+                                 "folder's cycles are excluded from that whole-project view "
+                                 "unless this user has access to it -- see "
+                                 "deps.py::can_view_cycle_folder).",
+                 ),
                  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # SRS 7.2 pagination rollout (task #82) -- like Test Projects, Test
     # Cycles is a flat, already-lightweight list (TestCycleOut has no heavy
@@ -704,6 +910,22 @@ def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
     # page_size=100 and unwrap .items rather than getting a real pager UI.
     _get_project_or_404(db, project_id)
     q = db.query(models.TestCycle).filter_by(project_id=project_id)
+    if folder_id == "unfiled":
+        q = q.filter(models.TestCycle.folder_id.is_(None))
+    elif folder_id:
+        try:
+            folder_id_int = int(folder_id)
+        except ValueError:
+            raise HTTPException(400, "folder_id must be numeric or 'unfiled'")
+        folder = _get_cycle_folder_or_404(db, folder_id_int)
+        if folder.project_id != project_id:
+            raise HTTPException(404, "Folder not found in this project")
+        require_can_view_cycle_folder(folder, current_user)
+        q = q.filter(models.TestCycle.folder_id == folder_id_int)
+    else:
+        hidden_ids = _hidden_cycle_folder_ids(db, project_id, current_user)
+        if hidden_ids:
+            q = q.filter(or_(models.TestCycle.folder_id.is_(None), ~models.TestCycle.folder_id.in_(hidden_ids)))
     q = pagination.apply_search(q, params, models.TestCycle.name, models.TestCycle.cycle_key)
     q = pagination.apply_status_filter(q, params, models.TestCycle.status)
     q = pagination.apply_sort(q, params, sortable={"name": models.TestCycle.name},
@@ -728,6 +950,11 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
         owner = db.query(models.User).get(payload.owner_id)
         if not owner:
             raise HTTPException(404, "Selected cycle owner not found")
+    if payload.folder_id is not None:
+        folder = db.query(models.TestCycleFolder).filter_by(id=payload.folder_id, project_id=project_id).first()
+        if not folder:
+            raise HTTPException(404, "Selected folder not found in this project")
+        require_can_view_cycle_folder(folder, current_user)
     linked_request = None
     child_models = {
         "Functional": models.FunctionalRequest, "SAST": models.SASTRequest,
@@ -744,7 +971,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
         project_id=project_id, name=name, description=payload.description,
         start_date=payload.start_date, end_date=payload.end_date, created_by_id=current_user.id,
         cycle_type=payload.cycle_type, environment=payload.environment,
-        build=payload.build, owner_id=payload.owner_id,
+        build=payload.build, owner_id=payload.owner_id, folder_id=payload.folder_id,
     )
     db.add(obj)
     db.flush()
@@ -765,7 +992,19 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
 
 @router.get("/cycles/{cycle_id}", response_model=schemas.TestCycleOut)
 def get_cycle(cycle_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return _get_cycle_or_404(db, cycle_id)
+    obj = _get_cycle_or_404(db, cycle_id)
+    # Folder-restriction check lives here (the main read entry point the
+    # frontend uses to open a cycle) rather than inside _get_cycle_or_404
+    # itself, which dozens of execution/export/bulk-action endpoints also
+    # call -- threading current_user through every one of those for a
+    # feature this narrowly scoped ("give a folder department/user access
+    # control") was judged not worth the blast radius. A restricted folder's
+    # cycles are hidden from list_cycles/list_cycle_folders either way; this
+    # closes the "already know the cycle_id" gap for the one endpoint the
+    # UI itself uses to open a cycle.
+    if obj.folder_id:
+        require_can_view_cycle_folder(obj.folder, current_user)
+    return obj
 
 
 @router.patch("/cycles/{cycle_id}", response_model=schemas.TestCycleOut)
@@ -874,6 +1113,10 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     if "owner_id" in data and data["owner_id"] is not None:
         if not db.query(models.User).get(data["owner_id"]):
             raise HTTPException(404, "Selected cycle owner not found")
+    if "folder_id" in data and data["folder_id"] is not None:
+        folder = db.query(models.TestCycleFolder).filter_by(id=data["folder_id"], project_id=obj.project_id).first()
+        if not folder:
+            raise HTTPException(404, "Destination folder not found in this project")
     # 2026-08 Reassignment Requirement -- changing (or clearing) the cycle
     # owner once one is already set is a reassignment: only the current
     # owner, their Department Head, or an Admin may do it, and a reason is

@@ -1380,14 +1380,6 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 .login-submit:active:not(:disabled) { transform: translateY(0); }
 .login-submit:disabled { opacity: .7; cursor: wait; }
 .login-submit span:last-child { font-size: 19px; font-weight: 400; }
-.login-divider { display: flex; align-items: center; gap: 10px; margin: 24px 0 16px; color: #a0a6b4; font-size: 9.5px; text-transform: uppercase; letter-spacing: .12em; }
-.login-divider::before, .login-divider::after { content: ''; height: 1px; flex: 1; background: #e9ebf1; }
-.demo-access { display: grid; grid-template-columns: 1fr 155px; gap: 13px; align-items: center; padding: 13px; border-radius: 11px; border: 1px solid #e7e9f0; background: #f8f9fc; }
-.demo-access > div { display: flex; flex-direction: column; min-width: 0; }
-.demo-access strong { font-size: 11.5px; color: #343b4e; }
-.demo-access small { margin-top: 2px; color: #8b92a3; font-size: 10px; }
-.demo-access select { width: 100%; height: 34px; border: 1px solid #d9dce6; border-radius: 8px; padding: 0 27px 0 9px; background: #fff; color: #40475a; font-size: 11px; cursor: pointer; }
-.demo-access select:focus { outline: 2px solid rgba(79,70,229,.2); border-color: var(--navy); }
 .login-help { margin: 21px 0 0; text-align: center; color: #969cab; font-size: 10.5px; }
 .login-help + .login-help { margin-top: 6px; }
 .login-help a { color: #0d6678; font-weight: 650; text-decoration: none; }
@@ -1413,7 +1405,6 @@ tr.row-clickable:hover td:first-child { box-shadow: inset 3px 0 0 var(--navy); }
 }
 @media (max-width: 390px) {
   .login-card { padding: 26px 20px 24px; }
-  .demo-access { grid-template-columns: 1fr; }
 }
 
 /* -----------------------------------------------------------------------
@@ -2006,6 +1997,20 @@ tbody tr:hover { background: #f8f9fc; }
 .tm-cycle-list strong { overflow: hidden; color: #42495c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .tm-cycle-list small { color: #969dad; font-size: 9px; }
 .tm-cycle-list p { padding: 10px; color: #969dad; font-size: 10.5px; line-height: 1.5; }
+/* Reported directly: "MAKE child hierarchy based, more easier to
+   visulaize" -- a folder's (or All cycles'/Unfiled's) test cycles now
+   render nested directly beneath that one selected row, connected by this
+   left border, instead of in a separate list with no visual link back to
+   which folder it belongs to. Reuses .tm-cycle-row/.tm-cycle-delete as-is,
+   just narrower/smaller inside the indented rail. */
+.tm-cycle-nested { list-style: none; margin: 3px 0 8px 17px; padding: 3px 0 3px 12px; border-left: 2px solid #d9dafa; display: flex; flex-direction: column; gap: 3px; }
+.tm-cycle-nested li { margin: 0; padding: 0; }
+.tm-cycle-nested .tm-cycle-row > button:first-child { padding: 7px 30px 7px 8px; font-size: 10.5px; }
+.tm-cycle-nested .tm-cycle-row strong { overflow: hidden; color: #42495c; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.tm-cycle-nested .tm-cycle-row small { color: #969dad; font-size: 9px; }
+.tm-cycle-empty { padding: 6px 8px; color: #969dad; font-size: 10px; }
+.tm-cycle-nested-add { width: 100%; min-height: 28px; margin-top: 2px; border: 1px dashed #cdd1dd; border-radius: 7px; background: transparent; color: #6f7688; font-size: 10px; cursor: pointer; }
+.tm-cycle-nested-add:hover { border-color: var(--navy); color: var(--navy); background: var(--navy-50); }
 .tm-cycle-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
 .tm-cycle-header > div > span { color: var(--navy); font-size: 9.5px; font-weight: 750; letter-spacing: .08em; }
 .tm-cycle-header h3 { margin: 3px 0; color: #242a3c; font-size: 17px; }
@@ -2676,8 +2681,6 @@ tbody tr:hover { background: #f2f8f8; }
 .password-toggle:hover { color: #0d6678; background: #e8f3f4; }
 .login-submit { background: linear-gradient(110deg, #0d6678, #075466); box-shadow: 0 8px 20px rgba(13,102,120,.24); }
 .login-submit:hover:not(:disabled) { box-shadow: 0 11px 25px rgba(13,102,120,.31); }
-.demo-access { border-color: #dce8e9; background: #f2f7f7; }
-.demo-access select:focus { outline-color: rgba(13,102,120,.2); border-color: #0d6678; }
 .login-mobile-brand .bank-logo { width: 45px; height: 45px; border: 1px solid #d6b52e; border-radius: 10px; }
 .login-mobile-brand > div { display: flex; flex-direction: column; gap: 2px; }
 .login-mobile-brand small { color: #70868a; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
@@ -3987,6 +3990,11 @@ td { padding: 12px; }
 .defect-trace-grid button { padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; border: 1px solid #d8e6e8; border-radius: 10px; background: #f7fbfb; color: #176573; text-align: left; cursor: pointer; }
 .defect-trace-grid button:hover { border-color: #72bdc9; background: #eef9fa; }
 .defect-trace-grid small { color: #7b9095; font-weight: 700; }
+.defect-also-linked { margin: -4px 0 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.defect-also-linked > small { color: #7b9095; font-weight: 700; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.defect-also-linked-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.defect-also-linked-chips button { padding: 5px 10px; border: 1px solid #d8e6e8; border-radius: 100px; background: #f7fbfb; color: #176573; font-size: 10.5px; cursor: pointer; }
+.defect-also-linked-chips button:hover { border-color: #72bdc9; background: #eef9fa; }
 .defect-detail-grid { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .defect-detail-grid section,.defect-workflow-details,.defect-evidence { padding: 15px; border: 1px solid #dce7e9; border-radius: 12px; background: #fff; }
 .defect-detail-grid h4,.defect-workflow-details h4,.defect-evidence h4 { margin: 0 0 10px; color: #244b53; }
@@ -4807,11 +4815,16 @@ td { padding: 12px; }
 .application-department-search { min-height:36px;padding:0 10px;display:flex;align-items:center;gap:8px;border:1px solid #d3e2e4;border-radius:8px;background:#f8fbfb; }
 .application-department-search svg { color:#658087; }.application-department-search input { width:100%;border:0;outline:0;background:transparent;font:inherit;font-size:10.5px; }
 .application-department-list { margin-top:10px;display:grid;gap:6px; }
-.application-department-row { min-height:55px;padding:8px 10px;display:grid;grid-template-columns:minmax(190px,1fr) minmax(220px,.8fr) auto 72px;align-items:center;gap:9px;border:1px solid #dfe9eb;border-radius:9px;background:#fff; }
-.application-department-row > div { min-width:0;display:flex;flex-direction:column;gap:2px; }.application-department-row > div strong { overflow:hidden;color:#31565e;font-size:11px;text-overflow:ellipsis;white-space:nowrap; }.application-department-row > div small { color:#83969a;font-size:8.5px; }
-.application-department-row select { min-height:34px;border:1px solid #d4e1e3;border-radius:7px;background:#fff;color:#405f66;font-size:10px; }
-.application-department-saved { color:#31845c;font-size:9px;font-weight:750; }
-@media (max-width:760px) { .application-department-head { flex-direction:column;gap:8px; }.application-department-row { grid-template-columns:1fr; }.application-department-row .btn { width:100%; }.application-department-saved { text-align:center; } }
+.application-department-row { min-height:55px;padding:8px 10px;display:flex;flex-wrap:wrap;align-items:center;gap:9px;border:1px solid #dfe9eb;border-radius:9px;background:#fff; }
+.application-department-row > div { min-width:0;flex:1 1 190px;display:flex;flex-direction:column;gap:2px; }.application-department-row > div strong { overflow:hidden;color:#31565e;font-size:11px;text-overflow:ellipsis;white-space:nowrap; }.application-department-row > div small { color:#83969a;font-size:8.5px; }
+.application-department-row select { flex:0 0 auto;min-height:34px;min-width:150px;border:1px solid #d4e1e3;border-radius:7px;background:#fff;color:#405f66;font-size:10px; }
+.application-department-saved { color:#31845c;font-size:9px;font-weight:750;white-space:nowrap; }
+.application-department-rename { flex:1 1 190px;min-width:0;display:flex;flex-direction:column;gap:2px; }
+.application-name-input { min-height:26px;padding:2px 6px;border:1px solid transparent;border-radius:6px;background:transparent;color:#31565e;font-size:11px;font-weight:600; }
+.application-name-input:hover, .application-name-input:focus { border-color:#d4e1e3;background:#f8fbfb;outline:0; }
+.application-department-rename small { color:#83969a;font-size:8.5px; }
+.application-department-inactive-badge { color:#b4590a;font-weight:750; }
+@media (max-width:760px) { .application-department-head { flex-direction:column;gap:8px; }.application-department-row { flex-direction:column;align-items:stretch; }.application-department-row .btn { width:100%; }.application-department-row select { width:100%; }.application-department-saved { text-align:center; } }
 
 /* User Directory — compact register with access editing in a modal. */
 .access-users-card table td { padding-top:11px;padding-bottom:11px;vertical-align:middle; }

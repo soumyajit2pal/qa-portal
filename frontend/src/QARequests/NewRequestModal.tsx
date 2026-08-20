@@ -44,6 +44,7 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
     bug_fix_source_request_id: editing.bug_fix_source_request_id || '',
     vendor_si_partner: editing.vendor_si_partner || '',
     technology_stack: editing.technology_stack || '',
+    change_description: editing.change_description || '',
     release_version: editing.release_version || '',
     build_number: editing.build_number || '',
     environment: editing.environment || 'SIT',

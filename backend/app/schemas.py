@@ -337,6 +337,11 @@ class QARequestCreate(BaseModel):
     target_release_date: Optional[datetime.date] = None
     supporting_doc_path: Optional[str] = None
     remarks: Optional[str] = None
+    # Mandatory in the wizard (see DetailsStep.tsx/validation.ts's
+    # REQUIRED_DETAIL_FIELDS) -- Optional here like every other UI-mandatory
+    # field on this schema (application_owner, cr_number, technology_stack,
+    # ...), matching QARequest.change_description's own comment.
+    change_description: Optional[str] = None
     # Readiness checklist items the requester is self-declaring as already
     # satisfied (matched by item text against DEFAULT_CHECKLIST_ITEMS). This
     # is informational for the QA Lead, who still independently verifies
@@ -477,6 +482,7 @@ class QARequestOut(ORMModel):
     target_release_date: Optional[datetime.date] = None
     supporting_doc_path: Optional[str] = None
     remarks: Optional[str] = None
+    change_description: Optional[str] = None
     status: str
     requester_id: Optional[int] = None
     created_at: datetime.datetime
@@ -494,6 +500,12 @@ class QARequestOut(ORMModel):
     linked_sast_requests: List[LinkedRequestRef] = []
     linked_dast_requests: List[LinkedRequestRef] = []
     linked_performance_requests: List[LinkedRequestRef] = []
+    # Sign-off has no FK to QARequest (matched by business ID string, see
+    # models.QASignOff.testing_request_id) so it isn't auto-linked the same
+    # way as the 4 fields above -- populated explicitly in get_request()
+    # below. See QARequestListOut's own linked_signoffs for why this was
+    # added: "can we get all requests details based on that cr[number]?"
+    linked_signoffs: List[LinkedRequestRef] = []
     # Read-only -- whatever the wizard's SAST/DAST/Performance/checklist steps
     # collected on an earlier Draft save (staged on draft_child_details, see
     # models.QARequest), so "Edit Request" can pre-fill them instead of
@@ -529,6 +541,16 @@ class QARequestListOut(ORMModel):
     request_date: Optional[datetime.date] = None
     department: Optional[str] = None
     application_name: str
+    # Reported directly: "why CR number is blank, though input is provided."
+    # This lightweight list schema only ever carried the legacy epic_number
+    # column (kept for pre-consolidation historical rows) -- the live,
+    # consolidated field every current request actually writes to
+    # (cr_number, see QARequestCreate/QARequestOut) was missing here
+    # entirely, so index.tsx's "CR Number/EPIC Number" column always read
+    # `r.cr_number` as undefined regardless of what was typed. Detail views
+    # (GET /api/qa-requests/{id}, QARequestOut) were never affected -- this
+    # was specific to the list endpoint's own lightweight schema.
+    cr_number: Optional[str] = None
     epic_number: Optional[str] = None
     target_release_date: Optional[datetime.date] = None
     status: str
@@ -541,6 +563,16 @@ class QARequestListOut(ORMModel):
     linked_sast_requests: List[LinkedRequestRef] = []
     linked_dast_requests: List[LinkedRequestRef] = []
     linked_performance_requests: List[LinkedRequestRef] = []
+    # Reported directly: "can we get all requests details based on that
+    # cr[number]?" -- Sign-off has no FK to QARequest (matched by business ID
+    # string instead, see models.QASignOff.testing_request_id), so it wasn't
+    # among the 4 relationship-backed linked_* fields above. Batched onto
+    # each row in list_requests() below via QASignOff.request_id (an alias
+    # property for certificate_id) so it fits the same LinkedRequestRef shape.
+    linked_signoffs: List[LinkedRequestRef] = []
+    # Reported directly, alongside the cr_number fix above -- shown as its
+    # own column on the list table now too (see index.tsx).
+    change_description: Optional[str] = None
 
 
 # ---- Functional Testing Request (Functional/Sanity/Regression Testing/UAT Support) ----
@@ -611,6 +643,7 @@ class FunctionalListOut(ORMModel):
     application_name: Optional[str] = None
     epic_number: Optional[str] = None
     cr_number: Optional[str] = None
+    change_description: Optional[str] = None
     department: Optional[str] = None
     # Not rendered by Functional.tsx's own list table, but modules/
     # governance/SignOff.tsx's "New Sign-off Certificate" Testing Request ID
@@ -656,6 +689,7 @@ class FunctionalOut(ORMModel):
     request_types: Optional[str] = None
     target_release_date: Optional[datetime.date] = None
     cr_number: Optional[str] = None
+    change_description: Optional[str] = None
     change_type: Optional[str] = None
     bug_fix_source_request_id: Optional[str] = None
     environment: Optional[str] = None
@@ -851,7 +885,7 @@ class ConfirmSignoffIn(BaseModel):
 
 
 class RequestSignoffIn(BaseModel):
-    """Optional -- lets the frontend link a QA Sign-off Certificate (created
+    """Optional -- lets the frontend link a QA Clearance Certificate (created
     via POST /api/signoffs right before this call, see SignOff.tsx's
     NewSignOffModal opened from the Functional module's "Request Sign-off"
     button) at the moment sign-off is requested, rather than waiting until
@@ -930,7 +964,13 @@ class SASTListOut(ORMModel):
     # (department scoping + subtitle line), no extra query cost.
     department: Optional[str] = None
     application_owner: Optional[str] = None
+    change_description: Optional[str] = None
     findings_count: int = 0
+    # 2026-08 "Findings Validation" doc -- lets the list Status column
+    # overlay "Suppression Approval Pending" over WAITING_FOR_FIX, mirroring
+    # application_master_status's own overlay of "Application Owner Approval
+    # Pending" over SM_APPROVAL_PENDING. See models.SASTRequest.has_open_suppression.
+    has_open_suppression: bool = False
     qa_request: Optional[LinkedRequestRef] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
@@ -942,6 +982,7 @@ class SASTOut(ORMModel):
     application_name: str
     epic_number: Optional[str] = None
     cr_number: Optional[str] = None
+    change_description: Optional[str] = None
     risk_category: Optional[str] = None
     priority: Optional[str] = None
     hash_value: Optional[str] = None
@@ -1039,7 +1080,10 @@ class DASTListOut(ORMModel):
     # eager-load, needed by Suppression.tsx's cross-module picker.
     department: Optional[str] = None
     application_owner: Optional[str] = None
+    change_description: Optional[str] = None
     findings_count: int = 0
+    # See SASTListOut.has_open_suppression above -- same idea, for DAST.
+    has_open_suppression: bool = False
     qa_request: Optional[LinkedRequestRef] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
@@ -1087,6 +1131,7 @@ class DASTOut(ORMModel):
     application_name: Optional[str] = None
     epic_number: Optional[str] = None
     cr_number: Optional[str] = None
+    change_description: Optional[str] = None
     deployment_environment: Optional[str] = None
     target_promotion_environment: Optional[str] = None
     # One row per scan target -- replaces the old design of 4 newline-joined
@@ -1193,6 +1238,7 @@ class PerformanceListOut(ORMModel):
     # which silently drops any row with no department -- see the matching
     # addition to SASTListOut/DASTListOut for the same reasoning.
     department: Optional[str] = None
+    change_description: Optional[str] = None
     qa_request: Optional[LinkedRequestRef] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
@@ -1204,6 +1250,7 @@ class PerformanceOut(ORMModel):
     application_name: str
     epic_number: Optional[str] = None
     cr_number: Optional[str] = None
+    change_description: Optional[str] = None
     tool_used: Optional[str] = None
     target_load: Optional[str] = None
     environment: Optional[str] = None
@@ -1383,6 +1430,18 @@ class DefectLinkExecution(BaseModel):
     execution_id: int
 
 
+class DefectExecutionLinkOut(ORMModel):
+    """One ADDITIONAL execution a Defect has been traced to, beyond its
+    primary one -- see models.Defect.execution_links' own comment."""
+    id: int
+    execution_id: int
+    cycle_id: Optional[int] = None
+    cycle_key: Optional[str] = None
+    project_id: Optional[int] = None
+    test_case_key: Optional[str] = None
+    status: Optional[str] = None
+
+
 class DefectUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -1477,6 +1536,9 @@ class DefectOut(ORMModel):
     execution_id: Optional[int] = None
     linked_test_case_ids: List[int] = []
     linked_test_case_keys: List[str] = []
+    # Additional executions this same governed defect has also been traced
+    # to, beyond its primary one above -- see models.Defect.execution_links.
+    execution_links: List[DefectExecutionLinkOut] = []
     application_name: str
     module_feature: str
     environment: str
@@ -1596,7 +1658,7 @@ class DefectDashboardOut(BaseModel):
     closure_trend: dict[str, int]
 
 
-# ---------------- Module 8: QA Sign-off ----------------
+# ---------------- Module 8: QA Clearance ----------------
 class SignOffCreate(BaseModel):
     certificate_type: str
     testing_type: str
@@ -1663,6 +1725,9 @@ class SignOffOut(ORMModel):
     application_owner: Optional[str] = None
     department: Optional[str] = None
     request_department: Optional[str] = None
+    # Delegated from the QA Request via source_functional_request -- see
+    # models.QASignOff.change_description.
+    change_description: Optional[str] = None
     vendor_si_partner: Optional[str] = None
     technology_stack: Optional[str] = None
     risk_tier: Optional[str] = None
@@ -1765,6 +1830,10 @@ class ApplicationMasterDecision(BaseModel):
 
 class ApplicationMasterDepartmentUpdate(BaseModel):
     department: str
+
+
+class ApplicationMasterRenameUpdate(BaseModel):
+    name: str
 
 
 class ApplicationSeedResult(ORMModel):
@@ -2433,6 +2502,19 @@ class TestCaseSummaryOut(BaseModel):
     # two are their dedicated counts.
     archived_count: int = 0
     recycle_bin_count: int = 0
+    # Reported directly: "Testcases count and all should be updated based on
+    # folder. otherwise creating confusion" -- total/approved_count/
+    # in_review_count/critical_count above are deliberately project-wide
+    # (they also power the sidebar's "All test cases" badge, which must NOT
+    # change just because a different folder is open). These four are the
+    # same four stats scoped to whatever folder/view the caller passed via
+    # the new `folder_id` query param (see get_test_case_summary) -- equal to
+    # the project-wide fields above when no folder_id was given (the "All
+    # test cases" view itself). Power the "Current view" stat cards only.
+    scoped_total: int = 0
+    scoped_approved_count: int = 0
+    scoped_in_review_count: int = 0
+    scoped_critical_count: int = 0
 
 
 # Summary shown when importing an xlsx sheet. imported_executions remains in
@@ -2448,11 +2530,67 @@ class TestCaseImportResult(ORMModel):
     failure_reason: Optional[str] = None
 
 
+class TestCycleFolderCreate(BaseModel):
+    name: str
+
+
+class TestCycleFolderAccessCreate(BaseModel):
+    """Exactly one of `department`/`user_id` must be set -- validated in
+    routers/test_execution.py::create_cycle_folder_access, mirroring
+    TestProjectViewGrantCreate."""
+    department: Optional[str] = None
+    user_id: Optional[int] = None
+
+
+class TestCycleFolderAccessOut(ORMModel):
+    id: int
+    folder_id: int
+    department: Optional[str] = None
+    user_id: Optional[int] = None
+    user_name: Optional[str] = None
+    granted_by_id: Optional[int] = None
+    granted_by_name: Optional[str] = None
+    created_at: datetime.datetime
+
+
+class TestCycleFolderOut(ORMModel):
+    id: int
+    project_id: int
+    name: str
+    created_by_id: Optional[int] = None
+    created_by_name: Optional[str] = None
+    created_at: datetime.datetime
+    # Reported directly: "give access department based or user level, same
+    # behaviour like project has" -- non-empty access_grants means this
+    # folder is RESTRICTED (see models.TestCycleFolder's own docstring);
+    # empty means it's visible to anyone who can execute in the project,
+    # same as an Unfiled cycle. Included inline (not a separate endpoint)
+    # since the folder sidebar needs to show a lock icon/count without an
+    # extra round trip per folder.
+    access_grants: List[TestCycleFolderAccessOut] = []
+    cycle_count: int = 0
+
+
+class TestCycleFolderListOut(BaseModel):
+    folders: List[TestCycleFolderOut]
+    # Mirrors TestCaseSummaryOut.unfiled_count/total -- the sidebar's "All
+    # cycles"/"Unfiled" pseudo-folder badges. total here only counts cycles
+    # this caller can actually see (i.e. excludes cycles sitting in a
+    # restricted folder they don't have access to) -- see
+    # deps.py::can_view_cycle_folder.
+    unfiled_count: int = 0
+    total: int = 0
+
+
 class TestCycleCreate(BaseModel):
     name: str
     description: Optional[str] = None
     start_date: datetime.date
     end_date: datetime.date
+    # Reported directly: "Create Test Cycle Folder ... Under this folder
+    # create test cycle." None means Unfiled, same convention as
+    # TestCaseCreate/TestCaseModal's own folder_id.
+    folder_id: Optional[int] = None
     # Reported: "failure in test lifecycle and testcases, basically on test
     # management" -- routers/test_execution.py::create_cycle unconditionally
     # reads payload.linked_request_id/linked_request_type (added alongside
@@ -2491,6 +2629,10 @@ class TestCycleUpdate(BaseModel):
     blocking_reason: Optional[str] = None
     remarks: Optional[str] = None
     reason: Optional[str] = None  # 2026-08 Reassignment Requirement -- mandatory only when owner_id changes and a previous owner already existed
+    # Lets an existing cycle be moved between folders (or back to Unfiled via
+    # explicit null) after creation, same latitude TestCaseBulkUpdate/
+    # TestCaseModal already give Test Repository folders.
+    folder_id: Optional[int] = None
 
 
 class TestCycleOut(ORMModel):
@@ -2502,6 +2644,8 @@ class TestCycleOut(ORMModel):
     status: str
     start_date: Optional[datetime.date] = None
     end_date: Optional[datetime.date] = None
+    folder_id: Optional[int] = None
+    folder_name: Optional[str] = None
     linked_request_type: Optional[str] = None
     linked_request_id: Optional[int] = None
     linked_request_key: Optional[str] = None

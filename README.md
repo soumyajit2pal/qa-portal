@@ -24,14 +24,14 @@ that renders each one.
 |---|---|---|
 | `auth.py` | `src/Login.tsx` | JWT login, `/auth/me`, user directory, Admin CRUD |
 | `qa_requests.py` | `src/QARequests.tsx` | The cross-module request gateway/inbox — raise a request, pick its type, route it |
-| `functional.py` | **Functional** (`src/modules/functional/`) | Functional QA request lifecycle: SM/dept-head decisions, readiness checklist, planning → test design → execution → defects → retest → regression → sign-off, documents, history |
+| `functional.py` | **Functional** (`src/modules/functional/`) | Functional QA request lifecycle: SM/dept-head decisions, readiness checklist, planning → test design → execution → defects → retest → regression → clearance, documents, history |
 | `sast_dast.py` | **Security** (`src/modules/security/`) | SAST and DAST request lifecycle: readiness, scan configuration/execution, findings, documents, history |
 | `suppression.py` | **Security** (`src/modules/security/`) | False-positive/suppression requests: app-owner and dept-head decisions, security-team decision, documents, history |
-| `automation.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Automation request lifecycle: feasibility, engineer assignment, script development, review, CI/CD integration, sign-off |
-| `performance.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Performance testing lifecycle: readiness, baseline, load test, result analysis, defect fix/retest, report, sign-off |
+| `automation.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Automation request lifecycle: feasibility, engineer assignment, script development, review, CI/CD integration, clearance |
+| `performance.py` | **Specialised Testing** (`src/modules/specialised-testing/`) | Performance testing lifecycle: readiness, baseline, load test, result analysis, defect fix/retest, report, clearance |
 | `approvals.py` | **Governance** (`src/modules/governance/`) | Cross-module workflow-decision feed (`/approvals`, `/approvals/pending-mine`) |
 | `audit.py` | **Governance** (`src/modules/governance/AuditLog.tsx`) | Immutable authentication, API-access, data-change and access-management audit trail |
-| `signoff.py` | **Governance** (`src/modules/governance/`) | Formal QA sign-off issuance, history, documents |
+| `signoff.py` | **Governance** (`src/modules/governance/`) | Formal QA Clearance issuance, history, documents |
 | `dashboard.py` | `src/Dashboard.tsx` | Project-wise, QA-wise, security, suppression, and 3W ("what's pending, where, since when") dashboards |
 | `reports.py` | **Governance** (`src/modules/governance/Reports.tsx`) | Operational/security/management report data (QA summary, SAST/DAST scan, vulnerability trend, severity distribution, suppression register, monthly KPI, quality scorecard, audit evidence) |
 | `export.py` | **Governance** (`src/modules/governance/Reports.tsx`) | Excel/PDF/CSV export of the above, with RBAC |
@@ -114,7 +114,7 @@ qualityops/
   frontend/
     package.json
     vite.config.ts
-    Dockerfile, nginx.conf
+    Dockerfile, nginx.conf.template   # nginx.conf itself kept only as a reference (see "Enable HTTPS")
     src/                    # see Frontend architecture above
   docker-compose.yml         # backend + frontend, 2 services
   README.md
@@ -269,14 +269,15 @@ docker build -f backend/Dockerfile -t qualityops-backend backend
 docker build -f frontend/Dockerfile -t qualityops-frontend frontend
 ```
 
-The frontend image's nginx (`frontend/nginx.conf`) reverse-proxies `/api/*` to a `backend`
-host same-origin, so the browser never talks to the API on a different origin and there's no
-CORS configuration needed anywhere. That proxy target assumes the two containers share a Docker
-network with the backend reachable at the hostname `backend` (true when run via
-`docker-compose.yml` below, or when deployed as two Services in the same Kubernetes namespace
-with the backend Service named `backend`). If your topology differs, either edit the
-`proxy_pass` target in `nginx.conf`, or skip the proxy entirely by rebuilding with
-`--build-arg VITE_API_BASE_URL=https://your-api-host` to bake in a direct API URL instead.
+The frontend image's nginx (`frontend/nginx.conf.template`, see the "Enable HTTPS" section below
+for why it's a template) reverse-proxies `/api/*` to a `backend` host same-origin, so the browser
+never talks to the API on a different origin and there's no CORS configuration needed anywhere.
+That proxy target assumes the two containers share a Docker network with the backend reachable at
+the hostname `backend` (true when run via `docker-compose.yml` below, or when deployed as two
+Services in the same Kubernetes namespace with the backend Service named `backend`). If your
+topology differs, either edit the `proxy_pass` target in `nginx.conf.template`, or skip the proxy
+entirely by rebuilding with `--build-arg VITE_API_BASE_URL=https://your-api-host` to bake in a
+direct API URL instead.
 
 ### Running everything together (docker-compose)
 
@@ -299,6 +300,122 @@ worker (see `backend/app/main.py`'s startup-lock comment) whenever more than one
 running. The app still runs fine without Redis reachable -- caching and the startup lock both
 degrade to a no-op/permissive fallback -- but then each of the 4 workers keeps its own cache and
 the startup task can run up to 4 times.
+
+### Enable HTTPS
+
+Out of the box (`docker compose up --build`, above) the app is HTTP-only, reachable at
+`http://localhost:8080`. Both paths below terminate TLS in this stack's own nginx (`frontend`)
+container, write their certificate into the same place, and need no `frontend/nginx.conf.template`
+changes either way -- only which bootstrap script you run differs. Pick based on how this server
+is reached:
+
+- **Have a real domain, and the server is reachable from the public internet on it?** Use
+  [Path A](#path-a--public-domain-lets-encrypt) -- a trusted, browser-recognized certificate that
+  renews itself automatically, no per-device setup for anyone visiting the app.
+- **Only have an IP address, no domain (yet), and/or the server is only reachable on a private
+  network (VPN/office LAN)?** Use [Path B](#path-b--ip-address--private-network-self-signed) --
+  Let's Encrypt cannot help here at all (it only ever validates domain ownership over the real
+  public internet, so a private/IP-only server can never qualify no matter what), but a private
+  certificate authority gets you real end-to-end TLS with a one-time trust step per device instead.
+
+#### Path A -- public domain (Let's Encrypt)
+
+1. **Point DNS at this host first.** The domain's A/AAAA record must already resolve to this
+   server's public IP, and ports **80** and **443** must be reachable from the internet on it --
+   Let's Encrypt validates ownership over the real internet, not just inside the Docker network.
+2. **Add two variables to the root `.env`** (next to `DATABASE_URL`, `SECRET_KEY`, etc.):
+   ```
+   DOMAIN_NAME=qa-portal.example.com
+   CERTBOT_EMAIL=you@example.com
+   ```
+   `CERTBOT_EMAIL` is only used by Let's Encrypt for expiry/security notices -- it's never shown
+   to app users.
+3. **Run the one-time bootstrap script**, before starting the rest of the stack:
+   ```bash
+   ./scripts/init-letsencrypt.sh
+   ```
+   This solves the classic nginx/Certbot chicken-and-egg problem: nginx won't start without a
+   certificate file to point at, but Certbot can't issue the first certificate until something is
+   already serving its HTTP challenge on port 80 -- so the script briefly gives nginx a throwaway
+   self-signed certificate just to get it running, requests the real one from Let's Encrypt against
+   that running nginx, then swaps it in and reloads. Safe to re-run if it fails partway through. Set
+   `CERTBOT_STAGING=1` in `.env` first to test against Let's Encrypt's staging environment (issues a
+   certificate your browser won't trust, but doesn't count against the real service's rate limits)
+   before doing a real run.
+4. **Bring up the rest of the stack** as usual: `docker compose up -d`. The app is now reachable at
+   `https://qa-portal.example.com`; plain `http://` requests to the same domain (port 80) are
+   redirected to HTTPS automatically. The pre-existing `http://localhost:8080` mapping still works
+   too, unchanged, for local/dev access without a domain.
+
+**Certificate renewal (Path A only):** the `certbot` service in `docker-compose.yml` checks every
+~12h and renews automatically once the certificate is within 30 days of expiring (Let's Encrypt
+certificates are valid 90 days). It does **not** reload nginx on its own, though -- nginx only
+picks up a renewed certificate file when told to. Add a host cron entry to reload it periodically
+(safe to run even when nothing renewed):
+```
+0 3 * * 1 cd /path/to/qa-portal && docker compose exec frontend nginx -s reload
+```
+If you skip this, the certificate still renews on disk, but nginx keeps presenting the old one
+until it's next restarted/redeployed some other way -- which will eventually expire and start
+failing in browsers.
+
+#### Path B -- IP address / private network (self-signed)
+
+`scripts/init-selfsigned.sh` generates a small private Certificate Authority (once) plus a
+certificate for `DOMAIN_NAME` signed by it -- deliberately not a single bare self-signed cert.
+The difference matters: you install/trust the **CA** once on each device that needs to reach this
+server, and every certificate that CA ever issues (this one, and any future rotation) is then
+trusted automatically with no more warnings -- a bare self-signed cert would need every device to
+individually click through (or bypass) a warning, and re-approve it again on every rotation.
+
+1. **Add `DOMAIN_NAME` to the root `.env`** -- for this path it's the IP address or internal
+   hostname you and your team will actually type into a browser, e.g.:
+   ```
+   DOMAIN_NAME=192.168.1.50
+   ```
+   `CERTBOT_EMAIL` is not needed for this path (nothing here talks to Let's Encrypt at all).
+2. **Run the one-time bootstrap script**:
+   ```bash
+   ./scripts/init-selfsigned.sh
+   ```
+   Creates the local CA and a certificate for `DOMAIN_NAME` (valid 10 years by default -- override
+   with `SELFSIGNED_DAYS` in `.env`; self-signed/private-CA certificates aren't subject to the
+   shorter validity windows public CA root programs enforce, since nothing here relies on an OS/
+   browser trusting it out of the box), starts/reloads nginx, and saves the CA certificate to
+   `./certs/qa-portal-local-ca.crt`. Safe to re-run -- it reuses the existing CA if one is already
+   there, so previously-trusted devices stay trusted; only the leaf certificate regenerates.
+3. **Install `./certs/qa-portal-local-ca.crt` on every device** that will access the app, so
+   browsers stop showing a trust warning:
+   - **Windows:** double-click the `.crt` file → *Install Certificate* → *Local Machine* →
+     *Place all certificates in the following store* → *Trusted Root Certification Authorities*.
+   - **macOS:** double-click the `.crt` file to open it in *Keychain Access*, then in the
+     certificate's *Get Info* panel set *When using this certificate* → *Always Trust*.
+   - **Linux (Debian/Ubuntu):** `sudo cp qa-portal-local-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates`.
+   - **Firefox** (keeps its own trust store separate from the OS on every platform):
+     Settings → Privacy & Security → *View Certificates* → *Authorities* tab → *Import*.
+   - **iOS/Android:** install as a profile/CA certificate via device Settings, then (iOS only) also
+     enable it under Settings → General → About → Certificate Trust Settings.
+
+   Until a device has done this, `https://192.168.1.50` still works (traffic is genuinely
+   encrypted), it just shows an interstitial trust warning first.
+4. **Bring up the rest of the stack**: `docker compose up -d`. Plain `http://192.168.1.50`
+   redirects to HTTPS automatically; `http://localhost:8080` still works unchanged.
+
+**No automatic renewal on this path** -- there's no ACME/Certbot involved, so nothing renews this
+certificate on a schedule. Re-run `./scripts/init-selfsigned.sh` before it expires (10 years by
+default) to issue a new leaf certificate off the same trusted CA; no device needs to re-trust
+anything when you do.
+
+#### Neither path -- HTTPS terminated elsewhere, or not wanted at all
+
+If TLS is (or will be) terminated outside this stack entirely -- an external load balancer or
+ingress that already handles HTTPS and talks plain HTTP to this container -- skip both paths
+above; `frontend/nginx.conf.template`'s port-80 behavior is a hard redirect to HTTPS, which would
+conflict with an external terminator forwarding plain HTTP. See `frontend/nginx.conf` (kept as a
+reference, no longer built by default) for a plain HTTP-only config to point the Dockerfile back
+at instead, and just make sure your external terminator forwards `X-Forwarded-Proto` (it already
+does in most LB/ingress setups) -- the backend and frontend nginx config both already read/forward
+that header where relevant.
 
 ### Verification status
 
@@ -373,7 +490,8 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   reverse-proxy networks. Login and action audit records will then store the
   original client from `X-Forwarded-For` instead of the proxy's address. The
   supplied nginx configuration already forwards `X-Real-IP` and
-  `X-Forwarded-For`.
+  `X-Forwarded-For` (and, once HTTPS is enabled per the section above,
+  `X-Forwarded-Proto`, useful if you later add HTTPS-only logic on the backend).
 - Add MFA at the identity-provider layer for LDAP/AD-backed logins, per the non-functional
   requirements (5.1) — this app only performs the LDAP bind, not step-up/MFA.
 - Supporting documents are uploaded (multiple files per request, every module) and stored on

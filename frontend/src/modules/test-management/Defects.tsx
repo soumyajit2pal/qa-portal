@@ -663,6 +663,30 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
         <button disabled={!defect.test_case_key} onClick={() => defect.test_case_key && navigate(`/test-repository?${defect.project_id ? `project=${defect.project_id}&` : ''}open=${encodeURIComponent(defect.test_case_key)}`)}><small>Test Case</small><strong>{defect.test_case_key || 'Not linked'}</strong></button>
         <button disabled={!defect.execution_id || !defect.cycle_id || !defect.project_id} onClick={() => defect.execution_id && defect.cycle_id && defect.project_id && navigate(`/test-execution?project=${defect.project_id}&cycle=${defect.cycle_id}&execution=${defect.execution_id}`)}><small>Execution</small><strong>{defect.execution_id ? `#${defect.execution_id}` : 'Not linked'}</strong></button>
       </div>
+      {/* Reported directly: "Select a previously opened, unlinked governed
+          defect ... instead show linked defect as well" -- the picker now
+          also offers a defect already primary-linked elsewhere, adding this
+          as an ADDITIONAL trace (see routers/defects.py's
+          _link_additional_execution) without disturbing the primary link
+          shown in the grid above. Surfaced here so a QA Lead reviewing this
+          defect sees every execution it's actually been traced to, not just
+          the primary one. */}
+      {defect.execution_links.length > 0 && (
+        <div className="defect-also-linked">
+          <small>Also linked to</small>
+          <div className="defect-also-linked-chips">
+            {defect.execution_links.map((link) => (
+              <button
+                key={link.id}
+                type="button"
+                onClick={() => navigate(`/test-execution?${link.project_id ? `project=${link.project_id}&` : ''}${link.cycle_id ? `cycle=${link.cycle_id}&` : ''}execution=${link.execution_id}`)}
+              >
+                {link.cycle_key || 'Cycle'} · {link.test_case_key || `execution #${link.execution_id}`}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="defect-detail-grid">
         <div className="defect-detail-main">
           <section><span className="defect-section-label">Issue definition</span><h4>Description</h4><AuthenticatedMarkdown value={defect.description} basePath={`/api/defects/${defect.id}/attachments`} /></section>

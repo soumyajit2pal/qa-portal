@@ -29,8 +29,15 @@ export default function QARequests() {
   const [statusFilter, setStatusFilter] = useState("");
   const [assignedOnly, setAssignedOnly] = useState(false);
   const [search, setSearch] = useState(
-    searchParams.get("search") || searchParams.get("application_name") || ""
+    searchParams.get("search") || searchParams.get("application_name") || searchParams.get("cr_number") || ""
   );
+  // Set only when arriving via a CR/EPIC-number global search (see
+  // components/Layout.tsx's submitSearch) -- drives an exact-match filter
+  // (GET /api/qa-requests?cr_number=...) instead of the free-text `search`
+  // param's substring match, so CR-102 doesn't also pull in CR-1023/
+  // CR-1024. Cleared as soon as the box is edited by hand, reverting to
+  // ordinary free-text search.
+  const [crNumber, setCrNumber] = useState(searchParams.get("cr_number") || "");
   const [showNew, setShowNew] = useState(false);
   // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
   // QARequestListOut shape now; opening a request fetches the full
@@ -51,9 +58,13 @@ export default function QARequests() {
     items: requests, page, pageSize, total, totalPages, hasNext, hasPrevious,
     loading, setPage, setPageSize, reload,
   } = usePaginatedList<QARequestListOut>("/api/qa-requests", {
-    search,
+    // While an exact CR/EPIC-number filter is active, the free-text
+    // substring `search` param is suppressed -- cr_number below already
+    // narrows to exactly that CR, and combining both would just be
+    // redundant (harmless, but pointless) until the user edits the box.
+    search: crNumber ? undefined : search,
     status: statusFilter ? [statusFilter] : undefined,
-    extra: { assigned_to_me: assignedOnly ? "true" : undefined },
+    extra: { assigned_to_me: assignedOnly ? "true" : undefined, cr_number: crNumber || undefined },
   });
 
   useEffect(() => {
@@ -83,11 +94,9 @@ export default function QARequests() {
     // topbar while already here updated the URL but never reached this
     // page's `search` state -- the list just kept showing the previous (or
     // no) filter. Re-syncing on every `location.search` change fixes that.
-    setSearch(
-      new URLSearchParams(location.search).get("search") ||
-        new URLSearchParams(location.search).get("application_name") ||
-        ""
-    );
+    const params = new URLSearchParams(location.search);
+    setSearch(params.get("search") || params.get("application_name") || params.get("cr_number") || "");
+    setCrNumber(params.get("cr_number") || "");
   }, [location.search]);
 
   const openRequest = useCallback(async (idOrRow: number | QARequestListOut) => {
@@ -117,9 +126,11 @@ export default function QARequests() {
 
   function clearSearch() {
     setSearch("");
+    setCrNumber("");
     const params = new URLSearchParams(location.search);
     params.delete("search");
     params.delete("application_name");
+    params.delete("cr_number");
     const remaining = params.toString();
     navigate(`${location.pathname}${remaining ? `?${remaining}` : ""}`, { replace: true });
   }
@@ -137,13 +148,18 @@ export default function QARequests() {
       />
       <div className="toolbar">
         <ClearableSearchInput
-          placeholder="Search by request ID, application, or project..."
+          placeholder="Search by request ID, application, CR number, or project..."
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => { setSearch(e.target.value); setCrNumber(""); }}
           onClear={clearSearch}
           clearLabel="Clear QA Request search"
           wrapperClassName="search-grow"
         />
+        {crNumber && (
+          <span className="badge badge-blue" title={`Showing every QA Request raised under ${crNumber} exactly`}>
+            Exact match: {crNumber}
+          </span>
+        )}
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
@@ -184,7 +200,28 @@ export default function QARequests() {
               filterValue: (r) => r.request_id || `Draft #${r.id}`,
             },
             { key: "application_name", header: "Application" },
-            { key: "cr_number", header: "CR Number/EPIC Number" },
+            {
+              key: "cr_number",
+              header: "CR Number/EPIC Number",
+              // Reported directly: "why CR number is blank, though input is
+              // provided" -- the backend's list schema was missing cr_number
+              // entirely (fixed, see schemas.QARequestListOut), but this
+              // also falls back to the legacy epic_number for older rows
+              // that predate the consolidated field, same fallback
+              // NewRequestModal.tsx already uses when reopening a Draft.
+              render: (r) => r.cr_number || r.epic_number || "—",
+              filterValue: (r) => r.cr_number || r.epic_number || "",
+            },
+            {
+              key: "change_description",
+              header: "Change Description",
+              render: (r) => (
+                <span className="truncate-cell" title={r.change_description || ""}>
+                  {r.change_description || "—"}
+                </span>
+              ),
+              filterValue: (r) => r.change_description || "",
+            },
             {
               key: "requester_id",
               header: "Requester",

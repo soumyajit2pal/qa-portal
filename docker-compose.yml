@@ -13,18 +13,14 @@ services:
 
     restart: "no"
 
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-
   backend:
     image: qualityops-backend:${IMAGE_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
 
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
 
     env_file:
       - .env
@@ -32,9 +28,6 @@ services:
     volumes:
       - qa_portal_uploads:/app/app/uploads
       - qa_portal_logs:/app/logs
-
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
     depends_on:
       migrate:
@@ -57,7 +50,6 @@ services:
 
     restart: unless-stopped
 
-
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
@@ -67,9 +59,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
     restart: unless-stopped
-
     volumes:
       - qa_portal_redis:/data
 
@@ -78,15 +68,16 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-
     ports:
-      - "8080:80"
-
+      - "8080:443"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/ssl:ro
     depends_on:
       backend:
         condition: service_healthy
-
     restart: unless-stopped
+
 
 volumes:
   qa_portal_uploads:

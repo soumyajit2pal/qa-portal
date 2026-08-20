@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableRows, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableRows, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
@@ -420,8 +420,14 @@ function DASTDetail({ req, onClose, onChanged, users }: {
       await load()
     } catch (err) { setScanError(err) } finally { setBusy(false) }
   }
-  async function markScanComplete() {
-    await act('mark-scan-complete', { comments })
+  // Reported directly: full "SAST/DAST Request Workflow Requirement" doc
+  // pasted with a status-flow diagram -- Mark Scan Complete's own button was
+  // retired from the Findings tab in favor of Validate Findings (see
+  // canValidateFindings below) -- the backend endpoint (_mark_scan_complete)
+  // is left in place, unused, matching this file's existing convention for
+  // superseded-but-not-deleted legacy actions.
+  async function validateFindings() {
+    await act('validate-findings')
     loadScan()
   }
   // Deep-links into the Suppression module with this request pre-selected --
@@ -523,61 +529,89 @@ function DASTDetail({ req, onClose, onChanged, users }: {
     (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&
     SAST_DAST_ANALYST_REASSIGNABLE_STATUSES.includes(status)
   const canStartScan = isAssignedAnalyst && status === 'CONFIGURATION'
-  // 2026-08 "Findings Validation" doc -- Rescan and Mark Scan Complete are
-  // now data-driven (see SecurityScanResults' own action buttons) and act
-  // across the same superset of in-flight statuses, replacing the old
-  // status-specific canCompleteScan/canRescanDecide self-report gates.
-  const canScanAct = isAssignedAnalyst && ['SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(status)
+  // 2026-08 "Findings Validation" doc restoration -- Finding Validation is
+  // once again a mandatory, explicit gate rather than a bypassed status.
+  // Three separate turn-based gates, mirroring routers/sast_dast.py's
+  // rewritten _validate_findings/_assign_to_requester/_rescan_scan exactly:
+  // the assigned analyst validates findings from SCANNING, assigns to the
+  // requester from REMEDIATION (only reachable once findings were found),
+  // and rescans only once genuinely reassigned back (RESCAN).
+  const canValidateFindings = isAssignedAnalyst && status === 'SCANNING'
+  const canAssignToRequester = isAssignedAnalyst && status === 'REMEDIATION'
+  const canRescan = isAssignedAnalyst && status === 'RESCAN'
   // Reported directly: "suppression requests CAN ONLY be raised by
   // requester, so this should be enable for requester, not QA team." --
-  // Initiate Suppression Request is the requester's own action (same
-  // active-scan window as canScanAct above), separate from Rescan/Mark Scan
-  // Complete which stay the assigned analyst's.
-  const canInitiateSuppression = isRequester && ['SCANNING', 'FINDING_VALIDATION', 'REMEDIATION', 'WAITING_FOR_FIX', 'RESCAN'].includes(status)
-  const canValidateFindings = isAssignedAnalyst && status === 'FINDING_VALIDATION'
-  // Reported directly: "where is waiting for fix, assign to requester ...
-  // if there are findings then it should show waiting for fix option" --
-  // Assign to Requester used to require status === 'REMEDIATION', a status
-  // nothing in the new Rescan/Mark Scan Complete flow ever transitions into
-  // (Start Scan goes straight to SCANNING), leaving it permanently
-  // unreachable. Now reachable across the same active-scan window as
-  // Rescan/Mark Scan Complete (mirrors sast_dast.py's
-  // _assign_to_requester, which now checks SCAN_ACTIVE_STATUSES + open
-  // findings instead); rendered in the Findings tab next to Rescan
-  // (SecurityScanResults), not here.
-  const canAssignToRequester = canScanAct
-  const canMarkFixed = (isRequester || isAssignedAnalyst) && status === 'WAITING_FOR_FIX'
+  // Initiate Suppression Request is the requester's own action. Narrowed to
+  // WAITING_FOR_FIX only (2026-08 doc Section 4: "After reviewing the
+  // findings, the requester may choose...") -- consistent with the
+  // above analyst-side gates now being turn-specific rather than spanning
+  // the whole active-scan window.
+  //
+  // Reported directly (follow-up): "requester delegated, to qa ... Full
+  // stand-in for requester" briefly used requesterInputEditor here (like
+  // canMarkFixed below), extending suppression-raising to the active
+  // delegate too.
+  //
+  // Reported directly (reversed): "INITIATE SUPPRESSION REQUEST SHOULD BE
+  // FROM REQUESTER SIDE, NOT QA SIDE" -- the concrete case was a requester
+  // who'd delegated this Waiting For Fix request to a Security Analyst
+  // (ordinary "full stand-in" use), and that analyst could then raise a
+  // suppression against their own team's finding. Suppression is now
+  // carved OUT of delegate stand-in entirely -- uses plain `isRequester`
+  // (the literal original requester, or Admin) instead of
+  // requesterInputEditor, unlike canMarkFixed below which is still fully
+  // delegable. Since the delegate can no longer act here, the original
+  // requester is deliberately NOT blocked by !req.active_delegation either
+  // (isRequester already ignores delegation status) -- mirrors
+  // suppression.py's _require_requester_of_linked exactly.
+  const canInitiateSuppression = isRequester && status === 'WAITING_FOR_FIX'
+  // Reported directly (follow-up): "why still mark fixed is visible? why
+  // you are not going through the codebase and not fixing all and not
+  // checking edge cases." Two fixes, mirroring sast_dast.py's _mark_fixed
+  // exactly:
+  // (1) `isAssignedAnalyst` used to also grant Mark Fixed -- a leftover
+  //     from the pre-turn-based design (section 51/52) that no longer
+  //     matches "after fix requester will reassign": Mark Fixed is now
+  //     strictly the requester's action, same as Rescan/Assign to Requester
+  //     are strictly the analyst's (section 130).
+  // (2) `req.active_delegation` guard was entirely missing -- once
+  //     WAITING_FOR_FIX became delegatable (section 126), a requester who'd
+  //     delegated this request out could still Mark Fixed themselves while
+  //     the delegate's assignment was still open.
+  //
+  // Reported directly (another follow-up): "requester delegated, to qa.
+  // but as status is Waiting For Fix, in qa side rescan button and all
+  // eligble button not visible." Blocking Mark Fixed outright while
+  // delegated (as just above) left the delegate with nothing reachable at
+  // all -- SAST/DAST has no editable surface during Waiting For Fix
+  // (Documents/Checklist are locked solid post-readiness, the edit form is
+  // pre-approval-only). Asked directly: delegate should be a full stand-in
+  // for the requester, including Mark Fixed itself. Now uses
+  // requesterInputEditor (isActiveDelegate OR (isRequester and NOT
+  // delegated)) instead of `isRequester && !req.active_delegation` --
+  // the delegate can Mark Fixed directly; the original requester is still
+  // locked out while someone else holds the delegation. Mirrors
+  // sast_dast.py's _mark_fixed exactly, which also auto-closes the
+  // delegation once Mark Fixed succeeds.
+  const canMarkFixed = requesterInputEditor && status === 'WAITING_FOR_FIX'
   const canMarkReportReady = isAssignedAnalyst && status === 'SECURITY_COMPLETE'
   // Reported directly (bug): "Supression request is now rejected, but
-  // still user not able to create supression request." Narrower than
-  // suppressionPending below -- Rejected must NOT block Initiate
-  // Suppression Request (only Mark Scan Complete's FR-06 gate treats
-  // Rejected as still-blocking), so this excludes both SUPPRESSION_
-  // TERMINAL_STATUSES (Done AND Rejected), not just Done.
+  // still user not able to create supression request." Rejected must NOT
+  // block Initiate Suppression Request or _mark_fixed's pending-suppression
+  // guard, so this excludes both SUPPRESSION_TERMINAL_STATUSES (Done AND
+  // Rejected), not just Done.
   const hasOpenSuppression = (req.suppressions || []).some((s) => !SUPPRESSION_TERMINAL_STATUSES.includes(s.status || ''))
-  // Up-front UI hint for 4.4's "If Suppression Pending" -- mirrors the
-  // backend's own has_done/pending formula in _mark_scan_complete exactly
-  // (that endpoint remains the actual gate; this just disables the button
-  // and shows the doc's message before the analyst even tries).
-  //
-  // Reported directly (bug): "Suppression request rejected: TQA-SUP-01 ...
-  // while other linked request already completed, still [blocked]" -- this
-  // used to be `some(s => s.status !== 'Done')`, which stayed true forever
-  // once ANY suppression on the request was Rejected, even after a LATER
-  // suppression reached Done (the same has_suppression-vs-has_done bug
-  // fixed server-side, but never mirrored here on the frontend). Now
-  // matches _mark_scan_complete's `not has_done or pending`: blocked only
-  // while no suppression has reached Done yet, or a genuinely open one
-  // (hasOpenSuppression, Rejected excluded) still exists alongside it.
-  const hasDoneSuppression = (req.suppressions || []).some((s) => s.status === 'Done')
-  const suppressionPending = !hasDoneSuppression || hasOpenSuppression
   const openSuppressionIds = (req.suppressions || []).filter((s) => !SUPPRESSION_TERMINAL_STATUSES.includes(s.status || '')).map((s) => s.suppression_id)
-  // Reported directly (follow-up): "Pending suppression requests exist:
-  // though request is rejected still it is showing like that" -- named
-  // separately from openSuppressionIds above so the Mark Scan Complete
-  // blocked-message can say "rejected" instead of mislabelling a Rejected
-  // decision as "pending".
-  const rejectedSuppressionIds = (req.suppressions || []).filter((s) => s.status === 'Rejected').map((s) => s.suppression_id)
+  // Reported directly: "for same sast request, even though supression
+  // request is present and mark completed, again asking for new supression
+  // request and relink." A suppression reaching Done is no longer "open"
+  // (hasOpenSuppression above goes false), which used to silently re-enable
+  // Initiate/Link Suppression Request -- but per the requirement doc's
+  // Section 4, once Approved the requester's next move is to reassign to
+  // the analyst (Mark Fixed), not raise a second suppression against the
+  // same request. See SecurityScanResults' own use of this.
+  const hasDoneSuppression = (req.suppressions || []).some((s) => s.status === 'Done')
+  const doneSuppressionIds = (req.suppressions || []).filter((s) => s.status === 'Done').map((s) => s.suppression_id)
   // Report Ready -> Closed. Usually reached automatically as part of the
   // Complete Scan/Rescan "no findings" confirmation, but this manual action
   // covers the case where that auto-chain stopped at Report Ready's
@@ -606,7 +640,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
         <div>
           <DetailSection title="Status">
             <DetailField label="Status">
-              <Badge status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status)} />
+              <Badge status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status) || suppressionAwareStatusLabel(status, hasOpenSuppression)} />
               {req.needs_dept_head_reapproval && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
                   Department Head re-approval required after changes
@@ -651,6 +685,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
               )}
             </DetailField>
             <DetailField label="CR Number/EPIC Number">{req.cr_number || req.epic_number || '—'}</DetailField>
+            <DetailField label="Change Description">{req.change_description || '—'}</DetailField>
             <DetailField label="Department">{req.department || '—'}</DetailField>
             <DetailField label="Application Owner">{req.application_owner || '—'}</DetailField>
           </DetailSection>
@@ -840,17 +875,9 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                 </>
               )}
               {canStartScan && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => setShowStartScanConfirm(true)}>Start Scan</button>}
-              {/* Rescan / Mark Scan Complete now live in the Findings tab's
-                  Scan Summary panel (SecurityScanResults, section 4.4 of the
-                  "Findings Validation" doc) instead of here -- they act on
-                  the scan data shown right there, and replace the old
-                  Complete Scan / Rescan Decision self-report buttons. */}
-              {/* Assign to Requester / Mark Fixed now live in the Findings
-                  tab (SecurityScanResults, section 4.4) next to Rescan --
-                  reported directly, see canAssignToRequester above. Validate
-                  Findings stays here, untouched, for backward compatibility
-                  with any legacy request still sitting in FINDING_VALIDATION. */}
-              {canValidateFindings && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('validate-findings')}>Validate Findings</button>}
+              {/* Validate Findings / Assign to Requester / Mark Fixed all live
+                  in the Findings tab now (SecurityScanResults, section 4.4) --
+                  reported directly, see canValidateFindings above. */}
               {canMarkReportReady && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('mark-report-ready')}>Mark Report Ready</button>}
               {canCloseRequest && <button className="btn btn-success btn-sm" disabled={busy} onClick={() => act('close')}>Close Request</button>}
             </div>
@@ -942,20 +969,21 @@ function DASTDetail({ req, onClose, onChanged, users }: {
             kind="DAST"
             results={scanResults}
             summary={scanSummary}
-            canAct={canScanAct}
-            canInitiateSuppression={canInitiateSuppression}
+            canValidateFindings={canValidateFindings}
+            canRescan={canRescan}
             canAssignToRequester={canAssignToRequester}
+            canInitiateSuppression={canInitiateSuppression}
             canMarkFixed={canMarkFixed}
             busy={busy}
-            suppressionPending={suppressionPending}
             hasOpenSuppression={hasOpenSuppression}
             openSuppressionIds={openSuppressionIds}
-            rejectedSuppressionIds={rejectedSuppressionIds}
+            hasDoneSuppression={hasDoneSuppression}
+            doneSuppressionIds={doneSuppressionIds}
+            onValidateFindings={validateFindings}
             onRescan={() => setShowRescanConfirm(true)}
-            onMarkComplete={markScanComplete}
-            onInitiateSuppression={initiateSuppression}
             onAssignToRequester={() => act('assign-to-requester')}
             onMarkFixed={() => act('mark-fixed')}
+            onInitiateSuppression={initiateSuppression}
             onLinkSuppression={() => setShowLinkSuppression(true)}
           />
         </div>
@@ -1070,7 +1098,7 @@ export default function DAST() {
       <ErrorText error={error} />
       <PageHeader
         title="DAST Requests" count={total}
-        subtitle="Dynamic Application Security Testing requests, from submission through findings and report sign-off. Raised via a QA Request (include DAST in its request types)."
+        subtitle="Dynamic Application Security Testing requests, from submission through findings and report clearance. Raised via a QA Request (include DAST in its request types)."
       />
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}
@@ -1082,11 +1110,14 @@ export default function DAST() {
             render: (r) => (openingId === r.id ? 'Opening…' : r.request_id),
           },
           { key: 'application_name', header: 'Application', render: (r) => r.application_name || '—' },
+          { key: 'change_description', header: 'Change Description', render: (r) => (
+            <span className="truncate-cell" title={r.change_description || ''}>{r.change_description || '—'}</span>
+          ), filterValue: (r) => r.change_description || '' },
           { key: 'requester_id', header: 'Requester', render: (r) => userName(users, r.requester_id) || '—', filterValue: (r) => userName(users, r.requester_id) || '' },
           { key: 'security_lead_id', header: 'Assigned Group', render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '—', filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
-          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
+          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status) || suppressionAwareStatusLabel(r.status, r.has_open_suppression)} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '—'), filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '') },
           { key: 'findings', header: 'Findings', render: (r) => r.findings_count, filterValue: (r) => String(r.findings_count) },
           { key: 'source', header: 'Source', render: (r) => (
