@@ -3,8 +3,8 @@ import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
 import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
-import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch, IconFolder } from '../../components/Icons'
-import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult, StorageSettingsOut } from '../../types'
+import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch } from '../../components/Icons'
+import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 // Shared by every page that needs a department picker -- departments are
@@ -344,69 +344,6 @@ function DepartmentManagerCard({ departments, onChanged }: { departments: Depart
   )
 }
 
-function UploadStorageCard() {
-  const [settings, setSettings] = useState<StorageSettingsOut | null>(null)
-  const [path, setPath] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [error, setError] = useState<unknown>(null)
-
-  useEffect(() => {
-    api.get<StorageSettingsOut>('/api/system-settings/storage').then((value) => {
-      setSettings(value); setPath(value.upload_path)
-    }).catch(setError)
-  }, [])
-
-  async function save(e: React.FormEvent) {
-    e.preventDefault()
-    setBusy(true); setSaved(false); setError(null)
-    try {
-      const value = await api.patch<StorageSettingsOut>('/api/system-settings/storage', { upload_path: path.trim() })
-      setSettings(value); setPath(value.upload_path); setSaved(true)
-    } catch (err) { setError(err) } finally { setBusy(false) }
-  }
-
-  return (
-    <Card title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><IconFolder /> Upload Storage</span>}>
-      <p className="muted small">
-        Absolute filesystem path on the backend server used for all new documents and checklist evidence.
-        The server validates and creates this directory before saving.
-      </p>
-      <p className="muted small">
-        If the backend runs as more than one process (multiple workers, containers, or replicas), make sure
-        this path points at storage that is persistent and shared identically across all of them — otherwise
-        downloads for files written by one process can report "file is missing on disk" to another.
-      </p>
-      <p className="muted small">
-        <strong>Docker:</strong> use <code>/data/qualityops/uploads</code> or a subfolder below it. To choose the
-        physical host/NFS folder, set <code>UPLOAD_STORAGE_HOST_PATH</code> in the Compose <code>.env</code> and
-        recreate the backend container; Docker mounts that host folder at this container path.
-      </p>
-      <form onSubmit={save} className="storage-setting-form">
-        <Field label="Upload directory path">
-          <input required value={path} onChange={(e) => { setPath(e.target.value); setSaved(false) }} placeholder="/data/qualityops/uploads" />
-        </Field>
-        <div className="storage-setting-actions">
-          <button type="submit" className="btn btn-primary" disabled={busy || !path.trim() || path.trim() === settings?.upload_path}>
-            {busy ? 'Validating…' : 'Save storage path'}
-          </button>
-          {settings && path !== settings.default_path && (
-            <button type="button" className="btn" disabled={busy} onClick={() => setPath(settings.default_path)}>Use default</button>
-          )}
-          {saved && <span className="storage-setting-saved">✓ Storage path updated</span>}
-        </div>
-      </form>
-      <ErrorText error={error} />
-      {settings?.legacy_paths.length ? (
-        <div className="storage-legacy-paths">
-          <strong>Previous locations retained for existing downloads</strong>
-          {settings.legacy_paths.map((legacy) => <code key={legacy}>{legacy}</code>)}
-        </div>
-      ) : null}
-    </Card>
-  )
-}
-
 // Admin section: "add one functionality on admin section to upload excel
 // and based on data present on excel Application name will be seed" -- lets
 // an Admin bulk-load a spreadsheet of known-good Application Names straight
@@ -617,7 +554,7 @@ export default function Admin() {
   const [userSearch, setUserSearch] = useState('')
   const [accountFilter, setAccountFilter] = useState<'ALL' | 'ACTIVE' | 'DISABLED' | 'REVIEW'>('ALL')
   const [loginFilter, setLoginFilter] = useState<'ALL' | 'STANDARD' | 'LDAP'>('ALL')
-  const [section, setSection] = useState<'users' | 'departments' | 'storage' | 'applications'>('users')
+  const [section, setSection] = useState<'users' | 'departments' | 'applications'>('users')
 
   // SRS 7.2 pagination rollout -- the user directory is now server-paginated
   // and server-filtered (search/account status/login type all become query
@@ -711,7 +648,6 @@ export default function Admin() {
       <nav className="access-workspace-nav" aria-label="Administration sections">
         <button type="button" className={section === 'users' ? 'active' : ''} onClick={() => setSection('users')}><IconLock /><span><strong>User Directory</strong><small>Accounts, roles and access</small></span><em>{summary?.total || 0}</em></button>
         <button type="button" className={section === 'departments' ? 'active' : ''} onClick={() => setSection('departments')}><IconPlus /><span><strong>Departments</strong><small>Organisation structure</small></span><em>{departments.length}</em></button>
-        <button type="button" className={section === 'storage' ? 'active' : ''} onClick={() => setSection('storage')}><IconFolder /><span><strong>Storage</strong><small>Document upload location</small></span></button>
         <button type="button" className={section === 'applications' ? 'active' : ''} onClick={() => setSection('applications')}><IconCheckCircle /><span><strong>Application Data</strong><small>Approved-name bulk setup</small></span></button>
       </nav>
 
@@ -804,10 +740,6 @@ export default function Admin() {
 
       {section === 'applications' && <div className="access-workspace-panel access-departments-section">
         <ApplicationSeedCard departmentOptions={departmentOptions} departments={departments} />
-      </div>}
-
-      {section === 'storage' && <div className="access-workspace-panel access-departments-section">
-        <UploadStorageCard />
       </div>}
 
       {showCreate && (

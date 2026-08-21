@@ -26,17 +26,13 @@ services:
       - .env
 
     environment:
-      # This is the path Admin > Upload Storage must use. Subfolders below
-      # it are also persisted by the same mount.
+      # Runtime uploads always use this Docker-managed container path.
       UPLOAD_STORAGE_ROOT: /data/qualityops/uploads
 
     volumes:
       # Set UPLOAD_STORAGE_HOST_PATH to an absolute host/NFS directory to
       # use a bind mount; when omitted, the existing named volume is used.
       - ${UPLOAD_STORAGE_HOST_PATH:-qa_portal_uploads}:/data/qualityops/uploads
-      # Compatibility mount for databases that still store the historical
-      # /app/app/uploads setting. Both paths address the same durable data.
-      - ${UPLOAD_STORAGE_HOST_PATH:-qa_portal_uploads}:/app/app/uploads
       - qa_portal_logs:/app/logs
 
     depends_on:

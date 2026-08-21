@@ -3017,16 +3017,6 @@ class ProjectPortfolioOut(BaseModel):
     ownership: List[ProjectOwnershipRow]
 
 
-class StorageSettingsOut(BaseModel):
-    upload_path: str
-    default_path: str
-    legacy_paths: List[str] = []
-
-
-class StorageSettingsUpdate(BaseModel):
-    upload_path: str
-
-
 # ---------------- Pending Approvals (see routers/pending_approvals.py) ----------------
 class PendingApprovalCount(BaseModel):
     """Lightweight login summary; detailed rows load only in the workspace."""

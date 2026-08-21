@@ -13,4 +13,16 @@ frontend/node_modules/
 frontend/dist/
 frontend/.env
 
+# Root -- used by docker-compose.yml's `env_file: .env` (DATABASE_URL,
+# SECRET_KEY, DOMAIN_NAME, CERTBOT_EMAIL, etc.). Previously missing here
+# (only backend/.env and frontend/.env were ignored) -- noticed while
+# adding the HTTPS setup's DOMAIN_NAME/CERTBOT_EMAIL vars to this file.
+/.env
+
+# Local CA certificate extracted by scripts/init-selfsigned.sh for
+# distributing to client devices -- not secret (it's the public cert, the
+# private key stays inside the certbot_conf Docker volume, never written
+# here), but machine/deployment-specific, not source.
+/certs/
+
 .DS_Store

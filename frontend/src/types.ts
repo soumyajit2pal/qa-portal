@@ -1718,9 +1718,3 @@ export interface PendingApprovalItem {
   submitted_at?: string | null
   path: string
 }
-
-export interface StorageSettingsOut {
-  upload_path: string
-  default_path: string
-  legacy_paths: string[]
-}

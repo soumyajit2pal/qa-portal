@@ -14,8 +14,8 @@ ENV UPLOAD_STORAGE_ROOT=/data/qualityops/uploads
 # All runtime uploads live below one stable container path. Docker Compose
 # backs this with either the qa_portal_uploads named volume or the host path
 # supplied through UPLOAD_STORAGE_HOST_PATH.
-RUN mkdir -p /data/qualityops/uploads /app/app/uploads \
-    && chown -R root:root /data/qualityops/uploads /app/app/uploads
+RUN mkdir -p /data/qualityops/uploads \
+    && chown -R root:root /data/qualityops/uploads
 VOLUME ["/data/qualityops/uploads"]
 
 EXPOSE 8000
