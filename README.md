@@ -495,10 +495,12 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
 - Add MFA at the identity-provider layer for LDAP/AD-backed logins, per the non-functional
   requirements (5.1) — this app only performs the LDAP bind, not step-up/MFA.
 - Supporting documents are uploaded (multiple files per request, every module) and stored on
-  local disk under `backend/app/uploads/<module>/<request_id>/` (see `app/documents.py`). For
-  production, point this at shared/durable storage (network share, S3-compatible object store)
-  instead of local disk, and mount it as a volume as `docker-compose.yml`/`backend/Dockerfile`
-  already do for the local-disk case.
+  local disk under the configured upload root (see `app/documents.py`). Docker mounts durable
+  storage at `/data/qualityops/uploads`; use that path (or one of its subfolders) in Admin >
+  Upload Storage. Set `UPLOAD_STORAGE_HOST_PATH=/absolute/host/or/nfs/path` in the root Compose
+  `.env` to replace the default `qa_portal_uploads` named volume, then recreate the backend
+  container. A path entered in the UI is a container path—it cannot add a new host mount to an
+  already-running container.
 - Set `SECRET_KEY` to a long random value via environment variable/secrets manager, never
   the placeholder in `.env.example`.
 - Tune `pool_size`/`max_overflow` in `app/database.py` to your Oracle session limits and

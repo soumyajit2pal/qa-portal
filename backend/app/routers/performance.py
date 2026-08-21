@@ -137,6 +137,7 @@ def _require_performance_execution_owner(obj: "models.PerformanceRequest", user:
 
 @router.get("", response_model=pagination.Page[schemas.PerformanceListOut])
 def list_performance(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+                      assigned_to_me: bool = False,
                       db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # application_name is a real column on PerformanceRequest itself (unlike
     # Functional/SAST/DAST, which all delegate it) -- but department/
@@ -158,6 +159,8 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
     ))
     if scope:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
+    if assigned_to_me:
+        q = q.filter(delegated_to_user)
     q = pagination.apply_search(q, params, models.PerformanceRequest.request_id, models.PerformanceRequest.application_name)
     q = pagination.apply_status_filter(q, params, models.PerformanceRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { hasRole, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
@@ -147,6 +148,7 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
   onLinked: (s: SuppressionOut) => void
 }) {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [suppressions, setSuppressions] = useState<SuppressionOut[]>([])
   const [selectedId, setSelectedId] = useState<number | ''>('')
   const [error, setError] = useState<unknown>(null)
@@ -173,6 +175,10 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
     && !SUPPRESSION_TERMINAL_STATUSES.includes(s.status)
     && !isAlreadyLinkedHere(s),
   )
+  // Existing requests linked to this scan are history, not relink
+  // candidates. Keep terminal requests (especially Done) visible because
+  // their approved decision is what authorizes suppression of the finding.
+  const linkedHere = suppressions.filter(isAlreadyLinkedHere)
 
   async function submit() {
     if (!selectedId) { setError(new Error('Select a suppression request to link.')); return }
@@ -190,10 +196,20 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
   return (
     <Modal title={`Link an existing Suppression Request to ${requestLabel}`} onClose={() => { if (!busy) onClose() }} variant="dialog" preventBackdropClose>
       <p className="muted small">
-        Only your own still-open suppression requests (not yet Done or Rejected) are listed. Linking
-        re-points the selected suppression at this {kind} request -- a suppression can only be linked
-        to one SAST/DAST request at a time, so this replaces its current link.
+        Suppression requests already created for this {kind} request are shown below, including completed
+        requests. You may also link one of your other open suppression requests to this request.
       </p>
+      <div className="security-scan-linked-suppressions">
+        <strong>Requests linked to {requestLabel}</strong>
+        {!loaded && <p className="muted small">Loading suppression requests…</p>}
+        {loaded && linkedHere.length === 0 && <p className="muted small">No suppression request has been created for this {kind} request yet.</p>}
+        {linkedHere.map((s) => (
+          <div key={s.id} className="security-scan-linked-suppression-row">
+            <span><button type="button" className="suppression-id-link" onClick={() => navigate(`/suppression?open=${encodeURIComponent(s.suppression_id)}`)}>{s.suppression_id}</button> — {s.application_name}</span>
+            <span className={`badge ${s.status === 'Done' ? 'badge-green' : s.status === 'Rejected' ? 'badge-red' : 'badge-yellow'}`}>{s.status}</span>
+          </div>
+        ))}
+      </div>
       <Field label="Suppression Request *">
         <select value={selectedId} disabled={busy} onChange={(event) => setSelectedId(event.target.value ? Number(event.target.value) : '')}>
           <option value="">Select a suppression request...</option>
@@ -204,7 +220,7 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
           ))}
         </select>
       </Field>
-      {loaded && candidates.length === 0 && <p className="muted small">No eligible open suppression requests of yours were found.</p>}
+      {loaded && candidates.length === 0 && <p className="muted small">No other eligible open suppression requests of yours were found.</p>}
       <ErrorText error={error} />
       <div className="modal-actions">
         <button className="btn btn-primary" disabled={busy || !selectedId} onClick={submit}>{busy ? 'Linking...' : 'Link'}</button>

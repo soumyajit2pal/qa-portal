@@ -1469,7 +1469,7 @@ export function Table<T extends Record<string, any>>({
         <thead>
           <tr>
             {visibleColumns.map((c) => (
-              <th key={c.key}>
+              <th key={c.key} data-column={c.key}>
                 <div className="th-cell">
                   <span>{c.header}</span>
                   {c.filterable !== false && (
@@ -1522,7 +1522,7 @@ export function Table<T extends Record<string, any>>({
               className={onRowClick ? "row-clickable" : undefined}
             >
               {visibleColumns.map((c) => (
-                <td key={c.key}>
+                <td key={c.key} data-column={c.key}>
                   {c.render ? c.render(row) : textFor(c, row)}
                 </td>
               ))}

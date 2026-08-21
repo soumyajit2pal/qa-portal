@@ -144,6 +144,7 @@ def _require_can_reassign_tester(obj: "models.FunctionalRequest", user: models.U
 
 @router.get("", response_model=pagination.Page[schemas.FunctionalListOut])
 def list_functional(params: pagination.PageParams = Depends(), requester_id: Optional[int] = None,
+                     assigned_to_me: bool = False,
                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # department/application_name/epic_number/application_master_status are
     # all delegated (read-only) properties resolved through the `qa_request`
@@ -170,6 +171,8 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
     ))
     if scope:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
+    if assigned_to_me:
+        q = q.filter(delegated_to_user)
     q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.FunctionalRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)

@@ -356,6 +356,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   // the DAST-side counterpart to Suppression.tsx's own Relink control.
   const [showLinkSuppression, setShowLinkSuppression] = useState(false)
   const [scanError, setScanError] = useState<unknown>(null)
+  const [scanNotice, setScanNotice] = useState('')
   const [scanResults, setScanResults] = useState<SecurityScanResultOut[]>([])
   const [scanSummary, setScanSummary] = useState<SecurityScanSummaryOut | null>(null)
 
@@ -385,11 +386,13 @@ function DASTDetail({ req, onClose, onChanged, users }: {
     setError(null)
     setBusy(true)
     try {
-      onChanged(await api.post<DASTOut>(`/api/dast-requests/${req.id}/${action}`, extra || {}))
+      const updated = await api.post<DASTOut>(`/api/dast-requests/${req.id}/${action}`, extra || {})
+      onChanged(updated)
       setComments('')
       await load()
+      return updated
     }
-    catch (err) { setError(err) } finally { setBusy(false) }
+    catch (err) { setError(err); return null } finally { setBusy(false) }
   }
 
   async function startScan(applicationName: string, applicationVersion: string) {
@@ -400,7 +403,9 @@ function DASTDetail({ req, onClose, onChanged, users }: {
       })
       onChanged(response.request)
       setShowStartScan(false)
-      loadScan()
+      setTab('findings')
+      setScanNotice('Scan validated successfully. Fortify SSC findings were imported and are shown below.')
+      await loadScan()
       await load()
     } catch (err) { setScanError(err) } finally { setBusy(false) }
   }
@@ -427,8 +432,13 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   // is left in place, unused, matching this file's existing convention for
   // superseded-but-not-deleted legacy actions.
   async function validateFindings() {
-    await act('validate-findings')
-    loadScan()
+    const updated = await act('validate-findings')
+    if (!updated) return
+    setTab('findings')
+    setScanNotice(updated.status === 'WAITING_FOR_FIX'
+      ? 'Findings validated successfully. Open findings were automatically assigned to the requester for remediation.'
+      : 'Findings validated successfully. No unresolved finding requires requester action.')
+    await loadScan()
   }
   // Deep-links into the Suppression module with this request pre-selected --
   // see Suppression.tsx's newRequestPrefill/NewSuppressionModal initialRequest.
@@ -654,7 +664,15 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                 and if so, which one(s) (see backend models.DASTRequest.suppressions). */}
             <DetailField label="Suppression Requested?">{req.suppressions.length > 0 ? 'Yes' : 'No'}</DetailField>
             {req.suppressions.length > 0 && (
-              <DetailField label="Suppression ID">{req.suppressions.map((s) => s.suppression_id).join(', ')}</DetailField>
+              <DetailField label="Suppression ID">
+                <span className="suppression-id-links">
+                  {req.suppressions.map((s) => (
+                    <button key={s.id} type="button" className="suppression-id-link" onClick={() => navigate(`/suppression?open=${encodeURIComponent(s.suppression_id)}`)}>
+                      {s.suppression_id}
+                    </button>
+                  ))}
+                </span>
+              </DetailField>
             )}
             <DetailField label="Created">{new Date(req.created_at).toLocaleString()}</DetailField>
             <DetailField label="Last Updated">{new Date(req.updated_at).toLocaleString()}</DetailField>
@@ -959,6 +977,11 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'findings' && (
         <div>
+          {scanNotice && (
+            <div className="execution-start-notice linked" role="status">
+              <strong>Success</strong><span>{scanNotice}</span>
+            </div>
+          )}
           {/* The old manual findings table (Issue ID/Severity/Description/
               Status, backed by req.findings -- DASTFinding rows) is removed
               -- reported directly. It always showed "No records found."
@@ -1044,7 +1067,11 @@ function DASTDetail({ req, onClose, onChanged, users }: {
           requestId={req.id}
           requestLabel={req.request_id}
           onClose={() => setShowLinkSuppression(false)}
-          onLinked={async () => { setShowLinkSuppression(false); await load() }}
+          onLinked={async () => {
+            setShowLinkSuppression(false)
+            onChanged(await api.get<DASTOut>(`/api/dast-requests/${req.id}`))
+            await load()
+          }}
         />
       )}
     </Modal>
@@ -1061,11 +1088,14 @@ export default function DAST() {
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
+  const [assignedOnly, setAssignedOnly] = useState(false)
 
   const {
     items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
     loading, setPage, setPageSize, reload,
-  } = usePaginatedList<DASTListOut>('/api/dast-requests', {})
+  } = usePaginatedList<DASTListOut>('/api/dast-requests', {
+    extra: { assigned_to_me: assignedOnly ? 'true' : undefined },
+  })
 
   useEffect(() => {
     // Full user list -- not just security analysts -- so both the Security
@@ -1100,6 +1130,12 @@ export default function DAST() {
         title="DAST Requests" count={total}
         subtitle="Dynamic Application Security Testing requests, from submission through findings and report clearance. Raised via a QA Request (include DAST in its request types)."
       />
+      <div className="toolbar module-assignment-toolbar">
+        <div className="tabs" style={{ margin: 0 }}>
+          <button type="button" className={!assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(false)}>All Requests</button>
+          <button type="button" className={assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(true)}>Assigned to Me</button>
+        </div>
+      </div>
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}
           server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}

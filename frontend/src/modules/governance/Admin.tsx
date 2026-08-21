@@ -377,6 +377,11 @@ function UploadStorageCard() {
         this path points at storage that is persistent and shared identically across all of them — otherwise
         downloads for files written by one process can report "file is missing on disk" to another.
       </p>
+      <p className="muted small">
+        <strong>Docker:</strong> use <code>/data/qualityops/uploads</code> or a subfolder below it. To choose the
+        physical host/NFS folder, set <code>UPLOAD_STORAGE_HOST_PATH</code> in the Compose <code>.env</code> and
+        recreate the backend container; Docker mounts that host folder at this container path.
+      </p>
       <form onSubmit={save} className="storage-setting-form">
         <Field label="Upload directory path">
           <input required value={path} onChange={(e) => { setPath(e.target.value); setSaved(false) }} placeholder="/data/qualityops/uploads" />

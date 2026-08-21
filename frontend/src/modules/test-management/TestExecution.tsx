@@ -2005,11 +2005,13 @@ export default function TestExecution() {
   const executedCount = executionSummary?.executed_count ?? 0
   const passCount = (executionSummary?.status_counts.Pass || 0) + (executionSummary?.status_counts['Retest Passed'] || 0)
   const passRate = executedCount ? Math.round((passCount / executedCount) * 100) : 0
+  const attentionCount = (executionSummary?.status_counts.Fail || 0) + (executionSummary?.status_counts.Blocked || 0)
   const assignedCount = executionSummary?.assigned_count ?? 0
   const unassignedCount = executionSummary?.unassigned_count ?? 0
   const myAssignmentCount = executionSummary?.mine_count ?? 0
   const totalRunCount = executionSummary?.total_run_count ?? 0
   const cycleExecutionTotal = executionSummary?.total ?? 0
+  const progressRate = cycleExecutionTotal ? Math.round((executedCount / cycleExecutionTotal) * 100) : 0
   const selectedCycle = cycles.find((c) => c.id === cycleId)
   const cycleIsLocked = !!selectedCycle && TEST_CYCLE_LOCKED_STATUSES.includes(selectedCycle.status)
   const cycleIsCompleted = selectedCycle?.status === 'Completed'
@@ -2336,17 +2338,31 @@ export default function TestExecution() {
                   {canExec && projectIsActive && !cycleIsLocked && <button className="btn btn-primary" onClick={() => setShowAddCases(true)}>+ Add test cases</button>}
                 </div>
               </div>
-              <div className="tm-execution-kpis">
-                <div><small>Progress</small><strong>{executedCount}<span> / {cycleExecutionTotal}</span></strong><i><b style={{ width: `${cycleExecutionTotal ? (executedCount / cycleExecutionTotal) * 100 : 0}%` }} /></i></div>
-                <div><small>Pass rate</small><strong>{passRate}%</strong><span>{passCount} passed</span></div>
-                <div className={((executionSummary?.status_counts.Fail || 0) || (executionSummary?.status_counts.Blocked || 0)) ? 'needs-attention' : ''}><small>Needs attention</small><strong>{(executionSummary?.status_counts.Fail || 0) + (executionSummary?.status_counts.Blocked || 0)}</strong><span>{executionSummary?.status_counts.Fail || 0} failed · {executionSummary?.status_counts.Blocked || 0} blocked</span></div>
-                <div className={unassignedCount ? 'needs-attention' : ''}><small>Assignment</small><strong>{assignedCount}<span> / {cycleExecutionTotal}</span></strong><span>{unassignedCount ? `${unassignedCount} unassigned` : 'Fully assigned'}</span></div>
-                <div><small>My queue</small><strong>{myAssignmentCount}</strong><span>Assigned to me</span></div>
-                <div><small>Total attempts</small><strong>{totalRunCount}</strong><span>Complete run history</span></div>
-              </div>
+              <section className="tm-execution-overview" aria-label="Cycle execution overview">
+                <div className="tm-execution-progress-card">
+                  <div className="tm-progress-ring" style={{ background: `conic-gradient(#245b8f ${progressRate}%, #e5ebf1 ${progressRate}% 100%)` }}>
+                    <div><strong>{progressRate}%</strong><span>complete</span></div>
+                  </div>
+                  <div className="tm-progress-copy">
+                    <small>Cycle progress</small>
+                    <h4>{executedCount} of {cycleExecutionTotal} testcases executed</h4>
+                    <p>{cycleExecutionTotal - executedCount > 0 ? `${cycleExecutionTotal - executedCount} testcase${cycleExecutionTotal - executedCount === 1 ? '' : 's'} remaining in this cycle.` : 'All testcases in this cycle have an execution result.'}</p>
+                    <div className="tm-progress-foot">
+                      <span><b>{totalRunCount}</b> total attempts</span>
+                      <span><b>{myAssignmentCount}</b> in my queue</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="tm-execution-health-grid">
+                  <div data-tone="success"><small>Pass rate</small><strong>{passRate}%</strong><span>{passCount} passed</span></div>
+                  <div data-tone={attentionCount ? 'warning' : 'neutral'}><small>Needs attention</small><strong>{attentionCount}</strong><span>{executionSummary?.status_counts.Fail || 0} failed · {executionSummary?.status_counts.Blocked || 0} blocked</span></div>
+                  <div data-tone={unassignedCount ? 'warning' : 'success'}><small>Assignment coverage</small><strong>{assignedCount}<em> / {cycleExecutionTotal}</em></strong><span>{unassignedCount ? `${unassignedCount} unassigned` : 'Fully assigned'}</span></div>
+                  <div data-tone="info"><small>My execution queue</small><strong>{myAssignmentCount}</strong><span>Assigned to me</span></div>
+                </div>
+              </section>
               <section className="tm-testcase-workbench">
               <div className="tm-workbench-head">
-                <div><small>Execution scope</small><h4>Cycle Testcases <span>{total} of {cycleExecutionTotal}</span></h4></div>
+                <div><small>Execution workspace</small><h4>Cycle Testcases <span>{total} of {cycleExecutionTotal}</span></h4><p>Assign owners, record results, review defects, and track every attempt.</p></div>
                 <div className="tm-assignment-filters">
                   <button className={assignmentFilter === 'all' ? 'active' : ''} onClick={() => setAssignmentFilter('all')}>All <em>{cycleExecutionTotal}</em></button>
                   <button className={assignmentFilter === 'mine' ? 'active' : ''} onClick={() => setAssignmentFilter('mine')}>Mine <em>{myAssignmentCount}</em></button>
@@ -2410,6 +2426,7 @@ export default function TestExecution() {
                   {(canManageExecutionGovernance || canExec) && <button type="button" className="btn btn-sm btn-danger" disabled={!selectedExecutionIds.size} onClick={() => setBulkRemoveExecutions(selectedExecutions)}>Remove from cycle{selectedExecutionIds.size ? ` (${selectedExecutionIds.size})` : ''}</button>}
                 </div>
               )}
+              <div className="tm-execution-table">
               <Table<TestExecutionOut>
                 rowKey="id"
                 onRowClick={setEditingExecution}
@@ -2427,6 +2444,7 @@ export default function TestExecution() {
                 ]}
                 rows={filteredExecutions}
               />
+              </div>
               </section>
               <section className={`tm-activity-panel ${showActivity ? 'open' : ''}`}>
                 <button type="button" className="tm-activity-toggle" onClick={() => setShowActivity((current) => !current)} aria-expanded={showActivity}>

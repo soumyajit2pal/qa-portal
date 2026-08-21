@@ -1855,6 +1855,7 @@ function FunctionalDetail({
 export default function Functional() {
   const [users, setUsers] = useState<UserOut[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
+  const [assignedOnly, setAssignedOnly] = useState(false);
   // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
   // FunctionalListOut shape; opening a request fetches the full
   // FunctionalOut record fresh via GET /api/functional-requests/{id} before
@@ -1869,6 +1870,7 @@ export default function Functional() {
     loading, setPage, setPageSize, reload,
   } = usePaginatedList<FunctionalListOut>("/api/functional-requests", {
     status: statusFilter ? [statusFilter] : undefined,
+    extra: { assigned_to_me: assignedOnly ? "true" : undefined },
   });
 
   useEffect(() => {
@@ -1916,6 +1918,12 @@ export default function Functional() {
         count={total}
         subtitle="Functional, Regression, Sanity Testing and UAT Support are raised through a QA Request and tracked here from approval to clearance."
       />
+      <div className="toolbar module-assignment-toolbar">
+        <div className="tabs" style={{ margin: 0 }}>
+          <button type="button" className={!assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(false)}>All Requests</button>
+          <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>Assigned to Me</button>
+        </div>
+      </div>
       {/* <div className="toolbar">
         <select
           value={statusFilter}

@@ -805,11 +805,14 @@ export default function Performance() {
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
+  const [assignedOnly, setAssignedOnly] = useState(false)
 
   const {
     items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
     loading, setPage, setPageSize, reload,
-  } = usePaginatedList<PerformanceListOut>('/api/performance-requests', {})
+  } = usePaginatedList<PerformanceListOut>('/api/performance-requests', {
+    extra: { assigned_to_me: assignedOnly ? 'true' : undefined },
+  })
 
   useEffect(() => {
     // Full user list -- not just QA Engineer/Lead -- so both the Assign
@@ -844,6 +847,12 @@ export default function Performance() {
         title="Performance Testing Requests" count={total}
         subtitle="Load/performance testing requests, from submission through baseline, load test execution, and clearance. Raised via a QA Request (include Performance Testing in its request types)."
       />
+      <div className="toolbar module-assignment-toolbar">
+        <div className="tabs" style={{ margin: 0 }}>
+          <button type="button" className={!assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(false)}>All Requests</button>
+          <button type="button" className={assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(true)}>Assigned to Me</button>
+        </div>
+      </div>
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}
           server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}

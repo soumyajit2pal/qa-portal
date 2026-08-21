@@ -120,6 +120,20 @@ def _severity_split(total: int) -> dict:
     return counts
 
 
+def _filter_total(base_total: int, filterset: str) -> int:
+    """Return a distinct mock count per filter without inventing findings.
+
+    Quick View stays intentionally larger while findings exist, which helps
+    catch accidental summing across overlapping filters. Once the mock scan
+    has resolved to zero, every filter must also resolve to zero; the old
+    ``base_total * 5 + 7`` formula left seven phantom Quick View findings
+    forever and made the zero-result workflow impossible to test.
+    """
+    if base_total <= 0:
+        return 0
+    return base_total if filterset == "SECURITY_AUDITOR_VIEW" else base_total * 5 + 7
+
+
 def _dump_state() -> dict:
     out = []
     for name, project in PROJECTS.items():
@@ -239,14 +253,10 @@ class Handler(BaseHTTPRequestHandler):
             state = VERSION_STATE.get(vid)
             base_total = (state or {}).get("current_total") or 0
             filterset = (parse_qs(parsed.query).get("filterset") or [""])[0]
-            # Reported directly: "sum of filter in total is wrong" -- Quick
-            # View is given a deliberately different total from Security
-            # Auditor View's real finding count, so if a caller ever summed
-            # every filter set together again, this would make that bug
-            # immediately obvious (the total would include this inflated
-            # number too). A correct caller only ever requests
-            # SECURITY_AUDITOR_VIEW's issueGroups.
-            total = base_total if filterset == "SECURITY_AUDITOR_VIEW" else base_total * 5 + 7
+            # Quick View deliberately differs while findings exist, but it
+            # must reach zero on the same scan as Security Auditor View so
+            # the portal's all-current-filters-zero completion gate can pass.
+            total = _filter_total(base_total, filterset)
             counts = _severity_split(total)
             self._send_json({"data": [{"id": severity, "totalCount": count} for severity, count in counts.items()]})
             return

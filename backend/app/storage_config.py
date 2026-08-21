@@ -41,7 +41,12 @@ from typing import Iterable
 from .database import SessionLocal
 from . import models
 
-DEFAULT_UPLOAD_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+# Containers set UPLOAD_STORAGE_ROOT to the durable volume mount. Local
+# non-Docker development keeps the historical app/uploads default.
+DEFAULT_UPLOAD_ROOT = os.path.abspath(os.getenv(
+    "UPLOAD_STORAGE_ROOT",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads"),
+))
 UPLOAD_PATH_KEY = "upload_path"
 LEGACY_PATHS_KEY = "upload_legacy_paths"
 
