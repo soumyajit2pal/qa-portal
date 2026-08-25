@@ -15,6 +15,8 @@ hands them to build_request_detail_pdf below -- so the reportlab boilerplate
 (styles, table formatting, page setup) lives in exactly one place.
 """
 import io
+import base64
+import json
 import re
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
@@ -122,6 +124,131 @@ def _markdown_cells(line: str) -> list[str]:
 
 
 _TABLE_SEPARATOR = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
+_MERGED_TABLE = re.compile(r"^\[qap-merged-table:v1:([A-Za-z0-9_-]+)\]$")
+
+
+def _normalize_merged_rows(rows: list[list[dict]]) -> list[list[dict]]:
+    """Prevent conflicting spreadsheet row spans from creating extra columns."""
+    width = max(1, *(sum(cell["c"] for cell in row) for row in rows))
+    active: list[Optional[dict]] = [None] * width
+    for row_index, row in enumerate(rows):
+        for column, span in enumerate(active):
+            if span and span["end_row"] < row_index:
+                active[column] = None
+        required = sum(cell["c"] for cell in row)
+        active_count = sum(span is not None for span in active)
+        if active_count + required > width:
+            to_release = active_count + required - width
+            conflicts = []
+            for span in active:
+                if span is not None and all(span is not existing for existing in conflicts):
+                    conflicts.append(span)
+            for conflict in conflicts:
+                covered = sum(span is conflict for span in active)
+                conflict["cell"]["r"] = max(1, row_index - conflict["origin_row"])
+                active = [None if span is conflict else span for span in active]
+                to_release -= covered
+                if to_release <= 0:
+                    break
+        column = 0
+        for cell in row:
+            while column < width and active[column] is not None:
+                column += 1
+            if cell["r"] > 1:
+                span = {"cell": cell, "origin_row": row_index, "end_row": row_index + cell["r"] - 1}
+                for covered in range(column, min(width, column + cell["c"])):
+                    active[covered] = span
+            column += cell["c"]
+    return rows
+
+
+def _decode_merged_table(value: str) -> Optional[dict]:
+    """Decode the safe, versioned table block emitted by RichTextEditor."""
+    match = _MERGED_TABLE.match(value.strip())
+    if not match:
+        return None
+    try:
+        payload = match.group(1)
+        payload += "=" * ((4 - len(payload) % 4) % 4)
+        parsed = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("rows"), list) or not parsed["rows"]:
+            return None
+        rows = []
+        for row in parsed["rows"]:
+            if not isinstance(row, list):
+                return None
+            cells = []
+            for cell in row:
+                if not isinstance(cell, dict) or not isinstance(cell.get("t"), str):
+                    return None
+                def span(name: str) -> int:
+                    candidate = cell.get(name, 1)
+                    return candidate if isinstance(candidate, int) and 1 <= candidate <= 100 else 1
+                cells.append({"t": cell["t"], "c": span("c"), "r": span("r"), "h": cell.get("h") is True})
+            rows.append(cells)
+        return {"rows": _normalize_merged_rows(rows)}
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _merged_table_flowable(table: dict, available_width: float) -> Table:
+    """Expand HTML-like spans into ReportLab's rectangular grid + SPANs."""
+    grid: list[list] = []
+    occupied: set[tuple[int, int]] = set()
+    span_commands: list[tuple] = []
+    header_commands: list[tuple] = []
+
+    def ensure(row_index: int, column_index: int) -> None:
+        while len(grid) <= row_index:
+            grid.append([])
+        while len(grid[row_index]) <= column_index:
+            grid[row_index].append("")
+
+    for row_index, source_row in enumerate(table["rows"]):
+        column_index = 0
+        for cell in source_row:
+            while (row_index, column_index) in occupied:
+                column_index += 1
+            column_span = cell["c"]
+            row_span = cell["r"]
+            for covered_row in range(row_index, row_index + row_span):
+                for covered_column in range(column_index, column_index + column_span):
+                    ensure(covered_row, covered_column)
+                    occupied.add((covered_row, covered_column))
+            grid[row_index][column_index] = Paragraph(
+                _markdown_inline(cell["t"]),
+                _label_style if cell["h"] else _body_style,
+            )
+            end = (column_index + column_span - 1, row_index + row_span - 1)
+            if column_span > 1 or row_span > 1:
+                span_commands.append(("SPAN", (column_index, row_index), end))
+            if cell["h"]:
+                header_commands.extend([
+                    ("BACKGROUND", (column_index, row_index), end, colors.HexColor("#e8edf2")),
+                    ("TEXTCOLOR", (column_index, row_index), end, colors.HexColor("#263442")),
+                    ("FONTNAME", (column_index, row_index), end, "Helvetica-Bold"),
+                ])
+            column_index += column_span
+
+    width = max((len(row) for row in grid), default=1)
+    normalized = [row + [""] * (width - len(row)) for row in grid]
+    repeat_rows = 1 if table["rows"] and table["rows"][0] and all(cell["h"] for cell in table["rows"][0]) else 0
+    nested = Table(
+        normalized, colWidths=[available_width / width] * width,
+        repeatRows=repeat_rows, splitByRow=1, splitInRow=1,
+    )
+    nested.setStyle(TableStyle([
+        *span_commands,
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#aeb8c3")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        *header_commands,
+    ]))
+    return nested
 
 
 def _rich_text_flowables(markdown: str, available_width: float = 320) -> list:
@@ -141,6 +268,12 @@ def _rich_text_flowables(markdown: str, available_width: float = 320) -> list:
     index = 0
     while index < len(lines):
         line = lines[index]
+        merged_table = _decode_merged_table(line)
+        if merged_table:
+            flush_paragraph()
+            flowables.append(_merged_table_flowable(merged_table, available_width))
+            index += 1
+            continue
         if line.strip() and "|" in line and index + 1 < len(lines) and _TABLE_SEPARATOR.match(lines[index + 1]):
             flush_paragraph()
             rows = [_markdown_cells(line)]

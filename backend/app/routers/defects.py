@@ -805,9 +805,16 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         ).first()
         if not department:
             raise HTTPException(400, "Select a valid active Department")
+        previous_assignee_id = obj.assignee_id
         previous_assignee = obj.assignee_name
+        previous_assigned_at = obj.assigned_at
         obj.assignee_id = assignee_user.id; obj.assigned_team = department.name
         obj.assigned_by_id = current_user.id; obj.assigned_at = models.now(); obj.assignment_remarks = remarks or None
+        reassignment.record_assignment_change(
+            db, "DEFECT", obj.id, "DEFECT_ASSIGNEE", current_user,
+            [previous_assignee_id], [assignee_user.id], remarks,
+            previous_assigned_at=previous_assigned_at,
+        )
         details = f"Assigned to {assignee_user.full_name} ({department.name})"
         if previous_assignee: details += f"; previous assignee: {previous_assignee}"
         # 2026-08 -- reported directly: "whenever assigning defect to
@@ -901,7 +908,9 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
     obj = _get(defect_id, db)
     if not obj.assignee_id or obj.status not in DEFECT_REASSIGNABLE_STATUSES:
         raise HTTPException(400, f"{obj.defect_key} does not currently have an assignee that can be reassigned.")
-    previous_assignee = db.query(models.User).get(obj.assignee_id)
+    previous_assignee_id = obj.assignee_id
+    previous_assigned_at = obj.assigned_at
+    previous_assignee = db.query(models.User).get(previous_assignee_id)
     reassignment.require_can_reassign(current_user, obj.assignee_id, previous_assignee.departments if previous_assignee else None)
     reason = reassignment.require_reason(payload.reason)
     new_assignee = db.query(models.User).get(payload.assignee_id)
@@ -936,7 +945,13 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
     obj.assignee_id = new_assignee.id
     obj.assigned_by_id = current_user.id
     obj.assigned_at = models.now()
-    reassignment.record_reassignment(db, "DEFECT", obj.id, current_user, previous_label, new_assignee.full_name, reason)
+    reassignment.record_reassignment(
+        db, "DEFECT", obj.id, current_user, previous_label, new_assignee.full_name, reason,
+        assignment_role="DEFECT_ASSIGNEE",
+        previous_assignee_ids=[previous_assignee_id],
+        new_assignee_ids=[new_assignee.id],
+        previous_assigned_at=previous_assigned_at,
+    )
     db.commit(); db.refresh(obj)
     return obj
 

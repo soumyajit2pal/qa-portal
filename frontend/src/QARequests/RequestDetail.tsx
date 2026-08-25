@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { formatDateTimeIST } from "../time";
 import { useAuth } from "../context/AuthContext";
 import { Link, useNavigate } from "react-router-dom";
 import {
@@ -36,7 +37,7 @@ import { AddDocuments } from "./AddDocuments";
 import JiraActivity from "../components/JiraActivity";
 import ConfirmModal from "../components/ConfirmModal";
 import LinkedDefects from "../components/LinkedDefects";
-import UserAssignSelect from "../components/UserAssignSelect";
+import RequestDelegation, { requestDelegationCapabilities } from "../components/RequestDelegation";
 
 interface RequestDetailProps {
   req: QARequestOut;
@@ -98,13 +99,6 @@ export function RequestDetail({
   // closes this whole modal too, since there's nothing left here for that
   // viewer to look at.
   const [appNameDecisionNotice, setAppNameDecisionNotice] = useState<string | null>(null);
-  const [showAssign, setShowAssign] = useState(false);
-  const [delegateUserId, setDelegateUserId] = useState("");
-  const [delegateReason, setDelegateReason] = useState("");
-  const [showReturn, setShowReturn] = useState(false);
-  const [returnComments, setReturnComments] = useState("");
-  const [showRecall, setShowRecall] = useState(false);
-  const [recallComments, setRecallComments] = useState("");
 
   // Every readiness checklist is Admin-configurable now (see
   // backend checklist_config.py) -- fetched live instead of the old
@@ -183,41 +177,6 @@ export function RequestDetail({
       onChanged(updated);
       load();
       if (action === "submit") setRaisedNotice(updated);
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
-  async function delegationAction(
-    action: "assign" | "return" | "recall",
-    path: string,
-    payload: Record<string, unknown>
-  ) {
-    setError(null);
-    setBusyAction(action);
-    try {
-      const updated = await api.post<QARequestOut>(
-        `/api/qa-requests/${req.id}/${path}`,
-        payload
-      );
-      onChanged(updated);
-      if (action === "return") {
-        // Access to a private Draft ends as soon as it is returned. Close the
-        // drawer instead of issuing document/history refreshes the former
-        // assignee is no longer authorized to make.
-        onClose();
-        return;
-      }
-      await load();
-      setShowAssign(false);
-      setShowReturn(false);
-      setShowRecall(false);
-      setDelegateUserId("");
-      setDelegateReason("");
-      setReturnComments("");
-      setRecallComments("");
     } catch (err) {
       setError(err);
     } finally {
@@ -452,16 +411,13 @@ export function RequestDetail({
   const canEditRequest = GATEWAY_EDITABLE_STATUSES.includes(status) && (
     isAdmin || isActiveDelegate || (ownsRequest && !hasActiveDelegation)
   );
-  const canAssignForInput = isRequester && !hasActiveDelegation && status === "DRAFT";
-  const canRecallDelegation = isRequester && !!hasActiveDelegation;
-  const canReturnToRequester = !!isActiveDelegate;
+  const delegationCapabilities = requestDelegationCapabilities("QA_REQUEST", req, user);
+  const canAssignForInput = delegationCapabilities.canAssign;
+  const canRecallDelegation = delegationCapabilities.canRecall;
+  const canReturnToRequester = delegationCapabilities.canReturn;
   const canUploadDocuments = status !== "CANCELLED" && (
     isAdmin || isActiveDelegate || (ownsRequest && !hasActiveDelegation)
   );
-  const delegateCandidates = users.filter((candidate) =>
-    candidate.is_active && candidate.id !== req.requester_id
-  );
-
   const hasLinked =
     req.linked_functional_requests?.length > 0 ||
     req.linked_sast_requests?.length > 0 ||
@@ -597,10 +553,10 @@ export function RequestDetail({
               {requestTypeList.join(", ") || "—"}
             </DetailField>
             <DetailField label="Created">
-              {new Date(req.created_at).toLocaleString()}
+              {formatDateTimeIST(req.created_at)}
             </DetailField>
             <DetailField label="Last Updated">
-              {new Date(req.updated_at).toLocaleString()}
+              {formatDateTimeIST(req.updated_at)}
             </DetailField>
           </DetailSection>
 
@@ -828,33 +784,18 @@ export function RequestDetail({
                   Edit Request
                 </button>
               )}
-              {canAssignForInput && (
-                <button
-                  className="btn btn-primary btn-sm"
-                  disabled={!!busyAction}
-                  onClick={() => setShowAssign(true)}
-                >
-                  Delegate for Input
-                </button>
-              )}
-              {canReturnToRequester && (
-                <button
-                  className="btn btn-primary btn-sm"
-                  disabled={!!busyAction}
-                  onClick={() => setShowReturn(true)}
-                >
-                  Return to Requester
-                </button>
-              )}
-              {canRecallDelegation && (
-                <button
-                  className="btn btn-sm"
-                  disabled={!!busyAction}
-                  onClick={() => setShowRecall(true)}
-                >
-                  Recall Delegation
-                </button>
-              )}
+              <RequestDelegation
+                targetType="QA_REQUEST"
+                request={req}
+                users={users}
+                disabled={!!busyAction}
+                showActiveBadge={false}
+                onChanged={async (updated) => {
+                  onChanged(updated);
+                  await load();
+                }}
+                onReturned={onClose}
+              />
               {canSubmit && (
                 <button
                   className="btn btn-primary btn-sm"
@@ -910,7 +851,7 @@ export function RequestDetail({
               {
                 key: "uploaded_at",
                 header: "Uploaded",
-                render: (d) => new Date(d.uploaded_at).toLocaleString(),
+                render: (d) => formatDateTimeIST(d.uploaded_at),
               },
               {
                 key: "actions",
@@ -980,6 +921,7 @@ export function RequestDetail({
                   setPendingDeleteDoc(null);
                   load();
                 } catch (err) {
+                  setPendingDeleteDoc(null);
                   setError(err);
                 } finally {
                   setDeleteDocBusy(false);
@@ -1025,87 +967,6 @@ export function RequestDetail({
             if (updated.status === "DRAFT") setDraftNotice(true);
           }}
         />
-      )}
-
-      {showAssign && (
-        <Modal title="Delegate for Input" onClose={() => setShowAssign(false)} variant="dialog" preventBackdropClose>
-          <p className="muted small" style={{ marginTop: 0 }}>
-            Select any active user. Department does not restrict this temporary assignment, and ownership remains with the requester.
-          </p>
-          <label className="form-field">
-            <span>Assign to *</span>
-            <UserAssignSelect
-              value={delegateUserId}
-              onChange={setDelegateUserId}
-              users={delegateCandidates}
-              placeholder="Search and select a user..."
-              disabled={busyAction === "assign"}
-            />
-          </label>
-          <label className="form-field" style={{ marginTop: 14 }}>
-            <span>Assignment reason *</span>
-            <textarea
-              value={delegateReason}
-              maxLength={1000}
-              rows={4}
-              onChange={(event) => setDelegateReason(event.target.value)}
-              placeholder="Describe the information or document update required..."
-            />
-          </label>
-          <ErrorText error={error} />
-          <div className="modal-actions">
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busyAction === "assign" || !delegateUserId || !delegateReason.trim()}
-              onClick={() => delegationAction("assign", "delegations", {
-                assigned_to_id: Number(delegateUserId),
-                reason: delegateReason.trim(),
-              })}
-            >
-              {busyAction === "assign" ? "Assigning..." : "Assign for Input"}
-            </button>
-            <button type="button" className="btn" disabled={busyAction === "assign"} onClick={() => setShowAssign(false)}>Cancel</button>
-          </div>
-        </Modal>
-      )}
-
-      {showReturn && (
-        <Modal title="Return to Requester" onClose={() => setShowReturn(false)} variant="dialog" preventBackdropClose>
-          <p className="muted small" style={{ marginTop: 0 }}>
-            Confirm what you updated. After return, your edit and upload access will end and the requester can continue the workflow.
-          </p>
-          <label className="form-field">
-            <span>Return comments *</span>
-            <textarea value={returnComments} maxLength={1000} rows={4} onChange={(event) => setReturnComments(event.target.value)} />
-          </label>
-          <ErrorText error={error} />
-          <div className="modal-actions">
-            <button type="button" className="btn btn-primary" disabled={busyAction === "return" || !returnComments.trim()} onClick={() => delegationAction("return", "delegations/return", { comments: returnComments.trim() })}>
-              {busyAction === "return" ? "Returning..." : "Return to Requester"}
-            </button>
-            <button type="button" className="btn" disabled={busyAction === "return"} onClick={() => setShowReturn(false)}>Cancel</button>
-          </div>
-        </Modal>
-      )}
-
-      {showRecall && (
-        <Modal title="Recall Delegation" onClose={() => setShowRecall(false)} variant="dialog" preventBackdropClose>
-          <p className="muted small" style={{ marginTop: 0 }}>
-            Recall immediately removes the assigned user's edit and upload access and returns control to the requester.
-          </p>
-          <label className="form-field">
-            <span>Recall reason *</span>
-            <textarea value={recallComments} maxLength={1000} rows={4} onChange={(event) => setRecallComments(event.target.value)} />
-          </label>
-          <ErrorText error={error} />
-          <div className="modal-actions">
-            <button type="button" className="btn btn-danger" disabled={busyAction === "recall" || !recallComments.trim()} onClick={() => delegationAction("recall", "delegations/recall", { comments: recallComments.trim() })}>
-              {busyAction === "recall" ? "Recalling..." : "Recall Delegation"}
-            </button>
-            <button type="button" className="btn" disabled={busyAction === "recall"} onClick={() => setShowRecall(false)}>Cancel</button>
-          </div>
-        </Modal>
       )}
 
       {confirmCancel && (

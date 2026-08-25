@@ -1,3 +1,5 @@
+import datetime
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -16,7 +18,27 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 _GATEWAY_PRIVATE_STATUSES = (GatewayStatus.DRAFT, GatewayStatus.CANCELLED)
 
 
-def _visible_qa_requests(db: Session, current_user: models.User):
+def _period_bounds(date_from: str | None, date_to: str | None):
+    start = datetime.datetime.fromisoformat(date_from.replace("Z", "+00:00")) if date_from else None
+    end = datetime.datetime.fromisoformat(date_to.replace("Z", "+00:00")) if date_to else None
+    # Database datetimes are stored as naive local values, as in dashboard.py.
+    if start and start.tzinfo:
+        start = start.astimezone(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).replace(tzinfo=None)
+    if end and end.tzinfo:
+        end = end.astimezone(datetime.timezone(datetime.timedelta(hours=5, minutes=30))).replace(tzinfo=None)
+    return start, end
+
+
+def _in_period(query, column, date_from: str | None, date_to: str | None):
+    start, end = _period_bounds(date_from, date_to)
+    if start:
+        query = query.filter(column >= start)
+    if end:
+        query = query.filter(column <= end)
+    return query
+
+
+def _visible_qa_requests(db: Session, current_user: models.User, date_from: str | None = None, date_to: str | None = None):
     """Reported bug: this and the other report endpoints below queried every
     QARequest row unfiltered, so the "QA Request Summary" report (visible to
     every logged-in user, not just QA/management roles -- see
@@ -44,18 +66,18 @@ def _visible_qa_requests(db: Session, current_user: models.User):
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.filter(models.QARequest.department.in_(scope))
-    return q
+    return _in_period(q, models.QARequest.created_at, date_from, date_to)
 
 
-def _visible_test_projects(db: Session, current_user: models.User):
+def _visible_test_projects(db: Session, current_user: models.User, date_from: str | None = None, date_to: str | None = None):
     q = db.query(models.TestProject)
     project_ids = viewable_project_ids(db, current_user)
     if project_ids is not None:
         q = q.filter(models.TestProject.id.in_(project_ids))
-    return q
+    return _in_period(q, models.TestProject.created_at, date_from, date_to)
 
 
-def _visible_defects(db: Session, current_user: models.User):
+def _visible_defects(db: Session, current_user: models.User, date_from: str | None = None, date_to: str | None = None):
     """Report-centre equivalent of Defect Management's visibility scope."""
     q = db.query(models.Defect)
     scope = dashboard_department_scope(current_user)
@@ -67,7 +89,7 @@ def _visible_defects(db: Session, current_user: models.User):
                  models.QARequest.department.in_(scope),
                  models.TestCycle.project_id.in_(project_ids or []),
              )))
-    return q
+    return _in_period(q, models.Defect.reported_at, date_from, date_to)
 
 
 def _user_name_map(db: Session, ids) -> dict[int, str]:
@@ -79,12 +101,12 @@ def _user_name_map(db: Session, ids) -> dict[int, str]:
 
 # ---------------- 4.10.1 Operational Reports ----------------
 @router.get("/qa-request-summary")
-def qa_request_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def qa_request_summary(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """One row per QA Request (the intake gateway -- see constants.GatewayStatus
     for its own Draft/Submitted/Raised/Cancelled status). "QA Testing Status"
     additionally surfaces the linked Functional Testing Request's own Draft ->
     ... -> Closed status, if one was raised alongside it."""
-    rows = _visible_qa_requests(db, current_user).options(
+    rows = _visible_qa_requests(db, current_user, date_from, date_to).options(
         selectinload(models.QARequest.linked_functional_requests),
         selectinload(models.QARequest.linked_sast_requests),
         selectinload(models.QARequest.linked_dast_requests),
@@ -124,7 +146,7 @@ def qa_request_summary(db: Session = Depends(get_db), current_user: models.User 
 
 
 @router.get("/test-cycle-summary")
-def test_cycle_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def test_cycle_summary(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """One compact row per visible cycle; avoids exporting every execution attempt."""
     q = (db.query(
             models.TestCycle.cycle_key, models.TestCycle.name, models.TestCycle.status,
@@ -143,6 +165,7 @@ def test_cycle_summary(db: Session = Depends(get_db), current_user: models.User 
     project_ids = viewable_project_ids(db, current_user)
     if project_ids is not None:
         q = q.filter(models.TestProject.id.in_(project_ids))
+    q = _in_period(q, models.TestCycle.created_at, date_from, date_to)
     rows = q.group_by(
         models.TestCycle.cycle_key, models.TestCycle.name, models.TestCycle.status,
         models.TestCycle.start_date, models.TestCycle.end_date,
@@ -168,8 +191,8 @@ def test_cycle_summary(db: Session = Depends(get_db), current_user: models.User 
 
 
 @router.get("/defect-retest-register")
-def defect_retest_register(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    rows = (_visible_defects(db, current_user).options(
+def defect_retest_register(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    rows = (_visible_defects(db, current_user, date_from, date_to).options(
         joinedload(models.Defect.qa_request), joinedload(models.Defect.reporter),
         joinedload(models.Defect.assignee), joinedload(models.Defect.retest_tester),
         joinedload(models.Defect.primary_test_case),
@@ -194,15 +217,16 @@ def defect_retest_register(db: Session = Depends(get_db), current_user: models.U
 
 
 @router.get("/testcase-approval-summary")
-def testcase_approval_summary(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def testcase_approval_summary(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    # The report measures test cases created in the period; an older project
+    # must still appear when it contains matching new/reviewed test cases.
     projects = _visible_test_projects(db, current_user).order_by(models.TestProject.name).all()
     project_ids = [project.id for project in projects]
-    grouped = (db.query(models.TestCase.project_id, models.TestCase.status, func.count(models.TestCase.id))
-               .filter(
-                   models.TestCase.project_id.in_(project_ids),
-                   models.TestCase.is_deleted.is_(False),
-               )
-               .group_by(models.TestCase.project_id, models.TestCase.status).all()) if project_ids else []
+    grouped_query = db.query(models.TestCase.project_id, models.TestCase.status, func.count(models.TestCase.id)).filter(
+        models.TestCase.project_id.in_(project_ids), models.TestCase.is_deleted.is_(False),
+    )
+    grouped_query = _in_period(grouped_query, models.TestCase.created_at, date_from, date_to)
+    grouped = grouped_query.group_by(models.TestCase.project_id, models.TestCase.status).all() if project_ids else []
     counts: dict[int, dict[str, int]] = {}
     for project_id, status, count in grouped:
         counts.setdefault(int(project_id), {})[status or "Unknown"] = int(count)
@@ -221,7 +245,7 @@ def testcase_approval_summary(db: Session = Depends(get_db), current_user: model
                         for status in ("Returned", "Returned by QA", "Returned by QA Lead")),
         "Rejected": counts.get(project.id, {}).get("Rejected", 0),
         "Archived": counts.get(project.id, {}).get("Archived", 0),
-    } for project in projects]
+    } for project in projects if not (date_from or date_to) or counts.get(project.id)]
 
 
 def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
@@ -258,7 +282,7 @@ def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
 
 # ---------------- 4.10.2 Security Reports ----------------
 @router.get("/sast-scan")
-def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def sast_scan_report(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # department is a delegated property (models.SASTRequest.department reads
     # through .qa_request), not a real column, so scoping needs a join same
     # as list_sast in routers/sast_dast.py -- standalone SAST requests (no
@@ -269,7 +293,7 @@ def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
     if scope:
         q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
-    rows = q.all()
+    rows = _in_period(q, models.SASTRequest.created_at, date_from, date_to).all()
     latest_scans = _latest_scan_by_request(db, "SAST", [r.id for r in rows])
     return [{
         "Request ID": r.request_id, "Application": r.application_name, "Build": r.build_number,
@@ -282,14 +306,14 @@ def sast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
 
 
 @router.get("/dast-scan")
-def dast_scan_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def dast_scan_report(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # See sast_scan_report's matching comment just above -- identical reasoning.
     q = db.query(models.DASTRequest)
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
-    rows = q.all()
+    rows = _in_period(q, models.DASTRequest.created_at, date_from, date_to).all()
     latest_scans = _latest_scan_by_request(db, "DAST", [r.id for r in rows])
     return [{
         "Request ID": r.request_id, "Application URL": r.application_url, "Environment": r.environment,
@@ -299,13 +323,13 @@ def dast_scan_report(db: Session = Depends(get_db), current_user: models.User = 
 
 
 @router.get("/performance-testing")
-def performance_testing_report(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def performance_testing_report(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     q = db.query(models.PerformanceRequest).options(joinedload(models.PerformanceRequest.qa_request))
     scope = dashboard_department_scope(current_user)
     if scope:
         q = (q.join(models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id)
              .filter(models.QARequest.department.in_(scope)))
-    rows = q.order_by(models.PerformanceRequest.created_at.desc()).all()
+    rows = _in_period(q, models.PerformanceRequest.created_at, date_from, date_to).order_by(models.PerformanceRequest.created_at.desc()).all()
     tester_ids = set()
     for item in rows:
         tester_ids.add(item.engineer_id)
@@ -329,7 +353,7 @@ def performance_testing_report(db: Session = Depends(get_db), current_user: mode
     } for item in rows]
 
 
-def _security_severity_counts(db: Session, current_user: models.User):
+def _security_severity_counts(db: Session, current_user: models.User, date_from: str | None = None, date_to: str | None = None):
     # Reported directly: "in dashboard sast dast findings showing 0
     # result." Used to read models.SASTFinding/DASTFinding -- see
     # _latest_scan_by_request's own comment for why that's always empty
@@ -347,8 +371,8 @@ def _security_severity_counts(db: Session, current_user: models.User):
                         .filter(models.QARequest.department.in_(scope))
         dast_q = dast_q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
                         .filter(models.QARequest.department.in_(scope))
-    sast_scans = _latest_scan_by_request(db, "SAST", [row[0] for row in sast_q.all()])
-    dast_scans = _latest_scan_by_request(db, "DAST", [row[0] for row in dast_q.all()])
+    sast_scans = _latest_scan_by_request(db, "SAST", [row[0] for row in _in_period(sast_q, models.SASTRequest.created_at, date_from, date_to).all()])
+    dast_scans = _latest_scan_by_request(db, "DAST", [row[0] for row in _in_period(dast_q, models.DASTRequest.created_at, date_from, date_to).all()])
     from collections import Counter
     counts = Counter()
     for scan in list(sast_scans.values()) + list(dast_scans.values()):
@@ -360,13 +384,13 @@ def _security_severity_counts(db: Session, current_user: models.User):
 
 
 @router.get("/severity-distribution")
-def severity_distribution(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    counts = _security_severity_counts(db=db, current_user=current_user)
+def severity_distribution(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    counts = _security_severity_counts(db=db, current_user=current_user, date_from=date_from, date_to=date_to)
     return [{"Severity": severity, "Finding Count": count} for severity, count in sorted(counts.items())]
 
 
 @router.get("/suppression-register")
-def suppression_register(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def suppression_register(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # One suppression request can now cover several findings (see
     # models.SuppressionItem) -- the register lists one row per finding,
     # same pattern as test-case-execution/defect-summary used to.
@@ -376,7 +400,7 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
     scope = dashboard_department_scope(current_user)
     if scope:
         q = q.filter(models.SuppressionRequest.department.in_(scope))
-    rows = q.all()
+    rows = _in_period(q, models.SuppressionRequest.created_at, date_from, date_to).all()
     out = []
     for s in rows:
         items = s.items or [None]
@@ -394,11 +418,11 @@ def suppression_register(db: Session = Depends(get_db), current_user: models.Use
 
 # ---------------- 4.10.3 Management Reports ----------------
 @router.get("/application-quality-scorecard")
-def quality_scorecard(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def quality_scorecard(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """Cross-module position by application, restricted through visible gateway IDs."""
     from collections import Counter
 
-    visible = _visible_qa_requests(db, current_user).all()
+    visible = _visible_qa_requests(db, current_user, date_from, date_to).all()
     request_ids = [item.id for item in visible]
     if not request_ids:
         return []
@@ -450,7 +474,7 @@ def quality_scorecard(db: Session = Depends(get_db), current_user: models.User =
 
 
 @router.get("/qa-signoff-register")
-def qa_signoff_register(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def qa_signoff_register(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     q = db.query(models.QASignOff).options(joinedload(models.QASignOff.source_functional_request))
     scope = dashboard_department_scope(current_user)
     if scope:
@@ -458,7 +482,7 @@ def qa_signoff_register(db: Session = Depends(get_db), current_user: models.User
                     models.FunctionalRequest.request_id == models.QASignOff.testing_request_id)
              .join(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id)
              .filter(models.QARequest.department.in_(scope)))
-    rows = q.order_by(models.QASignOff.created_at.desc()).all()
+    rows = _in_period(q, models.QASignOff.created_at, date_from, date_to).order_by(models.QASignOff.created_at.desc()).all()
     names = _user_name_map(db, [
         user_id for item in rows
         for user_id in (item.requester_id, item.reviewed_by_id, item.approved_by_id)
@@ -485,13 +509,13 @@ def qa_signoff_register(db: Session = Depends(get_db), current_user: models.User
 
 
 @router.get("/audit-evidence")
-def audit_evidence(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def audit_evidence(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # Same cross-entity feed as list_approvals (routers/approvals.py) -- uses
     # the same shared resolve_entity_department helper (deps.py) so this
     # export can't surface another department's approval/audit history
     # either (reported directly: "Report & Export Centre ... other
     # department data can not be shown").
-    rows = db.query(models.ApprovalAction).order_by(models.ApprovalAction.created_at.desc()).limit(1000).all()
+    rows = _in_period(db.query(models.ApprovalAction), models.ApprovalAction.created_at, date_from, date_to).order_by(models.ApprovalAction.created_at.desc()).limit(1000).all()
     scope = dashboard_department_scope(current_user)
     if scope:
         rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]

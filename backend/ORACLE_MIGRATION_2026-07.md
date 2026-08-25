@@ -1426,7 +1426,7 @@ identical via `diff -rq` (only the standard `.env`/`logs`/`uploads` exclusions d
 
 **Reported:** "While new Qa sign off certificate is raising with screenshots uplaod in rich text, save raft
 certificate not working." `SignOff.tsx`'s three rich-text fields (Exit Criteria Validation Notes, Open Defect
-Review Summary, Residual Risk Documentation) -- on both `NewSignOffModal` and `EditSignOffModal` -- had
+Review Summary, Remarks) -- on both `NewSignOffModal` and `EditSignOffModal` -- had
 `allowImages={false}`, the exact same flag that was disabling screenshots across the Defect module before
 sections 29-32 fixed it.
 

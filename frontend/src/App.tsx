@@ -17,6 +17,7 @@ import QARequests from './QARequests'
 import ModuleBoundary from './components/ModuleBoundary'
 import ApiActivityIndicator from './components/ApiActivityIndicator'
 import GlobalButtonTooltips from './components/GlobalButtonTooltips'
+import GlobalToastCenter from './components/GlobalToastCenter'
 
 const Help = lazy(() => import('./Help'))
 
@@ -178,6 +179,7 @@ export default function App() {
     <>
       <GlobalButtonTooltips />
       <ApiActivityIndicator />
+      <GlobalToastCenter />
       <Suspense fallback={<ModuleFallback />}>
         <Routes>
         <Route path="/login" element={<Login />} />

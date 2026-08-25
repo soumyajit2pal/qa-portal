@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api, waitForJob } from '../../api'
+import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
@@ -1096,7 +1097,7 @@ function AttemptHistory({ executionId, readOnly }: { executionId: number; readOn
             <Badge status={run.status} />
             <span className="muted small">{run.executed_by_name || 'Unknown runner'}</span>
             <span className="muted small">{run.defects?.length || 0} defect{run.defects?.length === 1 ? '' : 's'}</span>
-            <span className="muted small" style={{ marginLeft: 'auto' }}>{run.executed_at ? new Date(run.executed_at).toLocaleString() : '—'}</span>
+            <span className="muted small" style={{ marginLeft: 'auto' }}>{run.executed_at ? formatDateTimeIST(run.executed_at) : '—'}</span>
             <span>{expandedId === run.id ? '▾' : '▸'}</span>
           </button>
           {expandedId === run.id && (
@@ -1296,8 +1297,8 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
             <TestCaseDetail label="Pre-Condition" value={tc.pre_condition} wide />
             <TestCaseDetail label="Description" value={tc.description} wide />
             <TestCaseDetail label="Created By" value={tc.created_by_name} />
-            <TestCaseDetail label="Created At" value={tc.created_at ? new Date(tc.created_at).toLocaleString() : '—'} />
-            <TestCaseDetail label="Last Updated" value={tc.updated_at ? new Date(tc.updated_at).toLocaleString() : '—'} />
+            <TestCaseDetail label="Created At" value={tc.created_at ? formatDateTimeIST(tc.created_at) : '—'} />
+            <TestCaseDetail label="Last Updated" value={tc.updated_at ? formatDateTimeIST(tc.updated_at) : '—'} />
           </div>
           <div className="tm-execution-steps">
             <h4>Test Steps <span>{tc.steps.length}</span></h4>
@@ -1312,7 +1313,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
       )}
       <div className="tm-execution-result-heading"><h4>Execution Result</h4>{readOnly && <span>Read only</span>}</div>
       <div className={`tm-runner-panel ${execution.assigned_to_id ? '' : 'unassigned'}`}>
-        <div><small>Assigned runner</small><strong>{execution.assigned_to_name || 'Unassigned'}</strong>{execution.assigned_at && <span>Assigned {new Date(execution.assigned_at).toLocaleString()}{execution.assigned_by_name ? ` by ${execution.assigned_by_name}` : ''}</span>}</div>
+        <div><small>Assigned runner</small><strong>{execution.assigned_to_name || 'Unassigned'}</strong>{execution.assigned_at && <span>Assigned {formatDateTimeIST(execution.assigned_at)}{execution.assigned_by_name ? ` by ${execution.assigned_by_name}` : ''}</span>}</div>
         {(execution.assigned_to_id ? canReassign : canAssign) && <div className="tm-runner-control"><UserAssignSelect value={execution.assigned_to_id ? String(execution.assigned_to_id) : ''} onChange={handleAssignChange} users={runnerCandidates} placeholder="Assign QA runner…" disabled={busy} />{execution.assigned_to_id && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => handleAssignChange('')}>Unassign</button>}</div>}
         {pendingReassign !== null && (
           <div className="tm-reassign-confirm">
@@ -1338,7 +1339,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
             {reassignmentHistory.map((item) => (
               <li key={item.id}>
                 <strong>{item.previous_state || 'Unassigned'} → {item.new_state || 'Unassigned'}</strong>
-                <span> · {item.actor_name || 'Unknown'} · {new Date(item.created_at).toLocaleString()}</span>
+                <span> · {item.actor_name || 'Unknown'} · {formatDateTimeIST(item.created_at)}</span>
                 {item.comments && <p>{item.comments}</p>}
               </li>
             ))}
@@ -1363,7 +1364,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 16px' }}>
         <span className="muted small">Latest result:</span>
         <Badge status={execution.status} />
-        {execution.executed_at && <span className="muted small">as of {new Date(execution.executed_at).toLocaleString()}</span>}
+        {execution.executed_at && <span className="muted small">as of {formatDateTimeIST(execution.executed_at)}</span>}
       </div>
       <AttemptHistory executionId={execution.id} readOnly={readOnly} />
       {!readOnly && (
@@ -2179,8 +2180,8 @@ export default function TestExecution() {
     <ul className="tm-cycle-nested">
       {cycles.map((cycle) => (
         <li className="tm-cycle-row" key={cycle.id}>
-          <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)}>
-            <span><strong>{cycle.name}</strong><small>{cycle.cycle_key}</small></span><Badge status={cycle.status} />
+          <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)} title={`${cycle.name} · ${cycle.cycle_key} · ${cycle.status}`}>
+            <span className="tm-cycle-row-copy"><i aria-hidden="true" /><span><strong>{cycle.name}</strong><small>{cycle.cycle_key}</small></span></span><Badge status={cycle.status} />
           </button>
           {canDeleteCycle && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title="Delete test cycle" aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}>×</button>}
         </li>
@@ -2224,9 +2225,9 @@ export default function TestExecution() {
         <div className={`tm-workspace tm-execution-workspace${cycleSidebarCollapsed ? ' cycle-sidebar-collapsed' : ''}`}>
           <aside className="tm-tree-panel tm-cycle-panel">
             <div className="tm-cycle-sidebar-head">
-              {!cycleSidebarCollapsed && <div><small>Execution sets</small><strong>Test Cycles</strong></div>}
+              {!cycleSidebarCollapsed && <div className="tm-cycle-sidebar-title"><span aria-hidden="true">C</span><div><small>Execution workspace</small><strong>Cycle navigator</strong></div></div>}
               <div className="tm-cycle-sidebar-tools">
-                {!cycleSidebarCollapsed && <span>{cycles.length}</span>}
+                {!cycleSidebarCollapsed && <span title={`${cycleFolderTotals.total} total cycles`}>{cycleFolderTotals.total}</span>}
                 <button
                   type="button"
                   className="tm-tree-collapse"
@@ -2249,28 +2250,33 @@ export default function TestExecution() {
                 currently selected shows its own cycles nested directly
                 beneath it (nestedCycleList, computed above) -- see that
                 variable's own comment for why. */}
-            {!cycleSidebarCollapsed && <ul className="plain-list">
-              <li>
+            {!cycleSidebarCollapsed && <>
+              <div className="tm-cycle-scope-label">View</div>
+              <ul className="plain-list tm-cycle-scope-list">
+              <li className="tm-cycle-scope-item">
                 <div className="tm-folder-row">
                   <button type="button" className={`link-btn ${selectedCycleFolder === '' ? 'active' : ''}`} onClick={() => setSelectedCycleFolder('')}>
-                    <span>▦</span> All cycles <em>{cycleFolderTotals.total}</em>
+                    <span aria-hidden="true">A</span> All cycles <em>{cycleFolderTotals.total}</em>
                   </button>
                 </div>
                 {selectedCycleFolder === '' && nestedCycleList}
               </li>
-              <li>
+              <li className="tm-cycle-scope-item">
                 <div className="tm-folder-row">
                   <button type="button" className={`link-btn ${selectedCycleFolder === CYCLE_UNFILED ? 'active' : ''}`} onClick={() => setSelectedCycleFolder(CYCLE_UNFILED)}>
-                    <span>◇</span> Unfiled <em>{cycleFolderTotals.unfiled_count}</em>
+                    <span aria-hidden="true">U</span> Unfiled <em>{cycleFolderTotals.unfiled_count}</em>
                   </button>
                 </div>
                 {selectedCycleFolder === CYCLE_UNFILED && nestedCycleList}
               </li>
+              </ul>
+              <div className="tm-cycle-folder-label"><span>Folders</span><em>{cycleFolders.length}</em></div>
+              <ul className="plain-list tm-cycle-folder-list">
               {cycleFolders.map((f) => (
                 <li key={f.id}>
                   <div className="tm-folder-row">
                     <button type="button" className={`link-btn ${selectedCycleFolder === f.id ? 'active' : ''}`} onClick={() => setSelectedCycleFolder(f.id)}>
-                      <span>{f.access_grants.length ? '🔒' : '📁'}</span> {f.name} <em>{f.cycle_count}</em>
+                      <span className={f.access_grants.length ? 'restricted' : ''} aria-hidden="true">{f.access_grants.length ? '◈' : '□'}</span> {f.name} <em>{f.cycle_count}</em>
                     </button>
                     {canExec && projectIsActive && (
                       <div className="tm-folder-actions">
@@ -2285,7 +2291,8 @@ export default function TestExecution() {
                   {selectedCycleFolder === f.id && nestedCycleList}
                 </li>
               ))}
-            </ul>}
+              </ul>
+            </>}
             {!cycleSidebarCollapsed && canExec && projectIsActive && <button type="button" className="tm-tree-add" onClick={() => setShowNewCycleFolder(true)}>+ Add folder</button>}
           </aside>
           <section className="tm-main-panel">
@@ -2296,39 +2303,34 @@ export default function TestExecution() {
                   <span>{selectedCycle?.cycle_key}</span>
                   <h3>{selectedCycle?.name}</h3>
                   <p>{selectedCycle?.description || 'Execute and monitor the selected test set.'}</p>
-                  <div className="tm-cycle-meta">
-                    {selectedCycle && (canExec && projectIsActive && !cycleIsCompleted ? (
-                      <CycleStatusControl cycle={selectedCycle} executionTotal={cycleExecutionTotal} executedCount={executedCount} onChanged={(saved) => {
-                        setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle))
-                        api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${saved.id}`).then(setCycleActivity).catch(() => undefined)
-                      }} onError={setError} />
-                    ) : (
-                      <Badge status={selectedCycle?.status} />
-                    ))}
-                    {selectedCycle?.cycle_type && <span className="badge badge-gray">{selectedCycle.cycle_type}</span>}
-                    {selectedCycle?.environment && <span className="badge badge-gray">{selectedCycle.environment}</span>}
-                    {selectedCycle?.build && <span className="badge badge-gray">Build {selectedCycle.build}</span>}
-                    {selectedCycle?.owner_name && <span className="badge badge-gray">Owner: {selectedCycle.owner_name}</span>}
+                  <div className="tm-cycle-context-row">
+                    <div className="tm-cycle-meta">
+                      {selectedCycle && (canExec && projectIsActive && !cycleIsCompleted ? (
+                        <CycleStatusControl cycle={selectedCycle} executionTotal={cycleExecutionTotal} executedCount={executedCount} onChanged={(saved) => {
+                          setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle))
+                          api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${saved.id}`).then(setCycleActivity).catch(() => undefined)
+                        }} onError={setError} />
+                      ) : (
+                        <Badge status={selectedCycle?.status} />
+                      ))}
+                      {selectedCycle?.cycle_type && <span className="badge badge-gray">{selectedCycle.cycle_type}</span>}
+                      {selectedCycle?.environment && <span className="badge badge-gray">{selectedCycle.environment}</span>}
+                      {selectedCycle?.build && <span className="badge badge-gray">Build {selectedCycle.build}</span>}
+                      {selectedCycle?.owner_name && <span className="badge badge-gray">Owner: {selectedCycle.owner_name}</span>}
+                    </div>
+                    {selectedCycle?.linked_request_key && (
+                      <div className="tm-cycle-request-link">
+                        <b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>
+                        {canExec && projectIsActive && !cycleIsLocked && <button type="button" disabled={unlinkingCycleLink} onClick={() => setPendingUnlinkCycleRequest(true)}>{unlinkingCycleLink ? 'Unlinking…' : 'Unlink'}</button>}
+                        {canExec && projectIsActive && selectedCycle.status === 'Completed' && <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Change link</button>}
+                      </div>
+                    )}
+                    {!selectedCycle?.linked_request_key && canExec && projectIsActive && selectedCycle?.status === 'Completed' && (
+                      <div className="tm-cycle-request-link tm-cycle-request-link--empty">
+                        <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Link QA Request</button>
+                      </div>
+                    )}
                   </div>
-                  {selectedCycle?.linked_request_key && (
-                    <div className="tm-cycle-request-link">
-                      <b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>
-                      {canExec && projectIsActive && !cycleIsLocked && <button type="button" disabled={unlinkingCycleLink} onClick={() => setPendingUnlinkCycleRequest(true)}>{unlinkingCycleLink ? 'Unlinking…' : 'Unlink'}</button>}
-                      {canExec && projectIsActive && selectedCycle.status === 'Completed' && <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Change link</button>}
-                    </div>
-                  )}
-                  {!selectedCycle?.linked_request_key && canExec && projectIsActive && selectedCycle?.status === 'Completed' && (
-                    <div className="tm-cycle-request-link tm-cycle-request-link--empty">
-                      <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Link QA Request</button>
-                    </div>
-                  )}
-                  {cycleIsLocked && (
-                    <div className="info-banner">
-                      {selectedCycle?.status === 'Blocked'
-                        ? <>This cycle is <strong>Blocked</strong>. Assignment, editing, execution, testcase, defect, evidence, and link changes are disabled until Resume Execution.</>
-                        : <>This cycle is <strong>Completed</strong> and read-only. No further changes are allowed, except linking or updating the QA Request it's filed against.</>}
-                    </div>
-                  )}
                 </div>
                 <div className="tm-cycle-command-actions">
                   {canExec && projectIsActive && !cycleIsLocked && <button className="btn" onClick={() => selectedCycle && setEditingCycle(selectedCycle)}>Edit Cycle</button>}
@@ -2337,6 +2339,13 @@ export default function TestExecution() {
                   </button>
                   {canExec && projectIsActive && !cycleIsLocked && <button className="btn btn-primary" onClick={() => setShowAddCases(true)}>+ Add test cases</button>}
                 </div>
+                {cycleIsLocked && (
+                  <div className="info-banner">
+                    {selectedCycle?.status === 'Blocked'
+                      ? <>This cycle is <strong>Blocked</strong>. Assignment, editing, execution, testcase, defect, evidence, and link changes are disabled until Resume Execution.</>
+                      : <>This cycle is <strong>Completed</strong> and read-only. No further changes are allowed, except linking or updating the QA Request it's filed against.</>}
+                  </div>
+                )}
               </div>
               <section className="tm-execution-overview" aria-label="Cycle execution overview">
                 <div className="tm-execution-progress-card">
@@ -2440,7 +2449,7 @@ export default function TestExecution() {
                   { key: 'run_count', header: 'Runs', render: (e) => <span className={`tm-run-count ${e.run_count ? 'has-runs' : ''}`}>{e.run_count || 0}</span> },
                   { key: 'status', header: 'Latest Result', render: (e) => <Badge status={e.status} /> },
                   { key: 'defects', header: 'Defects', render: (e) => { const defects = (e.runs || []).flatMap((run) => run.defects || []); return defects.length ? <span className="tm-table-defects">{defects.slice(-2).map((defect) => defect.defect_key).join(', ')}{defects.length > 2 ? ` +${defects.length - 2}` : ''}</span> : '—' }, filterValue: (e) => (e.runs || []).flatMap((run) => run.defects || []).map((defect) => defect.defect_key).join(' ') },
-                  { key: 'executed_by_name', header: 'Last Runner', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.executed_by_name || '—'}</strong><small>{e.executed_at ? new Date(e.executed_at).toLocaleString() : 'Not run yet'}</small></span>, filterValue: (e) => e.executed_by_name || '' },
+                  { key: 'executed_by_name', header: 'Last Runner', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.executed_by_name || '—'}</strong><small>{e.executed_at ? formatDateTimeIST(e.executed_at) : 'Not run yet'}</small></span>, filterValue: (e) => e.executed_by_name || '' },
                 ]}
                 rows={filteredExecutions}
               />

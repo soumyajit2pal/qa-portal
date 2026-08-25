@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
+import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
 import {
@@ -64,7 +65,7 @@ function validityError(from: string, to: string): string | null {
 function richTextRequiredError(form: Pick<SignOffForm, 'exit_criteria_notes' | 'open_defect_summary' | 'residual_risk_notes'>): string | null {
   if (!form.exit_criteria_notes.trim()) return 'Exit Criteria Validation Notes are required.'
   if (!form.open_defect_summary.trim()) return 'Open Defect Review Summary is required.'
-  if (!form.residual_risk_notes.trim()) return 'Residual Risk Documentation is required.'
+  if (!form.residual_risk_notes.trim()) return 'Remarks are required.'
   return null
 }
 
@@ -374,7 +375,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
         </div>
         <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
         <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
-        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
+        <Field label="Remarks *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Remarks" placeholder="Add remarks…" /></Field>
         <Field label="Supporting Documents">
           <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
           {files.length > 0 && (
@@ -508,7 +509,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
         </div>
         <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
         <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
-        <Field label="Residual Risk Documentation *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Residual Risk Documentation" placeholder="Document accepted residual risks, mitigations and ownership…" /></Field>
+        <Field label="Remarks *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Remarks" placeholder="Add remarks…" /></Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
           <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Changes'}</button>
@@ -659,7 +660,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
       <div className="grid grid-2">
         <div><strong>Exit Criteria Validation Notes:</strong>{item.exit_criteria_notes ? <AuthenticatedMarkdown value={item.exit_criteria_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
         <div><strong>Open Defect Review Summary:</strong>{item.open_defect_summary ? <AuthenticatedMarkdown value={item.open_defect_summary} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
-        <div><strong>Residual Risk Documentation:</strong>{item.residual_risk_notes ? <AuthenticatedMarkdown value={item.residual_risk_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
+        <div><strong>Remarks:</strong>{item.residual_risk_notes ? <AuthenticatedMarkdown value={item.residual_risk_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -720,7 +721,7 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
           {signatures.map((signature) => <article className="signoff-signature-card" key={signature.signatureId}>
             <header><span>✓</span><div><small>{signature.stage}</small><strong>Electronically signed</strong></div></header>
             <div className={`signoff-signature-mark signature-style-${signature.style}`}>{signature.signer}</div>
-            <dl><div><dt>Signer</dt><dd>{signature.signer}</dd></div><div><dt>Signed at</dt><dd>{new Date(signature.appliedAt).toLocaleString()}</dd></div><div className="signature-id"><dt>Signature ID</dt><dd><code>{signature.signatureId}</code></dd></div></dl>
+            <dl><div><dt>Signer</dt><dd>{signature.signer}</dd></div><div><dt>Signed at</dt><dd>{formatDateTimeIST(signature.appliedAt)}</dd></div><div className="signature-id"><dt>Signature ID</dt><dd><code>{signature.signatureId}</code></dd></div></dl>
             <p>{signature.intent}</p>
           </article>)}
         </div>

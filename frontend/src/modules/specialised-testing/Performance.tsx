@@ -1,22 +1,23 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
+import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import MultiUserAssignSelect from '../../components/MultiUserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { IconCheckCircle } from '../../components/Icons'
 import RoleGroupLink from '../../components/RoleGroupLink'
-import ChildRequestDelegation from '../../components/ChildRequestDelegation'
+import RequestDelegation from '../../components/RequestDelegation'
 import {
   PRIORITIES, RISK_RATINGS, ENVIRONMENTS, DEPLOYMENT_ENVIRONMENTS,
   PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, hasDepartment, canManageReadinessEvidence,
   QA_DEPARTMENT, PERFORMANCE_PENDING_WITH, QA_EXECUTION_GROUP_ROLE,
   PERFORMANCE_TESTER_REASSIGNABLE_STATUSES,
 } from '../../constants'
-import { PerformanceOut, PerformanceListOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut } from '../../types'
+import { PerformanceOut, PerformanceListOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -27,8 +28,12 @@ function userName(users: UserOut[], id?: number | null): string | null {
 // Standalone creation is DISABLED -- a Performance request can only come into
 // being by including "Performance Testing" in a QA Request's request types
 // (see backend routers/qa_requests.py::_sync_linked_child_requests).
-function PerformanceFormModal({ onClose, onSaved, editing }: {
-  onClose: () => void; onSaved: (p: PerformanceOut) => void; editing: PerformanceOut
+function PerformanceFormModal({ onClose, onSaved, editing, documentsByItem, reloadEvidence }: {
+  onClose: () => void
+  onSaved: (p: PerformanceOut) => void
+  editing: PerformanceOut
+  documentsByItem: Record<number, RequestDocumentOut[]>
+  reloadEvidence: () => Promise<void>
 }) {
   const { user } = useAuth()
   const isAdmin = hasRole(user, 'ADMIN')
@@ -52,7 +57,6 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
   )
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/performance-requests', editing.id)
   // Same identity check as the detail view's isRequester/canSMDecide/
   // canDeptHeadDecide -- this modal only opens via canEditDetails, but the
   // checklist evidence controls inside it need their own explicit check.
@@ -84,6 +88,9 @@ function PerformanceFormModal({ onClose, onSaved, editing }: {
       const { request_type, ...rest } = form
       const payload = { ...rest, request_type: request_type.join(','), checked_items: checkedItems }
       const saved = await api.put<PerformanceOut>(`/api/performance-requests/${editing.id}`, payload)
+      // Evidence is stored outside the form PUT. Reconcile the shared
+      // detail cache before closing so the Checklist tab is never stale.
+      await reloadEvidence()
       onSaved(saved)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -296,6 +303,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
   // the moment of failing readiness instead.
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
+  const [readinessPassError, setReadinessPassError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [tab, setTab] = useState<'overview' | 'checklist' | 'documents' | 'history'>('overview')
   const [checklist, setChecklist] = useState<PerformanceChecklistItemOut[]>(req.checklist_items || [])
@@ -312,13 +320,18 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 
   async function act(action: string, extra?: Record<string, unknown>) {
     setError(null)
+    const isReadinessPass = action === 'readiness-decision' && extra?.decision === 'Passed'
+    if (isReadinessPass) setReadinessPassError(null)
     setBusy(true)
     try {
       onChanged(await api.post<PerformanceOut>(`/api/performance-requests/${req.id}/${action}`, extra || {}))
       setComments('')
       await loadExtras()
     }
-    catch (err) { setError(err) } finally { setBusy(false) }
+    catch (err) {
+      if (isReadinessPass) setReadinessPassError(err)
+      else setError(err)
+    } finally { setBusy(false) }
   }
 
   async function toggleChecklistItem(item: PerformanceChecklistItemOut) {
@@ -330,8 +343,6 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
       setChecklist((rows) => rows.map((r) => (r.id === saved.id ? saved : r)))
     } catch (err) { setError(err) }
   }
-
-  const pendingChecklistItems = checklist.filter((c) => c.is_mandatory && !c.is_complete)
 
   const isRequester = req.requester_id === user?.id || hasRole(user, 'ADMIN')
   const status = req.status
@@ -497,8 +508,8 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
             </DetailField>
             <DetailField label="Priority">{req.priority || '—'}</DetailField>
             <DetailField label="Risk Category">{req.risk_category || '—'}</DetailField>
-            <DetailField label="Created">{new Date(req.created_at).toLocaleString()}</DetailField>
-            <DetailField label="Last Updated">{new Date(req.updated_at).toLocaleString()}</DetailField>
+            <DetailField label="Created">{formatDateTimeIST(req.created_at)}</DetailField>
+            <DetailField label="Last Updated">{formatDateTimeIST(req.updated_at)}</DetailField>
           </DetailSection>
 
           <DetailSection title="Application & Change">
@@ -574,21 +585,16 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
           )}
 
           <div className="actions-panel">
-          {canCompleteReadiness && pendingChecklistItems.length > 0 && (
-            <p className="muted small" style={{ color: 'var(--danger, #c0392b)' }}>
-              {pendingChecklistItems.length} mandatory pre-testing readiness checklist item(s) still incomplete —
-              see the Readiness Checklist tab. These must all be ticked complete before Readiness can advance.
-            </p>
-          )}
           <div style={{ display: 'flex', gap: 8, margin: '10px 0', flexWrap: 'wrap', alignItems: 'center' }}>
             <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/performance-requests/${req.id}/export`, `${req.request_id}.pdf`)}>
               Export PDF
             </button>
             {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
-            <ChildRequestDelegation
+            <RequestDelegation
               targetType="PERFORMANCE"
               request={req}
               users={users}
+              disabled={busy}
               onChanged={async (updated) => { onChanged(updated); await loadExtras() }}
             />
             {canSubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
@@ -635,7 +641,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
             {canStartReadiness && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-readiness')}>Start Readiness</button>}
             {canCompleteReadiness && (
               <>
-                <button className="btn btn-success btn-sm" disabled={busy || pendingChecklistItems.length > 0}
+                <button className="btn btn-success btn-sm" disabled={busy}
                         onClick={() => act('readiness-decision', { decision: 'Passed', comments })}>
                   Readiness Passed
                 </button>
@@ -788,8 +794,16 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'documents' && <RequestDocuments apiBase="/api/performance-requests" reqId={req.id} canManage={canManageDocuments} />}
 
+      <ReadinessPassError error={readinessPassError} />
+
       {editing && (
-        <PerformanceFormModal editing={req} onClose={() => setEditing(false)} onSaved={(saved) => { setEditing(false); onChanged(saved); setChecklist(saved.checklist_items || []) }} />
+        <PerformanceFormModal
+          editing={req}
+          documentsByItem={documentsByItem}
+          reloadEvidence={reloadEvidence}
+          onClose={() => setEditing(false)}
+          onSaved={(saved) => { setEditing(false); onChanged(saved); setChecklist(saved.checklist_items || []) }}
+        />
       )}
     </Modal>
   )
@@ -877,8 +891,8 @@ export default function Performance() {
               <span className="badge badge-blue" title="Auto-created from a QA Request">Linked · {r.qa_request.request_id}</span>
             ) : <span className="badge badge-gray">Standalone (legacy)</span>
           ), filterValue: (r) => r.qa_request ? `Linked ${r.qa_request.request_id}` : 'Standalone legacy' },
-          { key: 'created_at', header: 'Created', render: (r) => new Date(r.created_at).toLocaleString() },
-          { key: 'updated_at', header: 'Updated', render: (r) => new Date(r.updated_at).toLocaleString() },
+          { key: 'created_at', header: 'Created', render: (r) => formatDateTimeIST(r.created_at) },
+          { key: 'updated_at', header: 'Updated', render: (r) => formatDateTimeIST(r.updated_at) },
         ]} rows={rows} />
       </Card>
       {selected && (

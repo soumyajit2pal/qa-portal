@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from './api'
+import { formatDateTimeIST } from './time'
 import { useAuth } from './context/AuthContext'
-import { Card, MetricCard, BarChart, Table, Badge, ErrorText, TableColumn } from './components/Common'
+import { Card, MetricCard, BarChart, Table, Badge, ErrorText, Modal, TableColumn } from './components/Common'
 import SearchableSelect from './components/SearchableSelect'
 import ClearableSearchInput from './components/ClearableSearchInput'
 import {
@@ -16,6 +17,7 @@ import {
   QARequestListOut, PageOut, FunctionalListOut, SASTListOut, DASTListOut, PerformanceListOut,
   ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut, DashboardSummaryOut,
   SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard,
+  DashboardAttentionMetric, DashboardAttentionOut, DashboardAttentionRow,
 } from './types'
 
 // A single request, whatever its underlying type, reduced to the handful of
@@ -126,6 +128,17 @@ interface RaisedRange {
   to: string
 }
 const DEFAULT_RAISED_RANGE: RaisedRange = { preset: 'all', from: '', to: '' }
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
+
+/** Format an instant for API filters without converting it to UTC/GMT. */
+function toIstApiDateTime(date: Date): string {
+  return new Date(date.getTime() + IST_OFFSET_MS).toISOString().replace('Z', '+05:30')
+}
+
+/** Date-only inputs represent calendar dates in the QA Portal's IST timezone. */
+function istDateAt(date: string, time: string): Date {
+  return new Date(`${date}T${time}+05:30`)
+}
 
 function rangeBounds(range: RaisedRange): { start?: Date; end?: Date } {
   if (range.preset === 'all') return {}
@@ -136,16 +149,16 @@ function rangeBounds(range: RaisedRange): { start?: Date; end?: Date } {
     const start = new Date(); start.setMonth(start.getMonth() - 1)
     return { start, end: new Date() }
   }
-  const start = range.from ? new Date(`${range.from}T00:00:00`) : undefined
-  const end = range.to ? new Date(`${range.to}T23:59:59.999`) : undefined
+  const start = range.from ? istDateAt(range.from, '00:00:00') : undefined
+  const end = range.to ? istDateAt(range.to, '23:59:59.999') : undefined
   return { start, end }
 }
 
 function rangeQuery(range: RaisedRange): string {
   const { start, end } = rangeBounds(range)
   const params = new URLSearchParams()
-  if (start) params.set('date_from', start.toISOString())
-  if (end) params.set('date_to', end.toISOString())
+  if (start) params.set('date_from', toIstApiDateTime(start))
+  if (end) params.set('date_to', toIstApiDateTime(end))
   const query = params.toString()
   return query ? `?${query}` : ''
 }
@@ -162,10 +175,9 @@ function isWithinRaisedRange(dateStr: string, range: RaisedRange): boolean {
     return t >= oneMonthAgo.getTime()
   }
   // custom
-  if (range.from && t < new Date(range.from).getTime()) return false
+  if (range.from && t < istDateAt(range.from, '00:00:00').getTime()) return false
   if (range.to) {
-    const toEnd = new Date(range.to)
-    toEnd.setHours(23, 59, 59, 999)
+    const toEnd = istDateAt(range.to, '23:59:59.999')
     if (t > toEnd.getTime()) return false
   }
   return true
@@ -255,17 +267,30 @@ interface StatCardProps {
   footline?: React.ReactNode
   spark?: Record<string, number>
   segments?: Segment[]
+  onOpen?: () => void
+  loading?: boolean
 }
 
-function StatCard({ icon: Icon, iconClass, tag, value, label, hint, footline, spark, segments }: StatCardProps) {
+function StatCard({ icon: Icon, iconClass, tag, value, label, hint, footline, spark, segments, onOpen, loading }: StatCardProps) {
   return (
-    <div className={`stat-card stat-card-${iconClass}`}>
+    <div
+      className={`stat-card stat-card-${iconClass}${onOpen ? ' stat-card-drilldown' : ''}`}
+      role={onOpen ? 'button' : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      onClick={onOpen}
+      onKeyDown={onOpen ? (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen()
+        }
+      } : undefined}
+    >
       <div className="top-row">
         <div className={`icon-chip ${iconClass}`}><Icon width={17} height={17} /></div>
         <div className="stat-card-meta">
           {tag && <span className="chip-tag">{tag}</span>}
-          {(hint || footline) && (
-            <span className="stat-card-info">
+          {(hint || footline) && !onOpen && (
+            <span className="stat-card-info" onClick={(event) => event.stopPropagation()}>
               <button type="button" aria-label={`About ${String(label)}`}>i</button>
               <span className="stat-card-tooltip" role="tooltip">
                 {hint && <span>{hint}</span>}
@@ -277,8 +302,15 @@ function StatCard({ icon: Icon, iconClass, tag, value, label, hint, footline, sp
       </div>
       <div className="value">{value}</div>
       <div className="label">{label}</div>
+      {onOpen && hint && <div className="hint">{hint}</div>}
       {spark && <Sparkline values={spark} />}
       {segments && <SegmentBar segments={segments} />}
+      {onOpen && footline && <div className="footline">{footline}</div>}
+      {onOpen && (
+        <span className="stat-card-drilldown-label">
+          {loading ? 'Loading records…' : 'View consolidated data'} <b aria-hidden="true">→</b>
+        </span>
+      )}
     </div>
   )
 }
@@ -420,6 +452,7 @@ function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
 // Dashboard level and shared across tab switches, but only MyRequestsTab
 // needs them now (genuine row browsing, out of scope for this endpoint).
 function CommandCentre({ range }: { range: RaisedRange }) {
+  const navigate = useNavigate()
   const [proj, setProj] = useState<ProjectWiseOut | null>(null)
   const [threeW, setThreeW] = useState<ThreeWOut | null>(null)
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
@@ -437,6 +470,31 @@ function CommandCentre({ range }: { range: RaisedRange }) {
   const [priorityFilter, setPriorityFilter] = useState('')
   const [ageingFilter, setAgeingFilter] = useState('')
   const [governanceSearch, setGovernanceSearch] = useState('')
+  const [attentionMetric, setAttentionMetric] = useState<DashboardAttentionMetric | null>(null)
+  const [attentionDetail, setAttentionDetail] = useState<DashboardAttentionOut | null>(null)
+  const [attentionLoading, setAttentionLoading] = useState(false)
+  const [attentionError, setAttentionError] = useState<unknown>(null)
+
+  async function loadAttention(metric: DashboardAttentionMetric, page: number, pageSize: number) {
+    setAttentionError(null)
+    setAttentionLoading(true)
+    try {
+      const query = new URLSearchParams(rangeQuery(range).replace(/^\?/, ''))
+      query.set('page', String(page))
+      query.set('page_size', String(pageSize))
+      setAttentionDetail(await api.get<DashboardAttentionOut>(`/api/dashboard/attention/${metric}?${query.toString()}`))
+    } catch (err) {
+      setAttentionError(err)
+    } finally {
+      setAttentionLoading(false)
+    }
+  }
+
+  async function openAttention(metric: DashboardAttentionMetric) {
+    setAttentionMetric(metric)
+    setAttentionDetail(null)
+    await loadAttention(metric, 1, 5)
+  }
 
   useEffect(() => {
     const query = rangeQuery(range)
@@ -446,12 +504,10 @@ function CommandCentre({ range }: { range: RaisedRange }) {
       // is applied unconditionally server-side -- no flag needed here.
       api.get<ProjectWiseOut>(`/api/dashboard/project-wise${query}`),
       api.get<ThreeWOut>(`/api/dashboard/3w${query}`),
-      // /api/approvals also feeds the separate Approval Workflow Log page
-      // (see modules/governance/Approvals.tsx) -- both now apply the same
-      // department scoping unconditionally server-side (reported directly:
-      // "Approval Workflow log ... everything also by department only"), so
-      // no flag is needed here any more.
-      api.get<ApprovalActionOut[]>(`/api/approvals${query}`),
+      // The dashboard renders only five rows.  Its dedicated endpoint applies
+      // period/scope filtering and resolves references in batches, rather
+      // than fetching the audit feed's hundreds of approval records.
+      api.get<ApprovalActionOut[]>(`/api/dashboard/recent-activity${query}${query ? '&' : '?'}limit=5`),
       // DSH-001..004 -- replaces this tab's own client-side derivation of
       // active/nearing-release/critical-pending counts and the Functional
       // lifecycle breakdown from 4-5 fully-fetched request collections (see
@@ -499,7 +555,6 @@ function CommandCentre({ range }: { range: RaisedRange }) {
   // all now come straight from the summary endpoint (see its own docstring
   // for exact query definitions) instead of being derived here from full
   // request-row collections.
-  const nearingRelease = summary.nearing_release_count
   const criticalPending = summary.critical_pending_count
   const activeRequestsCount = summary.active_requests_count
 
@@ -514,28 +569,123 @@ function CommandCentre({ range }: { range: RaisedRange }) {
     { key: 'priority', header: 'Priority', render: (r) => r.priority ? <Badge status={r.priority} /> : '—' },
   ]
 
+  const drilldownColumns: TableColumn<DashboardAttentionRow>[] = attentionMetric === 'active-projects'
+    ? [
+        { key: 'project_id', header: 'CR / EPIC' },
+        { key: 'application_name', header: 'Applications' },
+        { key: 'department', header: 'Department', render: (r) => r.department || '—' },
+        { key: 'request_count', header: 'Active requests' },
+        { key: 'request_ids', header: 'Linked request IDs' },
+        { key: 'status', header: 'Current stages' },
+        { key: 'updated_at', header: 'Last updated', render: (r) => r.updated_at ? timeAgo(r.updated_at) : '—' },
+      ]
+    : attentionMetric === 'security-findings'
+    ? [
+        { key: 'type', header: 'Scan type' },
+        { key: 'request_id', header: 'Request ID' },
+        { key: 'application_name', header: 'Application' },
+        { key: 'department', header: 'Department', render: (r) => r.department || '—' },
+        { key: 'critical', header: 'Critical', render: (r) => r.critical || 0 },
+        { key: 'high', header: 'High', render: (r) => r.high || 0 },
+        { key: 'medium', header: 'Medium', render: (r) => r.medium || 0 },
+        { key: 'low', header: 'Low', render: (r) => r.low || 0 },
+        { key: 'value', header: 'Findings', render: (r) => <strong>{r.value || 0}</strong> },
+        { key: 'updated_at', header: 'Latest scan', render: (r) => r.updated_at ? timeAgo(r.updated_at) : '—' },
+      ]
+    : attentionMetric === 'pending-decisions'
+    ? [
+        { key: 'type', header: 'Request type' },
+        { key: 'request_id', header: 'Request ID' },
+        { key: 'application_name', header: 'Application' },
+        { key: 'department', header: 'Department', render: (r) => r.department || '—' },
+        { key: 'status', header: 'Decision stage', render: (r) => <Badge status={r.status || ''} /> },
+        { key: 'pending_with', header: 'Waiting on' },
+        { key: 'updated_at', header: 'Waiting since', render: (r) => r.updated_at ? timeAgo(r.updated_at) : '—' },
+      ]
+    : [
+        { key: 'type', header: 'Request type' },
+        { key: 'request_id', header: 'Request ID' },
+        { key: 'application_name', header: 'Application' },
+        { key: 'department', header: 'Department', render: (r) => r.department || '—' },
+        { key: 'status', header: 'Current stage', render: (r) => <Badge status={r.status || ''} /> },
+        { key: 'created_at', header: 'Raised', render: (r) => r.created_at ? timeAgo(r.created_at) : '—' },
+        { key: 'updated_at', header: 'Last updated', render: (r) => r.updated_at ? timeAgo(r.updated_at) : '—' },
+      ]
+
   return (
     <div className="dashboard-command-centre">
       <div className="dashboard-section-head">
-        <div><span>Live portfolio</span><h3>What needs attention</h3></div>
+        <div>
+          <span>Live portfolio</span>
+          <h3>What needs attention</h3>
+          <p>Select any card to see the exact records behind its total and open the relevant request.</p>
+        </div>
       </div>
       <div className="grid grid-4 dashboard-metric-grid">
-        <StatCard icon={IconGrid} iconClass="blue" tag="Live" value={m.active_projects} label="Active projects"
-                  hint="Applications currently moving through functional QA."
-                  footline={`${nearingRelease} nearing release`} spark={proj.charts.risk_distribution} />
-        <StatCard icon={IconWarning} iconClass="red" tag="Live" value={m.sast_findings + m.dast_findings} label="Open security findings"
-                  hint="Unresolved SAST and DAST findings."
+        <StatCard icon={IconGrid} iconClass="blue" tag="Distinct CR / EPIC" value={m.active_projects} label="Active projects"
+                  hint="Distinct CR/EPICs with at least one active Functional QA request."
+                  footline="Source: active Functional QA requests"
+                  loading={attentionLoading && attentionMetric === 'active-projects'}
+                  onOpen={() => openAttention('active-projects')} />
+        <StatCard icon={IconWarning} iconClass="red" tag="Latest scans" value={m.sast_findings + m.dast_findings} label="Open security findings"
+                  hint="Unresolved findings in the latest Fortify scan for every SAST and DAST request."
                   footline={`${m.sast_findings} SAST · ${m.dast_findings} DAST findings open`}
-                  segments={[{ label: 'SAST', value: m.sast_findings, color: '#dc2626' }, { label: 'DAST', value: m.dast_findings, color: '#f97316' }]} />
-        <StatCard icon={IconApprove} iconClass="amber" tag={criticalPending ? `${criticalPending} critical` : 'Needs attention'} value={m.pending_approvals} label="Waiting for a decision"
-                  hint="Requests paused until the responsible approver completes the current workflow step."
-                  footline="Open the relevant request module to approve, return, or reject." />
-        <StatCard icon={IconWorkflow} iconClass="purple" tag="Live" value={activeRequestsCount} label="Active requests (org-wide)"
+                  segments={[{ label: 'SAST', value: m.sast_findings, color: '#dc2626' }, { label: 'DAST', value: m.dast_findings, color: '#f97316' }]}
+                  loading={attentionLoading && attentionMetric === 'security-findings'}
+                  onOpen={() => openAttention('security-findings')} />
+        <StatCard icon={IconApprove} iconClass="amber" tag={criticalPending ? `${criticalPending} critical` : 'Approval queue'} value={m.pending_approvals} label="Waiting for a decision"
+                  hint="Functional, SAST, DAST, or Suppression records waiting at a decision step."
+                  footline="Grouped across all decision workflows in your visible scope"
+                  loading={attentionLoading && attentionMetric === 'pending-decisions'}
+                  onOpen={() => openAttention('pending-decisions')} />
+        <StatCard icon={IconWorkflow} iconClass="purple" tag="Child requests" value={activeRequestsCount} label="Active child requests"
                   hint={range.preset === 'all'
-                    ? 'Open Functional, SAST, DAST, and Performance child requests.'
-                    : 'Open child requests raised within the selected period.'}
-                  footline={`${summary.child_requests_total} exact child request${summary.child_requests_total === 1 ? '' : 's'}${range.preset === 'all' ? ' across all departments' : ' in the selected range'}`} />
+                    ? 'Non-draft Functional, SAST, DAST, and Performance requests that are still open.'
+                    : 'Still-open child requests raised within the selected period.'}
+                  footline={`${summary.child_requests_total} total child request${summary.child_requests_total === 1 ? '' : 's'}${range.preset === 'all' ? ' in your visible scope' : ' in the selected range'}`}
+                  loading={attentionLoading && attentionMetric === 'active-requests'}
+                  onOpen={() => openAttention('active-requests')} />
       </div>
+
+      {attentionMetric && (
+        <Modal
+          title={attentionDetail?.title || 'Consolidated dashboard data'}
+          onClose={() => { setAttentionMetric(null); setAttentionDetail(null); setAttentionError(null) }}
+          wide
+        >
+          {attentionLoading && <p className="muted">Loading the source records behind this total…</p>}
+          <ErrorText error={attentionError} />
+          {attentionDetail && (
+            <>
+              <div className="dashboard-drilldown-summary">
+                <div><strong>{attentionDetail.total}</strong><span>{attentionDetail.unit}</span></div>
+                <p>{attentionDetail.description}</p>
+              </div>
+              <p className="muted small dashboard-drilldown-help">
+                Five records are shown per page by default. Use the page-size control or column filters to review the data, then select a row to open its source request.
+              </p>
+              <Table
+                rowKey="key"
+                columns={drilldownColumns}
+                rows={attentionDetail.rows}
+                server={{
+                  page: attentionDetail.page,
+                  pageSize: attentionDetail.page_size,
+                  total: attentionDetail.total_rows,
+                  totalPages: attentionDetail.total_pages,
+                  hasNext: attentionDetail.has_next,
+                  hasPrevious: attentionDetail.has_previous,
+                  loading: attentionLoading,
+                  onPageChange: (page) => loadAttention(attentionMetric, page, attentionDetail.page_size),
+                  onPageSizeChange: (pageSize) => loadAttention(attentionMetric, 1, pageSize),
+                }}
+                onRowClick={(row) => { if (row.route) navigate(row.route) }}
+              />
+              {attentionDetail.rows.length === 0 && <p className="muted small">No source records currently contribute to this metric.</p>}
+            </>
+          )}
+        </Modal>
+      )}
 
       <Card
         style={{ marginTop: 18 }}
@@ -797,7 +947,7 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
                 { key: 'step', header: 'Step' },
                 { key: 'decision', header: 'Decision' },
                 { key: 'actor_role', header: 'Role' },
-                { key: 'at', header: 'When', render: (r) => new Date(r.at).toLocaleString() },
+                { key: 'at', header: 'When', render: (r) => formatDateTimeIST(r.at) },
               ]} rows={detail.lifecycle} />
               <div className="section-title">Readiness Checklist</div>
               <ul className="small">
@@ -1199,7 +1349,7 @@ function TesterOverviewTab() {
     { key: 'executions_completed', header: 'Execution Attempts', render: (row) => <button className="tester-metric-link" disabled={!row.executions_completed} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Executions') }}>{row.executions_completed}</button> },
     { key: 'projects_worked', header: 'Projects Worked On', render: (row) => <button className="tester-metric-link success" disabled={!row.projects_worked} title={row.project_names.join('\n')} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Projects') }}>{row.projects_worked}</button>, filterValue: (row) => row.project_names.join(' ') },
     { key: 'current_execution_assignments', header: 'Current Assignments', render: (row) => <button className="tester-metric-link" disabled={!row.current_execution_assignments} onClick={(event) => { event.stopPropagation(); openContribution(row, 'Current Assignments') }}>{row.current_execution_assignments}</button> },
-    { key: 'last_activity', header: 'Last Activity', render: (row) => row.last_activity ? new Date(row.last_activity).toLocaleString() : <span className="muted">No activity in period</span> },
+    { key: 'last_activity', header: 'Last Activity', render: (row) => row.last_activity ? formatDateTimeIST(row.last_activity) : <span className="muted">No activity in period</span> },
   ]
 
   const departments = Array.from(new Set(workload.rows.map((row) => row.department).filter((value) => value && value !== '—'))).sort()
@@ -1230,7 +1380,7 @@ function TesterOverviewTab() {
     return result
   }, {})
   const bounds = rangeBounds(range)
-  const periodLabel = range.preset === 'all' ? 'All recorded activity' : `${bounds.start?.toLocaleDateString() || 'Beginning'} – ${bounds.end?.toLocaleDateString() || 'Today'}`
+  const periodLabel = range.preset === 'all' ? 'All recorded activity' : `${bounds.start?.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) || 'Beginning'} – ${bounds.end?.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) || 'Today'} (IST)`
 
   function exportContribution() {
     downloadCsv('qa-contribution-and-coverage.csv', filteredRows.map((row) => ({
@@ -1244,7 +1394,7 @@ function TesterOverviewTab() {
       retests_performed: row.retests_performed, execution_attempts: row.executions_completed,
       projects_worked_on: row.projects_worked, project_names: row.project_names.join('; '),
       current_assignments: row.current_execution_assignments,
-      last_activity: row.last_activity ? new Date(row.last_activity).toLocaleString() : '',
+      last_activity: row.last_activity ? formatDateTimeIST(row.last_activity) : '',
       reporting_period: periodLabel,
     })), [
       { key: 'tester', header: 'QA Tester' }, { key: 'department', header: 'Department' },
@@ -1267,8 +1417,8 @@ function TesterOverviewTab() {
     try {
       const { start, end } = rangeBounds(range)
       const params = new URLSearchParams()
-      if (start) params.set('date_from', start.toISOString())
-      if (end) params.set('date_to', end.toISOString())
+      if (start) params.set('date_from', toIstApiDateTime(start))
+      if (end) params.set('date_to', toIstApiDateTime(end))
       const selectedTester = workload?.rows.find((row) => row.tester_id === Number(testerFilterId))
       if (selectedTester) params.set('search', selectedTester.tester_name)
       if (departmentFilter) params.set('department', departmentFilter)
@@ -1350,21 +1500,21 @@ function TesterOverviewTab() {
           { key: 'project_key', header: 'Project', render: (project) => <strong>{project.project_key}</strong> },
           { key: 'project_name', header: 'Project Name' },
           { key: 'activity_types', header: 'Contribution Types', render: (project) => project.activity_types.join(', ') },
-          { key: 'last_activity', header: 'Last Activity', render: (project) => project.last_activity ? new Date(project.last_activity).toLocaleString() : '—' },
+          { key: 'last_activity', header: 'Last Activity', render: (project) => project.last_activity ? formatDateTimeIST(project.last_activity) : '—' },
         ]} /> : detailView === 'Current Assignments' ? <Table rowKey="record_key" rows={contributionDetail.current_assignments} onRowClick={(item) => navigate(item.route)} columns={[
           { key: 'record_key', header: 'Test Case', render: (item) => <strong>{item.record_key}</strong> },
           { key: 'project_name', header: 'Project', render: (item) => `${item.project_key} — ${item.project_name}` },
           { key: 'cycle_key', header: 'Cycle' },
           { key: 'cycle_status', header: 'Cycle Status', render: (item) => <Badge status={item.cycle_status} /> },
           { key: 'execution_status', header: 'Latest Result', render: (item) => <Badge status={item.execution_status} /> },
-          { key: 'assigned_at', header: 'Assigned', render: (item) => item.assigned_at ? new Date(item.assigned_at).toLocaleString() : '—' },
+          { key: 'assigned_at', header: 'Assigned', render: (item) => item.assigned_at ? formatDateTimeIST(item.assigned_at) : '—' },
         ]} /> : <Table rowKey="activity_id" rows={contributionDetail.activities.filter((item) => (detailView === 'Defects' && item.activity_type === 'Defect Raised') || (detailView === 'Retests' && item.activity_type === 'Defect Retested') || (detailView === 'Executions' && item.activity_type === 'Execution Attempt'))} onRowClick={(item) => navigate(item.route)} columns={[
           { key: 'activity_type', header: 'Activity' },
           { key: 'record_key', header: 'Record ID', render: (item) => <strong>{item.record_key}</strong> },
           { key: 'project_name', header: 'Project', render: (item) => item.project_name ? `${item.project_key} — ${item.project_name}` : 'Not linked to a Test Project' },
           { key: 'description', header: 'Details' },
           { key: 'status', header: 'Status', render: (item) => <Badge status={item.status} /> },
-          { key: 'activity_at', header: 'Activity Date', render: (item) => new Date(item.activity_at).toLocaleString() },
+          { key: 'activity_at', header: 'Activity Date', render: (item) => formatDateTimeIST(item.activity_at) },
         ]} />}
         {!['Projects', 'Current Assignments'].includes(detailView) && <p className="muted small">Up to {contributionDetail.detail_limit} recent records are shown per activity category. Summary counts above always cover the complete selected period.</p>}
       </Card>}
@@ -1409,7 +1559,7 @@ function TesterOverviewTab() {
               { key: 'application_name', header: 'Application' },
               { key: 'status', header: 'Status', render: (item) => <Badge status={item.status} /> },
               { key: 'work_state', header: 'Work State', render: (item) => <span className={item.is_current ? 'tester-ledger-current' : 'tester-ledger-complete'}>{item.is_current ? 'Currently working' : 'Completed'}</span> },
-              { key: 'updated_at', header: 'Last Activity', render: (item) => new Date(item.updated_at).toLocaleString() },
+              { key: 'updated_at', header: 'Last Activity', render: (item) => formatDateTimeIST(item.updated_at) },
             ]}
           />
           {!tester.assignments.length && <p className="muted small">No request assignments found for the selected period.</p>}
@@ -1439,7 +1589,7 @@ export default function Dashboard() {
   const { user } = useAuth()
   const [tab, setTab] = useState('command')
   const [insightTab, setInsightTab] = useState<'security' | 'suppression' | '3w'>('security')
-  const range = DEFAULT_RAISED_RANGE
+  const [range, setRange] = useState<RaisedRange>(DEFAULT_RAISED_RANGE)
 
   const hideRequestsTab = !!user?.roles?.some((r) => REQUESTS_TAB_HIDDEN_ROLES.includes(r))
     && !user?.roles?.includes('ADMIN')
@@ -1466,6 +1616,21 @@ export default function Dashboard() {
           <span>Monitor delivery health, governance, security, and team performance.</span>
         </div>
         <div className="dashboard-header-status"><i /><span><strong>Systems operational</strong><small>Live portal data</small></span></div>
+      </div>
+      <div className="tester-period-filter" role="group" aria-label="Dashboard reporting period">
+        <div><strong>Reporting period</strong><span>All dates use India Standard Time (IST). Dashboard metrics, activity, insights, and requests use this created/raised-date range.</span></div>
+        <div className="tester-period-presets">
+          {([
+            ['all', 'All time'], ['1h', 'Last hour'], ['3d', 'Last 3 days'], ['15d', 'Last 15 days'], ['1m', 'Last month'], ['custom', 'Custom dates'],
+          ] as Array<[RaisedRangePreset, string]>).map(([preset, label]) => (
+            <button key={preset} type="button" className={range.preset === preset ? 'active' : ''}
+                    onClick={() => setRange((current) => ({ ...current, preset }))}>{label}</button>
+          ))}
+        </div>
+        {range.preset === 'custom' && <div className="tester-custom-dates">
+          <label><span>From *</span><input required type="date" value={range.from} max={range.to || undefined} onChange={(event) => setRange((current) => ({ ...current, from: event.target.value }))} /></label>
+          <label><span>To *</span><input required type="date" value={range.to} min={range.from || undefined} onChange={(event) => setRange((current) => ({ ...current, to: event.target.value }))} /></label>
+        </div>}
       </div>
       <div className="tabs dashboard-tabs">
         {tabs.map((t) => (

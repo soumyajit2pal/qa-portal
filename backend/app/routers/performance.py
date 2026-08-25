@@ -558,7 +558,17 @@ def complete_planning(req_id: int, payload: schemas.AssignTesterIn, db: Session 
         previous_users = db.query(models.User).filter(models.User.id.in_(previous_ids)).all() if previous_ids else []
         previous_label = ", ".join(u.full_name for u in previous_users) if previous_users else "Unassigned"
         new_label = ", ".join(tester.full_name for tester in testers)
-        reassignment.record_reassignment(db, "PERFORMANCE", obj.id, current_user, previous_label, new_label, payload.reason)
+        reassignment.record_reassignment(
+            db, "PERFORMANCE", obj.id, current_user, previous_label, new_label, payload.reason,
+            assignment_role="QA_TESTER",
+            previous_assignee_ids=previous_ids,
+            new_assignee_ids=tester_ids,
+        )
+    else:
+        reassignment.record_assignment_change(
+            db, "PERFORMANCE", obj.id, "QA_TESTER", current_user,
+            previous_ids, tester_ids, payload.reason,
+        )
     db.commit()
     db.refresh(obj)
     return obj
@@ -739,7 +749,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
         subtitle="Performance Testing Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

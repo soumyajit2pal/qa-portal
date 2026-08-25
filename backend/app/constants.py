@@ -1,6 +1,7 @@
 """Shared enumerations / constant lists used across models, schemas and routers."""
 
 import datetime
+from zoneinfo import ZoneInfo
 
 # ---- Roles (Section: User Roles table in the CR document) ----
 class Role:
@@ -417,7 +418,7 @@ def validate_target_release_date(target_release_date) -> None:
     HTTPException. Silently passes on None (field left blank)."""
     if target_release_date is None:
         return
-    if target_release_date < datetime.date.today():
+    if target_release_date < datetime.datetime.now(ZoneInfo("Asia/Kolkata")).date():
         raise ValueError(
             f"Target Release Date ('{target_release_date.isoformat()}') cannot be in the past."
         )

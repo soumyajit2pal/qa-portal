@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { decodeMergedRichTable, encodeMergedRichTable, normalizeMergedRichTable } from '../richTableCodec'
 
 // Shared low-level mechanics behind every Jira-style rich text editor in
 // this app: markdown <-> contentEditable-HTML conversion, the formatting
@@ -38,11 +39,21 @@ function listToMarkdown(element: HTMLElement, ordered: boolean): string {
 }
 
 function tableToMarkdown(element: HTMLElement): string {
-  const rows = Array.from(element.querySelectorAll('tr')).map((row) =>
-    Array.from(row.querySelectorAll('th,td')).map((cell) =>
-      textOf(cell).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').trim()
-    )
-  ).filter((row) => row.length > 0)
+  const sourceRows = Array.from((element as HTMLTableElement).rows).map((row) =>
+    Array.from(row.children).filter((cell) => cell instanceof HTMLTableCellElement).map((cell) => {
+      const tableCell = cell as HTMLTableCellElement
+      return {
+        t: textOf(tableCell).replace(/\s*\n\s*/g, ' ').trim(),
+        c: tableCell.colSpan > 1 ? tableCell.colSpan : undefined,
+        r: tableCell.rowSpan > 1 ? tableCell.rowSpan : undefined,
+        h: tableCell.tagName === 'TH' || undefined,
+      }
+    })
+  )
+  if (sourceRows.some((row) => row.some((cell) => cell.c || cell.r))) {
+    return `${encodeMergedRichTable(normalizeMergedRichTable({ rows: sourceRows }))}\n`
+  }
+  const rows = sourceRows.map((row) => row.map((cell) => cell.t.replace(/\|/g, '\\|')))
   if (!rows.length) return ''
   const width = Math.max(...rows.map((row) => row.length))
   const normalized = rows.map((row) => [...row, ...Array(Math.max(0, width - row.length)).fill('')])
@@ -111,6 +122,18 @@ export function editorContentToMarkdown(editor: HTMLDivElement | null): string {
   return editor ? textOf(editor).replace(/\n{3,}/g, '\n\n').trim() : ''
 }
 
+export function pasteStructuredRichText(event: React.ClipboardEvent<HTMLDivElement>, editor: HTMLDivElement | null): boolean {
+  const clipboardHtml = event.clipboardData.getData('text/html')
+  if (!editor || !/<table\b/i.test(clipboardHtml)) return false
+  const parsed = new DOMParser().parseFromString(clipboardHtml, 'text/html')
+  const markdown = textOf(parsed.body).replace(/\n{3,}/g, '\n\n').trim()
+  if (!markdown) return false
+  event.preventDefault()
+  editor.focus()
+  document.execCommand('insertHTML', false, markdownToEditorHtml(markdown))
+  return true
+}
+
 export function safeRichTextLink(value: string): string | null {
   const link = value.trim()
   return /^(https?:\/\/|mailto:)/i.test(link) ? link : null
@@ -162,6 +185,17 @@ export function markdownToEditorHtml(value: string): string {
   while (index < lines.length) {
     const line = lines[index]
     if (!line.trim()) { blocks.push('<div><br></div>'); index += 1; continue }
+    const mergedTable = decodeMergedRichTable(line)
+    if (mergedTable) {
+      const tableRows = mergedTable.rows.map((row) => `<tr>${row.map((cell) => {
+        const tag = cell.h ? 'th' : 'td'
+        const spans = `${cell.c ? ` colspan="${cell.c}"` : ''}${cell.r ? ` rowspan="${cell.r}"` : ''}`
+        return `<${tag}${spans}>${inlineHtml(cell.t).replace(/\n/g, '<br>')}</${tag}>`
+      }).join('')}</tr>`).join('')
+      blocks.push(`<table><tbody>${tableRows}</tbody></table>`)
+      index += 1
+      continue
+    }
     const image = line.match(/^!\[([^\]]*)\]\(attachment:([^)]+)\)$/)
     if (image) {
       const name = decodeRichImageName(image[2])

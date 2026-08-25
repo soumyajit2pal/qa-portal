@@ -1,11 +1,11 @@
 import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, or_, select, union_all
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import (
     get_current_user, can_review_repository, can_give_final_approval,
@@ -46,16 +46,12 @@ router = APIRouter(prefix="/api/pending-approvals", tags=["pending-approvals"])
 # Performance "Requester Verification" (the requester confirming their own
 # already-approved work, not a peer approving someone else's request).
 #
-# SRS 7.2 pagination rollout -- deliberately left unpaginated. Every
-# category query below already filters down to "genuinely awaiting THIS
-# user's decision right now" (their own role/department/specific
-# assignment), which self-bounds the result: an item leaves this list the
-# moment it's acted on, so it's a live personal action queue, not a growing
-# historical register someone browses page by page (the same reasoning
-# MyExecutions.tsx's own "assigned to me" queue was left on). Silently
-# truncating this to one page could hide a genuinely pending approval from
-# the one person who needs to act on it -- a worse outcome for a governed
-# QA portal than the page staying a single unpaginated fetch.
+# The queue is returned through the shared page contract. Pagination is
+# applied only after every role/department/maker-checker gate below has built
+# the complete authorized queue, so totals cannot expose or count approvals
+# the viewer cannot act on. Complete category counts travel with every page
+# so filtering remains accurate even when a category has no row on the
+# current page.
 #
 # Test Case review (2026-08 "Test Approval Workflow" refactor, APR-007
 # "Pending Approval shall show only items on which the logged-in user can
@@ -72,6 +68,40 @@ def _item(category, entity_type, entity_id, display_id, title, status, status_la
         "department": department, "submitted_by": submitted_by, "submitted_at": submitted_at, "path": path,
         "parent_request_id": parent_request_id, "parent_path": parent_path,
         "parent_label": parent_label, "folder_name": folder_name,
+    }
+
+
+def _pending_sort_key(item: dict):
+    submitted_at = item.get("submitted_at")
+    if submitted_at is None:
+        submitted_at = datetime.datetime.min
+    elif submitted_at.tzinfo is not None:
+        submitted_at = submitted_at.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return submitted_at, item["category"], item["entity_type"], item["entity_id"]
+
+
+def _paginate_pending_items(items: List[dict], params: pagination.PageParams,
+                            category: Optional[str]) -> dict:
+    """Build stable category facets, then slice only the requested queue."""
+    ordered = sorted(items, key=_pending_sort_key)
+    category_counts: dict[str, int] = {}
+    for item in ordered:
+        category_counts[item["category"]] = category_counts.get(item["category"], 0) + 1
+
+    normalized_category = category.strip() if category and category.strip() else None
+    filtered = [item for item in ordered if item["category"] == normalized_category] if normalized_category else ordered
+    total = len(filtered)
+    total_pages = max(1, -(-total // params.page_size))
+    start = (params.page - 1) * params.page_size
+    return {
+        "items": filtered[start:start + params.page_size],
+        "page": params.page,
+        "page_size": params.page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_next": params.page < total_pages,
+        "has_previous": params.page > 1,
+        "category_counts": category_counts,
     }
 
 
@@ -636,8 +666,13 @@ def count_pending_approvals(db: Session = Depends(get_db),
     return {"count": sum(int(value or 0) for value in branch_counts)}
 
 
-@router.get("", response_model=List[schemas.PendingApprovalItem])
-def list_pending_approvals(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+@router.get("", response_model=schemas.PendingApprovalPage)
+def list_pending_approvals(
+    params: pagination.PageParams = Depends(),
+    category: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Everything genuinely awaiting the logged-in user's own decision right
     now, across every approval checkpoint in the app -- see this module's own
     docstring above for the full inventory and the ADMIN-sees-everything
@@ -653,5 +688,4 @@ def list_pending_approvals(db: Session = Depends(get_db), current_user: models.U
         + _test_project_items(db, current_user)
         + _test_case_items(db, current_user)
     )
-    items.sort(key=lambda i: i["submitted_at"] or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc))
-    return items
+    return _paginate_pending_items(items, params, category)

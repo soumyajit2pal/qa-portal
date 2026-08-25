@@ -29,7 +29,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'getting-started', number: '01', title: 'Getting started',
     summary: 'Login, profile, navigation, dashboard, table controls, and your first request.',
-    keywords: 'login ldap standard profile department navigation dashboard insights columns table drawer pending approval request quick start',
+    keywords: 'login ldap standard profile department navigation dashboard insights columns table drawer pending approval request quick start pagination toast confirmation success message',
   },
   {
     id: 'roles', number: '02', title: 'Roles and access model',
@@ -59,7 +59,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'evidence', number: '07', title: 'Readiness, evidence, and decisions',
     summary: 'When documents must be attached and how approve, return, and reject differ.',
-    keywords: 'readiness checklist self declaration evidence attachment document approve return reject comment reason popup error',
+    keywords: 'readiness checklist self declaration evidence attachment document approve return reject remarks mandatory comment reason popup modal error refresh upload',
   },
   {
     id: 'test-management', number: '08', title: 'Test case management',
@@ -69,7 +69,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'collaboration', number: '09', title: 'Comments and collaboration',
     summary: 'Jira-style comments, rich text, images, attachments, and activity history.',
-    keywords: 'comment activity rich text bullet image paste attachment collaboration jira edit delete history',
+    keywords: 'comment activity rich text bullet image paste attachment collaboration jira edit delete history table merged cell colspan rowspan pdf export',
   },
   {
     id: 'find-report', number: '10', title: 'Find, monitor, and report',
@@ -209,7 +209,7 @@ export default function Help() {
         <div className="help-hero-meta">
           <span>Audience</span><strong>All portal users</strong>
           <span>Manual status</span><strong>Current portal workflow</strong>
-          <span>Last reviewed</span><strong>19 August 2026</strong>
+          <span>Last reviewed</span><strong>23 August 2026</strong>
         </div>
       </div>
 
@@ -265,6 +265,8 @@ export default function Help() {
                 <li><IconCheckCircle />Use the filter icon beside a column heading, type to search the suggested values, then select one; tables paginate automatically.</li>
                 <li><IconCheckCircle />Request drawers open expanded. They remain open until Close is selected; use the expand control to switch between expanded and standard width.</li>
                 <li><IconCheckCircle />Dashboard keeps operational items on the landing view. Open Insights for focused Security, Suppression, or 3W analysis.</li>
+                <li><IconCheckCircle />After a successful create, save, assignment, upload, workflow decision, or removal, a green toast confirms that the server accepted the action.</li>
+                <li><IconCheckCircle />Approval, return, rejection, reassignment, deletion, and other consequential actions use a confirmation or decision dialog before submission.</li>
               </ul>
             </ManualSection>
           )}
@@ -401,6 +403,9 @@ export default function Help() {
               <Callout title="The decision panel is consistent across workflows">
                 Select Add e-signature, review the locked logged-in identity, choose Professional, Classic, or Handwritten style, accept the electronic-signature consent statement, and apply the signature. Then choose Approve, Return to Requester, or Reject in Workflow Decision. Approval records the signer, selected style, intent, signature reference, account, role, and authoritative server timestamp in the Approval Workflow Log. QA Clearance details and exported certificates show the selected signature style together with its full Signature ID and signing time.
               </Callout>
+              <Callout tone="warning" title="Remarks are mandatory for Return and Reject">
+                Return and Reject cannot be submitted with blank remarks. State the corrective action, missing evidence, policy reason, or technical reason clearly enough for the next user and the audit reviewer to understand the decision.
+              </Callout>
               <p className="help-inline-note">This is an auditable in-application electronic signature. A certificate-based PKI signature using a USB token, DSC provider, or enterprise signing gateway requires a separately configured trust-provider integration.</p>
               <h3 className="help-subheading">Evidence rules</h3>
               <ul className="help-check-list">
@@ -408,8 +413,13 @@ export default function Help() {
                 <li><IconCheckCircle />Evidence is editable before Department Head approval.</li>
                 <li><IconCheckCircle />After Department Head approval, normal evidence upload is locked to protect the approved record.</li>
                 <li><IconCheckCircle />If any later stage returns the request, Edit Details allows the requester to add the corrective evidence.</li>
+                <li><IconCheckCircle />Functional, SAST, DAST, and Performance use the same evidence control, file count, delete confirmation, locked-state message, and post-upload refresh behavior.</li>
+                <li><IconCheckCircle />After Save Changes, the evidence list is reloaded so newly uploaded or deleted files are shown without reopening the request.</li>
                 <li><IconCheckCircle />Use comments to explain what the attachment proves; do not upload unexplained files.</li>
               </ul>
+              <Callout title="Readiness validation behaves the same in every testing module">
+                Readiness Passed remains an available action. If mandatory checklist data is incomplete, Functional, SAST, DAST, and Performance show the same error dialog with the missing conditions instead of silently disabling the button or using a module-specific inline error.
+              </Callout>
               <Callout tone="warning" title="When an action fails">
                 The portal shows a red popup containing the exact backend reason and corrective guidance. Read it fully before retrying; repeated clicks do not resolve missing data, status, assignment, or permission conditions.
               </Callout>
@@ -429,6 +439,7 @@ export default function Help() {
               <SopSteps items={[
                 { title: 'Select an active project', text: 'A project requires a Department selected from the system list. Selecting an Application automatically uses and locks its mapped Department. Create folders and subfolders for release, module, epic, or test scope.' },
                 { title: 'Create or import test cases', text: 'Complete the ID-linked hierarchy and all fields including epic, CR, module, priority, pre-condition, scenario, steps, expected result, and data.' },
+                { title: 'Enter repository details consistently', text: 'For SAST repository scope, enter each repository as its own structured row with Repository URL, Branch, Commit ID, Technology Stack, and Build Number. Use Add repository only when the project spans more than one repository.' },
                 { title: 'Review import results', text: 'The completion dialog identifies created and skipped rows and gives a reason for each issue. The uploaded xlsx is parsed in memory; the source workbook is not retained in document storage.' },
                 { title: 'Submit for QA recommendation', text: 'A new or materially updated testcase moves to Pending QA Recommendation and cannot be used in a cycle until final approval.' },
                 { title: 'Two-stage group approval', text: 'Stage 1 is shared by the eligible QA Group except the author. After recommendation, Stage 2 moves to the QA Lead Group for final approval, return, or rejection. The status filter shows this current workflow; retired reviewer-assignment statuses remain visible only on historical records.' },
@@ -437,6 +448,9 @@ export default function Help() {
               ]} />
               <Callout title="Stat cards follow the selected folder">
                 The Total, Approved, In Review, and Critical counts above the test case list reflect whichever folder (or Unfiled, or the whole project) is currently selected—not the whole project regardless of folder. Select a different folder to see that folder’s own counts.
+              </Callout>
+              <Callout title="Terminal workflow rows do not have a pending actor">
+                Approved, Rejected, and Archived test cases show only their final workflow status. “Pending with” and pending duration appear only while an actual recommendation or approval action is waiting for a person or group.
               </Callout>
               <h3 className="help-subheading">Testcase versioning and comparison</h3>
               <div className="help-rule-grid">
@@ -523,6 +537,7 @@ export default function Help() {
               <ul className="help-check-list">
                 <li><IconCheckCircle />After posting, the editor clears and the new comment is shown immediately.</li>
                 <li><IconCheckCircle />Inline images preserve their position: text → image → more text. Select an image to open the authenticated full-size version.</li>
+                <li><IconCheckCircle />Tables pasted from spreadsheet or Jira-style content preserve merged rows and columns in the editor, record view, and PDF export.</li>
                 <li><IconCheckCircle />Images from older comments remain available in their attachment gallery even though those records do not contain inline position information.</li>
                 <li><IconCheckCircle />Do not place credentials, secrets, production customer data, or unmasked personal information in comments or screenshots.</li>
                 <li><IconCheckCircle />Use the workflow action dialog for an approval reason; use Activity for ongoing collaboration and supporting context.</li>
@@ -534,8 +549,8 @@ export default function Help() {
             <ManualSection {...topic('find-report')}>
               <div className="help-card-grid three">
                 <article><IconSearch /><h3>Global search</h3><p>Search a full TQA ID from the top bar. Short test-case input such as TC-02 is normalized to TQA-TC-02 automatically. A CR or EPIC number (e.g. CR-1042) jumps to the QA Requests list showing every request raised under that exact CR, with its linked Functional/SAST/DAST/Performance/Clearance requests alongside each row.</p></article>
-                <article><IconChart /><h3>Dashboard</h3><p>Dashboard date controls provide All time, Last hour, Last 3 days, Last 15 days, Last month, and a custom From/To range. QA-only views include tester assignments and capacity.</p></article>
-                <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request ID. Approval Workflow Log supports server-side search and entity filtering across the decision trail.</p></article>
+                <article><IconChart /><h3>Dashboard</h3><p>Dashboard date controls provide All time, Last hour, Last 3 days, Last 15 days, Last month, and a custom From/To range. Attention cards explain their source and open consolidated, server-paginated records for the selected metric.</p></article>
+                <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request or Test Project, supports category filters, and provides server-side page-size and next/previous controls. Approval Workflow Log supports server-side search and entity filtering.</p></article>
               </div>
               <h3 className="help-subheading">QA Tester Overview: who worked on which request</h3>
               <p><strong>Contribution & Coverage</strong> is the default management view. It reports original testcases created, governed defects raised, governed defect retests, retained execution attempts, distinct Test Projects with actual activity, current execution assignments, and the tester's last activity in the selected period. Testcase versions do not inflate authoring totals.</p>
@@ -617,7 +632,7 @@ export default function Help() {
                 <div><strong>403 popup</strong><span>Your account is authenticated but not authorized for this action.</span><span>Verify role, department, self-approval rule, and assignment; request an access review if incorrect.</span></div>
                 <div><strong>404 popup / page</strong><span>The record does not exist, was removed, or the ID/route is incorrect.</span><span>Search the full TQA ID, verify the module, and confirm the record still exists.</span></div>
                 <div><strong>Import skipped or failed</strong><span>Duplicate, invalid, missing, unsupported, or unapproved data.</span><span>Open the issue summary and correct each row using its displayed reason; do not retry unchanged data.</span></div>
-                <div><strong>Upload path error</strong><span>The Admin-configured server path is not absolute, writable, mounted, or available to every API container.</span><span>Use System Settings to enter an absolute production path and verify the same persistent volume is mounted at that path for all API replicas.</span></div>
+                <div><strong>Upload path error</strong><span>The deployment-controlled upload path is not absolute, writable, or mounted for the backend container.</span><span>Ask the platform administrator to verify UPLOAD_STORAGE_ROOT and the Docker volume/bind mount; this path is not changed from the portal UI.</span></div>
                 <div><strong>Cannot execute</strong><span>Test case is unapproved, project inactive, or runner not assigned.</span><span>Approve the case, reactivate the project if authorized, and assign a COE - Quality Assurance runner.</span></div>
               </div>
               <Callout title="Excel import storage">
@@ -626,7 +641,7 @@ export default function Help() {
               <h3 className="help-subheading">Escalation checklist</h3>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Full TQA record ID and module name.</li>
-                <li><IconCheckCircle />Current status and Pending With value.</li>
+                <li><IconCheckCircle />Current status and, for a non-terminal record, its Pending With value.</li>
                 <li><IconCheckCircle />Your department and assigned roles—never include a password.</li>
                 <li><IconCheckCircle />Exact popup reason and corrective guidance.</li>
                 <li><IconCheckCircle />Timestamp, attempted action, and a masked screenshot if useful.</li>

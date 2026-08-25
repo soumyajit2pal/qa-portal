@@ -1,20 +1,12 @@
-import { RepeatableGroupField, RepeatableGroupRow } from '../components/Common'
+import type { RepeatableGroupRow } from '../components/Common'
+import { SAST_COMPONENT_FIELDS, blankSastComponent } from '../components/SastRepositoryDetails'
+
+export { SAST_COMPONENT_FIELDS, blankSastComponent }
 
 // One "SAST component" = one repository, with its own branch/commit/tech
 // stack/build number -- the "+" on the SAST step adds a whole new one of
 // these (not just another URL), since a project can have several repos each
 // needing their own full set of details.
-export const SAST_COMPONENT_FIELDS: RepeatableGroupField[] = [
-  { key: 'repository_url', label: 'Repository URL' },
-  { key: 'git_branch', label: 'Branch' },
-  { key: 'commit_id', label: 'Commit ID' },
-  { key: 'technology_stack', label: 'Tech Stack' },
-  { key: 'build_number', label: 'Build Number' },
-]
-export function blankSastComponent(): RepeatableGroupRow {
-  return { repository_url: '', git_branch: '', commit_id: '', technology_stack: '', build_number: '' }
-}
-
 // One "DAST target" = one URL to scan, with its own environment/auth
 // requirement/credentials -- the "+" adds a whole new target, since a
 // project can have more than one URL to test. Test Credentials only shows

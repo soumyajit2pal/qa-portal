@@ -856,6 +856,48 @@ export interface DashboardSummaryOut {
   functional_status_counts: Record<string, number>
 }
 
+export type DashboardAttentionMetric =
+  | 'active-projects'
+  | 'security-findings'
+  | 'pending-decisions'
+  | 'active-requests'
+
+export interface DashboardAttentionRow {
+  key: string
+  type?: string
+  request_id?: string
+  request_ids?: string
+  project_id?: string
+  application_name?: string
+  department?: string | null
+  status?: string
+  pending_with?: string
+  request_count?: number
+  critical?: number
+  high?: number
+  medium?: number
+  low?: number
+  value?: number
+  created_at?: string
+  updated_at?: string
+  route?: string | null
+}
+
+export interface DashboardAttentionOut {
+  metric: DashboardAttentionMetric
+  title: string
+  description: string
+  total: number
+  unit: string
+  rows: DashboardAttentionRow[]
+  page: number
+  page_size: number
+  total_rows: number
+  total_pages: number
+  has_next: boolean
+  has_previous: boolean
+}
+
 export interface ThreeWItem {
   project_id: string
   application_name?: string
@@ -1717,4 +1759,8 @@ export interface PendingApprovalItem {
   submitted_by?: string | null
   submitted_at?: string | null
   path: string
+}
+
+export interface PendingApprovalPage extends PageOut<PendingApprovalItem> {
+  category_counts: Record<string, number>
 }

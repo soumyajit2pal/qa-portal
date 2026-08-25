@@ -10,7 +10,6 @@ import json
 import os
 import threading
 import uuid
-from datetime import datetime
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -55,7 +54,7 @@ def _write(job_id: str, data: dict) -> None:
 def update(job_id: str, **changes: Any) -> None:
     current = _read(job_id) or {}
     current.update(changes)
-    current["updated_at"] = datetime.utcnow().isoformat()
+    current["updated_at"] = models.now().isoformat()
     _write(job_id, current)
 
 
@@ -76,7 +75,7 @@ async def save_streaming_response(job_id: str, response, filename: str) -> dict:
 
 
 def _run(job_id: str, action: Callable[[str], Optional[dict]]) -> None:
-    update(job_id, status="RUNNING", progress=5, started_at=datetime.utcnow().isoformat())
+    update(job_id, status="RUNNING", progress=5, started_at=models.now().isoformat())
     try:
         result = action(job_id) or {}
         update(
@@ -84,21 +83,21 @@ def _run(job_id: str, action: Callable[[str], Optional[dict]]) -> None:
             status="COMPLETED",
             progress=100,
             result=result,
-            finished_at=datetime.utcnow().isoformat(),
+            finished_at=models.now().isoformat(),
         )
     except Exception as exc:
         update(
             job_id,
             status="FAILED",
             error=str(getattr(exc, "detail", None) or exc),
-            finished_at=datetime.utcnow().isoformat(),
+            finished_at=models.now().isoformat(),
         )
 
 
 def enqueue(background_tasks: BackgroundTasks, job_type: str, user_id: int,
             action: Callable[[str], Optional[dict]]) -> dict:
     job_id = uuid.uuid4().hex
-    now = datetime.utcnow().isoformat()
+    now = models.now().isoformat()
     _write(job_id, {
         "id": job_id,
         "job_type": job_type,

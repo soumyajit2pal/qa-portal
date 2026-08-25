@@ -508,6 +508,15 @@ def _assign_security_analyst(db: Session, obj, payload, current_user):
         reassignment.record_reassignment(
             db, entity_type, obj.id, current_user,
             previous_user.full_name if previous_user else "Unassigned", analyst.full_name, payload.reason,
+            assignment_role="SECURITY_ANALYST",
+            previous_assignee_ids=[previous_id],
+            new_assignee_ids=[analyst.id],
+        )
+    else:
+        entity_type = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+        reassignment.record_assignment_change(
+            db, entity_type, obj.id, "SECURITY_ANALYST", current_user,
+            [previous_id], [analyst.id], payload.reason,
         )
     db.commit()
     db.refresh(obj)
@@ -1794,7 +1803,7 @@ def export_dast(req_id: int, db: Session = Depends(get_db), current_user: models
         subtitle="DAST Request — Full Detail Export",
         sections=sections, history=history, history_note=history_note,
         generated_by=current_user.full_name,
-        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

@@ -507,7 +507,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
         subtitle="Suppression / False Positive Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

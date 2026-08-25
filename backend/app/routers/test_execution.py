@@ -980,6 +980,11 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
         actor_id=current_user.id, actor_role=current_user.roles_csv,
         decision="Created", comments=f"Created test cycle {obj.cycle_key} - {obj.name}.",
     ))
+    if obj.owner_id is not None:
+        reassignment.record_assignment_change(
+            db, "TEST_CYCLE", obj.id, "CYCLE_OWNER", current_user,
+            [], [obj.owner_id], "Assigned during cycle creation",
+        )
     if linked_request:
         obj.child_request_link = models.TestCycleChildRequestLink(
             child_type=payload.linked_request_type, child_id=linked_request.id,
@@ -1123,7 +1128,8 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     # mandatory. Setting an owner for the first time keeps the existing
     # broad _EXEC_ROLES gate already enforced at the endpoint level.
     previous_owner_id = previous_values["owner_id"]
-    is_owner_reassignment = "owner_id" in data and previous_owner_id is not None and data["owner_id"] != previous_owner_id
+    owner_changed = "owner_id" in data and data["owner_id"] != previous_owner_id
+    is_owner_reassignment = owner_changed and previous_owner_id is not None
     previous_owner = None
     owner_reason = None
     if is_owner_reassignment:
@@ -1218,6 +1224,14 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
             previous_owner.full_name if previous_owner else "Unassigned",
             new_owner.full_name if new_owner else "Unassigned",
             owner_reason, step_name="Owner Reassignment",
+            assignment_role="CYCLE_OWNER",
+            previous_assignee_ids=[previous_owner_id],
+            new_assignee_ids=[obj.owner_id],
+        )
+    elif owner_changed:
+        reassignment.record_assignment_change(
+            db, "TEST_CYCLE", obj.id, "CYCLE_OWNER", current_user,
+            [previous_owner_id], [obj.owner_id], payload.reason,
         )
     db.commit()
     db.refresh(obj)
@@ -1813,6 +1827,13 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
         db.add(obj)
         created.append(obj)
         already.add(case_id)
+    if assigned_runner and created:
+        db.flush()
+        for execution in created:
+            reassignment.record_assignment_change(
+                db, "TEST_EXECUTION", execution.id, "EXECUTION_RUNNER", current_user,
+                [], [assigned_runner.id], "Assigned when added to test cycle",
+            )
     for execution in created:
         db.add(models.ApprovalAction(
             entity_type="TEST_CASE", entity_id=execution.test_case_id, step_name="Test Cycle",
@@ -1954,6 +1975,7 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
     _require_open_cycle(cycle)
     previous_id = obj.assigned_to_id
     previous_name = obj.assigned_to_name
+    previous_assigned_at = obj.assigned_at
     is_reassignment = previous_id is not None
     _require_qa_assignment_manager(current_user)
     if is_reassignment:
@@ -1979,6 +2001,18 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
         reassignment.record_reassignment(
             db, "TEST_CASE", obj.test_case_id, current_user,
             previous_name or "Unassigned", target.full_name if target else "Unassigned", payload.reason,
+            assignment_role="EXECUTION_RUNNER",
+            previous_assignee_ids=[previous_id],
+            new_assignee_ids=[target.id if target else None],
+            previous_assigned_at=previous_assigned_at,
+            assignment_entity_type="TEST_EXECUTION",
+            assignment_entity_id=obj.id,
+        )
+    else:
+        reassignment.record_assignment_change(
+            db, "TEST_EXECUTION", obj.id, "EXECUTION_RUNNER", current_user,
+            [previous_id], [target.id if target else None], payload.reason,
+            previous_assigned_at=previous_assigned_at,
         )
     db.commit()
     db.refresh(obj)
@@ -2027,6 +2061,8 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
         reassignment.require_reason(payload.reason)
 
     previous_names = {execution.id: execution.assigned_to_name for execution in ordered}
+    previous_ids = {execution.id: execution.assigned_to_id for execution in ordered}
+    previous_assigned_at = {execution.id: execution.assigned_at for execution in ordered}
     for execution in ordered:
         execution.assigned_to_id = target.id
         execution.assigned_by_id = current_user.id
@@ -2045,6 +2081,18 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
             reassignment.record_reassignment(
                 db, "TEST_CASE", execution.test_case_id, current_user,
                 previous_names[execution.id] or "Unassigned", target.full_name, payload.reason,
+                assignment_role="EXECUTION_RUNNER",
+                previous_assignee_ids=[previous_ids[execution.id]],
+                new_assignee_ids=[target.id],
+                previous_assigned_at=previous_assigned_at[execution.id],
+                assignment_entity_type="TEST_EXECUTION",
+                assignment_entity_id=execution.id,
+            )
+        else:
+            reassignment.record_assignment_change(
+                db, "TEST_EXECUTION", execution.id, "EXECUTION_RUNNER", current_user,
+                [previous_ids[execution.id]], [target.id], payload.reason,
+                previous_assigned_at=previous_assigned_at[execution.id],
             )
     db.commit()
     for execution in ordered:

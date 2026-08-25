@@ -21,7 +21,11 @@ def pk_column():
 
 
 def now():
-    return datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Asia/Kolkata"))
+    return datetime.datetime.now(datetime.UTC).astimezone(ZoneInfo("Asia/Kolkata"))
+
+
+def today_ist():
+    return now().date()
 
 
 def as_aware(dt):
@@ -437,7 +441,7 @@ class QARequest(Base):
     # raised. Oracle's UNIQUE constraint permits any number of NULLs, so
     # multiple concurrent Drafts are never blocked by this.
     request_id = Column(String(40), unique=True, nullable=True)
-    request_date = Column(Date, default=lambda: datetime.date.today())
+    request_date = Column(Date, default=today_ist)
     department = Column(String(150))
     application_name = Column(String(150), nullable=False)
     application_owner = Column(String(150))
@@ -1664,10 +1668,73 @@ class ApprovalAction(Base):
     def actor_name(self):
         return self.actor.full_name if self.actor else None
 
-
     @property
     def created_by_name(self):
         return self.created_by.full_name if self.created_by else None
+
+
+class EmailNotification(Base):
+    """Durable SMTP outbox item created from an ApprovalAction transaction."""
+    __tablename__ = "qap_email_notifications"
+    __table_args__ = (UniqueConstraint("approval_action_id", "recipient_email", name="uq_qap_email_action_recipient"),)
+    id = pk_column()
+    approval_action_id = Column(Integer, ForeignKey("qap_approval_actions.id"), nullable=False)
+    recipient_email = Column(String(320), nullable=False)
+    subject = Column(String(255), nullable=False)
+    body = Column(Text, nullable=False)
+    status = Column(String(16), nullable=False, default="PENDING")
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime, nullable=True)
+    last_attempt_at = Column(DateTime, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=now, nullable=False)
+
+
+class AssignmentHistory(Base):
+    """Normalized assignment tenure for every governed assignee change.
+
+    Current assignee columns remain the fast operational lookup.  This table
+    preserves who held a role, when the tenure began/ended, who performed
+    each change, and the associated reasons.  One entity can have several
+    simultaneous active rows (for example Functional QA testers), while
+    single-assignee roles naturally have one active row.
+    """
+    __tablename__ = "qap_assignment_history"
+    id = pk_column()
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(Integer, nullable=False)
+    assignment_role = Column(String(40), nullable=False)
+    assignee_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False)
+    assigned_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    assigned_at = Column(DateTime, default=now, nullable=False)
+    assignment_reason = Column(Text, nullable=True)
+    unassigned_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    unassigned_at = Column(DateTime, nullable=True)
+    unassignment_reason = Column(Text, nullable=True)
+
+    assignee = relationship("User", foreign_keys=[assignee_id])
+    assigned_by = relationship("User", foreign_keys=[assigned_by_id])
+    unassigned_by = relationship("User", foreign_keys=[unassigned_by_id])
+
+    @property
+    def assignee_name(self):
+        return self.assignee.full_name if self.assignee else None
+
+    @property
+    def assigned_by_name(self):
+        return self.assigned_by.full_name if self.assigned_by else None
+
+    @property
+    def unassigned_by_name(self):
+        return self.unassigned_by.full_name if self.unassigned_by else None
+
+    __table_args__ = (
+        CheckConstraint(
+            "unassigned_at IS NULL OR unassigned_at >= assigned_at",
+            name="ck_qap_asgh_time_order",
+        ),
+    )
 
 
 class AuditLog(Base):
@@ -1745,7 +1812,7 @@ class QASignOff(Base):
     __tablename__ = "qap_signoffs"
     id = pk_column()
     certificate_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["SIGNOFF"]))
-    certificate_date = Column(Date, default=lambda: datetime.date.today())
+    certificate_date = Column(Date, default=today_ist)
     certificate_type = Column(String(32))
     testing_type = Column(String(16))
     # Perf tuning (2026-08) -- indexed via explicit short-named Index()
@@ -1860,11 +1927,9 @@ class QASignOff(Base):
 # (review workflow + project membership), cycle lifecycle,
 # Experience/Reporting (frontend), Hardening (validation,
 # concurrency, audit). See test_management_migration.py for the one-time
-# migration of every pre-existing row into the new versioned structures --
-# this app has no Alembic (confirmed choice: kept create_all()-based schema
-# management rather than introducing a migration tool for this revamp), so
-# most changes below are additive, while explicitly retired schema is removed
-# by that migration. Pre-revamp columns that
+# migration of every pre-existing row into the new versioned structures. That
+# revamp predates the later Alembic adoption; current schema changes must ship
+# as reviewed Alembic revisions. Pre-revamp columns that
 # are superseded are kept as backward-compatible MIRRORS of the new
 # versioned data (exact same pattern already established by
 # TestExecution/TestExecutionRun below -- TestExecution's own columns mirror
@@ -3174,14 +3239,10 @@ class DefectExecutionLink(Base):
 # this project has hit ORA-00972 from a too-long identifier before, see
 # ORACLE_MIGRATION_2026-07.md's own note on it).
 #
-# IMPORTANT -- this app has no Alembic/migration tool (see database.py's
-# module docstring): schema changes are additive-only via
-# `Base.metadata.create_all()`, which only emits DDL for tables that don't
-# exist yet. A brand-new deployment gets these indexes automatically; an
-# EXISTING Oracle schema needs them added by hand -- see
-# backend/scripts/2026-08_add_performance_indexes.sql for the equivalent
-# manual `CREATE INDEX` statements (same convention already used for new
-# columns needing manual `ALTER TABLE`).
+# These indexes were originally introduced by the historical manual SQL in
+# backend/scripts/2026-08_add_performance_indexes.sql. Current deployments are
+# Alembic-managed; all new index changes must be represented in a reviewed
+# revision and applied with `alembic upgrade head`.
 Index("ix_qap_req_dept_status_created", QARequest.department, QARequest.status, QARequest.created_at)
 Index("ix_qap_req_bugfix_source", QARequest.bug_fix_source_request_id)
 Index("ix_qap_del_req_status", QARequestDelegation.qa_request_id, QARequestDelegation.status)
@@ -3192,6 +3253,16 @@ Index("ix_qap_sast_status_created", SASTRequest.status, SASTRequest.created_at)
 Index("ix_qap_dast_status_created", DASTRequest.status, DASTRequest.created_at)
 Index("ix_qap_perf_status_created", PerformanceRequest.status, PerformanceRequest.created_at)
 Index("ix_qap_appract_entity_created", ApprovalAction.entity_type, ApprovalAction.entity_id, ApprovalAction.created_at)
+# Dashboard recent activity is an unfiltered newest-first feed.  The entity
+# index above cannot support that ordering because its leading key is type.
+Index("ix_qap_appract_created_id", ApprovalAction.created_at, ApprovalAction.id)
+Index("ix_qap_email_outbox", EmailNotification.status, EmailNotification.next_attempt_at, EmailNotification.created_at)
+Index(
+    "ix_qap_asgh_entity_active",
+    AssignmentHistory.entity_type, AssignmentHistory.entity_id,
+    AssignmentHistory.assignment_role, AssignmentHistory.unassigned_at,
+)
+Index("ix_qap_asgh_user_time", AssignmentHistory.assignee_id, AssignmentHistory.assigned_at)
 Index("ix_qap_tc_proj_folder_created", TestCase.project_id, TestCase.folder_id, TestCase.created_at)
 # 2026-08 -- added after the IDX-001..007 pass above, alongside the Recycle
 # Bin feature's is_deleted column (models.py's own comment on that column).

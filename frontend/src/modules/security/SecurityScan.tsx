@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
+import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { hasRole, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
 import { ErrorText, Field, Modal, Table, TableColumn } from '../../components/Common'
@@ -30,7 +31,7 @@ const SCAN_HISTORY_COLUMNS: TableColumn<ScanHistoryRow>[] = [
   { key: 'scan_no', header: 'Scan No' },
   { key: 'scan_type', header: 'Type' },
   { key: 'filter_title', header: 'Filter' },
-  { key: 'imported_at', header: 'Scan Date', render: (r) => new Date(r.imported_at).toLocaleDateString() },
+  { key: 'imported_at', header: 'Scan Date', render: (r) => formatDateIST(r.imported_at) },
   { key: 'critical_count', header: 'Critical' },
   { key: 'high_count', header: 'High' },
   { key: 'medium_count', header: 'Medium' },
@@ -321,7 +322,7 @@ export function SecurityScanResults({
   return (
     <section className="security-scan-results" aria-label="Fortify SSC scan results">
       <header>
-        <div><small>{current.provider} · Latest imported result</small><strong>{current.application_name} <span>v{current.application_version}</span></strong><p>Imported {new Date(current.imported_at).toLocaleString()} · Provider version ID {current.provider_version_id}</p></div>
+        <div><small>{current.provider} · Latest imported result</small><strong>{current.application_name} <span>v{current.application_version}</span></strong><p>Imported {formatDateTimeIST(current.imported_at)} · Provider version ID {current.provider_version_id}</p></div>
         {current.audit_url && <a className="btn btn-sm" href={current.audit_url} target="_blank" rel="noreferrer">Open in Fortify SSC ↗</a>}
       </header>
 
@@ -437,7 +438,7 @@ export function SecurityScanResults({
               Mark Fixed is what sends a Waiting For Fix request back to
               Rescan (see sast_dast.py::_mark_fixed); delegation itself is
               the existing "Delegate for Input" control on the Overview tab
-              (ChildRequestDelegation), now extended to WAITING_FOR_FIX.
+              (RequestDelegation), now extended to WAITING_FOR_FIX.
               Reported directly, full requirement doc: while a suppression
               is still awaiting a decision ("Suppression Approval Pending"),
               the requester can't reassign yet -- only once it's Approved or

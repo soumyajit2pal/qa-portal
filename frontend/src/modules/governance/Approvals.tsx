@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../../api'
+import { formatDateTimeIST } from '../../time'
 import { Card, Table, Badge, ErrorText, PageHeader } from '../../components/Common'
 import { ApprovalActionOut, UserOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
@@ -70,7 +71,7 @@ export default function Approvals() {
           { key: 'actor_id', header: 'Actor', render: (r) => userName(users, r.actor_id) || '—', filterValue: (r) => userName(users, r.actor_id) || '' },
           { key: 'actor_role', header: 'Actor Role' },
           { key: 'comments', header: 'Comments' },
-          { key: 'created_at', header: 'When', render: (r) => new Date(r.created_at).toLocaleString() },
+          { key: 'created_at', header: 'When', render: (r) => formatDateTimeIST(r.created_at) },
         ]} rows={rows} />
       </Card>
     </div>

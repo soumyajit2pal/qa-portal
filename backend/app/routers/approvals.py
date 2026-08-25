@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas, pagination
 from ..database import get_db
-from ..deps import get_current_user, dashboard_department_scope, resolve_entity_department
+from ..deps import get_current_user, require_roles, dashboard_department_scope, resolve_entity_department
 from .. import documents as doc_store
 from ..constants import GatewayStatus, Role
 
@@ -140,6 +140,53 @@ def list_approvals(entity_type: Optional[str] = None, entity_id: Optional[int] =
     (the standalone, no-entity_id Approval Workflow Log) that genuinely
     browses this feed page by page and was migrated instead."""
     return [_to_out(db, r) for r in _filtered_approval_rows(db, current_user, entity_type, entity_id)]
+
+
+def _assignment_entity_department(db: Session, entity_type: str, entity_id: int) -> Optional[str]:
+    if entity_type == "TEST_CYCLE":
+        row = db.query(models.TestProject.department).join(
+            models.TestCycle, models.TestCycle.project_id == models.TestProject.id,
+        ).filter(models.TestCycle.id == entity_id).first()
+        return row[0] if row else None
+    if entity_type == "TEST_EXECUTION":
+        row = db.query(models.TestProject.department).join(
+            models.TestCycle, models.TestCycle.project_id == models.TestProject.id,
+        ).join(
+            models.TestExecution, models.TestExecution.cycle_id == models.TestCycle.id,
+        ).filter(models.TestExecution.id == entity_id).first()
+        return row[0] if row else None
+    return resolve_entity_department(db, entity_type, entity_id)
+
+
+@router.get("/assignment-history", response_model=List[schemas.AssignmentHistoryOut])
+def list_assignment_history(
+    entity_type: str,
+    entity_id: int,
+    assignment_role: Optional[str] = None,
+    active_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(
+        Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+        Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
+    )),
+):
+    """Return normalized assignee tenures for management/audit reporting."""
+    normalized_type = entity_type.strip().upper()
+    department = _assignment_entity_department(db, normalized_type, entity_id)
+    if department is None:
+        raise HTTPException(404, "Assignment-history entity not found")
+    scope = dashboard_department_scope(current_user)
+    if scope and department not in scope and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Assignment history is outside your department scope")
+    q = db.query(models.AssignmentHistory).filter(
+        models.AssignmentHistory.entity_type == normalized_type,
+        models.AssignmentHistory.entity_id == entity_id,
+    )
+    if assignment_role:
+        q = q.filter(models.AssignmentHistory.assignment_role == assignment_role.strip().upper())
+    if active_only:
+        q = q.filter(models.AssignmentHistory.unassigned_at.is_(None))
+    return q.order_by(models.AssignmentHistory.assigned_at.desc(), models.AssignmentHistory.id.desc()).limit(1000).all()
 
 
 @router.get("/history", response_model=pagination.Page[schemas.ApprovalActionOut])

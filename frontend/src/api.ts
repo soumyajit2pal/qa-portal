@@ -30,7 +30,12 @@ const inFlightGets = new Map<string, Promise<unknown>>()
 const completedGets = new Map<string, { value: unknown; expiresAt: number }>()
 let cacheGeneration = 0
 const activityListeners = new Set<(pending: number) => void>()
-const mutationListeners = new Set<(path: string) => void>()
+export interface ApiMutationEvent {
+  path: string
+  method: string
+}
+
+const mutationListeners = new Set<(event: ApiMutationEvent) => void>()
 let pendingRequests = 0
 
 function updateActivity(change: number) {
@@ -46,7 +51,7 @@ export function subscribeToApiActivity(listener: (pending: number) => void): () 
 }
 
 /** Subscribe to successful data-changing requests. */
-export function subscribeToApiMutations(listener: (path: string) => void): () => void {
+export function subscribeToApiMutations(listener: (event: ApiMutationEvent) => void): () => void {
   mutationListeners.add(listener)
   return () => mutationListeners.delete(listener)
 }
@@ -207,7 +212,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
     try {
       try {
         const result = await executeRequest<T>(path, opts)
-        if (method !== 'GET') mutationListeners.forEach((listener) => listener(path))
+        if (method !== 'GET') mutationListeners.forEach((listener) => listener({ path, method }))
         if (key && !opts.isBlob && requestGeneration === cacheGeneration) {
           completedGets.set(key, { value: result, expiresAt: Date.now() + GET_CACHE_TTL_MS })
         }
@@ -220,7 +225,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
         if (!retryable) throw error
         await new Promise((resolve) => window.setTimeout(resolve, 350))
         const result = await executeRequest<T>(path, opts)
-        if (method !== 'GET') mutationListeners.forEach((listener) => listener(path))
+        if (method !== 'GET') mutationListeners.forEach((listener) => listener({ path, method }))
         if (key && !opts.isBlob && requestGeneration === cacheGeneration) {
           completedGets.set(key, { value: result, expiresAt: Date.now() + GET_CACHE_TTL_MS })
         }
@@ -271,9 +276,12 @@ export const api = {
     return request(`/api/auth/login`, { method: 'POST', body: form, formEncoded: true })
   },
 
-  downloadReport: async (reportKey: string, format: string = 'xlsx', filters: string = ''): Promise<void> => {
+  downloadReport: async (reportKey: string, format: string = 'xlsx', filters: string = '', dateFrom = '', dateTo = ''): Promise<void> => {
+    const params = new URLSearchParams({ format, filters })
+    if (dateFrom) params.set('date_from', dateFrom)
+    if (dateTo) params.set('date_to', dateTo)
     const blob = await request<Blob>(
-      `/api/export/${reportKey}?format=${format}&filters=${encodeURIComponent(filters)}`,
+      `/api/export/${reportKey}?${params.toString()}`,
       { isBlob: true }
     )
     triggerDownload(blob, `${reportKey}.${format}`)

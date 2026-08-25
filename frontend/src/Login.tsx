@@ -119,6 +119,7 @@ export default function Login() {
 
       <footer className="login-page-footer">
         Developed By <strong>Soumyajit Pal</strong><span>•</span>Quality Assurance Department - IT
+        <span>•</span>© 2026 All rights reserved.
       </footer>
     </main>
   )

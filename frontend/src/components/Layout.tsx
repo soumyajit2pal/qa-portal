@@ -424,6 +424,8 @@ export default function Layout({ children }: { children?: ReactNode }) {
           <strong>Soumyajit Pal</strong>
           <span>·</span>
           <span>Quality Assurance Department - IT</span>
+          <span>·</span>
+          <span>© 2026 All rights reserved.</span>
         </div>
       </div>
     </div>

@@ -422,6 +422,7 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [comments, setComments] = useState('')
+  const [remarksDecision, setRemarksDecision] = useState<'return' | 'reject' | null>(null)
   // Whether the "require Department Head re-approval on return" popup (see
   // canSecurityDecide below) is open -- an always-visible checkbox next to
   // "Return to Requester" was easy to miss, so this is now asked as a pop-up
@@ -559,9 +560,46 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
             {canSecurityDecide && (
               <WorkflowDecisionPanel busy={busy} title="Security verification decision" options={[
                 { key: 'accept', label: 'Accept & mark done', description: 'Complete the suppression workflow', tone: 'approve', onClick: () => act('security-team-decision', { decision: 'Accepted', comments }) },
-                { key: 'return', label: 'Return to Requester', description: 'Send back for corrections and resubmission', tone: 'return', onClick: () => setShowReapprovalConfirm(true) },
-                { key: 'reject', label: 'Reject', description: 'Stop and close this approval path', tone: 'reject', onClick: () => act('security-team-decision', { decision: 'Rejected', comments }) },
+                { key: 'return', label: 'Return to Requester', description: 'Send back for corrections and resubmission', tone: 'return', onClick: () => setRemarksDecision('return') },
+                { key: 'reject', label: 'Reject', description: 'Stop and close this approval path', tone: 'reject', onClick: () => setRemarksDecision('reject') },
               ]} />
+            )}
+            {remarksDecision && (
+              <Modal
+                title={remarksDecision === 'return' ? 'Return to Requester' : 'Reject suppression request'}
+                onClose={() => { setRemarksDecision(null); setComments('') }}
+                variant="dialog"
+                preventBackdropClose
+              >
+                <Field label="Remarks *">
+                  <textarea
+                    required
+                    rows={4}
+                    value={comments}
+                    onChange={(event) => setComments(event.target.value)}
+                    placeholder={`Explain why this request is being ${remarksDecision === 'return' ? 'returned' : 'rejected'}…`}
+                  />
+                </Field>
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className={remarksDecision === 'reject' ? 'btn btn-danger' : 'btn btn-primary'}
+                    disabled={busy || !comments.trim()}
+                    onClick={() => {
+                      if (remarksDecision === 'return') {
+                        setRemarksDecision(null)
+                        setShowReapprovalConfirm(true)
+                      } else {
+                        setRemarksDecision(null)
+                        act('security-team-decision', { decision: 'Rejected', comments: comments.trim() })
+                      }
+                    }}
+                  >
+                    Continue
+                  </button>
+                  <button type="button" className="btn" disabled={busy} onClick={() => { setRemarksDecision(null); setComments('') }}>Cancel</button>
+                </div>
+              </Modal>
             )}
             {showReapprovalConfirm && (
               <ConfirmModal
@@ -572,11 +610,11 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
                 busy={busy}
                 onConfirm={() => {
                   setShowReapprovalConfirm(false)
-                  act('security-team-decision', { decision: 'Returned', comments, require_dept_head_reapproval: true })
+                  act('security-team-decision', { decision: 'Returned', comments: comments.trim(), require_dept_head_reapproval: true })
                 }}
                 onCancel={() => {
                   setShowReapprovalConfirm(false)
-                  act('security-team-decision', { decision: 'Returned', comments, require_dept_head_reapproval: false })
+                  act('security-team-decision', { decision: 'Returned', comments: comments.trim(), require_dept_head_reapproval: false })
                 }}
               />
             )}

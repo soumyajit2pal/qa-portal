@@ -598,6 +598,14 @@ def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = De
         reassignment.record_reassignment(
             db, "FUNCTIONAL_REQUEST", obj.id, current_user,
             previous_label, ", ".join(tester_names), payload.reason,
+            assignment_role="QA_TESTER",
+            previous_assignee_ids=previous_ids,
+            new_assignee_ids=unique_ids,
+        )
+    else:
+        reassignment.record_assignment_change(
+            db, "FUNCTIONAL_REQUEST", obj.id, "QA_TESTER", current_user,
+            previous_ids, unique_ids, payload.reason,
         )
     db.commit()
     db.refresh(obj)
@@ -1090,7 +1098,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
         subtitle="Functional QA Request — Full Detail Export",
         sections=sections, history=history,
         generated_by=current_user.full_name,
-        generated_at=models.now().strftime("%Y-%m-%d %H:%M UTC"),
+        generated_at=models.now().strftime("%Y-%m-%d %H:%M IST"),
     )
     return StreamingResponse(
         buf, media_type="application/pdf",

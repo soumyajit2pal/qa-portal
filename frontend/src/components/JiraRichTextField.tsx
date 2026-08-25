@@ -11,6 +11,7 @@ import {
   RichTextLinkEditor,
   RichTextPastedImages,
   insertRichTextImages,
+  pasteStructuredRichText,
 } from './RichTextEditor'
 
 // A plain controlled rich-text form input (value/onChange/onImagesChange) --
@@ -108,6 +109,8 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
   }
 
   function pasteInlineImages(event: React.ClipboardEvent<HTMLDivElement>) {
+    if (pasteStructuredRichText(event, editorRef.current)) { sync(); return }
+    if (!allowImages) return
     const accepted = pasteImages(event)
     insertRichTextImages(editorRef.current, accepted)
     if (accepted.length) sync()
@@ -155,7 +158,7 @@ export default function JiraRichTextField({ value, disabled, onChange, onImagesC
         aria-invalid={count > maxLength}
         data-placeholder={placeholder}
         onInput={sync}
-        onPaste={allowImages ? pasteInlineImages : undefined}
+        onPaste={pasteInlineImages}
         suppressContentEditableWarning
       />
       <input

@@ -1,5 +1,4 @@
 import csv
-import datetime
 import io
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -192,7 +191,8 @@ def _fmt_cell(value) -> str:
 
 @router.get("/{report_key}")
 def export_report(report_key: str, format: str = Query("xlsx", pattern="^(xlsx|pdf|csv)$"),
-                   filters: str = "", db: Session = Depends(get_db),
+                   filters: str = "", date_from: str | None = None, date_to: str | None = None,
+                   db: Session = Depends(get_db),
                    current_user: models.User = Depends(get_current_user)):
     """
     Module 11: Download & Export Centre. Streams the requested report/screen data
@@ -204,18 +204,23 @@ def export_report(report_key: str, format: str = Query("xlsx", pattern="^(xlsx|p
     fn = REPORT_REGISTRY.get(report_key)
     if not fn:
         raise HTTPException(404, f"Unknown report '{report_key}'. See /api/export/reports for valid keys.")
-    rows = fn(db=db, current_user=current_user)
+    rows = fn(db=db, current_user=current_user, date_from=date_from, date_to=date_to)
+
+    date_filter = ""
+    if date_from or date_to:
+        date_filter = f"Date range: {date_from or 'Beginning'} to {date_to or 'Now'}"
+    applied_filters = " · ".join(value for value in (filters, date_filter) if value)
 
     meta = {
         "report_name": report_key.replace("-", " ").title(),
         "module": report_key,
-        "generated_at": models.now().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "generated_at": models.now().strftime("%Y-%m-%d %H:%M:%S IST"),
         "generated_by": current_user.full_name,
-        "filters": filters,
+        "filters": applied_filters,
         "total_records": len(rows),
     }
 
-    filename_base = f"{report_key}_{datetime.date.today().isoformat()}"
+    filename_base = f"{report_key}_{models.today_ist().isoformat()}"
 
     if format == "xlsx":
         buf = _rows_to_xlsx(rows, meta)

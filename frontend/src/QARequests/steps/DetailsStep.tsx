@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../api";
+import { istToday } from "../../time";
 import { Field } from "../../components/Common";
 import SearchableSelect from "../../components/SearchableSelect";
 import { CHANGE_TYPES, DEPLOYMENT_ENVIRONMENTS, validTargetPromotionOptions } from "../../constants";
@@ -364,7 +365,7 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
           <Field label="Target Release Date">
             <input
               type="date"
-              min={new Date().toISOString().split("T")[0]}
+              min={istToday()}
               value={form.target_release_date}
               onChange={(e) => set("target_release_date", e.target.value)}
             />

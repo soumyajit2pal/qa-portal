@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from .. import models, cache
 from ..database import get_db
 from ..deps import get_current_user, dashboard_department_scope
+from ..pagination import PageParams
 from ..xlsx_export import new_workbook, add_summary_sheet, add_table_sheet, workbook_response
 from ..constants import (
     Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
@@ -64,6 +65,133 @@ def _in_period(query, column, date_from: str | None, date_to: str | None):
     if end:
         query = query.filter(column <= end)
     return query
+
+
+def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction]) -> dict[tuple[str, int], tuple[str | None, str | None, str | None, int | None]]:
+    """Load dashboard activity references and departments in batches.
+
+    ApprovalAction is deliberately polymorphic, so the generic approvals feed
+    historically resolved every row independently.  The dashboard only needs
+    a very small, newest-first slice, but doing that resolution row by row
+    still turned one request into hundreds or thousands of queries.  This
+    helper keeps the polymorphic model while reducing resolution to one query
+    per entity table (plus one QA-request lookup for all linked children).
+
+    Values are ``(request_ref, department, qa_status, requester_id)``.  The
+    latter two are needed to preserve the generic feed's hidden-foreign-draft
+    rule for QA gateway records.
+    """
+    ids_by_type: dict[str, set[int]] = {}
+    for row in rows:
+        ids_by_type.setdefault(row.entity_type, set()).add(row.entity_id)
+    result: dict[tuple[str, int], tuple[str | None, str | None, str | None, int | None]] = {}
+
+    qa_ids = ids_by_type.get("QA_REQUEST", set())
+    child_specs = (
+        ("FUNCTIONAL_REQUEST", models.FunctionalRequest),
+        ("SAST", models.SASTRequest),
+        ("DAST", models.DASTRequest),
+        ("PERFORMANCE", models.PerformanceRequest),
+    )
+    child_rows: dict[str, list] = {}
+    linked_qa_ids: set[int] = set()
+    for entity_type, model in child_specs:
+        ids = ids_by_type.get(entity_type, set()) | (ids_by_type.get("SAST_DAST", set()) if entity_type in {"SAST", "DAST"} else set())
+        if ids:
+            fetched = db.query(model.id, model.request_id, model.qa_request_id).filter(model.id.in_(ids)).all()
+            child_rows[entity_type] = fetched
+            linked_qa_ids.update(row.qa_request_id for row in fetched if row.qa_request_id)
+
+    defect_rows = []
+    if ids_by_type.get("DEFECT"):
+        defect_rows = db.query(models.Defect.id, models.Defect.defect_key, models.Defect.qa_request_id).filter(
+            models.Defect.id.in_(ids_by_type["DEFECT"])
+        ).all()
+        linked_qa_ids.update(row.qa_request_id for row in defect_rows if row.qa_request_id)
+
+    qa_rows = db.query(
+        models.QARequest.id, models.QARequest.request_id, models.QARequest.department,
+        models.QARequest.status, models.QARequest.requester_id,
+    ).filter(models.QARequest.id.in_(qa_ids | linked_qa_ids)).all() if qa_ids or linked_qa_ids else []
+    qa_by_id = {row.id: row for row in qa_rows}
+    for qa_id in qa_ids:
+        qa = qa_by_id.get(qa_id)
+        if qa:
+            result[("QA_REQUEST", qa_id)] = (qa.request_id, qa.department, qa.status, qa.requester_id)
+
+    for entity_type, fetched in child_rows.items():
+        for row in fetched:
+            qa = qa_by_id.get(row.qa_request_id)
+            result[(entity_type, row.id)] = (row.request_id, qa.department if qa else None, None, None)
+            # Legacy SAST_DAST rows use SAST when ids happen to overlap,
+            # exactly as the generic approval endpoint does.
+            if entity_type == "SAST" or ("SAST_DAST", row.id) not in result:
+                result[("SAST_DAST", row.id)] = (row.request_id, qa.department if qa else None, None, None)
+
+    for row in defect_rows:
+        qa = qa_by_id.get(row.qa_request_id)
+        result[("DEFECT", row.id)] = (row.defect_key, qa.department if qa else None, None, None)
+
+    direct_specs = (
+        ("SUPPRESSION", models.SuppressionRequest, models.SuppressionRequest.suppression_id, models.SuppressionRequest.department),
+        ("SIGNOFF", models.QASignOff, models.QASignOff.certificate_id, models.QASignOff.department),
+    )
+    for entity_type, model, ref_column, department_column in direct_specs:
+        ids = ids_by_type.get(entity_type, set())
+        if ids:
+            for row in db.query(model.id, ref_column, department_column).filter(model.id.in_(ids)).all():
+                result[(entity_type, row.id)] = (row[1], row[2], None, None)
+    return result
+
+
+@router.get("/recent-activity")
+def recent_activity(
+    date_from: str | None = Query(None), date_to: str | None = Query(None),
+    limit: int = Query(5, ge=1, le=20), db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Return the dashboard's small recent-activity feed efficiently.
+
+    This intentionally does not reuse ``/api/approvals``: that endpoint is a
+    complete cross-module audit feed, whereas the dashboard renders only a
+    handful of records.  Rows are read newest-first in bounded batches so a
+    department-scoped user still receives ``limit`` eligible items without
+    ever materializing or serializing the full audit history.
+    """
+    scope = dashboard_department_scope(current_user)
+    query = _in_period(db.query(models.ApprovalAction), models.ApprovalAction.created_at, date_from, date_to)
+    query = query.order_by(models.ApprovalAction.created_at.desc(), models.ApprovalAction.id.desc())
+    items: list[dict] = []
+    offset = 0
+    batch_size = max(50, limit * 4)
+    while len(items) < limit:
+        rows = query.offset(offset).limit(batch_size).all()
+        if not rows:
+            break
+        metadata = _recent_activity_metadata(db, rows)
+        actor_ids = {row.actor_id for row in rows if row.actor_id}
+        actor_names = dict(db.query(models.User.id, models.User.full_name).filter(models.User.id.in_(actor_ids)).all()) if actor_ids else {}
+        for row in rows:
+            request_ref, department, qa_status, requester_id = metadata.get((row.entity_type, row.entity_id), (None, None, None, None))
+            if (row.entity_type == "QA_REQUEST" and not current_user.has_role(Role.ADMIN)
+                    and qa_status in {"DRAFT", "CANCELLED"} and requester_id != current_user.id):
+                continue
+            if scope and department not in scope:
+                continue
+            items.append({
+                "id": row.id, "entity_type": row.entity_type, "entity_id": row.entity_id,
+                "request_ref": request_ref, "step_name": row.step_name, "actor_id": row.actor_id,
+                "actor_name": actor_names.get(row.actor_id), "actor_role": row.actor_role,
+                "decision": row.decision, "comments": row.comments,
+                "previous_state": row.previous_state, "new_state": row.new_state,
+                "created_at": row.created_at,
+            })
+            if len(items) == limit:
+                break
+        offset += len(rows)
+        if len(rows) < batch_size:
+            break
+    return items
 
 
 def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
@@ -999,6 +1127,235 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     }
     cache.set_json(cache_key, result, ttl_seconds=60)
     return result
+
+
+_ATTENTION_METRICS = {
+    "active-projects",
+    "security-findings",
+    "pending-decisions",
+    "active-requests",
+}
+
+
+def _attention_request_row(kind: str, request, route: str, value: int = 1):
+    """Common row shape for the dashboard attention-card drill-downs."""
+    return {
+        "key": f"{kind}:{request.id}",
+        "type": kind,
+        "request_id": request.request_id,
+        "application_name": request.application_name or "—",
+        "department": request.department,
+        "status": request.status,
+        "created_at": request.created_at,
+        "updated_at": request.updated_at,
+        "value": value,
+        "route": route,
+    }
+
+
+def _attention_response(metric: str, title: str, description: str, unit: str,
+                        metric_total: int, rows: list, params: PageParams):
+    """Return only the requested drill-down page while preserving the
+    headline metric total separately from the number of contributing rows.
+
+    Those values differ for security findings: ten findings may come from
+    only two latest-scan rows.
+    """
+    total_rows = len(rows)
+    total_pages = max(1, -(-total_rows // params.page_size))
+    offset = (params.page - 1) * params.page_size
+    return {
+        "metric": metric,
+        "title": title,
+        "description": description,
+        "total": metric_total,
+        "unit": unit,
+        "rows": rows[offset:offset + params.page_size],
+        "page": params.page,
+        "page_size": params.page_size,
+        "total_rows": total_rows,
+        "total_pages": total_pages,
+        "has_next": params.page < total_pages,
+        "has_previous": params.page > 1,
+    }
+
+
+@router.get("/attention/{metric}")
+def dashboard_attention_detail(
+    metric: str,
+    params: PageParams = Depends(),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Record-level reconciliation for the four Command Centre cards.
+
+    This endpoint is deliberately loaded only after a card is clicked. The
+    lightweight summary endpoints remain fast, while users can still see the
+    exact projects, scan snapshots, approval gates, or active requests that
+    produced each headline number.
+    """
+    if metric not in _ATTENTION_METRICS:
+        raise HTTPException(404, "Unknown dashboard attention metric")
+
+    scope = dashboard_department_scope(current_user)
+
+    if metric == "active-projects":
+        requests = _join_qa_department(
+            _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at, date_from, date_to),
+            models.FunctionalRequest,
+            scope,
+        ).filter(models.FunctionalRequest.status.in_(ACTIVE_QA_STATUSES)).all()
+        grouped = {}
+        for request in requests:
+            project_id = request.cr_number or request.epic_number
+            if not project_id:
+                continue
+            entry = grouped.setdefault(project_id, {
+                "key": f"project:{project_id}",
+                "project_id": project_id,
+                "type": "Functional QA",
+                "request_ids": [],
+                "application_names": set(),
+                "departments": set(),
+                "statuses": set(),
+                "request_count": 0,
+                "updated_at": None,
+                "route": None,
+            })
+            entry["request_ids"].append(request.request_id)
+            if request.application_name:
+                entry["application_names"].add(request.application_name)
+            if request.department:
+                entry["departments"].add(request.department)
+            entry["statuses"].add(request.status)
+            entry["request_count"] += 1
+            if not entry["updated_at"] or (request.updated_at and request.updated_at > entry["updated_at"]):
+                entry["updated_at"] = request.updated_at
+            if entry["request_count"] == 1:
+                entry["route"] = f"/functional-requests?open={request.request_id}"
+            else:
+                entry["route"] = "/functional-requests"
+        rows = []
+        for entry in grouped.values():
+            entry["request_ids"] = ", ".join(entry["request_ids"])
+            entry["application_name"] = ", ".join(sorted(entry.pop("application_names"))) or "—"
+            entry["department"] = ", ".join(sorted(entry.pop("departments"))) or None
+            entry["status"] = ", ".join(sorted(entry.pop("statuses")))
+            rows.append(entry)
+        rows.sort(key=lambda row: row["updated_at"] or datetime.datetime.min, reverse=True)
+        return _attention_response(
+            metric, "Active projects",
+            "One row per distinct CR/EPIC with at least one active Functional QA request. Multiple requests under the same CR/EPIC are consolidated.",
+            "projects", len(rows), rows, params,
+        )
+
+    if metric == "security-findings":
+        rows = []
+        for kind, model, path in (("SAST", models.SASTRequest, "/sast"), ("DAST", models.DASTRequest, "/dast")):
+            requests = _join_qa_department(
+                _in_period(db.query(model), model.created_at, date_from, date_to), model, scope
+            ).all()
+            by_id = {request.id: request for request in requests}
+            for request_id, scan in _latest_scan_by_request(db, kind, by_id).items():
+                if scan.total_count <= 0:
+                    continue
+                request = by_id[request_id]
+                row = _attention_request_row(kind, request, f"{path}?open={request.request_id}", scan.total_count)
+                row.update({
+                    "critical": scan.critical_count,
+                    "high": scan.high_count,
+                    "medium": scan.medium_count,
+                    "low": scan.low_count,
+                    "updated_at": scan.imported_at,
+                })
+                rows.append(row)
+        rows.sort(key=lambda row: (row["value"], row["updated_at"] or datetime.datetime.min), reverse=True)
+        return _attention_response(
+            metric, "Open security findings",
+            "Latest imported Fortify SSC snapshot for each SAST/DAST request. The card total is the sum of the Findings column, not the number of rows.",
+            "findings", sum(row["value"] for row in rows), rows, params,
+        )
+
+    if metric == "pending-decisions":
+        rows = []
+        pending_with = {
+            "SM_APPROVAL_PENDING": "SM / Peer Reviewer",
+            "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
+            "READINESS_VERIFICATION": "QA Lead",
+            "QA_SIGNOFF_PENDING": "QA Lead",
+            "REQUESTER_VERIFICATION": "Requester",
+            "SECURITY_LEAD_ASSIGNED": "QA Lead",
+            "SECURITY_READINESS": "QA Lead / Security",
+        }
+        for kind, model, statuses, path in (
+            ("Functional QA", models.FunctionalRequest, PENDING_APPROVAL_STATUSES, "/functional-requests"),
+            ("SAST", models.SASTRequest, SAST_DAST_PENDING_APPROVAL_STATUSES, "/sast"),
+            ("DAST", models.DASTRequest, SAST_DAST_PENDING_APPROVAL_STATUSES, "/dast"),
+        ):
+            requests = _join_qa_department(
+                _in_period(db.query(model), model.created_at, date_from, date_to), model, scope
+            ).filter(model.status.in_(statuses)).all()
+            for request in requests:
+                row = _attention_request_row(kind, request, f"{path}?open={request.request_id}")
+                row["pending_with"] = pending_with.get(request.status, "Workflow owner")
+                rows.append(row)
+        suppressions = _in_period(
+            db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to
+        ).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
+        if scope:
+            suppressions = suppressions.filter(models.SuppressionRequest.department.in_(scope))
+        suppression_pending_with = {
+            "Draft": "Requester",
+            "SM_APPROVAL_PENDING": "Service Manager",
+            "RETURNED_BY_SM": "Requester",
+            "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
+            "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
+            "SECURITY_TEAM_VERIFICATION": "Security Team",
+            "RETURNED_BY_SECURITY_TEAM": "Requester",
+        }
+        for request in suppressions.all():
+            rows.append({
+                "key": f"Suppression:{request.id}",
+                "type": "Suppression",
+                "request_id": request.suppression_id,
+                "application_name": request.application_name or "—",
+                "department": request.department,
+                "status": request.status,
+                "pending_with": suppression_pending_with.get(request.status, "Workflow owner"),
+                "created_at": request.created_at,
+                "updated_at": request.updated_at,
+                "value": 1,
+                "route": f"/suppression?open={request.suppression_id}",
+            })
+        rows.sort(key=lambda row: row["updated_at"] or datetime.datetime.min, reverse=True)
+        return _attention_response(
+            metric, "Waiting for a decision",
+            "Every Functional, SAST, DAST, or Suppression record currently stopped at an approval or decision checkpoint.",
+            "records", len(rows), rows, params,
+        )
+
+    rows = []
+    for kind, model, terminal_statuses, path in (
+        ("Functional QA", models.FunctionalRequest, QA_REQUEST_TERMINAL_STATUSES, "/functional-requests"),
+        ("SAST", models.SASTRequest, SAST_DAST_TERMINAL_STATUSES, "/sast"),
+        ("DAST", models.DASTRequest, SAST_DAST_TERMINAL_STATUSES, "/dast"),
+        ("Performance", models.PerformanceRequest, PERFORMANCE_TERMINAL_STATUSES, "/performance"),
+    ):
+        requests = _join_qa_department(
+            _in_period(db.query(model), model.created_at, date_from, date_to), model, scope
+        ).filter(model.status.notin_(list(terminal_statuses) + ["DRAFT"])).all()
+        rows.extend(
+            _attention_request_row(kind, request, f"{path}?open={request.request_id}")
+            for request in requests
+        )
+    rows.sort(key=lambda row: row["updated_at"] or datetime.datetime.min, reverse=True)
+    return _attention_response(
+        metric, "Active requests",
+        "Every non-draft, non-terminal Functional, SAST, DAST, and Performance child request in the selected reporting period.",
+        "requests", len(rows), rows, params,
+    )
 
 
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------

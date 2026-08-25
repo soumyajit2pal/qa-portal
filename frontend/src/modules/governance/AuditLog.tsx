@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
+import { formatDateTimeIST } from '../../time'
 import { AuditLogOut, AuditSummary } from '../../types'
 import { Card, ErrorText, Modal, PageHeader, Table } from '../../components/Common'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
@@ -91,7 +92,7 @@ export default function AuditLog() {
           rowKey="id" onRowClick={setSelected}
           server={{ page, pageSize, total, totalPages, hasNext, hasPrevious, onPageChange: setPage, onPageSizeChange: setPageSize, loading }}
           columns={[
-          { key: 'created_at', header: 'When', render: (r) => new Date(r.created_at).toLocaleString() },
+          { key: 'created_at', header: 'When', render: (r) => formatDateTimeIST(r.created_at) },
           { key: 'actor_name', header: 'Who', render: (r) => <div><div>{r.actor_name || r.actor_username || 'Unauthenticated'}</div><div className="muted small">{r.actor_username || '—'}</div></div>, filterValue: (r) => `${r.actor_name || ''} ${r.actor_username || ''}` },
           { key: 'event_type', header: 'Event', render: (r) => label(r.event_type) },
           { key: 'action', header: 'Action', render: (r) => label(r.action) },
@@ -104,7 +105,7 @@ export default function AuditLog() {
       {selected && (
         <Modal title={`Audit event #${selected.id}`} onClose={() => setSelected(null)} wide>
           <div className="audit-detail-grid">
-            <div><span>Timestamp</span><strong>{new Date(selected.created_at).toLocaleString()}</strong></div>
+            <div><span>Timestamp</span><strong>{formatDateTimeIST(selected.created_at)}</strong></div>
             <div><span>Actor</span><strong>{selected.actor_name || selected.actor_username || 'Unauthenticated'}</strong></div>
             <div><span>Roles at the time</span><strong>{selected.actor_roles || '—'}</strong></div>
             <div><span>Event / action</span><strong>{label(selected.event_type)} · {label(selected.action)}</strong></div>

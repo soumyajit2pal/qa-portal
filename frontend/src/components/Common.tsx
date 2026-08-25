@@ -7,6 +7,7 @@ import React, {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { formatDateTimeIST, toISTISOString } from "../time";
 
 import {
   QA_STATUS_LABELS,
@@ -514,7 +515,7 @@ export function SignField({
     if (!userName || !consented) return;
     const applied: ElectronicSignature = {
       signer: userName,
-      signedAt: new Date().toISOString(),
+      signedAt: toISTISOString(),
       signatureId: `ESIG-${globalThis.crypto?.randomUUID?.().toUpperCase() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`.toUpperCase()}`,
       statement: "I confirm my identity and intend this electronic signature to authorize the approval decision.",
       style: signatureStyle,
@@ -533,7 +534,7 @@ export function SignField({
         <em>
           {signed ? (
             <>
-              <span>{new Date(signature.signedAt).toLocaleString()}</span>
+              <span>{formatDateTimeIST(signature.signedAt)}</span>
               <code title={signature.signatureId}>{signature.signatureId}</code>
             </>
           ) : "Confirm your authenticated identity before an approval can be submitted."}
@@ -679,9 +680,10 @@ export function ApprovalDecisionButtons({
   }
 
   function confirmDecision() {
+    if ((pendingDecision === "return" || pendingDecision === "reject") && !actionNote.trim()) return;
     if (pendingDecision === "approve") onApprove(withSignature(actionNote, signature));
-    if (pendingDecision === "return") onReturn(actionNote);
-    if (pendingDecision === "reject") onReject(actionNote);
+    if (pendingDecision === "return") onReturn(actionNote.trim());
+    if (pendingDecision === "reject") onReject(actionNote.trim());
     setPendingDecision(null);
   }
 
@@ -756,9 +758,15 @@ export function ApprovalDecisionButtons({
               </div>
             )}
             <label className="workflow-note-field">
-              <span>Action note <em>Optional</em></span>
-              <textarea value={actionNote} onChange={(event) => setActionNote(event.target.value)} rows={4} placeholder="Add context for this decision, or continue without a note…" />
-              <small>No note is required. If entered, it will be saved in workflow history.</small>
+              <span>Remarks <em>{pendingDecision === "approve" ? "Optional" : "Required"}</em></span>
+              <textarea
+                value={actionNote}
+                onChange={(event) => setActionNote(event.target.value)}
+                rows={4}
+                required={pendingDecision !== "approve"}
+                placeholder={pendingDecision === "approve" ? "Add context for this decision, or continue without remarks…" : `Explain why this request is being ${pendingDecision === "return" ? "returned" : "rejected"}…`}
+              />
+              <small>{pendingDecision === "approve" ? "If entered, the remarks will be saved in workflow history." : "Remarks are required and will be saved in workflow history."}</small>
             </label>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button
@@ -771,7 +779,7 @@ export function ApprovalDecisionButtons({
               <button
                 type="button"
                 className={`btn btn-sm ${pendingDecision === "reject" ? "btn-danger" : pendingDecision === "approve" ? "btn-success" : "btn-primary"}`}
-                disabled={pendingDecision === "approve" && !extraReady}
+                disabled={(pendingDecision === "approve" && !extraReady) || (pendingDecision !== "approve" && !actionNote.trim())}
                 onClick={confirmDecision}
               >
                 Confirm {pendingDecision === "approve" ? approveLabel : pendingDecision === "return" ? returnLabel : rejectLabel}
@@ -1085,6 +1093,19 @@ export function ErrorText({ error, title = "Action could not be completed", guid
       </div>
       <button type="button" className="btn btn-primary" onClick={() => setVisible(false)}>Close</button>
     </Modal>
+  );
+}
+
+// One readiness-pass failure dialog for every request module. Keeping the
+// title and corrective guidance here prevents Functional, SAST, DAST and
+// Performance from drifting back to different inline/disabled behaviours.
+export function ReadinessPassError({ error }: { error?: unknown }) {
+  return (
+    <ErrorText
+      error={error}
+      title="Readiness cannot be passed"
+      guidance="Review the Readiness Checklist, complete the listed verification items, and then try “Readiness Passed” again."
+    />
   );
 }
 
@@ -1738,6 +1759,7 @@ export function RequestDocuments({
       setPendingDelete(null);
       load();
     } catch (err) {
+      setPendingDelete(null);
       setError(err);
     } finally {
       setDeleteBusy(false);
@@ -1760,7 +1782,7 @@ export function RequestDocuments({
           {
             key: "uploaded_at",
             header: "Uploaded",
-            render: (d) => new Date(d.uploaded_at).toLocaleString(),
+            render: (d) => formatDateTimeIST(d.uploaded_at),
           },
           {
             key: "actions",
@@ -1963,6 +1985,55 @@ export function ChecklistEvidenceFileRow({
   );
 }
 
+// One visual/interaction shell for supporting evidence everywhere. The
+// gateway wizard keeps new files locally until Draft save, while raised
+// request modules upload immediately, but that storage difference must not
+// produce two different controls for users.
+export function SupportingEvidenceControl({
+  canAttach = true,
+  attachDisabled = false,
+  attachBusy = false,
+  onAttach,
+  totalFiles,
+  required = false,
+  children,
+}: {
+  canAttach?: boolean;
+  attachDisabled?: boolean;
+  attachBusy?: boolean;
+  onAttach: () => void;
+  totalFiles: number;
+  required?: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <>
+      <div className="checklist-evidence-actions">
+        {canAttach ? (
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={attachBusy || attachDisabled}
+            title={attachDisabled ? "Tick this item as checked before attaching evidence for it" : undefined}
+            onClick={onAttach}
+          >
+            {attachBusy ? "Uploading…" : "Attach evidence"}
+          </button>
+        ) : (
+          <span className="muted small" title="Evidence is locked after Department Head approval">Evidence locked</span>
+        )}
+        {totalFiles > 0 && <span className="badge badge-blue">{totalFiles} file{totalFiles !== 1 ? "s" : ""}</span>}
+        {required && totalFiles === 0 && (
+          <span className="badge badge-gray" title="Evidence is recommended for mandatory and selected checklist items.">
+            Evidence recommended
+          </span>
+        )}
+      </div>
+      {totalFiles > 0 && <div className="checklist-evidence-files">{children}</div>}
+    </>
+  );
+}
+
 // Shared delete-confirmation dialog for one evidence document -- same
 // markup/behavior in both ChecklistEvidence and ChecklistEvidencePicker,
 // just an optional trailing phrase on the body copy (e.g. "from this
@@ -1983,7 +2054,7 @@ export function ChecklistEvidenceDeleteModal({
   return (
     <Modal title="Delete checklist evidence?" onClose={onCancel} variant="dialog" preventBackdropClose>
       <p>Delete <strong>{fileName}</strong>{itemLabel ? ` ${itemLabel}` : ""}? This cannot be undone.</p>
-      <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+      <div className="form-actions">
         <button type="button" className="btn btn-danger" disabled={busy} onClick={onConfirm}>
           {busy ? "Deleting…" : "Delete"}
         </button>
@@ -2044,7 +2115,6 @@ export function ChecklistEvidence({
   const { user } = useAuth();
   const isAdmin = !!user?.roles?.includes("ADMIN");
   const inputRef = useRef<HTMLInputElement>(null);
-  const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [pendingDelete, setPendingDelete] = useState<RequestDocumentOut | null>(null);
@@ -2063,7 +2133,6 @@ export function ChecklistEvidence({
     try {
       await api.uploadFiles(endpoint, files);
       await onReload();
-      setExpanded(true);
     } catch (err) {
       setError(err);
     } finally {
@@ -2081,6 +2150,9 @@ export function ChecklistEvidence({
       setPendingDelete(null);
       await onReload();
     } catch (err) {
+      // Never leave the confirmation and error dialogs mounted together.
+      // The error dialog becomes the single active layer.
+      setPendingDelete(null);
       setError(err);
     } finally {
       setBusy(false);
@@ -2096,7 +2168,7 @@ export function ChecklistEvidence({
     // instead stretches/centers this to match that row's "Supporting
     // evidence" column exactly -- reported directly: "On edit details it
     // should be like while creating the request."
-    <div className="checklist-evidence-cell">
+    <div className="checklist-evidence-cell supporting-evidence-control">
       {/* Same checklist-evidence-actions/-files/-file classes
           ChecklistEvidencePicker.tsx uses (index.css) instead of inline
           styles -- reported directly: "Font style and all should be same as
@@ -2106,47 +2178,21 @@ export function ChecklistEvidence({
           override below matches the wizard's own left-aligned, smaller
           button/badge sizing exactly, same as
           ChecklistEvidencePicker gets from .security-request-step. */}
-      <div className="checklist-evidence-actions">
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          hidden
-          onChange={(e) => upload(e.target.files)}
-        />
-        {canManage ? (
-          <button
-            type="button"
-            className="btn btn-sm"
-            disabled={busy || !checked}
-            title={checked ? undefined : "Tick this item as checked before attaching evidence for it"}
-            onClick={() => inputRef.current?.click()}
-          >
-            {busy ? "Uploading…" : "Attach evidence"}
-          </button>
-        ) : (
-          <span className="muted small" title="Evidence is locked after Department Head approval">Evidence locked</span>
-        )}
-        {documents.length > 0 && (
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => setExpanded((value) => !value)}
-          >
-            {documents.length} file{documents.length !== 1 ? "s" : ""}
-          </button>
-        )}
-        {required && documents.length === 0 && (
-          <span
-            className="badge badge-gray"
-            title="This item is mandatory or has been self-declared checked -- attaching evidence isn't required to submit or verify it, but it's recommended."
-          >
-            Evidence recommended
-          </span>
-        )}
-      </div>
-      {expanded && documents.length > 0 && (
-        <div className="checklist-evidence-files">
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => upload(e.target.files)}
+      />
+      <SupportingEvidenceControl
+        canAttach={canManage}
+        attachDisabled={!checked}
+        attachBusy={busy}
+        onAttach={() => inputRef.current?.click()}
+        totalFiles={documents.length}
+        required={required}
+      >
           {documents.map((document) => (
             <ChecklistEvidenceFileRow
               key={document.id}
@@ -2159,13 +2205,11 @@ export function ChecklistEvidence({
               }
             />
           ))}
-        </div>
-      )}
+      </SupportingEvidenceControl>
       <ErrorText error={error} />
       {pendingDelete && (
         <ChecklistEvidenceDeleteModal
           fileName={pendingDelete.file_name}
-          itemLabel="from this checklist item"
           busy={busy}
           onConfirm={deleteDocument}
           onCancel={() => setPendingDelete(null)}

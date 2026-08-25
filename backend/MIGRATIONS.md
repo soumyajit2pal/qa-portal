@@ -91,6 +91,23 @@ empty replacement tables would not restore deleted business data.
 
 5. Commit the model and revision together.
 
+## Normalized assignment history
+
+Revision `a31e7d92c4f0` creates `qap_assignment_history`, which stores one
+effective-dated tenure per assignee, entity, and assignment role. Apply it with
+the normal deployment command:
+
+```bash
+cd backend
+alembic upgrade head
+```
+
+Existing current assignments are adopted lazily when their next assignment
+change occurs. This avoids inventing historical start times or actors that the
+legacy data cannot prove. New and changed assignments are recorded immediately,
+and management users can query the normalized history through
+`GET /api/approvals/assignment-history`.
+
 ## Deployment commands
 
 ### Docker Compose

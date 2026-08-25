@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, subscribeToApiMutations } from '../../api'
+import { formatDateIST, formatDateTimeIST } from '../../time'
 import { Card, Badge, ErrorText, PageHeader } from '../../components/Common'
-import { PendingApprovalItem } from '../../types'
+import { PendingApprovalItem, PendingApprovalPage } from '../../types'
 
 // Table's rowKey prop needs a single field name to key React's list
 // rendering by -- there's no one column on PendingApprovalItem that's
@@ -28,20 +29,45 @@ export default function PendingApprovals() {
   const navigate = useNavigate()
   const [rows, setRows] = useState<Row[]>([])
   const [category, setCategory] = useState('')
+  const [categoryCounts, setCategoryCounts] = useState<Record<string, number>>({})
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(5)
+  const [total, setTotal] = useState(0)
+  const [totalPages, setTotalPages] = useState(1)
+  const [hasNext, setHasNext] = useState(false)
+  const [hasPrevious, setHasPrevious] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [loading, setLoading] = useState(true)
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
 
   const load = useCallback(async () => {
+    setLoading(true)
     try {
-      const items = await api.get<PendingApprovalItem[]>('/api/pending-approvals')
-      setRows(items.map((r) => ({ ...r, _key: `${r.category}-${r.entity_type}-${r.entity_id}` })))
+      const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+      if (category) query.set('category', category)
+      const result = await api.get<PendingApprovalPage>(`/api/pending-approvals?${query}`)
+      if (category && !result.category_counts[category]) {
+        setCategory('')
+        setPage(1)
+        return
+      }
+      if (result.page > result.total_pages) {
+        setPage(result.total_pages)
+        return
+      }
+      setRows(result.items.map((r) => ({ ...r, _key: `${r.category}-${r.entity_type}-${r.entity_id}` })))
+      setCategoryCounts(result.category_counts)
+      setTotal(result.total)
+      setTotalPages(result.total_pages)
+      setHasNext(result.has_next)
+      setHasPrevious(result.has_previous)
+      setError(null)
     } catch (err) {
       setError(err)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [category, page, pageSize])
 
   useEffect(() => { load() }, [load])
 
@@ -66,9 +92,9 @@ export default function PendingApprovals() {
   // (which roles/checkpoints apply varies a lot person to person) rather
   // than a hardcoded list -- mirrors Approvals.tsx's own ENTITY_TYPES
   // filter, just derived at runtime since there's no fixed enum here.
-  const categories = Array.from(new Set(rows.map((r) => r.category))).sort()
-  const visibleRows = category ? rows.filter((r) => r.category === category) : rows
-  const groups = Array.from(visibleRows.reduce((map, row) => {
+  const categories = Object.keys(categoryCounts).sort()
+  const allTotal = Object.values(categoryCounts).reduce((sum, count) => sum + count, 0)
+  const groups = Array.from(rows.reduce((map, row) => {
     const key = row.parent_request_id
       ? `parent:${row.parent_request_id}`
       : `standalone:${row.display_id || `${row.entity_type}-${row.entity_id}`}`
@@ -118,17 +144,17 @@ export default function PendingApprovals() {
     <div>
       <ErrorText error={error} />
       <PageHeader
-        title="Pending Approvals" count={rows.length}
+        title="Pending Approvals" count={total}
         subtitle="Review work grouped by its parent QA Request or Test Project (folder-wise, for test cases). Select a child to open its approval drawer directly."
       />
       {categories.length > 1 && (
         <div className="pending-approval-filters" role="group" aria-label="Filter approval checkpoints">
-          <button type="button" className={!category ? 'active' : ''} onClick={() => setCategory('')}>
-            All <span>{rows.length}</span>
+          <button type="button" className={!category ? 'active' : ''} onClick={() => { setCategory(''); setPage(1) }}>
+            All <span>{allTotal}</span>
           </button>
           {categories.map((c) => (
-            <button type="button" key={c} className={category === c ? 'active' : ''} onClick={() => setCategory(c)}>
-              {c.replace(' -- ', ' · ')} <span>{rows.filter((row) => row.category === c).length}</span>
+            <button type="button" key={c} className={category === c ? 'active' : ''} onClick={() => { setCategory(c); setPage(1) }}>
+              {c.replace(' -- ', ' · ')} <span>{categoryCounts[c]}</span>
             </button>
           ))}
         </div>
@@ -137,15 +163,16 @@ export default function PendingApprovals() {
         <div className="pending-approval-loading" role="status" aria-label="Loading pending approvals">
           {[1, 2, 3].map((item) => <div key={item}><i /><span /><span /></div>)}
         </div>
-      ) : rows.length === 0 ? (
+      ) : total === 0 ? (
         <Card className="pending-approval-empty">
           <div className="pending-approval-empty-icon">✓</div>
           <strong>You're all caught up</strong>
           <p>There are no requests waiting for your approval right now.</p>
         </Card>
       ) : (
-        <div className="pending-approval-groups">
-          {groups.map((group) => {
+        <>
+          <div className="pending-approval-groups">
+            {groups.map((group) => {
             const isCollapsed = collapsed.has(group.key)
             const oldest = group.items.find((item) => item.submitted_at)?.submitted_at
             // "Test Project" (folder-wise grouped, see folderBuckets above)
@@ -165,7 +192,7 @@ export default function PendingApprovals() {
                   <span className="pending-approval-parent-copy">
                     <small>{parentKicker}</small>
                     <strong>{group.parentId}</strong>
-                    {oldest && <em>Oldest pending since {new Date(oldest).toLocaleDateString()}</em>}
+                    {oldest && <em>Oldest pending since {formatDateIST(oldest)}</em>}
                   </span>
                   <span className="pending-approval-child-count">{group.items.length}</span>
                 </button>
@@ -198,7 +225,7 @@ export default function PendingApprovals() {
                               <span>{item.category.replace(' -- ', ' · ')}</span>
                               {item.department && <span>{item.department}</span>}
                               {item.submitted_by && <span>From {item.submitted_by}</span>}
-                              {item.submitted_at && <span>{new Date(item.submitted_at).toLocaleString()}</span>}
+                              {item.submitted_at && <span>{formatDateTimeIST(item.submitted_at)}</span>}
                             </span>
                           </span>
                           <span className="pending-approval-open">Review <b>→</b></span>
@@ -209,8 +236,21 @@ export default function PendingApprovals() {
                 </div>
               )}
             </Card>
-          )})}
-        </div>
+            )})}
+          </div>
+          <div className="table-footer pending-approval-pagination-footer" aria-label="Pending approvals pagination">
+            <div className="table-footer-filters">{loading && <span>Refreshing…</span>}</div>
+            <div className="table-pagination">
+              <span>{(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}</span>
+              <select className="table-page-size" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1) }} aria-label="Approvals per page">
+                {[5, 10, 25, 50, 100].map((size) => <option key={size} value={size}>{size} / page</option>)}
+              </select>
+              <button type="button" disabled={!hasPrevious || loading} onClick={() => setPage((current) => current - 1)}>‹ Prev</button>
+              <span>Page {page} of {totalPages}</span>
+              <button type="button" disabled={!hasNext || loading} onClick={() => setPage((current) => current + 1)}>Next ›</button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   )

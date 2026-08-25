@@ -301,6 +301,34 @@ running. The app still runs fine without Redis reachable -- caching and the star
 degrade to a no-op/permissive fallback -- but then each of the 4 workers keeps its own cache and
 the startup task can run up to 4 times.
 
+### Workflow email notifications
+
+When SMTP is enabled, workflow approval and assignment actions are placed into
+a durable database outbox in the same transaction as the audit action. SMTP
+delivery is disabled until the deployment supplies a relay; no emails are
+queued or backfilled while it is disabled. When the details are available,
+add these values to the deployment `.env` and restart the backend:
+
+```env
+SMTP_ENABLED=true
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=qa-portal@example.com
+SMTP_PASSWORD=your-secret
+SMTP_FROM_ADDRESS=qa-portal@example.com
+SMTP_FROM_NAME=QA Portal
+SMTP_STARTTLS=true
+SMTP_SSL=false
+PORTAL_BASE_URL=https://qa-portal.example.com
+```
+
+Use exactly one TLS mode: STARTTLS (normally port 587) or implicit SSL/TLS
+(normally port 465, set `SMTP_SSL=true` and `SMTP_STARTTLS=false`). Delivery
+retries transient failures with bounded backoff and does not roll back a
+business action when a relay is unavailable. The outbox notifies request
+participants, assignees, and role-eligible approvers at their workflow step;
+users without an email address are skipped.
+
 ### Enable HTTPS
 
 Out of the box (`docker compose up --build`, above) the app is HTTP-only, reachable at

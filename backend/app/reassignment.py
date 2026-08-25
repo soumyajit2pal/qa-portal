@@ -40,7 +40,8 @@ this app re-reads the assignee column fresh on each request (no caching),
 so overwriting it to the new assignee is sufficient -- there is nothing
 further for this module to enforce.
 """
-from typing import List, Optional
+import datetime
+from typing import Iterable, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -115,14 +116,86 @@ def require_reason(reason: Optional[str]) -> str:
     return reason.strip()
 
 
+def record_assignment_change(
+    db: Session,
+    entity_type: str,
+    entity_id: int,
+    assignment_role: str,
+    actor: models.User,
+    previous_assignee_ids: Iterable[Optional[int]],
+    new_assignee_ids: Iterable[Optional[int]],
+    reason: Optional[str] = None,
+    previous_assigned_at: Optional[datetime.datetime] = None,
+) -> None:
+    """Synchronize normalized assignment tenures for one entity/role.
+
+    Rows active before the change are closed, retained assignees keep their
+    original start time, and newly assigned users receive a fresh active row.
+    When an assignment predates this table, ``previous_assignee_ids`` lazily
+    creates the missing historical tenure before closing/retaining it.  This
+    avoids inventing a bulk backfill that cannot reliably reconstruct the
+    original actor or timestamp from free-text ApprovalAction rows.
+    """
+    previous_ids = {int(value) for value in previous_assignee_ids if value is not None}
+    new_ids = {int(value) for value in new_assignee_ids if value is not None}
+    changed_at = models.now()
+    normalized_reason = reason.strip() if reason and reason.strip() else None
+
+    active_rows = db.query(models.AssignmentHistory).filter(
+        models.AssignmentHistory.entity_type == entity_type,
+        models.AssignmentHistory.entity_id == entity_id,
+        models.AssignmentHistory.assignment_role == assignment_role,
+        models.AssignmentHistory.unassigned_at.is_(None),
+    ).with_for_update().all()
+    active_by_user = {row.assignee_id: row for row in active_rows}
+
+    # Adopt legacy current assignments that existed before this normalized
+    # table.  The source row's assigned_at is used when one exists; actor is
+    # intentionally NULL because the original assigning actor is unknowable.
+    for assignee_id in previous_ids - set(active_by_user):
+        row = models.AssignmentHistory(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            assignment_role=assignment_role,
+            assignee_id=assignee_id,
+            assigned_by_id=None,
+            assigned_at=previous_assigned_at or changed_at,
+        )
+        db.add(row)
+        active_by_user[assignee_id] = row
+
+    for assignee_id, row in active_by_user.items():
+        if assignee_id not in new_ids:
+            row.unassigned_by_id = actor.id
+            row.unassigned_at = changed_at
+            row.unassignment_reason = normalized_reason
+
+    for assignee_id in new_ids - set(active_by_user):
+        db.add(models.AssignmentHistory(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            assignment_role=assignment_role,
+            assignee_id=assignee_id,
+            assigned_by_id=actor.id,
+            assigned_at=changed_at,
+            assignment_reason=normalized_reason,
+        ))
+
+
 def record_reassignment(db: Session, entity_type: str, entity_id: int, actor: models.User,
                          previous_label: str, new_label: str,
-                         reason: str, step_name: str = "Reassignment") -> None:
-    """Writes the audit-trail row the CR requires -- previous assignee, new
-    assignee, reassigned by (actor_id), date/time (created_at), and reason
-    (comments) -- reusing the same ApprovalAction table every other
-    workflow decision in this app already writes to (defects.py::_audit,
-    functional.py::_log, etc.), not a new parallel mechanism.
+                         reason: str, step_name: str = "Reassignment", *,
+                         assignment_role: str,
+                         previous_assignee_ids: Iterable[Optional[int]],
+                         new_assignee_ids: Iterable[Optional[int]],
+                         previous_assigned_at: Optional[datetime.datetime] = None,
+                         assignment_entity_type: Optional[str] = None,
+                         assignment_entity_id: Optional[int] = None) -> None:
+    """Write both the human-readable event and normalized assignee tenures.
+
+    ApprovalAction remains the business activity feed, while
+    AssignmentHistory is the queryable source for exact assignee intervals,
+    actors, roles and reasons.
 
     `previous_label`/`new_label` are plain display strings (a name, a
     comma-joined list of names, or "Unassigned") rather than User objects --
@@ -134,4 +207,9 @@ def record_reassignment(db: Session, entity_type: str, entity_id: int, actor: mo
         actor_id=actor.id, actor_role=actor.roles_csv, decision="Reassigned",
         comments=reason, previous_state=previous_label, new_state=new_label,
     ))
-
+    record_assignment_change(
+        db, assignment_entity_type or entity_type,
+        assignment_entity_id if assignment_entity_id is not None else entity_id,
+        assignment_role, actor,
+        previous_assignee_ids, new_assignee_ids, reason, previous_assigned_at,
+    )

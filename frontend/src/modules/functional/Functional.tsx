@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
+import { formatDateTimeIST, istToday } from "../../time";
 import { useAuth } from "../../context/AuthContext";
 import {
   Card,
@@ -16,6 +17,7 @@ import {
   RequestDocuments,
   ChecklistEvidence,
   useChecklistDocuments,
+  ReadinessPassError,
   applicationNameAwareStatusLabel,
 } from "../../components/Common";
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
@@ -24,7 +26,7 @@ import ConfirmModal from "../../components/ConfirmModal";
 import JiraActivity from "../../components/JiraActivity";
 import ClearableSearchInput from "../../components/ClearableSearchInput";
 import RoleGroupLink from "../../components/RoleGroupLink";
-import ChildRequestDelegation from "../../components/ChildRequestDelegation";
+import RequestDelegation from "../../components/RequestDelegation";
 import {
   QA_STATUSES,
   QA_STATUS_LABELS,
@@ -51,6 +53,7 @@ import {
   ApprovalActionOut,
   SignOffOut,
   EligibleTestCycleOut,
+  RequestDocumentOut,
 } from "../../types";
 import { usePaginatedList } from "../../hooks/usePaginatedList";
 // Reused as-is from the Governance module -- the app is now a single
@@ -79,10 +82,14 @@ function FunctionalFormModal({
   onClose,
   onSaved,
   editing,
+  documentsByItem,
+  reloadEvidence,
 }: {
   onClose: () => void;
   onSaved: (f: FunctionalOut) => void;
   editing: FunctionalOut;
+  documentsByItem: Record<number, RequestDocumentOut[]>;
+  reloadEvidence: () => Promise<void>;
 }) {
   const { user } = useAuth();
   const isAdmin = hasRole(user, "ADMIN");
@@ -111,10 +118,6 @@ function FunctionalFormModal({
   );
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
-  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments(
-    "/api/functional-requests",
-    editing.id
-  );
   // Mirrors the identity check the detail view computes for canEditDetails/
   // canSMDecide/canDepartmentHeadDecide -- this modal only ever opens via
   // that same canEditDetails gate, but the checklist evidence controls
@@ -169,6 +172,10 @@ function FunctionalFormModal({
           checked_items: checkedItems,
         }
       );
+      // Evidence is uploaded independently from the form PUT. Refresh the
+      // shared detail cache before closing so the Checklist tab immediately
+      // reflects everything attached in Edit Details.
+      await reloadEvidence();
       onSaved(saved);
     } catch (err) {
       setError(err);
@@ -316,7 +323,7 @@ function FunctionalFormModal({
             <Field label="Target Release Date">
               <input
                 type="date"
-                min={new Date().toISOString().split("T")[0]}
+                min={istToday()}
                 value={form.target_release_date}
                 onChange={(e) => set("target_release_date", e.target.value)}
               />
@@ -1157,10 +1164,10 @@ function FunctionalDetail({
               {req.request_types || "—"}
             </DetailField>
             <DetailField label="Created">
-              {new Date(req.created_at).toLocaleString()}
+              {formatDateTimeIST(req.created_at)}
             </DetailField>
             <DetailField label="Last Updated">
-              {new Date(req.updated_at).toLocaleString()}
+              {formatDateTimeIST(req.updated_at)}
             </DetailField>
           </DetailSection>
 
@@ -1361,10 +1368,11 @@ function FunctionalDetail({
                   Edit Details
                 </button>
               )}
-              <ChildRequestDelegation
+              <RequestDelegation
                 targetType="FUNCTIONAL"
                 request={req}
                 users={users}
+                disabled={!!busyAction}
                 onChanged={async (updated) => {
                   onChanged(updated);
                   await load();
@@ -1721,6 +1729,8 @@ function FunctionalDetail({
           {editingDetails && (
             <FunctionalFormModal
               editing={req}
+              documentsByItem={documentsByItem}
+              reloadEvidence={reloadEvidence}
               onClose={() => setEditingDetails(false)}
               onSaved={(saved) => {
                 setEditingDetails(false);
@@ -1842,11 +1852,7 @@ function FunctionalDetail({
         <RequestDocuments apiBase="/api/functional-requests" reqId={req.id} canManage={canManageDocuments} />
       )}
 
-      <ErrorText
-        error={readinessPassError}
-        title="Readiness cannot be passed"
-        guidance="Review the Readiness Checklist, complete the listed verification items, and then try “Readiness Passed” again."
-      />
+      <ReadinessPassError error={readinessPassError} />
       {showStartExecution && <StartExecutionModal req={req} busy={busyAction === "start-execution"} onCancel={() => setShowStartExecution(false)} onStart={startExecution} />}
     </Modal>
   );
@@ -2009,12 +2015,12 @@ export default function Functional() {
             {
               key: "created_at",
               header: "Created",
-              render: (r) => new Date(r.created_at).toLocaleString(),
+              render: (r) => formatDateTimeIST(r.created_at),
             },
             {
               key: "updated_at",
               header: "Updated",
-              render: (r) => new Date(r.updated_at).toLocaleString(),
+              render: (r) => formatDateTimeIST(r.updated_at),
             },
           ]}
           rows={requests}

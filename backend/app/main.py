@@ -24,7 +24,7 @@ configure_logging()  # must run before `from .database import ...` below, since
 logger = logging.getLogger("qa_portal.main")
 
 from .database import SessionLocal, AuditSessionLocal
-from . import cache, models  # noqa: F401  (models ensures models are registered before create_all)
+from . import cache, models, email_notifications  # noqa: F401  (models ensures models are registered before create_all)
 from .auth import decode_access_token
 from .audit_service import write_audit
 from .documents import migrate_legacy_document_layout
@@ -87,6 +87,14 @@ app = FastAPI(
                 "Quality Operations Platform.",
     version="1.0.0",
 )
+
+# Workflow emails are queued transactionally for every approval action. SMTP
+# delivery remains disabled until deployment sets SMTP_ENABLED=true.
+email_notifications.install_outbox_listener()
+if email_notifications.smtp_readiness()[0]:
+    # Resume any notifications delayed by a temporary SMTP outage. The
+    # outbox's atomic claim makes this safe with many workers.
+    email_notifications.start_outbox_poller()
 
 app.add_middleware(
     CORSMiddleware,

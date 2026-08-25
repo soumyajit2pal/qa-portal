@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, waitForJob } from '../../api'
+import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge, InfoTooltip, WorkflowDecisionPanel } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
@@ -1328,13 +1329,13 @@ function TestCaseVersionsModal({ testCase, versions, onClose }: {
                 <td><button type="button" className="tm-version-link" onClick={() => setSelectedVersionId(v.id)}>v{v.version}</button></td>
                 <td><Badge status={displayStatus(index, v.status)} /></td>
                 <td>{v.author_name || '—'}</td>
-                <td>{new Date(v.created_at).toLocaleString()}</td>
-                <td>{v.submitted_at ? new Date(v.submitted_at).toLocaleString() : '—'}</td>
+                <td>{formatDateTimeIST(v.created_at)}</td>
+                <td>{v.submitted_at ? formatDateTimeIST(v.submitted_at) : '—'}</td>
                 <td>
                   {full?.reviewed_by_name ? (
                     <span className="tm-workflow-status-field">
                       <strong>{full.reviewed_by_name}</strong>
-                      <small>{full.reviewed_at ? new Date(full.reviewed_at).toLocaleString() : ''}{full.review_comments ? ` -- ${full.review_comments}` : ''}</small>
+                      <small>{full.reviewed_at ? formatDateTimeIST(full.reviewed_at) : ''}{full.review_comments ? ` -- ${full.review_comments}` : ''}</small>
                     </span>
                   ) : '—'}
                 </td>
@@ -1342,7 +1343,7 @@ function TestCaseVersionsModal({ testCase, versions, onClose }: {
                   {full?.qa_lead_decided_by_name ? (
                     <span className="tm-workflow-status-field">
                       <strong>{full.qa_lead_decided_by_name}</strong>
-                      <small>{full.qa_lead_decided_at ? new Date(full.qa_lead_decided_at).toLocaleString() : ''}{full.qa_lead_decision_comments ? ` -- ${full.qa_lead_decision_comments}` : ''}</small>
+                      <small>{full.qa_lead_decided_at ? formatDateTimeIST(full.qa_lead_decided_at) : ''}{full.qa_lead_decision_comments ? ` -- ${full.qa_lead_decision_comments}` : ''}</small>
                     </span>
                   ) : '—'}
                 </td>
@@ -2485,7 +2486,7 @@ function RecycleBinPanel({
           { key: 'test_case_key', header: 'Test Case', render: (c) => <span className="tm-test-case-cell"><strong>{c.test_case_key}</strong><small>{c.test_scenario || 'Scenario not provided'}</small></span>, filterValue: (c) => `${c.test_case_key} ${c.test_scenario || ''}` },
           { key: 'status', header: 'Status when deleted', render: (c) => <Badge status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} /> },
           { key: 'deleted_by', header: 'Deleted by', render: (c) => <span>{c.deleted_by_name || '—'}</span> },
-          { key: 'deleted_at', header: 'Deleted on', render: (c) => <span>{c.deleted_at ? new Date(c.deleted_at).toLocaleString() : '—'}</span> },
+          { key: 'deleted_at', header: 'Deleted on', render: (c) => <span>{c.deleted_at ? formatDateTimeIST(c.deleted_at) : '—'}</span> },
           {
             key: 'actions', header: 'Actions', filterable: false,
             render: (c) => (
@@ -3347,17 +3348,20 @@ export default function TestRepository() {
                     || (c.status === 'Draft' ? c.current_draft_author_name : null)
                     || TEST_CASE_PENDING_WITH[c.status]
                   const groupRole = TEST_CASE_PENDING_GROUP_ROLES[c.status]
+                  // Final states have no next actor. The fallback map uses
+                  // an em dash for those states; treating that as a person
+                  // produced the confusing literal "Pending with —" below
+                  // an already Approved badge.
+                  const hasPendingActor = !!pendingWithLabel && pendingWithLabel !== '—'
                   return (
                     <span className="tm-workflow-cell">
                       <Badge status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />
-                      {groupRole ? (
+                      {groupRole && hasPendingActor ? (
                         <span className="tm-workflow-pending-group" onClick={(e) => e.stopPropagation()}>
                           <small>Pending with</small>
                           <RoleGroupLink users={users} role={groupRole} label={pendingWithLabel || 'group'} />
                         </span>
-                      ) : (
-                        <small>{pendingWithLabel ? `Pending with ${pendingWithLabel}` : 'No action pending'}</small>
-                      )}
+                      ) : hasPendingActor ? <small>Pending with {pendingWithLabel}</small> : null}
                       {/* "along with Pending with details, show submitted by as well" --
                           current_draft_submitted_by_name is only ever set once the current
                           draft has actually been submitted, so this stays absent for a
@@ -3386,14 +3390,17 @@ export default function TestRepository() {
                       {c.current_draft_reviewed_by_name && (
                         <small className="muted">Recommended by {c.current_draft_reviewed_by_name}</small>
                       )}
-                      {c.pending_since && (
-                        <small className="muted" title={`Pending since ${new Date(c.pending_since).toLocaleString()}`}>
-                          Since {new Date(c.pending_since).toLocaleDateString()}
+                      {hasPendingActor && c.pending_since && (
+                        <small className="muted" title={`Pending since ${formatDateTimeIST(c.pending_since)}`}>
+                          Since {formatDateIST(c.pending_since)}
                         </small>
                       )}
                     </span>
                   )
-                }, filterValue: (c) => `${TEST_CASE_STATUS_LABELS[c.status] || c.status} ${c.pending_with_user_name || TEST_CASE_PENDING_WITH[c.status] || ''}` },
+                }, filterValue: (c) => {
+                  const pending = c.pending_with_user_name || TEST_CASE_PENDING_WITH[c.status] || ''
+                  return `${TEST_CASE_STATUS_LABELS[c.status] || c.status} ${pending === '—' ? '' : pending}`
+                } },
                 { key: 'version', header: 'Version', render: (c) => <span className="badge badge-gray">{`v${c.version || '1.0'}`}</span>, filterValue: (c) => `v${c.version || '1.0'}` },
                 { key: 'steps', header: 'Steps', render: (c) => c.steps_count, filterable: false },
                 {

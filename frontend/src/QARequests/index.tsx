@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { formatDateTimeIST } from "../time";
 import {
   Badge,
   Card,
@@ -262,12 +263,12 @@ export default function QARequests() {
             {
               key: "created_at",
               header: "Created",
-              render: (r) => new Date(r.created_at).toLocaleString(),
+              render: (r) => formatDateTimeIST(r.created_at),
             },
             {
               key: "updated_at",
               header: "Updated",
-              render: (r) => new Date(r.updated_at).toLocaleString(),
+              render: (r) => formatDateTimeIST(r.updated_at),
             },
           ]}
           rows={requests}

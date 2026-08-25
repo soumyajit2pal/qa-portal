@@ -6,6 +6,14 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 RICH_TEXT_MAX_LENGTH = 10000
 
 
+def _require_return_reject_comments(decision: str, comments: Optional[str]) -> Optional[str]:
+    """Normalize remarks and require them for workflow return/reject outcomes."""
+    normalized = comments.strip() if isinstance(comments, str) else comments
+    if decision.strip().lower() in {"return", "returned", "reject", "rejected"} and not normalized:
+        raise ValueError("Remarks are required when returning or rejecting")
+    return normalized or None
+
+
 def _limited_rich_text(value, info):
     if value is not None and len(value) > RICH_TEXT_MAX_LENGTH:
         label = info.field_name.replace("_", " ").title()
@@ -24,8 +32,23 @@ def _plain_person_name(value):
     return re.sub(r"\s+of\s+req\s+\d+\s*$", "", value, flags=re.IGNORECASE).strip()
 
 
+def _serialize_ist_datetime(value: datetime.datetime) -> str:
+    """Expose every API datetime with an explicit IST offset.
+
+    Oracle DateTime columns are timezone-naive but represent IST wall-clock
+    values; other sources may already be timezone-aware.  This preserves the
+    instant in either case and prevents browsers from guessing a timezone.
+    """
+    ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ist)
+    else:
+        value = value.astimezone(ist)
+    return value.isoformat()
+
+
 class ORMModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, json_encoders={datetime.datetime: _serialize_ist_datetime})
 
 
 # ---------------- Auth / Users ----------------
@@ -728,6 +751,11 @@ class WorkflowDecision(BaseModel):
     # once fixed (the default).
     require_dept_head_reapproval: Optional[bool] = False
 
+    @model_validator(mode="after")
+    def require_return_reject_remarks(self):
+        self.comments = _require_return_reject_comments(self.decision, self.comments)
+        return self
+
 
 # ---- QA Request lifecycle-specific payloads ----
 class DepartmentHeadDecisionIn(BaseModel):
@@ -735,6 +763,11 @@ class DepartmentHeadDecisionIn(BaseModel):
     decision: str                          # Approved / Returned / Rejected
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def require_return_reject_remarks(self):
+        self.comments = _require_return_reject_comments(self.decision, self.comments)
+        return self
 
 
 class AssignTesterIn(BaseModel):
@@ -770,6 +803,11 @@ class SecurityDeptHeadDecisionIn(BaseModel):
     qa_lead_id: Optional[int] = None
     security_lead_id: Optional[int] = None  # legacy alias for qa_lead_id
 
+    @model_validator(mode="after")
+    def require_return_reject_remarks(self):
+        self.comments = _require_return_reject_comments(self.decision, self.comments)
+        return self
+
 
 class PerformanceDeptHeadDecisionIn(BaseModel):
     """Performance Department Head decision with COE - Quality Assurance QA Lead assignment."""
@@ -777,6 +815,11 @@ class PerformanceDeptHeadDecisionIn(BaseModel):
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
     engineer_id: Optional[int] = None  # legacy alias for qa_lead_id
+
+    @model_validator(mode="after")
+    def require_return_reject_remarks(self):
+        self.comments = _require_return_reject_comments(self.decision, self.comments)
+        return self
 
 
 class ReadinessDecisionIn(BaseModel):
@@ -1390,6 +1433,27 @@ class ApprovalActionOut(ORMModel):
     _normalize_actor_name = field_validator("actor_name", mode="before")(_plain_person_name)
 
 
+class AssignmentHistoryOut(ORMModel):
+    id: int
+    entity_type: str
+    entity_id: int
+    assignment_role: str
+    assignee_id: int
+    assignee_name: Optional[str] = None
+    assigned_by_id: Optional[int] = None
+    assigned_by_name: Optional[str] = None
+    assigned_at: datetime.datetime
+    assignment_reason: Optional[str] = None
+    unassigned_by_id: Optional[int] = None
+    unassigned_by_name: Optional[str] = None
+    unassigned_at: Optional[datetime.datetime] = None
+    unassignment_reason: Optional[str] = None
+
+    _normalize_assignee_name = field_validator("assignee_name", mode="before")(_plain_person_name)
+    _normalize_assigned_by_name = field_validator("assigned_by_name", mode="before")(_plain_person_name)
+    _normalize_unassigned_by_name = field_validator("unassigned_by_name", mode="before")(_plain_person_name)
+
+
 class CommentCreate(BaseModel):
     body: str
 
@@ -1826,6 +1890,11 @@ class ApplicationMasterOut(ORMModel):
 class ApplicationMasterDecision(BaseModel):
     decision: str          # "Approved" or "Rejected"
     comments: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_reject_remarks(self):
+        self.comments = _require_return_reject_comments(self.decision, self.comments)
+        return self
 
 
 class ApplicationMasterDepartmentUpdate(BaseModel):
@@ -3062,3 +3131,15 @@ class PendingApprovalItem(BaseModel):
     submitted_by: Optional[str] = None
     submitted_at: Optional[datetime.datetime] = None
     path: str                # frontend route to open this item for review
+
+
+class PendingApprovalPage(BaseModel):
+    """Paginated heterogeneous approval queue plus complete filter facets."""
+    items: List[PendingApprovalItem]
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
+    category_counts: Dict[str, int]

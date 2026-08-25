@@ -79,10 +79,14 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
   const tierLabel = isAppOwnerTier ? 'Application Owner' : 'SM'
 
   async function decide(decision: 'Approved' | 'Rejected') {
+    if (decision === 'Rejected' && !comments.trim()) {
+      setError(new Error('Remarks are required when rejecting an application name.'))
+      return
+    }
     setBusy(decision)
     setError(null)
     try {
-      await api.post(`/api/application-names/${applicationMasterId}/${endpoint}`, { decision, comments })
+      await api.post(`/api/application-names/${applicationMasterId}/${endpoint}`, { decision, comments: comments.trim() || null })
       setDecided(decision)
       // Reported directly (again, after section 175/177): buttons were still
       // showing after a click. AWAITED now (was fire-and-forget) so the
@@ -144,7 +148,7 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
       </span>
       <input
         type="text"
-        placeholder="Remarks (optional -- e.g. why you're rejecting this name)"
+        placeholder="Remarks (required for rejection)"
         value={comments}
         disabled={!!busy}
         onChange={(e) => setComments(e.target.value)}
@@ -157,7 +161,7 @@ export function ApplicationNameBanner({ applicationMasterId, applicationMasterSt
         <button type="button" className="btn btn-sm btn-primary" disabled={!!busy} onClick={() => decide('Approved')}>
           {busy === 'Approved' ? 'Approving...' : 'Approve Name'}
         </button>
-        <button type="button" className="btn btn-sm btn-danger" disabled={!!busy} onClick={() => decide('Rejected')}>
+        <button type="button" className="btn btn-sm btn-danger" disabled={!!busy || !comments.trim()} onClick={() => decide('Rejected')}>
           {busy === 'Rejected' ? 'Rejecting...' : 'Reject Name'}
         </button>
       </div>

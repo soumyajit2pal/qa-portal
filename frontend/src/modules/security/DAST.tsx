@@ -1,15 +1,16 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
+import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableRows, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, RepeatableRows, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
-import ChildRequestDelegation from '../../components/ChildRequestDelegation'
+import RequestDelegation from '../../components/RequestDelegation'
 import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut } from '../../types'
+import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
 
@@ -53,7 +54,19 @@ function blankDastTarget(): DastTargetRow {
 // therefore edit-only now: it fills in the real target URL / environment /
 // credentials on that auto-created request -- see canEditDetails in
 // DASTDetail below.
-function DASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onSaved: (d: DASTOut) => void; editing: DASTOut }) {
+function DASTFormModal({
+  onClose,
+  onSaved,
+  editing,
+  documentsByItem,
+  reloadEvidence,
+}: {
+  onClose: () => void
+  onSaved: (d: DASTOut) => void
+  editing: DASTOut
+  documentsByItem: Record<number, RequestDocumentOut[]>
+  reloadEvidence: () => Promise<void>
+}) {
   // editing.targets is already one real row per scan target (see
   // models.DASTTarget) -- just convert authentication_required's "Yes"/"No"
   // to a boolean for the checkbox, and drop `id` for local editing state.
@@ -80,7 +93,6 @@ function DASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   )
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/dast-requests', editing.id)
   // Same identity check as the detail view's isRequester/canSMDecide/
   // canDeptHeadDecide -- this modal only opens via canEditDetails, but the
   // checklist evidence controls inside it need their own explicit check.
@@ -132,6 +144,10 @@ function DASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
         checked_items: checkedItems,
       }
       const saved = await api.put<DASTOut>(`/api/dast-requests/${editing.id}`, payload)
+      // Evidence uploads are persisted independently from this form PUT.
+      // Refresh the shared parent cache before the modal closes so the
+      // Checklist tab immediately renders the saved files.
+      await reloadEvidence()
       onSaved(saved)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -332,6 +348,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
   // the moment of failing readiness instead.
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
+  const [readinessPassError, setReadinessPassError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>(req.checklist_items || [])
@@ -384,6 +401,8 @@ function DASTDetail({ req, onClose, onChanged, users }: {
 
   async function act(action: string, extra?: Record<string, unknown>) {
     setError(null)
+    const isReadinessPass = action === 'readiness-decision' && extra?.decision === 'Passed'
+    if (isReadinessPass) setReadinessPassError(null)
     setBusy(true)
     try {
       const updated = await api.post<DASTOut>(`/api/dast-requests/${req.id}/${action}`, extra || {})
@@ -392,7 +411,11 @@ function DASTDetail({ req, onClose, onChanged, users }: {
       await load()
       return updated
     }
-    catch (err) { setError(err); return null } finally { setBusy(false) }
+    catch (err) {
+      if (isReadinessPass) setReadinessPassError(err)
+      else setError(err)
+      return null
+    } finally { setBusy(false) }
   }
 
   async function startScan(applicationName: string, applicationVersion: string) {
@@ -523,11 +546,9 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   const canStartReadiness = isAssignedQALead && status === 'SECURITY_LEAD_ASSIGNED'
   const canReadinessDecide = isAssignedQALead && status === 'SECURITY_READINESS'
   const canVerifyChecklist = isAssignedQALead && status === 'SECURITY_READINESS'
-  const pendingChecklistItems = checklist.filter((c) => c.is_mandatory && !c.is_complete)
   // Mandatory checklist items must be self-declared ready BEFORE Submit is
   // even allowed (see routers/sast_dast.py::_require_checklist_ready) --
-  // distinct from pendingChecklistItems above, which gates Security
-  // Readiness's own independent verification instead.
+  // distinct from Security Readiness's own independent verification.
   const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
   const isInitialAnalystAssignment = status === 'PLANNING'
   // 2026-08 Reassignment CR -- see SAST.tsx's identical comment for the
@@ -674,8 +695,8 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                 </span>
               </DetailField>
             )}
-            <DetailField label="Created">{new Date(req.created_at).toLocaleString()}</DetailField>
-            <DetailField label="Last Updated">{new Date(req.updated_at).toLocaleString()}</DetailField>
+            <DetailField label="Created">{formatDateTimeIST(req.created_at)}</DetailField>
+            <DetailField label="Last Updated">{formatDateTimeIST(req.updated_at)}</DetailField>
           </DetailSection>
 
           <DetailSection title="Application & Change">
@@ -753,10 +774,11 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                 Export PDF
               </button>
               {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
-              <ChildRequestDelegation
+              <RequestDelegation
                 targetType="DAST"
                 request={req}
                 users={users}
+                disabled={busy}
                 onChanged={async (updated) => { onChanged(updated); await load() }}
               />
               {canSubmit && (
@@ -827,7 +849,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
               {canStartReadiness && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-readiness')}>Start Security Readiness</button>}
               {canReadinessDecide && (
                 <>
-                  <button className="btn btn-success btn-sm" disabled={busy || pendingChecklistItems.length > 0}
+                  <button className="btn btn-success btn-sm" disabled={busy}
                           onClick={() => act('readiness-decision', { decision: 'Passed', comments })}>
                     Readiness Passed
                   </button>
@@ -853,12 +875,6 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                     act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: false })
                   }}
                 />
-              )}
-              {canReadinessDecide && pendingChecklistItems.length > 0 && (
-                <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>
-                  {pendingChecklistItems.length} mandatory Security Readiness checklist item(s) still incomplete —
-                  see the Checklist tab.
-                </p>
               )}
               {canAssignSecurityAnalyst && (
                 <>
@@ -904,6 +920,8 @@ function DASTDetail({ req, onClose, onChanged, users }: {
           {editing && (
             <DASTFormModal
               editing={req}
+              documentsByItem={documentsByItem}
+              reloadEvidence={reloadEvidence}
               onClose={() => setEditing(false)}
               onSaved={(saved) => { setEditing(false); onChanged(saved) }}
             />
@@ -1017,6 +1035,8 @@ function DASTDetail({ req, onClose, onChanged, users }: {
       {tab === 'history' && (
         <JiraActivity entityType="DAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
+
+      <ReadinessPassError error={readinessPassError} />
 
       {/* Rendered outside every tab-specific block (not just inside
           Overview) -- reported directly: clicking Rescan from the Findings
@@ -1163,8 +1183,8 @@ export default function DAST() {
               </span>
             ) : <span className="badge badge-gray">Standalone (legacy)</span>
           ), filterValue: (r) => r.qa_request ? `Linked ${r.qa_request.request_id}` : 'Standalone legacy' },
-          { key: 'created_at', header: 'Created', render: (r) => new Date(r.created_at).toLocaleString() },
-          { key: 'updated_at', header: 'Updated', render: (r) => new Date(r.updated_at).toLocaleString() },
+          { key: 'created_at', header: 'Created', render: (r) => formatDateTimeIST(r.created_at) },
+          { key: 'updated_at', header: 'Updated', render: (r) => formatDateTimeIST(r.updated_at) },
         ]} rows={rows} />
       </Card>
       {selected && (

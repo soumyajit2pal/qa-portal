@@ -1,5 +1,6 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react'
 import { api } from '../api'
+import { formatDateIST, formatDateTimeIST } from '../time'
 import { useAuth } from '../context/AuthContext'
 import { ROLE_LABELS } from '../constants'
 import { ApprovalActionOut, RequestDocumentOut } from '../types'
@@ -17,7 +18,9 @@ import {
   normalizeStoredRichText,
   insertRichTextImages,
   decodeRichImageName,
+  pasteStructuredRichText,
 } from './RichTextEditor'
+import { decodeMergedRichTable } from '../richTableCodec'
 
 type ActivityFilter = 'all' | 'comments' | 'history'
 
@@ -39,7 +42,7 @@ function relativeTime(value: string): string {
   if (hours < 24) return `${hours}h ago`
   const days = Math.floor(hours / 24)
   if (days < 30) return `${days}d ago`
-  return new Date(value).toLocaleDateString()
+  return formatDateIST(value)
 }
 
 // ---- Rendering a posted comment's stored markdown back to React (display
@@ -85,6 +88,21 @@ export function MarkdownComment({ value, attachmentUrls = {} }: { value: string;
   while (index < lines.length) {
     const line = lines[index]
     if (!line.trim()) { index += 1; continue }
+    const mergedTable = decodeMergedRichTable(line)
+    if (mergedTable) {
+      blocks.push(
+        <div className="jira-markdown-table-wrap" key={`merged-table-${index}`}>
+          <table><tbody>{mergedTable.rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>{row.map((cell, cellIndex) => {
+              const Cell = cell.h ? 'th' : 'td'
+              return <Cell key={cellIndex} colSpan={cell.c} rowSpan={cell.r}>{inlineMarkdown(cell.t, `merged-${index}-${rowIndex}-${cellIndex}`)}</Cell>
+            })}</tr>
+          ))}</tbody></table>
+        </div>,
+      )
+      index += 1
+      continue
+    }
     const image = line.match(/^!\[([^\]]*)\]\(attachment:([^)]+)\)$/)
     if (image) {
       const name = decodeRichImageName(image[2])
@@ -131,7 +149,7 @@ export function MarkdownComment({ value, attachmentUrls = {} }: { value: string;
     }
     const paragraph: string[] = [line]
     index += 1
-    while (index < lines.length && lines[index].trim() && !isTableStart(index) && !/^\s*(?:#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s?)/.test(lines[index])) paragraph.push(lines[index++])
+    while (index < lines.length && lines[index].trim() && !decodeMergedRichTable(lines[index]) && !isTableStart(index) && !/^\s*(?:#{1,6}\s+|[-*]\s+|\d+\.\s+|>\s?)/.test(lines[index])) paragraph.push(lines[index++])
     blocks.push(<p key={`p-${index}`}>{paragraph.map((entry, paragraphIndex) => <React.Fragment key={paragraphIndex}>{inlineMarkdown(entry, `p-${index}-${paragraphIndex}`)}{paragraphIndex < paragraph.length - 1 && <br />}</React.Fragment>)}</p>)
   }
   return <div className="jira-markdown">{blocks}</div>
@@ -260,6 +278,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
   }
 
   function onPaste(event: React.ClipboardEvent<HTMLDivElement>) {
+    if (pasteStructuredRichText(event, editorRef.current)) { setExpanded(true); syncEditor(); return }
     const accepted = pasteImages(event)
     insertRichTextImages(editorRef.current, accepted)
     if (accepted.length) { setExpanded(true); syncEditor() }
@@ -387,7 +406,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
                   {!isComment && item.previous_state && item.new_state && (
                     <span className="jira-activity-transition">{item.previous_state} → {item.new_state}</span>
                   )}
-                  <time title={new Date(item.created_at).toLocaleString()}>{relativeTime(item.created_at)}</time>
+                  <time title={formatDateTimeIST(item.created_at)}>{relativeTime(item.created_at)}</time>
                 </div>
                 {item.comments && (isComment ? <CommentContent commentId={item.id} value={item.comments} /> : <div className="jira-activity-message">{item.comments}</div>)}
                 {isComment && !item.comments && <CommentContent commentId={item.id} value="" />}

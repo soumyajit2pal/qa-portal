@@ -106,7 +106,7 @@ def _validate_rich_text_before_progress(obj: models.QASignOff) -> None:
     fields = (
         ("Exit Criteria Validation Notes", obj.exit_criteria_notes),
         ("Open Defect Review Summary", obj.open_defect_summary),
-        ("Residual Risk Documentation", obj.residual_risk_notes),
+        ("Remarks", obj.residual_risk_notes),
     )
     oversized = [
         f"{label} ({len(value):,}/{schemas.RICH_TEXT_MAX_LENGTH:,})"

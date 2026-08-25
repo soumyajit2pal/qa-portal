@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
+import { formatDateIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
@@ -628,7 +629,7 @@ export default function TestProjects() {
             {project.is_archived && (
               <div className="info-banner">
                 <strong>Archived</strong> by {project.archived_by_name || 'a QA Lead'}
-                {project.archived_at && ` on ${new Date(project.archived_at).toLocaleDateString()}`}
+                {project.archived_at && ` on ${formatDateIST(project.archived_at)}`}
                 {project.archived_reason && ` — ${project.archived_reason}`}
               </div>
             )}

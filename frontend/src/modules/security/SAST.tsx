@@ -1,15 +1,17 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
+import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, RepeatableGroupInput, RepeatableGroupField, RepeatableGroupRow, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel } from '../../components/Common'
+import SastRepositoryDetails, { SAST_COMPONENT_FIELDS, SastRepositoryRow } from '../../components/SastRepositoryDetails'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
-import ChildRequestDelegation from '../../components/ChildRequestDelegation'
+import RequestDelegation from '../../components/RequestDelegation'
 import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
-import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut } from '../../types'
+import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
 
@@ -17,14 +19,6 @@ import { SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from '.
 // stack/build number -- the "+" adds a whole new one of these (not just
 // another URL), since a project can have several repos each needing their
 // own full set of details. Same shape as QARequests.tsx's wizard SAST step.
-const SAST_COMPONENT_FIELDS: RepeatableGroupField[] = [
-  { key: 'repository_url', label: 'Repository URL' },
-  { key: 'git_branch', label: 'Branch' },
-  { key: 'commit_id', label: 'Commit ID' },
-  { key: 'technology_stack', label: 'Tech Stack' },
-  { key: 'build_number', label: 'Build Number' },
-]
-
 // Standalone SAST request creation is DISABLED per request -- a SAST request
 // can now only come into being by including "SAST" in a QA Request's request
 // types (see backend routers/qa_requests.py::_sync_linked_security_requests),
@@ -33,13 +27,25 @@ const SAST_COMPONENT_FIELDS: RepeatableGroupField[] = [
 // the mandatory details (repository URL, branch, commit ID, tech stack,
 // build number) on that auto-created request before the security team picks
 // it up -- see canEditDetails in SASTDetail below.
-function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onSaved: (s: SASTOut) => void; editing: SASTOut }) {
+function SASTFormModal({
+  onClose,
+  onSaved,
+  editing,
+  documentsByItem,
+  reloadEvidence,
+}: {
+  onClose: () => void
+  onSaved: (s: SASTOut) => void
+  editing: SASTOut
+  documentsByItem: Record<number, RequestDocumentOut[]>
+  reloadEvidence: () => Promise<void>
+}) {
   const { user } = useAuth()
   const isAdmin = hasRole(user, 'ADMIN')
   // editing.components is already one real row per repository (see
   // models.SASTComponent) -- just drop the `id` for local editing state,
   // RepeatableGroupInput doesn't need it.
-  function toRows(components: SASTComponentOut[]): RepeatableGroupRow[] {
+  function toRows(components: SASTComponentOut[]): SastRepositoryRow[] {
     return components.length > 0
       ? components.map((c) => ({
           repository_url: c.repository_url || '', git_branch: c.git_branch || '', commit_id: c.commit_id || '',
@@ -62,7 +68,6 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
   )
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/sast-requests', editing.id)
   // Same identity check as the detail view's isRequester/canSMDecide/
   // canDeptHeadDecide -- this modal only opens via that same gate, but the
   // checklist evidence controls inside it need their own explicit check.
@@ -114,6 +119,10 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
         })),
       }
       const saved = await api.put<SASTOut>(`/api/sast-requests/${editing.id}`, payload)
+      // Evidence uploads are persisted immediately and are not included in
+      // the form PUT response. Reconcile the shared cache before closing so
+      // the Checklist tab cannot reveal its stale pre-edit file list.
+      await reloadEvidence()
       onSaved(saved)
     } catch (err2) { setError(err2) } finally { setBusy(false) }
   }
@@ -154,23 +163,15 @@ function SASTFormModal({ onClose, onSaved, editing }: { onClose: () => void; onS
                 {PRIORITIES.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </Field>
-            <Field label="SHA256/MD5 Hash"><input value={form.hash_value} onChange={(e) => set('hash_value', e.target.value)} /></Field>
           </div>
         </div>
 
-        <div className="form-section">
-          <div className="form-section-title">Repository Details *</div>
-          <RepeatableGroupInput
-            required
-            fields={SAST_COMPONENT_FIELDS}
-            rows={form.components}
-            onChange={(v) => set('components', v)}
-          />
-          <p className="muted small" style={{ marginTop: 6, marginBottom: 0 }}>
-            Click "+" to add another repository (its own branch, commit ID, tech stack and build number)
-            if this project spans more than one.
-          </p>
-        </div>
+        <SastRepositoryDetails
+          rows={form.components}
+          onChange={(rows) => set('components', rows)}
+          hashValue={form.hash_value}
+          onHashChange={(value) => set('hash_value', value)}
+        />
 
         {editing.checklist_items.length > 0 && (
           <div className="form-section">
@@ -315,6 +316,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   // "Readiness Failed" was easy to miss, so this is now asked as a pop-up at
   // the moment of failing readiness instead.
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
+  const [readinessPassError, setReadinessPassError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>(req.checklist_items || [])
@@ -374,6 +376,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
 
   async function act(action: string, extra?: Record<string, unknown>) {
     setError(null)
+    const isReadinessPass = action === 'readiness-decision' && extra?.decision === 'Passed'
+    if (isReadinessPass) setReadinessPassError(null)
     setBusy(true)
     try {
       const updated = await api.post<SASTOut>(`/api/sast-requests/${req.id}/${action}`, extra || {})
@@ -382,7 +386,11 @@ function SASTDetail({ req, onClose, onChanged, users }: {
       await load()
       return updated
     }
-    catch (err) { setError(err); return null } finally { setBusy(false) }
+    catch (err) {
+      if (isReadinessPass) setReadinessPassError(err)
+      else setError(err)
+      return null
+    } finally { setBusy(false) }
   }
 
   async function startScan(applicationName: string, applicationVersion: string) {
@@ -523,11 +531,9 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const canStartReadiness = isAssignedQALead && status === 'SECURITY_LEAD_ASSIGNED'
   const canReadinessDecide = isAssignedQALead && status === 'SECURITY_READINESS'
   const canVerifyChecklist = isAssignedQALead && status === 'SECURITY_READINESS'
-  const pendingChecklistItems = checklist.filter((c) => c.is_mandatory && !c.is_complete)
   // Mandatory checklist items must be self-declared ready BEFORE Submit is
   // even allowed (see routers/sast_dast.py::_require_checklist_ready) --
-  // distinct from pendingChecklistItems above, which gates Security
-  // Readiness's own independent verification instead.
+  // distinct from Security Readiness's own independent verification.
   const pendingSelfDeclare = checklist.filter((c) => c.is_mandatory && !c.requester_checked)
   const isInitialAnalystAssignment = status === 'PLANNING'
   // 2026-08 Reassignment CR, reported directly: "Everywhere the system
@@ -688,8 +694,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                 </span>
               </DetailField>
             )}
-            <DetailField label="Created">{new Date(req.created_at).toLocaleString()}</DetailField>
-            <DetailField label="Last Updated">{new Date(req.updated_at).toLocaleString()}</DetailField>
+            <DetailField label="Created">{formatDateTimeIST(req.created_at)}</DetailField>
+            <DetailField label="Last Updated">{formatDateTimeIST(req.updated_at)}</DetailField>
           </DetailSection>
 
           <DetailSection title="Application & Change">
@@ -768,10 +774,11 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                 Export PDF
               </button>
               {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
-              <ChildRequestDelegation
+              <RequestDelegation
                 targetType="SAST"
                 request={req}
                 users={users}
+                disabled={busy}
                 onChanged={async (updated) => { onChanged(updated); await load() }}
               />
               {canSubmit && (
@@ -842,7 +849,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
               {canStartReadiness && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('start-readiness')}>Start Security Readiness</button>}
               {canReadinessDecide && (
                 <>
-                  <button className="btn btn-success btn-sm" disabled={busy || pendingChecklistItems.length > 0}
+                  <button className="btn btn-success btn-sm" disabled={busy}
                           onClick={() => act('readiness-decision', { decision: 'Passed', comments })}>
                     Readiness Passed
                   </button>
@@ -868,12 +875,6 @@ function SASTDetail({ req, onClose, onChanged, users }: {
                     act('readiness-decision', { decision: 'Failed', comments, require_dept_head_reapproval: false })
                   }}
                 />
-              )}
-              {canReadinessDecide && pendingChecklistItems.length > 0 && (
-                <p className="muted small" style={{ color: 'var(--danger, #c0392b)', width: '100%' }}>
-                  {pendingChecklistItems.length} mandatory Security Readiness checklist item(s) still incomplete —
-                  see the Checklist tab.
-                </p>
               )}
               {canAssignSecurityAnalyst && (
                 <>
@@ -924,6 +925,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
           {editing && (
             <SASTFormModal
               editing={req}
+              documentsByItem={documentsByItem}
+              reloadEvidence={reloadEvidence}
               onClose={() => setEditing(false)}
               onSaved={(saved) => { setEditing(false); onChanged(saved) }}
             />
@@ -1037,6 +1040,8 @@ function SASTDetail({ req, onClose, onChanged, users }: {
       {tab === 'history' && (
         <JiraActivity entityType="SAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
+
+      <ReadinessPassError error={readinessPassError} />
 
       {/* Rendered outside every tab-specific block (not just inside
           Overview) -- reported directly: clicking Rescan from the Findings
@@ -1188,8 +1193,8 @@ export default function SAST() {
               </span>
             ) : <span className="badge badge-gray">Standalone (legacy)</span>
           ), filterValue: (r) => r.qa_request ? `Linked ${r.qa_request.request_id}` : 'Standalone legacy' },
-          { key: 'created_at', header: 'Created', render: (r) => new Date(r.created_at).toLocaleString() },
-          { key: 'updated_at', header: 'Updated', render: (r) => new Date(r.updated_at).toLocaleString() },
+          { key: 'created_at', header: 'Created', render: (r) => formatDateTimeIST(r.created_at) },
+          { key: 'updated_at', header: 'Updated', render: (r) => formatDateTimeIST(r.updated_at) },
         ]} rows={rows} />
       </Card>
       {selected && (

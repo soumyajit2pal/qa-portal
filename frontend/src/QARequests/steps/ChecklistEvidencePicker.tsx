@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react'
 import { api } from '../../api'
-import { ErrorText, ChecklistEvidenceFileRow, ChecklistEvidenceDeleteModal } from '../../components/Common'
+import { ErrorText, ChecklistEvidenceFileRow, ChecklistEvidenceDeleteModal, SupportingEvidenceControl } from '../../components/Common'
 import { RequestDocumentOut } from '../../types'
 
 export type EvidenceKind = 'functional' | 'sast' | 'dast' | 'performance'
@@ -68,6 +68,9 @@ export function ChecklistEvidencePicker({
       setPendingDelete(null)
       onReload()
     } catch (err) {
+      // Close the confirmation before showing the shared error dialog so
+      // two modal overlays never compete for focus or stack visually.
+      setPendingDelete(null)
       setError(err)
     } finally {
       setDeleteBusy(false)
@@ -77,7 +80,7 @@ export function ChecklistEvidencePicker({
   const totalFiles = savedFiles.length + files.length
 
   return (
-    <div className="checklist-evidence-picker">
+    <div className="checklist-evidence-picker supporting-evidence-control">
       <input
         ref={inputRef}
         type="file"
@@ -88,28 +91,12 @@ export function ChecklistEvidencePicker({
           e.target.value = ''
         }}
       />
-      <div className="checklist-evidence-actions">
-        <button
-          type="button"
-          className="btn btn-sm"
-          disabled={!checked}
-          title={checked ? undefined : 'Tick this item as checked before attaching evidence for it'}
-          onClick={() => inputRef.current?.click()}
-        >
-          Attach evidence
-        </button>
-        {totalFiles > 0 && <span className="badge badge-blue">{totalFiles} file{totalFiles !== 1 ? 's' : ''}</span>}
-        {required && totalFiles === 0 && (
-          <span
-            className="badge badge-gray"
-            title="This item is mandatory or checked off -- attaching evidence isn't required to raise this request, but it's recommended."
-          >
-            Evidence recommended
-          </span>
-        )}
-      </div>
-      {(savedFiles.length > 0 || files.length > 0) && (
-        <div className="checklist-evidence-files">
+      <SupportingEvidenceControl
+        attachDisabled={!checked}
+        onAttach={() => inputRef.current?.click()}
+        totalFiles={totalFiles}
+        required={required}
+      >
           {savedFiles.map((document) => (
             <ChecklistEvidenceFileRow
               key={document.id}
@@ -126,8 +113,7 @@ export function ChecklistEvidencePicker({
               <button type="button" className="btn btn-sm" aria-label={`Remove ${file.name}`} onClick={() => onFilesChange(files.filter((_, i) => i !== index))}>×</button>
             </div>
           ))}
-        </div>
-      )}
+      </SupportingEvidenceControl>
       <ErrorText error={error} />
       {pendingDelete && (
         <ChecklistEvidenceDeleteModal

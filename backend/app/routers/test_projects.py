@@ -24,10 +24,8 @@ _MANAGE_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD)
 
 # Reported directly: "while creating project with same project name you can
 # not create project, project should be unique as well." No DB-level UNIQUE
-# constraint on TestProject.name -- this app has no Alembic (create_all()
-# only emits DDL for tables that don't exist yet, see database.py's module
-# docstring), and retrofitting a hard UNIQUE constraint onto an EXISTING,
-# already-populated production table risks failing outright if any
+# constraint on TestProject.name. Retrofitting a hard UNIQUE constraint onto
+# an existing, already-populated production table risks failing outright if any
 # duplicate names already exist there. Enforced here at the application
 # layer instead, same as every other "must be unique" business rule this
 # router already checks by hand (e.g. the department-must-exist-and-be-
