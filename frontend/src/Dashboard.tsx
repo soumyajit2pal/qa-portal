@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from './api'
-import { formatDateTimeIST } from './time'
+import { formatDateIST, formatDateTimeIST } from './time'
 import { useAuth } from './context/AuthContext'
 import { Card, MetricCard, BarChart, Table, Badge, ErrorText, Modal, TableColumn } from './components/Common'
 import SearchableSelect from './components/SearchableSelect'
@@ -1242,9 +1242,8 @@ type TesterContributionDetailView = 'Defects' | 'Retests' | 'Executions' | 'Proj
 // QA-team-only capacity view. Aggregation and permission
 // enforcement both live on /api/dashboard/qa-tester-workload; the client
 // gate below is for navigation clarity, not the sole security boundary.
-function TesterOverviewTab() {
+function TesterOverviewTab({ range }: { range: RaisedRange }) {
   const navigate = useNavigate()
-  const [range, setRange] = useState<RaisedRange>({ preset: '1m', from: '', to: '' })
   const [workload, setWorkload] = useState<TesterWorkloadOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [view, setView] = useState<'contribution' | 'capacity'>('contribution')
@@ -1268,6 +1267,9 @@ function TesterOverviewTab() {
       .then(setWorkload).catch(setError)
   }, [range])
 
+  if (range.preset === 'custom' && (!range.from || !range.to)) {
+    return <p className="muted">Select both Dashboard custom dates to load QA tester reporting data.</p>
+  }
   if (error) return <ErrorText error={error} />
   if (!workload) return <p className="muted">Loading QA tester workload…</p>
 
@@ -1380,7 +1382,7 @@ function TesterOverviewTab() {
     return result
   }, {})
   const bounds = rangeBounds(range)
-  const periodLabel = range.preset === 'all' ? 'All recorded activity' : `${bounds.start?.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) || 'Beginning'} – ${bounds.end?.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) || 'Today'} (IST)`
+  const periodLabel = range.preset === 'all' ? 'All recorded activity (IST)' : `${bounds.start ? formatDateIST(bounds.start) : 'Beginning'} – ${bounds.end ? formatDateIST(bounds.end) : 'Today'} (IST)`
 
   function exportContribution() {
     downloadCsv('qa-contribution-and-coverage.csv', filteredRows.map((row) => ({
@@ -1434,24 +1436,12 @@ function TesterOverviewTab() {
   return (
     <div className="tester-overview-tab">
       <div className="dashboard-section-head">
-        <div><strong>QA Contribution & Coverage</strong><span>Evidence-based testcase, defect, retest, execution, project, and current-work tracking.</span></div>
+        <div><strong>QA Contribution & Coverage</strong><span>Evidence-based testcase, defect, retest, execution, project, and current-work tracking. Using the Dashboard reporting period: {periodLabel}.</span></div>
         <Badge status="QA_LEAD_ASSIGNED" label="QA team only" />
       </div>
       <div className="pill-tabs tester-overview-modes">
         <button className={view === 'contribution' ? 'active' : ''} onClick={() => setView('contribution')}>Contribution & Coverage</button>
         <button className={view === 'capacity' ? 'active' : ''} onClick={() => setView('capacity')}>Capacity & Occupancy</button>
-      </div>
-      <div className="tester-period-filter" role="group" aria-label="Completed request period">
-        <div><strong>Reporting period</strong><span>{periodLabel}. Current assignments always remain visible.</span></div>
-        <div className="tester-period-presets">
-          {([
-            ['all', 'All time'], ['3d', 'Last 3 days'], ['15d', 'Last 15 days'], ['1m', 'Last month'], ['custom', 'Custom dates'],
-          ] as Array<[RaisedRangePreset, string]>).map(([preset, label]) => <button key={preset} type="button" className={range.preset === preset ? 'active' : ''} onClick={() => setRange((current) => ({ ...current, preset }))}>{label}</button>)}
-        </div>
-        {range.preset === 'custom' && <div className="tester-custom-dates">
-          <label><span>From *</span><input required type="date" value={range.from} max={range.to || undefined} onChange={(event) => setRange((current) => ({ ...current, from: event.target.value }))} /></label>
-          <label><span>To *</span><input required type="date" value={range.to} min={range.from || undefined} onChange={(event) => setRange((current) => ({ ...current, to: event.target.value }))} /></label>
-        </div>}
       </div>
       {view === 'contribution' && <>
       <div className="tester-contribution-filters">
@@ -1654,7 +1644,7 @@ export default function Dashboard() {
           {insightTab === '3w' && <ThreeWTab range={range} />}
         </div>
       )}
-      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab />}
+      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab range={range} />}
     </div>
   )
 }
