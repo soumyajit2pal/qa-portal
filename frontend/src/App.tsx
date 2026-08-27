@@ -1,4 +1,4 @@
-import React, { ReactNode, Suspense, lazy } from 'react'
+import React, { ReactNode, Suspense, lazy, useEffect } from 'react'
 import { Routes, Route, Navigate, Link, Outlet } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
@@ -175,6 +175,31 @@ function ModuleFallback() {
 }
 
 export default function App() {
+  // Date ranges govern reporting and workflow deadlines.  Keep native date
+  // inputs calendar-only so a partially typed/pasted value cannot bypass the
+  // paired min/max range rules (for example, entering a To date before From).
+  // Tab/Escape remain available for normal keyboard focus and dismissing the
+  // native calendar; selection itself still happens through the picker.
+  useEffect(() => {
+    function isDateInput(target: EventTarget | null): target is HTMLInputElement {
+      return target instanceof HTMLInputElement && target.type === 'date'
+    }
+    function blockDateTyping(event: KeyboardEvent) {
+      if (isDateInput(event.target) && !['Tab', 'Escape'].includes(event.key)) event.preventDefault()
+    }
+    function blockDatePasteOrDrop(event: ClipboardEvent | DragEvent) {
+      if (isDateInput(event.target)) event.preventDefault()
+    }
+    document.addEventListener('keydown', blockDateTyping, true)
+    document.addEventListener('paste', blockDatePasteOrDrop, true)
+    document.addEventListener('drop', blockDatePasteOrDrop, true)
+    return () => {
+      document.removeEventListener('keydown', blockDateTyping, true)
+      document.removeEventListener('paste', blockDatePasteOrDrop, true)
+      document.removeEventListener('drop', blockDatePasteOrDrop, true)
+    }
+  }, [])
+
   return (
     <>
       <GlobalButtonTooltips />

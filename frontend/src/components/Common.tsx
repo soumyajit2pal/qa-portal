@@ -1434,17 +1434,32 @@ export function Table<T extends Record<string, any>>({
     setOpenFilterKey(null);
   }
 
+  function columnLabel(column: TableColumn<T>): string {
+    if (typeof column.header === "string" && column.header.trim()) return column.header;
+    return column.key.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+
+  const recordCount = server ? server.total : rows.length;
+  const visibleRecordCount = server ? filteredRows.length : filteredRows.length;
+
   return (
     <div className="table-shell">
-      <div className="table-column-controls" ref={columnsTriggerRef}>
-        <button
-          type="button"
-          className="table-columns-trigger"
-          onClick={toggleColumnsPanel}
-          aria-expanded={columnsOpen}
-        >
-          Columns <span>{visibleColumns.length}/{availableColumns.length}</span>
-        </button>
+      <div className="table-toolbar">
+        <div className="table-record-summary" aria-live="polite">
+          <span className="table-record-dot" aria-hidden="true" />
+          <strong>{recordCount.toLocaleString()} record{recordCount === 1 ? "" : "s"}</strong>
+          {activeFilters.length > 0 && <span>{visibleRecordCount.toLocaleString()} matching current filters</span>}
+        </div>
+        <div className="table-column-controls" ref={columnsTriggerRef}>
+          <button
+            type="button"
+            className="table-columns-trigger"
+            onClick={toggleColumnsPanel}
+            aria-expanded={columnsOpen}
+          >
+            Columns <span>{visibleColumns.length}/{availableColumns.length}</span>
+          </button>
+        </div>
         {columnsOpen && createPortal(
           <div
             className="table-columns-panel"
@@ -1485,12 +1500,12 @@ export function Table<T extends Record<string, any>>({
           document.body
         )}
       </div>
-      <div className="table-wrap">
-      <table>
+      <div className="table-wrap" role="region" aria-label="Data table" tabIndex={0}>
+      <table className="data-table">
         <thead>
           <tr>
             {visibleColumns.map((c) => (
-              <th key={c.key} data-column={c.key}>
+              <th key={c.key} data-column={c.key} scope="col">
                 <div className="th-cell">
                   <span>{c.header}</span>
                   {c.filterable !== false && (
@@ -1499,9 +1514,8 @@ export function Table<T extends Record<string, any>>({
                       className={`th-filter-btn ${
                         filters[c.key] ? "active" : ""
                       }`}
-                      title={`Filter ${
-                        typeof c.header === "string" ? c.header : "column"
-                      }`}
+                      title={`Filter ${columnLabel(c)}`}
+                      aria-label={`Filter ${columnLabel(c)}`}
                       onClick={(e) => toggleFilter(c.key, e)}
                     >
                       <IconFilter width={12} height={12} />
@@ -1543,7 +1557,7 @@ export function Table<T extends Record<string, any>>({
               className={onRowClick ? "row-clickable" : undefined}
             >
               {visibleColumns.map((c) => (
-                <td key={c.key} data-column={c.key}>
+              <td key={c.key} data-column={c.key} data-label={columnLabel(c)}>
                   {c.render ? c.render(row) : textFor(c, row)}
                 </td>
               ))}

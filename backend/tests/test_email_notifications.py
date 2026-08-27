@@ -69,6 +69,8 @@ class EmailNotificationTests(unittest.TestCase):
                 db.commit()
             messages = db.query(models.EmailNotification).all()
             self.assertEqual([message.recipient_email for message in messages], ["sm@example.com"])
+            self.assertIsNotNone(messages[0].approval_action_id)
+            self.assertEqual(messages[0].approval_action.entity_type, "FUNCTIONAL_REQUEST")
             self.assertEqual(messages[0].status, "PENDING")
         finally:
             db.close()

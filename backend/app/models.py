@@ -1663,6 +1663,13 @@ class ApprovalAction(Base):
     new_state = Column(String(30), nullable=True)
 
     actor = relationship("User", foreign_keys=[actor_id])
+    # The SMTP outbox is attached by relationship (rather than copying
+    # `action.id`) while an ApprovalAction is still pending.  Oracle assigns
+    # identity values only during the flush, so SQLAlchemy must flush this
+    # parent first and then populate EmailNotification.approval_action_id.
+    email_notifications = relationship(
+        "EmailNotification", back_populates="approval_action", cascade="all, delete-orphan"
+    )
 
     @property
     def actor_name(self):
@@ -1689,6 +1696,8 @@ class EmailNotification(Base):
     sent_at = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=now, nullable=False)
+
+    approval_action = relationship("ApprovalAction", back_populates="email_notifications")
 
 
 class AssignmentHistory(Base):

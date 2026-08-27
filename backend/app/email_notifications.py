@@ -178,7 +178,11 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
         email = (user.email or "").strip()
         if email:
             db.add(models.EmailNotification(
-                approval_action_id=action.id, recipient_email=email, subject=subject, body=body,
+                # `action` is new at before_commit time, so its Oracle
+                # identity value is still None.  The relationship makes
+                # SQLAlchemy insert the ApprovalAction first, then binds the
+                # generated ID into this mandatory FK during the same flush.
+                approval_action=action, recipient_email=email, subject=subject, body=body,
             ))
 
 
