@@ -331,6 +331,72 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
             ))
 
 
+def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]) -> None:
+    """Create one summary email per recipient/stage for a test-case batch.
+
+    Test cases are routinely submitted, recommended, or approved in bulk.
+    Sending a separate email for every row turns a useful notification into
+    mailbox noise, so all records from the same transaction and workflow
+    checkpoint are presented as one actionable summary instead.
+    """
+    groups: dict[tuple[int, str, bool, str], list[tuple[models.ApprovalAction, object, NotificationRoute]]] = {}
+    for action in actions:
+        if getattr(action, "_email_notifications_queued", False):
+            continue
+        action._email_notifications_queued = True
+        target = _target(action, db)
+        route = _notification_route(db, action, target)
+        if not route:
+            continue
+        status = _status_label(getattr(target, "status", None))
+        for recipient_id in route.recipient_ids - {action.actor_id}:
+            key = (recipient_id, route.recipient_label, route.action_required, status)
+            groups.setdefault(key, []).append((action, target, route))
+
+    portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
+    for (recipient_id, label, action_required, status), entries in groups.items():
+        user = db.get(models.User, recipient_id)
+        email = (user.email or "").strip() if user else ""
+        if not email:
+            continue
+        first_action, _, route = entries[0]
+        references = list(dict.fromkeys(_portal_reference(action, target) for action, target, _ in entries))
+        shown_references = references[:20]
+        remaining = len(references) - len(shown_references)
+        type_label = "Test Case" if len(references) == 1 else "Test Cases"
+        subject = f"{'Action required' if action_required else 'Workflow update'}: {len(references)} {type_label} — {label}"
+        url_path = _route(first_action)
+        url = f"{portal_url}{url_path}" if portal_url else url_path
+        item_lines = "\n".join(f"• {reference}" for reference in shown_references)
+        if remaining:
+            item_lines += f"\n• and {remaining} more"
+        body = (
+            f"QA PORTAL {'ACTION REQUIRED' if action_required else 'WORKFLOW UPDATE'}\n\n"
+            f"{route.instruction}\n\n"
+            f"{len(references)} {type_label.lower()} are now at: {status}\n\n"
+            f"Items:\n{item_lines}\n\n"
+            f"Open Test Repository: {url}\n"
+        )
+        html_items = "".join(f"<li style=\"margin:4px 0\">{escape(reference)}</li>" for reference in shown_references)
+        if remaining:
+            html_items += f"<li style=\"margin:4px 0\">and {remaining} more</li>"
+        html_body = f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
+<div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
+  <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px;letter-spacing:.3px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">{'Action required' if action_required else 'Workflow update'} · Test case summary</div></div>
+  <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">{len(references)} {type_label}</h1>
+    <p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">{escape(route.instruction)}</p>
+    <p style=\"margin:0 0 10px;color:#627981;font-size:13px\">Current status</p><p style=\"margin:0 0 18px;font-weight:600\">{escape(status)}</p>
+    <div style=\"margin:18px 0;padding:12px 14px;background:#f5f8f9;border-left:3px solid #0d6678;font-size:13px\"><strong>Test cases</strong><ul style=\"margin:8px 0 0;padding-left:20px\">{html_items}</ul></div>
+    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Open Test Repository</a>
+  </div>
+  <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">This is an automated QA Portal workflow notification.</div>
+</div></body></html>"""
+        db.add(models.EmailNotification(
+            approval_action=first_action, recipient_email=email, subject=subject,
+            body=body, html_body=html_body,
+        ))
+
+
 def _before_commit(session: SASession) -> None:
     if session.info.get("email_notification_listener"):
         return
@@ -347,7 +413,11 @@ def _before_commit(session: SASession) -> None:
         final_actions = {}
         for action in actions:
             final_actions[(action.entity_type, action.entity_id)] = action
+        test_case_actions = [action for action in final_actions.values() if action.entity_type == "TEST_CASE"]
+        _queue_test_case_digests(session, test_case_actions)
         for action in final_actions.values():
+            if action.entity_type == "TEST_CASE":
+                continue
             _queue_for_action(session, action)
         # The after-commit hook must run only for the transaction that
         # actually created workflow messages. Delivery itself commits status
@@ -417,56 +487,87 @@ def _send(notification: models.EmailNotification) -> None:
         client.send_message(message)
 
 
+def _candidate_notification_ids(now: datetime.datetime, limit: int) -> list[int]:
+    """Read the batch once, then deliver every recipient in isolation."""
+    db = SessionLocal()
+    try:
+        return [row.id for row in db.query(models.EmailNotification.id).filter(
+            or_(
+                models.EmailNotification.status == "PENDING",
+                (models.EmailNotification.status == "RETRY") & (models.EmailNotification.next_attempt_at <= now),
+                (models.EmailNotification.status == "SENDING") & (models.EmailNotification.last_attempt_at < now - datetime.timedelta(minutes=15)),
+            )
+        ).order_by(models.EmailNotification.created_at).limit(limit).all()]
+    finally:
+        db.close()
+
+
+def _deliver_one(notification_id: int, now: datetime.datetime) -> bool:
+    """Deliver one outbox row in its own database session/transaction.
+
+    SMTP rejections and even an unexpected persistence error for one recipient
+    must not prevent the rest of a notification batch from being delivered.
+    """
+    db = SessionLocal()
+    try:
+        notification = db.get(models.EmailNotification, notification_id)
+        if not notification:
+            return False
+        original_status = notification.status
+        if original_status not in {"PENDING", "RETRY", "SENDING"}:
+            return False
+
+        # Claim atomically. Several Uvicorn workers can wake up for the same
+        # outbox row, but only one may hand this recipient to the SMTP relay.
+        claim = db.query(models.EmailNotification).filter(
+            models.EmailNotification.id == notification_id,
+            models.EmailNotification.status == original_status,
+        )
+        if original_status == "RETRY":
+            claim = claim.filter(models.EmailNotification.next_attempt_at <= now)
+        elif original_status == "SENDING":
+            claim = claim.filter(models.EmailNotification.last_attempt_at < now - datetime.timedelta(minutes=15))
+        claimed = claim.update({
+            models.EmailNotification.status: "SENDING",
+            models.EmailNotification.attempts: models.EmailNotification.attempts + 1,
+            models.EmailNotification.last_attempt_at: now,
+        }, synchronize_session=False)
+        db.commit()
+        if not claimed:
+            return False
+
+        notification = db.get(models.EmailNotification, notification_id)
+        try:
+            _send(notification)
+            notification.status = "SENT"
+            notification.sent_at = models.now()
+            notification.last_error = None
+            db.commit()
+            return True
+        except Exception as exc:
+            notification.last_error = str(exc)[:2000]
+            if notification.attempts >= _MAX_ATTEMPTS:
+                notification.status = "FAILED"
+            else:
+                notification.status = "RETRY"
+                notification.next_attempt_at = models.now() + datetime.timedelta(minutes=2 ** notification.attempts)
+            db.commit()
+            logger.warning("Email delivery failed for outbox item %s: %s", notification_id, exc)
+            return False
+    except Exception:
+        db.rollback()
+        logger.exception("Email delivery processing failed for outbox item %s", notification_id)
+        return False
+    finally:
+        db.close()
+
+
 def deliver_pending(limit: int = 20) -> int:
     ready, reason = smtp_readiness()
     if not ready:
         logger.debug("Email outbox delivery skipped: %s", reason)
         return 0
     now = models.now()
-    db = SessionLocal()
-    delivered = 0
-    try:
-        candidates = db.query(models.EmailNotification).filter(
-            or_(
-                models.EmailNotification.status == "PENDING",
-                (models.EmailNotification.status == "RETRY") & (models.EmailNotification.next_attempt_at <= now),
-                (models.EmailNotification.status == "SENDING") & (models.EmailNotification.last_attempt_at < now - datetime.timedelta(minutes=15)),
-            )
-        ).order_by(models.EmailNotification.created_at).limit(limit).all()
-        for notification in candidates:
-            # Claim atomically. Several Uvicorn workers can wake up for the
-            # same outbox, but only one may hand this item to the SMTP relay.
-            claim = db.query(models.EmailNotification).filter(
-                models.EmailNotification.id == notification.id,
-                models.EmailNotification.status == notification.status,
-            )
-            if notification.status == "RETRY":
-                claim = claim.filter(models.EmailNotification.next_attempt_at <= now)
-            elif notification.status == "SENDING":
-                claim = claim.filter(models.EmailNotification.last_attempt_at < now - datetime.timedelta(minutes=15))
-            claimed = claim.update({
-                models.EmailNotification.status: "SENDING",
-                models.EmailNotification.attempts: models.EmailNotification.attempts + 1,
-                models.EmailNotification.last_attempt_at: now,
-            }, synchronize_session=False)
-            db.commit()
-            if not claimed:
-                continue
-            db.expire_all()
-            notification = db.get(models.EmailNotification, notification.id)
-            try:
-                _send(notification)
-                notification.status = "SENT"; notification.sent_at = models.now(); notification.last_error = None
-                delivered += 1
-            except Exception as exc:
-                notification.last_error = str(exc)[:2000]
-                if notification.attempts >= _MAX_ATTEMPTS:
-                    notification.status = "FAILED"
-                else:
-                    notification.status = "RETRY"
-                    notification.next_attempt_at = models.now() + datetime.timedelta(minutes=2 ** notification.attempts)
-                logger.warning("Email delivery failed for outbox item %s: %s", notification.id, exc)
-            db.commit()
-        return delivered
-    finally:
-        db.close()
+    # Do not let a bad mailbox, an SMTP refusal, or a transient DB error for
+    # one recipient abort delivery for every other recipient in this batch.
+    return sum(_deliver_one(notification_id, now) for notification_id in _candidate_notification_ids(now, limit))
