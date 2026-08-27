@@ -45,10 +45,13 @@ class EmailNotificationTests(unittest.TestCase):
         try:
             requester = models.User(id=1, username="requester", full_name="Requester", email="requester@example.com", login_type="STANDARD")
             approver = models.User(id=2, username="sm", full_name="SM", email="sm@example.com", login_type="STANDARD")
+            department_head = models.User(id=3, username="head", full_name="Department Head", email="head@example.com", login_type="STANDARD")
             db.add_all([
-                requester, approver,
+                requester, approver, department_head,
                 models.UserRole(user_id=2, role=Role.SM),
                 models.UserDepartment(user_id=2, department="IT"),
+                models.UserRole(user_id=3, role=Role.DEPARTMENT_HEAD_CM),
+                models.UserDepartment(user_id=3, department="IT"),
             ])
             db.flush()
             db.add(models.QARequest(id=10, request_id="TQA-REQ-10", application_name="Portal", department="IT", requester_id=1, status=GatewayStatus.SUBMITTED))
@@ -58,7 +61,11 @@ class EmailNotificationTests(unittest.TestCase):
             ))
             db.add(models.ApprovalAction(
                 entity_type="FUNCTIONAL_REQUEST", entity_id=20, actor_id=1,
-                step_name="SM Approval", decision="Submitted",
+                step_name="Requester", decision="Submitted",
+            ))
+            db.add(models.ApprovalAction(
+                entity_type="FUNCTIONAL_REQUEST", entity_id=20, actor_id=1,
+                step_name="SM Approval", decision="Pending",
             ))
             install_outbox_listener()
             settings = {
@@ -75,6 +82,24 @@ class EmailNotificationTests(unittest.TestCase):
             self.assertIn("TQA-FUNC-20", messages[0].subject)
             self.assertIn("Record: TQA-FUNC-20", messages[0].body)
             self.assertNotIn("Record: #20", messages[0].body)
+            self.assertIn("Action required", messages[0].subject)
+            self.assertIn("Service Manager review", messages[0].body)
+            self.assertIsNotNone(messages[0].html_body)
+            self.assertIn("Open in QA Portal", messages[0].html_body)
+
+            # When the SM completes their approval, only the next stage's
+            # Department Head receives the next action-required email.
+            functional = db.get(models.FunctionalRequest, 20)
+            functional.status = QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING
+            db.add(models.ApprovalAction(
+                entity_type="FUNCTIONAL_REQUEST", entity_id=20, actor_id=2,
+                step_name="SM Approval", decision="Approved",
+            ))
+            with patch.dict(os.environ, settings, clear=False), patch("app.email_notifications.deliver_pending_async"):
+                db.commit()
+            messages = db.query(models.EmailNotification).order_by(models.EmailNotification.id).all()
+            self.assertEqual([message.recipient_email for message in messages], ["sm@example.com", "head@example.com"])
+            self.assertIn("Department Head review", messages[1].body)
         finally:
             db.close()
             engine.dispose()

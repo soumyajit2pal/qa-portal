@@ -10,7 +10,9 @@ import os
 import smtplib
 import threading
 import time
+from dataclasses import dataclass
 from email.message import EmailMessage
+from html import escape
 from urllib.parse import quote
 
 from sqlalchemy import event, or_
@@ -24,6 +26,14 @@ logger = logging.getLogger("qa_portal.email")
 _listener_installed = False
 _poller_started = False
 _MAX_ATTEMPTS = 5
+
+
+@dataclass(frozen=True)
+class NotificationRoute:
+    recipient_ids: set[int]
+    recipient_label: str
+    action_required: bool
+    instruction: str
 
 
 def _enabled() -> bool:
@@ -80,24 +90,25 @@ def _department(target) -> str | None:
     return parent.department if parent else None
 
 
-def _target_user_ids(target) -> set[int]:
+def _requester_user_ids(target) -> set[int]:
+    """The person who must respond when work is returned or completed."""
     if not target:
         return set()
     ids = set()
     for field in (
-        "requester_id", "created_by_id", "owner_id", "qa_lead_id", "security_lead_id",
-        "engineer_id", "reviewed_by_id", "approved_by_id", "sm_id", "dept_head_id",
-        "security_id", "reporter_id", "assignee_id", "retest_tester_id",
-        "default_reviewer_id", "default_qa_lead_id", "pending_requested_by_id",
+        "requester_id", "created_by_id", "author_id", "submitted_by_id", "pending_requested_by_id",
     ):
         value = getattr(target, field, None)
         if value:
             ids.add(value)
-    for raw in (getattr(target, "assigned_tester_ids", None) or "").split(","):
-        try:
-            ids.add(int(raw.strip()))
-        except (TypeError, ValueError):
-            pass
+    # A TestCase's requester is stored on its active draft version rather
+    # than on the permanent testcase identity.
+    draft = getattr(target, "current_draft_version", None)
+    if draft:
+        for field in ("author_id", "submitted_by_id"):
+            value = getattr(draft, field, None)
+            if value:
+                ids.add(value)
     parent = getattr(target, "qa_request", None)
     if parent and parent.requester_id:
         ids.add(parent.requester_id)
@@ -114,18 +125,31 @@ def _next_approver_roles(target) -> set[str]:
         if status == "DEPT_HEAD_QA_APPROVAL_PENDING":
             return {Role.CHIEF_MANAGER_QA, Role.AGM_QA}
     if isinstance(target, models.TestCase):
-        if status in {"IN REVIEW", "RECOMMENDATION PENDING"}:
+        if status == "IN REVIEW":
+            return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+        if status == "RECOMMENDATION PENDING":
             return {Role.QA_ENGINEER}
         if status in {"REVIEW COMPLETED", "QA LEAD APPROVAL PENDING"}:
             return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+    if isinstance(target, models.TestProject) and target.pending_is_active is not None:
+        return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+    if isinstance(target, models.QARequest):
+        application = getattr(target, "application_master", None)
+        application_status = str(getattr(application, "status", "") or "").upper()
+        if application_status == "PENDING_APP_OWNER":
+            return {Role.APPLICATION_OWNER}
+        if application_status == "PENDING_SM":
+            return {Role.SM}
     if status == "SM_APPROVAL_PENDING":
         return {Role.SM}
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
         return {Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM}
     if status in {"QA_LEAD_ASSIGNED", "READINESS_VERIFICATION", "ENGINEER_ASSIGNED", "READINESS"}:
         return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
-    if status in {"SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS", "SECURITY_TEAM_VERIFICATION"}:
-        return {Role.SECURITY_ANALYST, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+    if status in {"SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS"}:
+        return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+    if status == "SECURITY_TEAM_VERIFICATION":
+        return {Role.SECURITY_ANALYST}
     if status in {"QA_LEAD_APPROVAL_PENDING", "REVIEW_COMPLETED"}:
         return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
     return set()
@@ -138,6 +162,79 @@ def _role_user_ids(db: SASession, roles: set[str], department: str | None) -> se
         joinedload(models.User.department_assignments)
     ).filter(models.User.is_active == True, models.UserRole.role.in_(roles)).all()  # noqa: E712
     return {user.id for user in users if not department or user.has_department(department)}
+
+
+def _role_label(roles: set[str]) -> str:
+    labels = {
+        Role.SM: "Service Manager",
+        Role.DEPARTMENT_HEAD_CM: "Department Head",
+        Role.DEPARTMENT_HEAD_AGM: "Department Head",
+        Role.APPLICATION_OWNER: "Application Owner",
+        Role.QA_LEAD: "QA Lead",
+        Role.CHIEF_MANAGER_QA: "QA Lead Group",
+        Role.AGM_QA: "QA Lead Group",
+        Role.SECURITY_ANALYST: "Security Team",
+        Role.QA_ENGINEER: "QA Team",
+    }
+    for role in roles:
+        if role in labels:
+            return labels[role]
+    return "QA Portal user"
+
+
+def _is_workflow_transition(action: models.ApprovalAction) -> bool:
+    """Ignore audit-only actions such as document uploads while an item waits.
+
+    Workflow routing is based on the target's final status at commit time.
+    Without this guard, an evidence upload during SM approval would send a
+    second, misleading SM reminder even though no workflow stage changed.
+    """
+    decision = (action.decision or "").strip().lower()
+    return any(word in decision for word in (
+        "submit", "pending", "resubmit", "reopen", "approv", "recommend",
+        "return", "reject", "fail", "accept", "clear", "issue", "complete",
+        "close", "cancel", "change", "request",
+    ))
+
+
+def _notification_route(db: SASession, action: models.ApprovalAction, target) -> NotificationRoute | None:
+    """Route each workflow transition to its *next* responsible party.
+
+    This deliberately does not copy every stakeholder on every message.
+    For example, after a requester raises a request only the SM receives the
+    action-required mail; after the SM approves it only the Department Head
+    receives the next one. Returned work goes to the requester. This mirrors
+    the Pending Approvals queue and prevents duplicate/noisy notifications.
+    """
+    if not target or not _is_workflow_transition(action):
+        return None
+
+    roles = _next_approver_roles(target)
+    if roles:
+        department = QA_DEPARTMENT if isinstance(target, models.TestCase) else _department(target)
+        recipients = _role_user_ids(db, roles, department)
+        if recipients:
+            label = _role_label(roles)
+            return NotificationRoute(
+                recipients, label, True,
+                f"Your {label} review is required before this workflow can continue.",
+            )
+
+    status = str(getattr(target, "status", "") or "").upper()
+    requester_ids = _requester_user_ids(target)
+    if not requester_ids:
+        return None
+    if status.startswith("RETURNED") or status in {"SM_REJECTED", "ASSIGNED_TO_REQUESTER", "WAITING_FOR_FIX", "REQUESTER_VERIFICATION"}:
+        return NotificationRoute(
+            requester_ids, "Requester", True,
+            "This item needs your review or update before the workflow can continue.",
+        )
+    if status in {"REJECTED", "DEPARTMENT_HEAD_REJECTED", "DONE", "ISSUED", "CLOSED", "CANCELLED"}:
+        return NotificationRoute(
+            requester_ids, "Requester", False,
+            "The workflow has reached an outcome. Open the record for the full details.",
+        )
+    return None
 
 
 def _route(action: models.ApprovalAction) -> str:
@@ -173,6 +270,13 @@ def _portal_link(action: models.ApprovalAction, reference: str) -> str:
     return f"{route}?open={quote(reference, safe='')}&openId={action.entity_id}"
 
 
+def _status_label(value) -> str:
+    """Make stored status codes readable without degrading acronyms (SM/QA)."""
+    words = str(value or "—").replace("_", " ").split()
+    acronyms = {"SM", "QA", "SAST", "DAST", "COE", "AGM"}
+    return " ".join(word if word.upper() in acronyms else word.title() for word in words)
+
+
 def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
     # Before SMTP is deliberately enabled, do not accumulate weeks of stale
     # workflow mail that would surprise users on the first activation.
@@ -182,10 +286,10 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
         return
     action._email_notifications_queued = True
     target = _target(action, db)
-    recipient_ids = _target_user_ids(target)
-    approver_department = QA_DEPARTMENT if isinstance(target, models.TestCase) else _department(target)
-    recipient_ids.update(_role_user_ids(db, _next_approver_roles(target), approver_department))
-    recipient_ids.discard(action.actor_id)
+    route = _notification_route(db, action, target)
+    if not route:
+        return
+    recipient_ids = route.recipient_ids - {action.actor_id}
     if not recipient_ids:
         return
     users = db.query(models.User).filter(models.User.id.in_(recipient_ids), models.User.is_active == True).all()  # noqa: E712
@@ -193,13 +297,28 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
     reference = _portal_reference(action, target)
     path = _portal_link(action, reference)
     url = f"{portal_url}{path}" if portal_url else path
-    subject = f"QA Portal: {reference} — {action.step_name or 'Workflow'} — {action.decision or 'Updated'}"
+    status = _status_label(getattr(target, "status", None))
+    type_label = action.entity_type.replace("_", " ").title()
+    subject = f"{'Action required' if route.action_required else 'Workflow update'}: {reference} — {route.recipient_label}"
     body = (
-        f"A QA Portal workflow item has been updated.\n\n"
-        f"Type: {action.entity_type.replace('_', ' ')}\nRecord: {reference}\n"
-        f"Step: {action.step_name or '—'}\nDecision: {action.decision or '—'}\n"
-        f"Comments: {action.comments or '—'}\n\nOpen QA Portal: {url}\n"
+        f"QA PORTAL {'ACTION REQUIRED' if route.action_required else 'WORKFLOW UPDATE'}\n\n"
+        f"{route.instruction}\n\n"
+        f"Record: {reference}\nType: {type_label}\nCurrent status: {status}\n"
+        f"Latest action: {action.step_name or 'Workflow'} — {action.decision or 'Updated'}\n"
+        f"Comments: {action.comments or 'No comments provided.'}\n\n"
+        f"Open item: {url}\n"
     )
+    html_body = f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
+<div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
+  <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px;letter-spacing:.3px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">{'Action required' if route.action_required else 'Workflow update'}</div></div>
+  <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">{escape(reference)}</h1>
+    <p style=\"margin:0 0 20px;font-size:15px;line-height:1.55\">{escape(route.instruction)}</p>
+    <table style=\"width:100%;border-collapse:collapse;font-size:14px\"><tr><td style=\"padding:9px 0;color:#627981;width:38%\">Type</td><td style=\"padding:9px 0;font-weight:600\">{escape(type_label)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Current status</td><td style=\"padding:9px 0;font-weight:600\">{escape(status)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Latest action</td><td style=\"padding:9px 0\">{escape(action.step_name or 'Workflow')} — {escape(action.decision or 'Updated')}</td></tr></table>
+    <div style=\"margin:18px 0;padding:12px 14px;background:#f5f8f9;border-left:3px solid #0d6678;font-size:13px;line-height:1.5\"><strong>Comments</strong><br>{escape(action.comments or 'No comments provided.').replace(chr(10), '<br>')}</div>
+    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Open in QA Portal</a>
+  </div>
+  <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">This is an automated QA Portal workflow notification.</div>
+</div></body></html>"""
     for user in users:
         email = (user.email or "").strip()
         if email:
@@ -208,7 +327,7 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
                 # identity value is still None.  The relationship makes
                 # SQLAlchemy insert the ApprovalAction first, then binds the
                 # generated ID into this mandatory FK during the same flush.
-                approval_action=action, recipient_email=email, subject=subject, body=body,
+                approval_action=action, recipient_email=email, subject=subject, body=body, html_body=html_body,
             ))
 
 
@@ -220,7 +339,15 @@ def _before_commit(session: SASession) -> None:
         return
     session.info["email_notification_listener"] = True
     try:
+        # A single endpoint can log several history rows while moving one
+        # record through intermediate states (e.g. Submitted then SM
+        # Approval Pending). Route only the final row for that record, based
+        # on its final status, so the next approver receives one precise
+        # notification instead of duplicates.
+        final_actions = {}
         for action in actions:
+            final_actions[(action.entity_type, action.entity_id)] = action
+        for action in final_actions.values():
             _queue_for_action(session, action)
         # The after-commit hook must run only for the transaction that
         # actually created workflow messages. Delivery itself commits status
@@ -279,6 +406,8 @@ def _send(notification: models.EmailNotification) -> None:
     message["From"] = f'{settings["from_name"]} <{settings["from_address"]}>'
     message["To"] = notification.recipient_email
     message.set_content(notification.body)
+    if notification.html_body:
+        message.add_alternative(notification.html_body, subtype="html")
     smtp_class = smtplib.SMTP_SSL if settings["ssl"] else smtplib.SMTP
     with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"]) as client:
         if settings["starttls"]:

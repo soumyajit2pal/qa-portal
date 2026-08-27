@@ -1689,6 +1689,9 @@ class EmailNotification(Base):
     recipient_email = Column(String(320), nullable=False)
     subject = Column(String(255), nullable=False)
     body = Column(Text, nullable=False)
+    # HTML alternative for a readable, branded workflow notification. The
+    # plain-text body remains the durable fallback for older mail clients.
+    html_body = Column(Text, nullable=True)
     status = Column(String(16), nullable=False, default="PENDING")
     attempts = Column(Integer, nullable=False, default=0)
     next_attempt_at = Column(DateTime, nullable=True)
