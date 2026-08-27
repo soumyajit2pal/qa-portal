@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, ErrorText, PageHeader } from '../../components/Common'
+import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
 import { hasRole, ROLE_LABELS, DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES } from '../../constants'
 import { UserOut } from '../../types'
 import { RoleChipSelect } from './Admin'
@@ -26,6 +26,7 @@ export default function DepartmentAdmin() {
   const [users, setUsers] = useState<UserOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
+  const [emailTarget, setEmailTarget] = useState<UserOut | null>(null)
 
   // SRS 7.2 pagination rollout -- deliberately left unpaginated (see
   // routers/auth.py::list_local_admin_users' own docstring). This roster is
@@ -54,14 +55,16 @@ export default function DepartmentAdmin() {
   // default -- Admins normally use /admin instead of this page anyway.
   const assignableRoles = isQAAdmin ? QA_ADMIN_ASSIGNABLE_ROLES : DEPARTMENT_ADMIN_ASSIGNABLE_ROLES
 
-  async function patchUser(id: number, changes: { roles?: string[]; is_active?: boolean }) {
+  async function patchUser(id: number, changes: { email?: string | null; roles?: string[]; is_active?: boolean }): Promise<boolean> {
     setError(null)
     setSavingId(id)
     try {
       const updated = await api.patch<UserOut>(`/api/auth/local-admin/users/${id}`, changes)
       setUsers((rows) => rows.map((r) => (r.id === id ? updated : r)))
+      return true
     } catch (err) {
       setError(err)
+      return false
     } finally {
       setSavingId(null)
     }
@@ -119,6 +122,12 @@ export default function DepartmentAdmin() {
                 </div>
               )
             }, filterValue: (u) => (u.roles || []).join(' ') },
+            { key: 'email', header: 'Notification Email', render: (u) => (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>{u.email || 'Not set'}</span>
+                <button className="btn btn-sm" disabled={savingId === u.id} onClick={() => setEmailTarget(u)}>Update</button>
+              </div>
+            ), filterValue: (u) => u.email || '' },
             { key: 'is_active', header: 'Status', render: (u) => (
               <button
                 className={`btn btn-sm ${u.is_active ? '' : 'btn-danger'}`}
@@ -137,6 +146,48 @@ export default function DepartmentAdmin() {
           </p>
         )}
       </Card>
+      {emailTarget && (
+        <EmailEditor
+          userRow={emailTarget}
+          busy={savingId === emailTarget.id}
+          onClose={() => setEmailTarget(null)}
+          onSave={async (email) => {
+            const saved = await patchUser(emailTarget.id, { email })
+            if (saved) setEmailTarget(null)
+            return saved
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+function EmailEditor({ userRow, busy, onClose, onSave }: {
+  userRow: UserOut; busy: boolean; onClose: () => void; onSave: (email: string | null) => Promise<boolean>
+}) {
+  const [email, setEmail] = useState(userRow.email || '')
+  const [formError, setFormError] = useState<unknown>(null)
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault()
+    try {
+      setFormError(null)
+      await onSave(email.trim() || null)
+    } catch (err) {
+      setFormError(err)
+    }
+  }
+
+  return (
+    <Modal title={`Update notification email — ${userRow.full_name}`} onClose={onClose}>
+      <form onSubmit={submit}>
+        <Field label="Email address">
+          <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" autoFocus />
+        </Field>
+        <p className="muted small">This address receives QA Portal workflow notifications for this user.</p>
+        <ErrorText error={formError} />
+        <div className="modal-actions"><button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save email'}</button></div>
+      </form>
+    </Modal>
   )
 }

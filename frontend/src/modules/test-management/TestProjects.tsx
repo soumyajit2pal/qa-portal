@@ -498,10 +498,20 @@ export default function TestProjects() {
   // Approvals feed to land a QA Lead directly on the specific project
   // awaiting their activation/deactivation decision.
   useEffect(() => {
+    const recordId = Number(searchParams.get('openId'))
     const openKey = searchParams.get('open')
-    if (!openKey || projects.length === 0) return
-    setSearch(openKey)
-    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+    if (Number.isInteger(recordId) && recordId > 0) {
+      api.get<TestProjectOut>(`/api/test-projects/${recordId}`).then((project) => {
+        setProjects((current) => current.some((item) => item.id === project.id) ? current : [project, ...current])
+        setProjectFilter('all')
+        setSearch(project.project_key)
+      }).catch(setError)
+    } else if (openKey) {
+      if (!projects.some((project) => project.project_key === openKey)) return
+      setProjectFilter('all')
+      setSearch(openKey)
+    } else return
+    setSearchParams((p) => { p.delete('open'); p.delete('openId'); return p }, { replace: true })
   }, [projects, searchParams, setSearchParams])
 
   const applicationNameById = useMemo(() => new Map(applications.map((a) => [a.id, a.name])), [applications])

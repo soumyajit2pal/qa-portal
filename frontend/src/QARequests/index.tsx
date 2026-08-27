@@ -116,12 +116,20 @@ export default function QARequests() {
   // Pending Approvals and other deep links can open the parent gateway's
   // drawer immediately instead of landing on its filtered list first.
   useEffect(() => {
+    const recordId = Number(new URLSearchParams(location.search).get("openId"));
     const openId = new URLSearchParams(location.search).get("open");
-    if (!openId || requests.length === 0) return;
-    const match = requests.find((request) => request.request_id === openId);
-    if (match) openRequest(match.id);
+    if (Number.isInteger(recordId) && recordId > 0) {
+      openRequest(recordId);
+    } else if (openId) {
+      const match = requests.find((request) => request.request_id === openId);
+      if (!match) return;
+      openRequest(match.id);
+    } else {
+      return;
+    }
     const params = new URLSearchParams(location.search);
     params.delete("open");
+    params.delete("openId");
     navigate(`${location.pathname}${params.toString() ? `?${params}` : ""}`, { replace: true });
   }, [requests, location.search, location.pathname, navigate, openRequest]);
 

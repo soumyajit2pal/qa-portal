@@ -605,6 +605,14 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
     _require_own_department_target(current_user, user)
     before = user_snapshot(user)
 
+    # A valid notification address is operational contact data, not an
+    # access-control attribute. Local Department Coordinators may maintain it
+    # for people in their own department, under the same scope/protected-user
+    # restrictions as role and activation changes above.
+    updates = payload.model_dump(exclude_unset=True)
+    if "email" in updates:
+        user.email = (updates["email"] or "").strip() or None
+
     if payload.roles is not None:
         assignable = _local_admin_assignable_roles(current_user)
         invalid = [r for r in payload.roles if r not in assignable]

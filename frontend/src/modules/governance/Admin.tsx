@@ -197,6 +197,7 @@ function ResetPasswordModal({ userRow, onClose, onDone }: { userRow: UserOut; on
 function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onClose, onDone }: {
   userRow: UserOut; currentUserId: number; departmentOptions: string[]; onClose: () => void; onDone: () => void
 }) {
+  const [email, setEmail] = useState(userRow.email || '')
   const [departments, setDepartments] = useState<string[]>(userRow.departments?.length ? userRow.departments : (userRow.department ? [userRow.department] : []))
   const [roles, setRoles] = useState<string[]>(userRow.roles || [])
   const [adminManagedOnly, setAdminManagedOnly] = useState(!!userRow.admin_managed_only)
@@ -211,7 +212,7 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
     if (!roles.length) { setError(new Error('Select at least one role')); return }
     setBusy(true); setError(null)
     try {
-      await api.patch(`/api/auth/users/${userRow.id}`, { departments, roles, admin_managed_only: adminManagedOnly, is_active: active })
+      await api.patch(`/api/auth/users/${userRow.id}`, { email: email.trim() || null, departments, roles, admin_managed_only: adminManagedOnly, is_active: active })
       onDone()
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -234,6 +235,9 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
   return <Modal title={`Manage access — ${userRow.full_name}`} onClose={onClose}>
     <form onSubmit={save} className="access-manage-form">
       <div className="access-manage-identity"><span className="access-user-avatar">{userRow.full_name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase()}</span><div><strong>{userRow.full_name}</strong><span>@{userRow.username}</span><small>{userRow.email || 'No email address'}</small></div></div>
+      <Field label="Notification email">
+        <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" />
+      </Field>
       <section className="access-picker-panel">
         <header><div><small>01 · Organisational scope</small><h3>Department access</h3><p>Select one or more departments. Set one selected department as primary.</p></div><strong>{departments.length} selected</strong></header>
         <label className="access-picker-search"><IconSearch width={14} height={14} /><input value={departmentSearch} onChange={(event) => setDepartmentSearch(event.target.value)} placeholder="Find a department…" /></label>

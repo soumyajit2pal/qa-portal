@@ -671,11 +671,16 @@ export default function Suppression() {
   // the Linked Requests table jump straight to a specific suppression's
   // detail drawer instead of just landing on this list.
   useEffect(() => {
+    const recordId = Number(searchParams.get('openId'))
     const openId = searchParams.get('open')
-    if (!openId || rows.length === 0) return
-    const match = rows.find((r) => r.suppression_id === openId)
-    if (match) setSelected(match)
-    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+    if (Number.isInteger(recordId) && recordId > 0) {
+      api.get<SuppressionOut>(`/api/suppressions/${recordId}`).then(setSelected).catch(setError)
+    } else if (openId) {
+      const match = rows.find((r) => r.suppression_id === openId)
+      if (!match) return
+      setSelected(match)
+    } else return
+    setSearchParams((p) => { p.delete('open'); p.delete('openId'); return p }, { replace: true })
   }, [rows, searchParams, setSearchParams])
 
   // "Initiate Suppression Request" (SecurityScan.tsx, findings tab) links

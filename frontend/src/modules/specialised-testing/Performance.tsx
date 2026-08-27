@@ -847,11 +847,16 @@ export default function Performance() {
   // full reasoning; the gateway's "Linked Requests" table opens a specific
   // Performance request here via `?open=<request_id>`.
   useEffect(() => {
+    const recordId = Number(searchParams.get('openId'))
     const openId = searchParams.get('open')
-    if (!openId || rows.length === 0) return
-    const match = rows.find((r) => r.request_id === openId)
-    if (match) openRequest(match.id)
-    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+    if (Number.isInteger(recordId) && recordId > 0) {
+      openRequest(recordId)
+    } else if (openId) {
+      const match = rows.find((r) => r.request_id === openId)
+      if (!match) return
+      openRequest(match.id)
+    } else return
+    setSearchParams((p) => { p.delete('open'); p.delete('openId'); return p }, { replace: true })
   }, [rows, searchParams, setSearchParams, openRequest])
 
   return (

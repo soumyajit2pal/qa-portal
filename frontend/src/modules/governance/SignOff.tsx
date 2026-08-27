@@ -781,11 +781,16 @@ export default function SignOff() {
   // specific sign-off certificate's detail drawer instead of just landing on
   // this list.
   useEffect(() => {
+    const recordId = Number(searchParams.get('openId'))
     const openId = searchParams.get('open')
-    if (!openId || rows.length === 0) return
-    const match = rows.find((r) => r.certificate_id === openId)
-    if (match) setSelected(match)
-    setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
+    if (Number.isInteger(recordId) && recordId > 0) {
+      api.get<SignOffOut>(`/api/signoffs/${recordId}`).then(setSelected).catch(setError)
+    } else if (openId) {
+      const match = rows.find((r) => r.certificate_id === openId)
+      if (!match) return
+      setSelected(match)
+    } else return
+    setSearchParams((p) => { p.delete('open'); p.delete('openId'); return p }, { replace: true })
   }, [rows, searchParams, setSearchParams])
 
   const departments = useMemo(() => Array.from(new Set(rows.map((row) => row.request_department).filter((value): value is string => !!value))).sort((a, b) => a.localeCompare(b)), [rows])

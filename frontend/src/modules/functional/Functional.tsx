@@ -1896,20 +1896,25 @@ export default function Functional() {
     }
   }, []);
 
-  // Deep-link support: the gateway QA Request's "Linked Requests" table
-  // opens a specific request here via `?open=<request_id>`, e.g. navigating
-  // straight from /qa-requests to /functional-requests?open=TQA-FUNC-...
-  // Once the list has loaded, find the matching row and open its detail
-  // exactly as a row click would, then drop the query param so it doesn't
-  // re-trigger on refresh/back-navigation.
+  // Pending Approvals includes openId so this fetches the exact record even
+  // when it is not on the module list's currently loaded page.  `open` is
+  // retained as a backward-compatible fallback for older deep links.
   useEffect(() => {
+    const recordId = Number(searchParams.get("openId"));
     const openId = searchParams.get("open");
-    if (!openId || requests.length === 0) return;
-    const match = requests.find((r) => r.request_id === openId);
-    if (match) openRequest(match.id);
+    if (Number.isInteger(recordId) && recordId > 0) {
+      openRequest(recordId);
+    } else if (openId) {
+      const match = requests.find((r) => r.request_id === openId);
+      if (!match) return;
+      openRequest(match.id);
+    } else {
+      return;
+    }
     setSearchParams(
       (p) => {
         p.delete("open");
+        p.delete("openId");
         return p;
       },
       { replace: true }

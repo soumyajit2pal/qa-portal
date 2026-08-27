@@ -11,6 +11,7 @@ import smtplib
 import threading
 import time
 from email.message import EmailMessage
+from urllib.parse import quote
 
 from sqlalchemy import event, or_
 from sqlalchemy.orm import Session as SASession, joinedload
@@ -149,6 +150,29 @@ def _route(action: models.ApprovalAction) -> str:
     return routes.get(action.entity_type, "/approvals")
 
 
+def _portal_reference(action: models.ApprovalAction, target) -> str:
+    """Return the business ID users see in the portal, never a database key."""
+    if target:
+        for field in (
+            "request_id", "suppression_id", "certificate_id", "defect_key",
+            "project_key", "test_case_key",
+        ):
+            value = getattr(target, field, None)
+            if value:
+                return str(value)
+    # This fallback is intentionally descriptive rather than presenting the
+    # internal primary key as a user-facing record identifier.
+    return action.entity_type.replace("_", " ").title()
+
+
+def _portal_link(action: models.ApprovalAction, reference: str) -> str:
+    """Link to the exact portal record, including when its list is paginated."""
+    route = _route(action)
+    if route == "/approvals":
+        return route
+    return f"{route}?open={quote(reference, safe='')}&openId={action.entity_id}"
+
+
 def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
     # Before SMTP is deliberately enabled, do not accumulate weeks of stale
     # workflow mail that would surprise users on the first activation.
@@ -166,11 +190,13 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
         return
     users = db.query(models.User).filter(models.User.id.in_(recipient_ids), models.User.is_active == True).all()  # noqa: E712
     portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
-    url = f"{portal_url}{_route(action)}" if portal_url else _route(action)
-    subject = f"QA Portal: {action.step_name or 'Workflow'} — {action.decision or 'Updated'}"
+    reference = _portal_reference(action, target)
+    path = _portal_link(action, reference)
+    url = f"{portal_url}{path}" if portal_url else path
+    subject = f"QA Portal: {reference} — {action.step_name or 'Workflow'} — {action.decision or 'Updated'}"
     body = (
         f"A QA Portal workflow item has been updated.\n\n"
-        f"Type: {action.entity_type.replace('_', ' ')}\nRecord: #{action.entity_id}\n"
+        f"Type: {action.entity_type.replace('_', ' ')}\nRecord: {reference}\n"
         f"Step: {action.step_name or '—'}\nDecision: {action.decision or '—'}\n"
         f"Comments: {action.comments or '—'}\n\nOpen QA Portal: {url}\n"
     )

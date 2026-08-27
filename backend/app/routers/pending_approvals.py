@@ -1,5 +1,6 @@
 import datetime
 from typing import List, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, or_, select, union_all
@@ -109,7 +110,19 @@ def _parent_context(obj):
     gateway = getattr(obj, "qa_request", None)
     if not gateway or not gateway.request_id:
         return None, None
-    return gateway.request_id, f"/qa-requests?search={gateway.request_id}"
+    return gateway.request_id, _detail_path("/qa-requests", gateway.request_id, gateway.id)
+
+
+def _detail_path(path: str, display_id: str, entity_id: int) -> str:
+    """Build a deep link that can open an exact record, regardless of pagination.
+
+    ``open`` remains the readable business identifier used by existing links,
+    while ``openId`` is the database identifier the destination page can fetch
+    directly.  Pending Approvals must not depend on whether its target happens
+    to be on the first page of a module list.
+    """
+    separator = "&" if "?" in path else "?"
+    return f"{path}{separator}open={quote(str(display_id), safe='')}&openId={entity_id}"
 
 
 def _name(user: Optional["models.User"]) -> Optional[str]:
@@ -164,7 +177,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
 
     def _gateway_path(gw) -> str:
         if gw and gw.request_id:
-            return f"/qa-requests?open={gw.request_id}"
+            return _detail_path("/qa-requests", gw.request_id, gw.id)
         return "/qa-requests"
 
     if user.has_role(Role.APPLICATION_OWNER):
@@ -268,7 +281,7 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
                     f"{module_label} -- SM Approval", entity_type, obj.id, obj.request_id,
                     f"{module_label}: {obj.application_name or '—'}", obj.status,
                     labels.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
-                    obj.created_at, f"{path}?open={obj.request_id}",
+                    obj.created_at, _detail_path(path, obj.request_id, obj.id),
                     *_parent_context(obj),
                 ))
         if user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
@@ -287,7 +300,7 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
                     f"{module_label} -- Department Head Approval", entity_type, obj.id, obj.request_id,
                     f"{module_label}: {obj.application_name or '—'}", obj.status,
                     labels.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
-                    obj.created_at, f"{path}?open={obj.request_id}",
+                    obj.created_at, _detail_path(path, obj.request_id, obj.id),
                     *_parent_context(obj),
                 ))
     return results
@@ -314,7 +327,7 @@ def _readiness_items(db: Session, user: models.User) -> List[dict]:
                 f"{module_label} -- {action}", entity_type, obj.id, obj.request_id,
                 f"{module_label}: {obj.application_name or '—'}", obj.status,
                 labels.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
-                obj.created_at, f"{path}?open={obj.request_id}",
+                obj.created_at, _detail_path(path, obj.request_id, obj.id),
                 *_parent_context(obj),
             ))
     return results
@@ -343,7 +356,7 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
                 f"Suppression: {obj.application_name or '—'}", obj.status,
                 SUPPRESSION_STATUS_LABELS.get(obj.status, obj.status), obj.department,
                 _user_name(db, obj.created_by_id),
-                obj.created_at, f"/suppression?open={obj.suppression_id}",
+                obj.created_at, _detail_path("/suppression", obj.suppression_id, obj.id),
             ))
     if user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
         q = _query("DEPARTMENT_HEAD_APPROVAL_PENDING")
@@ -356,7 +369,7 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
                 f"Suppression: {obj.application_name or '—'}", obj.status,
                 SUPPRESSION_STATUS_LABELS.get(obj.status, obj.status), obj.department,
                 _user_name(db, obj.created_by_id),
-                obj.created_at, f"/suppression?open={obj.suppression_id}",
+                obj.created_at, _detail_path("/suppression", obj.suppression_id, obj.id),
             ))
     if user.has_role(Role.SECURITY_ANALYST):
         for obj in _query("SECURITY_TEAM_VERIFICATION").order_by(models.SuppressionRequest.created_at).all():
@@ -365,7 +378,7 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
                 f"Suppression: {obj.application_name or '—'}", obj.status,
                 SUPPRESSION_STATUS_LABELS.get(obj.status, obj.status), obj.department,
                 _user_name(db, obj.created_by_id),
-                obj.created_at, f"/suppression?open={obj.suppression_id}",
+                obj.created_at, _detail_path("/suppression", obj.suppression_id, obj.id),
             ))
     return results
 
@@ -393,7 +406,7 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
                 "QA Clearance -- QA Lead Approval", "SIGNOFF", obj.id, obj.certificate_id,
                 f"QA Clearance: {obj.application_name or '—'}", obj.status,
                 SIGNOFF_STATUS_LABELS.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
-                obj.created_at, f"/signoff?open={obj.certificate_id}",
+                obj.created_at, _detail_path("/signoff", obj.certificate_id, obj.id),
             ))
     if user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         q = _query("DEPT_HEAD_QA_APPROVAL_PENDING")
@@ -404,7 +417,7 @@ def _signoff_items(db: Session, user: models.User) -> List[dict]:
                 "QA Clearance -- Executive Approval", "SIGNOFF", obj.id, obj.certificate_id,
                 f"QA Clearance: {obj.application_name or '—'}", obj.status,
                 SIGNOFF_STATUS_LABELS.get(obj.status, obj.status), obj.department, _user_name(db, obj.requester_id),
-                obj.created_at, f"/signoff?open={obj.certificate_id}",
+                obj.created_at, _detail_path("/signoff", obj.certificate_id, obj.id),
             ))
     return results
 
@@ -427,7 +440,7 @@ def _test_project_items(db: Session, user: models.User) -> List[dict]:
             "Test Project -- Activation Approval", "TEST_PROJECT", obj.id, obj.project_key,
             f"{action} requested: {obj.name}", "PENDING_ACTIVATION_APPROVAL",
             f"{action} Approval Pending", obj.department, obj.pending_requested_by_name,
-            obj.pending_requested_at, f"/test-projects?open={obj.project_key}",
+            obj.pending_requested_at, _detail_path("/test-projects", obj.project_key, obj.id),
         ))
     return results
 

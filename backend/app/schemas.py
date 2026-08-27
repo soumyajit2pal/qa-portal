@@ -149,9 +149,11 @@ class LocalAdminUserUpdate(BaseModel):
     counterpart to the Admin-only UserUpdate above. Only `roles` (constrained
     server-side to DEPARTMENT_ADMIN_ASSIGNABLE_ROLES or
     QA_ADMIN_ASSIGNABLE_ROLES depending on which kind of local admin is
-    calling -- see routers/auth.py::_local_admin_assignable_roles) and
-    `is_active` may be touched this way -- no department, login type,
-    profile fields, or password. See routers/auth.py::update_local_admin_user."""
+    calling -- see routers/auth.py::_local_admin_assignable_roles),
+    `is_active`, and the notification email may be touched this way. A
+    coordinator still cannot change a person's department, login type,
+    name, or password. See routers/auth.py::update_local_admin_user."""
+    email: Optional[str] = None
     roles: Optional[List[str]] = None
     is_active: Optional[bool] = None
 

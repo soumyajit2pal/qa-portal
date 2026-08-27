@@ -72,6 +72,9 @@ class EmailNotificationTests(unittest.TestCase):
             self.assertIsNotNone(messages[0].approval_action_id)
             self.assertEqual(messages[0].approval_action.entity_type, "FUNCTIONAL_REQUEST")
             self.assertEqual(messages[0].status, "PENDING")
+            self.assertIn("TQA-FUNC-20", messages[0].subject)
+            self.assertIn("Record: TQA-FUNC-20", messages[0].body)
+            self.assertNotIn("Record: #20", messages[0].body)
         finally:
             db.close()
             engine.dispose()
