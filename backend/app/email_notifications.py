@@ -65,21 +65,33 @@ def smtp_readiness() -> tuple[bool, str | None]:
     return True, None
 
 
-def _html_email(title: str, subtitle: str, content_html: str, *, footer: str | None = None) -> str:
-    """Render the single QA Portal email design used by every notification.
+def _html_email(title: str, subtitle: str, instruction: str, *,
+                status: str | None, panel_title: str, panel_html: str,
+                action_label: str, action_url: str,
+                footer: str | None = None) -> str:
+    """Render the one approved QA Portal mail design.
 
-    The test-case digest was the approved visual baseline: compact teal
-    heading, clear title, information panel and one primary action.  Keeping
-    the wrapper in one function prevents workflow, access-review and digest
-    emails from slowly becoming separate templates again.  ``content_html``
-    is composed only from escaped values at each call site.
+    This is deliberately the exact Test Case digest structure: teal header,
+    title, instruction, status line, one pale detail panel and one teal
+    action button.  Every notification calls this renderer; no email type is
+    allowed to introduce a separate table/card/layout. ``panel_html`` is
+    built from escaped values at each call site.
     """
     footer = footer or "This is an automated QA Portal workflow notification."
+    status_html = ""
+    if status:
+        status_html = (
+            '<p style="margin:0 0 10px;color:#627981;font-size:13px">Current status</p>'
+            f'<p style="margin:0 0 18px;font-weight:600">{escape(status)}</p>'
+        )
     return f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
 <div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
   <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px;letter-spacing:.3px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">{escape(subtitle)}</div></div>
   <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">{escape(title)}</h1>
-    {content_html}
+    <p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">{escape(instruction)}</p>
+    {status_html}
+    <div style=\"margin:18px 0;padding:12px 14px;background:#f5f8f9;border-left:3px solid #0d6678;font-size:13px;line-height:1.5\"><strong>{escape(panel_title)}</strong>{panel_html}</div>
+    <a href=\"{escape(action_url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">{escape(action_label)}</a>
   </div>
   <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">{escape(footer)}</div>
 </div></body></html>"""
@@ -127,9 +139,14 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
     )
     html_body = _html_email(
         "New LDAP access request", "Access review required",
-        f"""<p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">Review this account and assign the appropriate portal role.</p>
-    <table style=\"width:100%;border-collapse:collapse;font-size:14px\"><tr><td style=\"padding:9px 0;color:#627981;width:38%\">User</td><td style=\"padding:9px 0;font-weight:600\">{escape(user.full_name)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Username</td><td style=\"padding:9px 0\">{escape(user.username)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Department</td><td style=\"padding:9px 0\">{escape(department)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Current role(s)</td><td style=\"padding:9px 0\">{escape(', '.join(user.roles) or 'No portal role assigned')}</td></tr></table>
-    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;margin-top:18px;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Review in QA Portal</a>""",
+        "Review this account and assign the appropriate portal role.",
+        status="Access review pending", panel_title="Access request",
+        panel_html=(
+            f"<ul style=\"margin:8px 0 0;padding-left:20px\"><li>User: {escape(user.full_name)}</li>"
+            f"<li>Username: {escape(user.username)}</li><li>Department: {escape(department)}</li>"
+            f"<li>Current role(s): {escape(', '.join(user.roles) or 'No portal role assigned')}</li></ul>"
+        ),
+        action_label="Review in QA Portal", action_url=url,
         footer="This is an automated QA Portal access-management notification.",
     )
     action = models.ApprovalAction(
@@ -567,11 +584,14 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
         f"Open item: {url}\n"
     )
     html_body = _html_email(
-        reference, 'Action required' if route.action_required else 'Workflow update',
-        f"""<p style=\"margin:0 0 20px;font-size:15px;line-height:1.55\">{escape(route.instruction)}</p>
-    <table style=\"width:100%;border-collapse:collapse;font-size:14px\"><tr><td style=\"padding:9px 0;color:#627981;width:38%\">Type</td><td style=\"padding:9px 0;font-weight:600\">{escape(type_label)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Current status</td><td style=\"padding:9px 0;font-weight:600\">{escape(status)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Latest action</td><td style=\"padding:9px 0\">{escape(action.step_name or 'Workflow')} — {escape(action.decision or 'Updated')}</td></tr></table>
-    <div style=\"margin:18px 0;padding:12px 14px;background:#f5f8f9;border-left:3px solid #0d6678;font-size:13px;line-height:1.5\"><strong>Comments</strong><br>{escape(action.comments or 'No comments provided.').replace(chr(10), '<br>')}</div>
-    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Open in QA Portal</a>""",
+        reference, 'Action required' if route.action_required else 'Workflow update', route.instruction,
+        status=status, panel_title="Workflow details",
+        panel_html=(
+            f"<ul style=\"margin:8px 0 0;padding-left:20px\"><li>Type: {escape(type_label)}</li>"
+            f"<li>Latest action: {escape(action.step_name or 'Workflow')} — {escape(action.decision or 'Updated')}</li>"
+            f"<li>Comments: {escape(action.comments or 'No comments provided.').replace(chr(10), '<br>')}</li></ul>"
+        ),
+        action_label="Open in QA Portal", action_url=url,
     )
     queued_count = 0
     missing_email_users = []
@@ -660,10 +680,9 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
         html_body = _html_email(
             f"{len(references)} {type_label}",
             f"{'Action required' if action_required else 'Workflow update'} · Test case summary",
-            f"""<p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">{escape(route.instruction)}</p>
-    <p style=\"margin:0 0 10px;color:#627981;font-size:13px\">Current status</p><p style=\"margin:0 0 18px;font-weight:600\">{escape(status)}</p>
-    <div style=\"margin:18px 0;padding:12px 14px;background:#f5f8f9;border-left:3px solid #0d6678;font-size:13px\"><strong>Test cases</strong><ul style=\"margin:8px 0 0;padding-left:20px\">{html_items}</ul></div>
-    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Open Test Repository</a>""",
+            route.instruction, status=status, panel_title="Test cases",
+            panel_html=f"<ul style=\"margin:8px 0 0;padding-left:20px\">{html_items}</ul>",
+            action_label="Open Test Repository", action_url=url,
         )
         db.add(models.EmailNotification(
             approval_action=first_action, recipient_email=email, subject=subject,
