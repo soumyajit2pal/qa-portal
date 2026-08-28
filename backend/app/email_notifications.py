@@ -393,7 +393,7 @@ def _assigned_user_route(target) -> NotificationRoute | None:
 
 def _role_label(roles: set[str]) -> str:
     labels = {
-        Role.SM: "Service Manager",
+        Role.SM: "SM",
         Role.DEPARTMENT_HEAD_CM: "Department Head",
         Role.DEPARTMENT_HEAD_AGM: "Department Head",
         Role.APPLICATION_OWNER: "Application Owner",
