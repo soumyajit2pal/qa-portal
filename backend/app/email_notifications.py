@@ -700,10 +700,32 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
     return queued_count
 
 
+def _before_flush(session: SASession, flush_context, instances) -> None:
+    """Remember workflow actions that an endpoint flushes before commit.
+
+    Several creation flows need generated child IDs and call ``db.flush()``
+    before their final ``db.commit()``.  SQLAlchemy removes those audit rows
+    from ``session.new`` at flush time, so inspecting only ``session.new`` in
+    ``before_commit`` silently missed their notification (notably the child
+    SM Approval Pending row created while raising a QA Request).
+    """
+    tracked = session.info.setdefault("email_notification_actions", [])
+    known = {id(action) for action in tracked}
+    for action in session.new:
+        if isinstance(action, models.ApprovalAction) and id(action) not in known:
+            tracked.append(action)
+            known.add(id(action))
+
+
 def _before_commit(session: SASession) -> None:
     if session.info.get("email_notification_listener"):
         return
-    actions = [item for item in session.new if isinstance(item, models.ApprovalAction)]
+    actions = list(session.info.get("email_notification_actions", []))
+    known = {id(action) for action in actions}
+    for item in session.new:
+        if isinstance(item, models.ApprovalAction) and id(item) not in known:
+            actions.append(item)
+            known.add(id(item))
     if not actions:
         return
     session.info["email_notification_listener"] = True
@@ -752,6 +774,7 @@ def _before_commit(session: SASession) -> None:
 
 
 def _after_commit(session: SASession) -> None:
+    session.info.pop("email_notification_actions", None)
     if not session.info.pop("email_notifications_created", False):
         return
     if _enabled():
@@ -785,6 +808,7 @@ def start_outbox_poller() -> None:
 
 
 def _after_rollback(session: SASession) -> None:
+    session.info.pop("email_notification_actions", None)
     session.info.pop("email_notifications_created", None)
 
 
@@ -792,6 +816,7 @@ def install_outbox_listener() -> None:
     global _listener_installed
     if _listener_installed:
         return
+    event.listen(SASession, "before_flush", _before_flush)
     event.listen(SASession, "before_commit", _before_commit)
     event.listen(SASession, "after_commit", _after_commit)
     event.listen(SASession, "after_rollback", _after_rollback)
