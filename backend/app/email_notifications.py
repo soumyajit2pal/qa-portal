@@ -65,6 +65,26 @@ def smtp_readiness() -> tuple[bool, str | None]:
     return True, None
 
 
+def _html_email(title: str, subtitle: str, content_html: str, *, footer: str | None = None) -> str:
+    """Render the single QA Portal email design used by every notification.
+
+    The test-case digest was the approved visual baseline: compact teal
+    heading, clear title, information panel and one primary action.  Keeping
+    the wrapper in one function prevents workflow, access-review and digest
+    emails from slowly becoming separate templates again.  ``content_html``
+    is composed only from escaped values at each call site.
+    """
+    footer = footer or "This is an automated QA Portal workflow notification."
+    return f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
+<div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
+  <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px;letter-spacing:.3px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">{escape(subtitle)}</div></div>
+  <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">{escape(title)}</h1>
+    {content_html}
+  </div>
+  <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">{escape(footer)}</div>
+</div></body></html>"""
+
+
 def queue_access_review_notifications(db: SASession, user: models.User) -> int:
     """Queue one access-review email for each active Administrator.
 
@@ -105,16 +125,13 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
         f"Current role(s): {', '.join(user.roles) or 'No portal role assigned'}\n\n"
         f"Review access: {url}\n"
     )
-    html_body = f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
-<div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
-  <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">Access review required</div></div>
-  <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">New LDAP access request</h1>
-    <p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">Review this account and assign the appropriate portal role.</p>
+    html_body = _html_email(
+        "New LDAP access request", "Access review required",
+        f"""<p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">Review this account and assign the appropriate portal role.</p>
     <table style=\"width:100%;border-collapse:collapse;font-size:14px\"><tr><td style=\"padding:9px 0;color:#627981;width:38%\">User</td><td style=\"padding:9px 0;font-weight:600\">{escape(user.full_name)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Username</td><td style=\"padding:9px 0\">{escape(user.username)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Department</td><td style=\"padding:9px 0\">{escape(department)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Current role(s)</td><td style=\"padding:9px 0\">{escape(', '.join(user.roles) or 'No portal role assigned')}</td></tr></table>
-    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;margin-top:18px;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Review in QA Portal</a>
-  </div>
-  <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">This is an automated QA Portal access-management notification.</div>
-</div></body></html>"""
+    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;margin-top:18px;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Review in QA Portal</a>""",
+        footer="This is an automated QA Portal access-management notification.",
+    )
     action = models.ApprovalAction(
         entity_type="USER_ACCESS",
         entity_id=user.id,
@@ -216,12 +233,26 @@ def _next_approver_roles(target) -> set[str]:
         return {Role.SM}
     if status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
         return {Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM}
-    if status in {"QA_LEAD_ASSIGNED", "READINESS_VERIFICATION", "ENGINEER_ASSIGNED", "READINESS"}:
+    if status in {
+        "QA_LEAD_ASSIGNED", "READINESS_VERIFICATION", "QA_ACTIVITY_INITIATED",
+        "PLANNING", "QA_COMPLETED", "QA_SIGNOFF_PENDING", "ENGINEER_ASSIGNED",
+        "READINESS", "FEASIBILITY", "RESULT_ANALYSIS", "REPORT", "SIGNOFF_PENDING",
+    }:
         return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
     if status in {"SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS"}:
         return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
-    if status == "SECURITY_TEAM_VERIFICATION":
+    if status in {
+        "TESTER_ASSIGNED", "TEST_DESIGN", "EXECUTION_IN_PROGRESS", "RETESTING",
+    }:
+        return {Role.QA_ENGINEER}
+    if status in {
+        "CONFIGURATION", "SCANNING", "FINDING_VALIDATION", "REMEDIATION",
+        "ASSIGNED_TO_LEAD", "RESCAN", "SECURITY_COMPLETE", "REPORT_READY",
+        "SECURITY_TEAM_VERIFICATION",
+    }:
         return {Role.SECURITY_ANALYST}
+    if status in {"ENVIRONMENT_SETUP", "SCRIPT_DEVELOPMENT", "BASELINE", "LOAD_TEST_EXECUTION"}:
+        return {Role.QA_ENGINEER}
     if status in {"QA_LEAD_APPROVAL_PENDING", "REVIEW_COMPLETED"}:
         return {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
     return set()
@@ -234,6 +265,113 @@ def _role_user_ids(db: SASession, roles: set[str], department: str | None) -> se
         joinedload(models.User.department_assignments)
     ).filter(models.User.is_active == True, models.UserRole.role.in_(roles)).all()  # noqa: E712
     return {user.id for user in users if not department or user.has_department(department)}
+
+
+def _user_ids(value) -> set[int]:
+    """Return a safe, de-duplicated set from a persisted assignee field.
+
+    Functional and Performance keep their tester assignment as a compact
+    comma-separated value for compatibility with the existing schema.  Do
+    not let a malformed legacy value prevent the rest of the group from being
+    notified; only valid positive integer IDs are meaningful here.
+    """
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, (tuple, list, set)):
+        values = value
+    else:
+        values = [value]
+    ids = set()
+    for item in values:
+        try:
+            user_id = int(item)
+        except (TypeError, ValueError):
+            continue
+        if user_id > 0:
+            ids.add(user_id)
+    return ids
+
+
+def _assigned_user_route(target) -> NotificationRoute | None:
+    """Return the named current owner when the workflow has one.
+
+    A role group owns an item only while no person has been selected.  Once a
+    QA Lead assigns an analyst/tester (or a reviewer/defect assignee is
+    explicitly recorded), sending the next action-required email to the
+    whole group is both noisy and ambiguous.  This resolver is intentionally
+    stage-aware: a historical assignment does not override a later stage
+    that is back with the requester or QA Lead group.
+    """
+    status = str(getattr(target, "status", "") or "").upper()
+
+    if isinstance(target, models.FunctionalRequest) and status in {
+        "TESTER_ASSIGNED", "TEST_DESIGN", "EXECUTION_IN_PROGRESS", "RETESTING",
+    }:
+        recipients = _user_ids(target.assigned_tester_ids)
+        if recipients:
+            return NotificationRoute(
+                recipients, "Assigned QA Tester", True,
+                "You have been assigned QA work on this request. Open the record to continue the workflow.",
+            )
+
+    if isinstance(target, models.PerformanceRequest) and status in {
+        "ENVIRONMENT_SETUP", "SCRIPT_DEVELOPMENT", "BASELINE",
+        "LOAD_TEST_EXECUTION",
+    }:
+        recipients = _user_ids(target.assigned_tester_ids)
+        if recipients:
+            return NotificationRoute(
+                recipients, "Assigned QA Tester", True,
+                "You have been assigned performance-testing work. Open the record to continue the workflow.",
+            )
+
+    if isinstance(target, (models.SASTRequest, models.DASTRequest)) and status in {
+        "CONFIGURATION", "SCANNING", "FINDING_VALIDATION", "REMEDIATION",
+        "ASSIGNED_TO_LEAD", "RESCAN", "SECURITY_COMPLETE", "REPORT_READY",
+    }:
+        recipients = _user_ids(target.security_analyst_id)
+        if recipients:
+            return NotificationRoute(
+                recipients, "Assigned Security Analyst", True,
+                "You have been assigned security-testing work. Open the record to continue the workflow.",
+            )
+
+    if isinstance(target, models.TestCase):
+        draft = target.current_draft_version
+        if draft and status == "IN REVIEW":
+            recipients = _user_ids(draft.assigned_reviewer_id)
+            if recipients:
+                return NotificationRoute(
+                    recipients, "Assigned QA Reviewer", True,
+                    "You have been assigned this test case for review.",
+                )
+        if draft and status == "REVIEW COMPLETED":
+            recipients = _user_ids(draft.assigned_qa_lead_id)
+            if recipients:
+                return NotificationRoute(
+                    recipients, "Assigned QA Lead", True,
+                    "You have been assigned this test case for final QA approval.",
+                )
+
+    if isinstance(target, models.Defect) and status in {
+        "ASSIGNED", "IN PROGRESS", "RESOLVED", "REOPENED", "DEFERRED",
+    }:
+        recipients = _user_ids(target.assignee_id)
+        if recipients:
+            return NotificationRoute(
+                recipients, "Assigned Defect Owner", True,
+                "You have been assigned this defect. Open the record to continue the workflow.",
+            )
+    if isinstance(target, models.Defect) and status == "RETEST":
+        recipients = _user_ids(target.retest_tester_id)
+        if recipients:
+            return NotificationRoute(
+                recipients, "Assigned QA Tester", True,
+                "This defect is ready for your retest decision.",
+            )
+    return None
 
 
 def _role_label(roles: set[str]) -> str:
@@ -265,7 +403,7 @@ def _is_workflow_transition(action: models.ApprovalAction) -> bool:
     return any(word in decision for word in (
         "submit", "pending", "resubmit", "reopen", "approv", "recommend",
         "return", "reject", "fail", "accept", "clear", "issue", "complete",
-        "close", "cancel", "change", "request",
+        "close", "cancel", "change", "request", "assign",
     ))
 
 
@@ -292,12 +430,25 @@ def _notification_route(db: SASession, action: models.ApprovalAction, target) ->
         )
         return None
 
+    assigned_route = _assigned_user_route(target)
+    if assigned_route:
+        logger.info(
+            "SMTP workflow route evaluated reference=%s status=%s owner=individual eligible_recipient_count=%s",
+            reference, getattr(target, "status", None), len(assigned_route.recipient_ids),
+        )
+        return assigned_route
+
     roles = _next_approver_roles(target)
     if roles:
         department = QA_DEPARTMENT if isinstance(target, models.TestCase) else _department(target)
-        recipients = _role_user_ids(db, roles, department)
+        # The assigned group is the notification owner.  Department scope is
+        # still enforced by the action endpoints themselves, but must not
+        # suppress a group notification merely because a member's primary
+        # department differs from the request.  That was the reason an
+        # otherwise active SM group could receive no email at all.
+        recipients = _role_user_ids(db, roles, None)
         logger.info(
-            "SMTP workflow route evaluated reference=%s status=%s roles=%s department=%s eligible_recipient_count=%s",
+            "SMTP workflow route evaluated reference=%s status=%s owner=group roles=%s request_department=%s eligible_recipient_count=%s",
             reference, getattr(target, "status", None), ",".join(sorted(roles)), department or "<any>", len(recipients),
         )
         if recipients:
@@ -415,17 +566,13 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
         f"Comments: {action.comments or 'No comments provided.'}\n\n"
         f"Open item: {url}\n"
     )
-    html_body = f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
-<div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
-  <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px;letter-spacing:.3px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">{'Action required' if route.action_required else 'Workflow update'}</div></div>
-  <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">{escape(reference)}</h1>
-    <p style=\"margin:0 0 20px;font-size:15px;line-height:1.55\">{escape(route.instruction)}</p>
+    html_body = _html_email(
+        reference, 'Action required' if route.action_required else 'Workflow update',
+        f"""<p style=\"margin:0 0 20px;font-size:15px;line-height:1.55\">{escape(route.instruction)}</p>
     <table style=\"width:100%;border-collapse:collapse;font-size:14px\"><tr><td style=\"padding:9px 0;color:#627981;width:38%\">Type</td><td style=\"padding:9px 0;font-weight:600\">{escape(type_label)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Current status</td><td style=\"padding:9px 0;font-weight:600\">{escape(status)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Latest action</td><td style=\"padding:9px 0\">{escape(action.step_name or 'Workflow')} — {escape(action.decision or 'Updated')}</td></tr></table>
     <div style=\"margin:18px 0;padding:12px 14px;background:#f5f8f9;border-left:3px solid #0d6678;font-size:13px;line-height:1.5\"><strong>Comments</strong><br>{escape(action.comments or 'No comments provided.').replace(chr(10), '<br>')}</div>
-    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Open in QA Portal</a>
-  </div>
-  <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">This is an automated QA Portal workflow notification.</div>
-</div></body></html>"""
+    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Open in QA Portal</a>""",
+    )
     queued_count = 0
     missing_email_users = []
     for user in users:
@@ -510,17 +657,14 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
         html_items = "".join(f"<li style=\"margin:4px 0\">{escape(reference)}</li>" for reference in shown_references)
         if remaining:
             html_items += f"<li style=\"margin:4px 0\">and {remaining} more</li>"
-        html_body = f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
-<div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
-  <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px;letter-spacing:.3px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">{'Action required' if action_required else 'Workflow update'} · Test case summary</div></div>
-  <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">{len(references)} {type_label}</h1>
-    <p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">{escape(route.instruction)}</p>
+        html_body = _html_email(
+            f"{len(references)} {type_label}",
+            f"{'Action required' if action_required else 'Workflow update'} · Test case summary",
+            f"""<p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">{escape(route.instruction)}</p>
     <p style=\"margin:0 0 10px;color:#627981;font-size:13px\">Current status</p><p style=\"margin:0 0 18px;font-weight:600\">{escape(status)}</p>
     <div style=\"margin:18px 0;padding:12px 14px;background:#f5f8f9;border-left:3px solid #0d6678;font-size:13px\"><strong>Test cases</strong><ul style=\"margin:8px 0 0;padding-left:20px\">{html_items}</ul></div>
-    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Open Test Repository</a>
-  </div>
-  <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">This is an automated QA Portal workflow notification.</div>
-</div></body></html>"""
+    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Open Test Repository</a>""",
+        )
         db.add(models.EmailNotification(
             approval_action=first_action, recipient_email=email, subject=subject,
             body=body, html_body=html_body,

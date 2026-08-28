@@ -141,6 +141,68 @@ class EmailNotificationTests(unittest.TestCase):
             db.close()
             engine.dispose()
 
+    def test_group_owner_is_not_suppressed_by_department_membership(self):
+        """An active workflow group receives the mail before an individual is assigned."""
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine, tables=[
+            models.User.__table__, models.UserRole.__table__, models.UserDepartment.__table__,
+            models.QARequest.__table__, models.FunctionalRequest.__table__, models.ApprovalAction.__table__, models.EmailNotification.__table__,
+        ])
+        db = sessionmaker(bind=engine)()
+        try:
+            requester = models.User(id=1, username="requester", full_name="Requester", email="requester@example.com", login_type="STANDARD")
+            sm = models.User(id=2, username="sm", full_name="SM", email="sm@example.com", login_type="STANDARD")
+            db.add_all([
+                requester, sm,
+                models.UserRole(user_id=2, role=Role.SM),
+                # Deliberately different from the request department: group
+                # notification ownership must not disappear because of this.
+                models.UserDepartment(user_id=2, department="IT"),
+                models.QARequest(id=10, request_id="TQA-REQ-10", application_name="Portal", department="Operations", requester_id=1),
+                models.FunctionalRequest(id=20, request_id="TQA-FUNC-20", requester_id=1, qa_request_id=10, status=QAStatus.SM_APPROVAL_PENDING),
+                models.ApprovalAction(entity_type="FUNCTIONAL_REQUEST", entity_id=20, actor_id=1, step_name="SM Approval", decision="Pending"),
+            ])
+            install_outbox_listener()
+            settings = {"SMTP_ENABLED": "true", "SMTP_HOST": "smtp.example.com", "SMTP_FROM_ADDRESS": "qa-portal@example.com"}
+            with patch.dict(os.environ, settings, clear=False), patch("app.email_notifications.deliver_pending_async"):
+                db.commit()
+            self.assertEqual([item.recipient_email for item in db.query(models.EmailNotification).all()], ["sm@example.com"])
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_named_tester_replaces_group_notification(self):
+        """Once a tester is selected, only that tester receives the action mail."""
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine, tables=[
+            models.User.__table__, models.UserRole.__table__, models.UserDepartment.__table__,
+            models.QARequest.__table__, models.FunctionalRequest.__table__, models.ApprovalAction.__table__, models.EmailNotification.__table__,
+        ])
+        db = sessionmaker(bind=engine)()
+        try:
+            lead = models.User(id=1, username="lead", full_name="QA Lead", email="lead@example.com", login_type="STANDARD")
+            tester = models.User(id=2, username="tester", full_name="Tester", email="tester@example.com", login_type="STANDARD")
+            other_tester = models.User(id=3, username="other", full_name="Other Tester", email="other@example.com", login_type="STANDARD")
+            db.add_all([
+                lead, tester, other_tester,
+                models.UserRole(user_id=2, role=Role.QA_ENGINEER),
+                models.UserRole(user_id=3, role=Role.QA_ENGINEER),
+                models.QARequest(id=10, request_id="TQA-REQ-10", application_name="Portal", department="Operations", requester_id=1),
+                models.FunctionalRequest(id=20, request_id="TQA-FUNC-20", requester_id=1, qa_request_id=10,
+                                         status=QAStatus.TESTER_ASSIGNED, assigned_tester_ids="2"),
+                models.ApprovalAction(entity_type="FUNCTIONAL_REQUEST", entity_id=20, actor_id=1, step_name="Planning", decision="Tester Assigned"),
+            ])
+            install_outbox_listener()
+            settings = {"SMTP_ENABLED": "true", "SMTP_HOST": "smtp.example.com", "SMTP_FROM_ADDRESS": "qa-portal@example.com"}
+            with patch.dict(os.environ, settings, clear=False), patch("app.email_notifications.deliver_pending_async"):
+                db.commit()
+            messages = db.query(models.EmailNotification).all()
+            self.assertEqual([item.recipient_email for item in messages], ["tester@example.com"])
+            self.assertIn("Assigned QA Tester", messages[0].subject)
+        finally:
+            db.close()
+            engine.dispose()
+
     def test_one_bad_recipient_does_not_stop_other_recipients(self):
         engine = create_engine("sqlite:///:memory:")
         models.Base.metadata.create_all(engine, tables=[models.ApprovalAction.__table__, models.EmailNotification.__table__])
