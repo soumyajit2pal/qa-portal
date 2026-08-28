@@ -26,6 +26,7 @@ logger = logging.getLogger("qa_portal.email")
 _listener_installed = False
 _poller_started = False
 _MAX_ATTEMPTS = 5
+_EMAIL_TEMPLATE_MARKER = "qa-portal-email-template:v1"
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,7 @@ def _html_email(title: str, subtitle: str, instruction: str, *,
             '<p style="margin:0 0 10px;color:#627981;font-size:13px">Current status</p>'
             f'<p style="margin:0 0 18px;font-weight:600">{escape(status)}</p>'
         )
-    return f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
+    return f"""<!doctype html><!-- {_EMAIL_TEMPLATE_MARKER} --><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
 <div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
   <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px;letter-spacing:.3px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">{escape(subtitle)}</div></div>
   <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">{escape(title)}</h1>
@@ -95,6 +96,132 @@ def _html_email(title: str, subtitle: str, instruction: str, *,
   </div>
   <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">{escape(footer)}</div>
 </div></body></html>"""
+
+
+def _legacy_html_email(notification: models.EmailNotification) -> str:
+    """Bring pre-template outbox rows into the approved layout at send time.
+
+    Queue records survive deployments.  Some rows already in Oracle can have
+    no HTML body or an older visual design; retaining that stored HTML would
+    make the notification system look inconsistent after the shared template
+    is introduced.  Plain text remains the source of truth for those rows
+    and is presented in the same single-panel QA Portal design.
+    """
+    body = (notification.body or "No additional details were recorded.").strip()
+    action_url = ""
+    detail_lines = []
+    for line in body.splitlines():
+        label, separator, value = line.partition(":")
+        if separator and label.strip().lower() in {"open item", "open test repository", "review access"}:
+            action_url = value.strip()
+            continue
+        detail_lines.append(line)
+    portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
+    if action_url.startswith("/") and portal_url:
+        action_url = f"{portal_url}{action_url}"
+    if not action_url:
+        action_url = portal_url or "/"
+    detail_html = escape("\n".join(detail_lines)).replace("\n", "<br>")
+    return _html_email(
+        "QA Portal notification", "Workflow update",
+        "Open the portal to review this notification and take any required action.",
+        status=None, panel_title="Notification details",
+        panel_html=f"<p style=\"margin:8px 0 0\">{detail_html}</p>",
+        action_label="Open in QA Portal", action_url=action_url,
+    )
+
+
+def _recipient_key(action: models.ApprovalAction, recipient_email: str) -> tuple[str, str]:
+    """Return a transaction-local key for the outbox's unique pair.
+
+    An ``ApprovalAction`` normally has no database identity while the
+    before-commit listener is assembling its notifications.  The Python
+    object identity is therefore the only stable key until the action has
+    been flushed.  Once it has an ID, use that ID so an existing persisted
+    outbox row is also recognised.
+    """
+    action_key = f"id:{action.id}" if action.id is not None else f"pending:{id(action)}"
+    return action_key, recipient_email.strip()
+
+
+def _is_notification_already_queued(
+    db: SASession, action: models.ApprovalAction, recipient_email: str, category: str,
+) -> bool:
+    """Protect the outbox's one-action/one-recipient invariant before flush.
+
+    The unique constraint remains the final database safeguard.  This helper
+    handles the expected duplicate paths *before* SQLAlchemy flushes: a
+    repeated listener evaluation, duplicate users with the same mailbox, or
+    an action which already has a durable outbox row after an earlier retry.
+    It deliberately uses ``no_autoflush`` for the durable-row check, so the
+    check itself cannot cause a pending duplicate to turn into a 500.
+    """
+    recipient_email = recipient_email.strip()
+    key = _recipient_key(action, recipient_email)
+    reserved = db.info.setdefault("email_notification_recipient_keys", set())
+    if key in reserved:
+        logger.info(
+            "SMTP notification queue skipped category=%s recipient=%s approval_action_id=%s reason=duplicate_recipient",
+            category, recipient_email, action.id,
+        )
+        return True
+
+    # Include flushed rows remembered by the listener as well as current
+    # pending rows.  The relationship comparison covers new parent actions;
+    # the FK comparison covers already-flushed parent actions.
+    candidates = list(db.info.get("email_notification_outbox", [])) + list(db.new)
+    for notification in candidates:
+        if not isinstance(notification, models.EmailNotification):
+            continue
+        same_parent = notification.approval_action is action
+        if action.id is not None and notification.approval_action_id == action.id:
+            same_parent = True
+        if same_parent and (notification.recipient_email or "").strip() == recipient_email:
+            reserved.add(key)
+            logger.info(
+                "SMTP notification queue skipped category=%s recipient=%s approval_action_id=%s reason=duplicate_recipient",
+                category, recipient_email, action.id,
+            )
+            return True
+
+    # A completed/retried request can encounter an action which already has
+    # its notification stored.  Never enqueue that exact action-recipient
+    # pair a second time.  This is also important after a rolling deployment
+    # where an in-flight request may be evaluated by two application workers.
+    if action.id is not None:
+        with db.no_autoflush:
+            existing = db.query(models.EmailNotification.id).filter(
+                models.EmailNotification.approval_action_id == action.id,
+                models.EmailNotification.recipient_email == recipient_email,
+            ).first()
+        if existing:
+            reserved.add(key)
+            logger.info(
+                "SMTP notification queue skipped category=%s recipient=%s approval_action_id=%s reason=already_persisted",
+                category, recipient_email, action.id,
+            )
+            return True
+
+    reserved.add(key)
+    return False
+
+
+def _queue_email_notification(
+    db: SASession, action: models.ApprovalAction, recipient_email: str, *,
+    subject: str, body: str, html_body: str | None, category: str,
+) -> bool:
+    """Add an idempotent durable outbox row and report whether it was added."""
+    recipient_email = recipient_email.strip()
+    if not recipient_email or _is_notification_already_queued(db, action, recipient_email, category):
+        return False
+    db.add(models.EmailNotification(
+        approval_action=action,
+        recipient_email=recipient_email,
+        subject=subject,
+        body=body,
+        html_body=html_body,
+    ))
+    return True
 
 
 def queue_access_review_notifications(db: SASession, user: models.User) -> int:
@@ -159,16 +286,16 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
         comments=f"New LDAP account mapped to {department}.",
     )
     db.add(action)
+    queued_count = 0
     for admin in recipients:
-        db.add(models.EmailNotification(
-            approval_action=action,
-            recipient_email=admin.email.strip(),
-            subject=subject,
-            body=body,
-            html_body=html_body,
-        ))
-        logger.info("SMTP notification queued category=access_review recipient=%s user=%s", admin.email.strip(), user.username)
-    return len(recipients)
+        email = admin.email.strip()
+        if _queue_email_notification(
+            db, action, email, subject=subject, body=body, html_body=html_body,
+            category="access_review",
+        ):
+            queued_count += 1
+            logger.info("SMTP notification queued category=access_review recipient=%s user=%s", email, user.username)
+    return queued_count
 
 
 def _target(action: models.ApprovalAction, db: SASession):
@@ -393,7 +520,7 @@ def _assigned_user_route(target) -> NotificationRoute | None:
 
 def _role_label(roles: set[str]) -> str:
     labels = {
-        Role.SM: "SM",
+        Role.SM: "Service Manager",
         Role.DEPARTMENT_HEAD_CM: "Department Head",
         Role.DEPARTMENT_HEAD_AGM: "Department Head",
         Role.APPLICATION_OWNER: "Application Owner",
@@ -599,19 +726,18 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> int:
         action_label="Open in QA Portal", action_url=url,
     )
     queued_count = 0
+    deliverable_recipient_count = 0
     missing_email_users = []
     for user in users:
         email = (user.email or "").strip()
         if email:
-            db.add(models.EmailNotification(
-                # `action` is new at before_commit time, so its Oracle
-                # identity value is still None.  The relationship makes
-                # SQLAlchemy insert the ApprovalAction first, then binds the
-                # generated ID into this mandatory FK during the same flush.
-                approval_action=action, recipient_email=email, subject=subject, body=body, html_body=html_body,
-            ))
-            queued_count += 1
-            logger.info("SMTP notification queued category=workflow recipient=%s reference=%s action=%s", email, reference, action.decision or "Updated")
+            deliverable_recipient_count += 1
+            if _queue_email_notification(
+                db, action, email, subject=subject, body=body, html_body=html_body,
+                category="workflow",
+            ):
+                queued_count += 1
+                logger.info("SMTP notification queued category=workflow recipient=%s reference=%s action=%s", email, reference, action.decision or "Updated")
         else:
             missing_email_users.append(user.username)
     if missing_email_users:
@@ -620,10 +746,16 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> int:
             reference, ",".join(missing_email_users),
         )
     if not queued_count:
-        logger.warning(
-            "SMTP workflow notification not queued reference=%s reason=no_deliverable_recipient resolved_recipient_count=%s",
-            reference, len(recipient_ids),
-        )
+        if deliverable_recipient_count:
+            logger.info(
+                "SMTP workflow notification not queued reference=%s reason=all_deliverable_recipients_already_queued resolved_recipient_count=%s",
+                reference, len(recipient_ids),
+            )
+        else:
+            logger.warning(
+                "SMTP workflow notification not queued reference=%s reason=no_deliverable_recipient resolved_recipient_count=%s",
+                reference, len(recipient_ids),
+            )
     return queued_count
 
 
@@ -691,12 +823,12 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
             panel_html=f"<ul style=\"margin:8px 0 0;padding-left:20px\">{html_items}</ul>",
             action_label="Open Test Repository", action_url=url,
         )
-        db.add(models.EmailNotification(
-            approval_action=first_action, recipient_email=email, subject=subject,
-            body=body, html_body=html_body,
-        ))
-        queued_count += 1
-        logger.info("SMTP notification queued category=test_case_digest recipient=%s count=%s", email, len(references))
+        if _queue_email_notification(
+            db, first_action, email, subject=subject, body=body, html_body=html_body,
+            category="test_case_digest",
+        ):
+            queued_count += 1
+            logger.info("SMTP notification queued category=test_case_digest recipient=%s count=%s", email, len(references))
     return queued_count
 
 
@@ -793,6 +925,7 @@ def _before_commit(session: SASession) -> None:
 def _after_commit(session: SASession) -> None:
     session.info.pop("email_notification_actions", None)
     session.info.pop("email_notification_outbox", None)
+    session.info.pop("email_notification_recipient_keys", None)
     if not session.info.pop("email_notifications_created", False):
         return
     if _enabled():
@@ -828,6 +961,7 @@ def start_outbox_poller() -> None:
 def _after_rollback(session: SASession) -> None:
     session.info.pop("email_notification_actions", None)
     session.info.pop("email_notification_outbox", None)
+    session.info.pop("email_notification_recipient_keys", None)
     session.info.pop("email_notifications_created", None)
 
 
@@ -850,8 +984,17 @@ def _send(notification: models.EmailNotification) -> None:
     message["From"] = f'{settings["from_name"]} <{settings["from_address"]}>'
     message["To"] = notification.recipient_email
     message.set_content(notification.body)
-    if notification.html_body:
-        message.add_alternative(notification.html_body, subtype="html")
+    html_body = notification.html_body
+    if _EMAIL_TEMPLATE_MARKER not in (html_body or ""):
+        html_body = _legacy_html_email(notification)
+        # Persist the normalized template with the delivery outcome, so later
+        # retry attempts do not need to render a legacy message again.
+        notification.html_body = html_body
+        logger.info(
+            "SMTP notification template normalized id=%s recipient=%s approval_action_id=%s",
+            notification.id, notification.recipient_email, notification.approval_action_id,
+        )
+    message.add_alternative(html_body, subtype="html")
     smtp_class = smtplib.SMTP_SSL if settings["ssl"] else smtplib.SMTP
     with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"]) as client:
         if settings["starttls"]:
