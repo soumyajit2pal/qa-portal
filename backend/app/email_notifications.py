@@ -704,10 +704,11 @@ def _before_flush(session: SASession, flush_context, instances) -> None:
     """Remember workflow actions that an endpoint flushes before commit.
 
     Several creation flows need generated child IDs and call ``db.flush()``
-    before their final ``db.commit()``.  SQLAlchemy removes those audit rows
-    from ``session.new`` at flush time, so inspecting only ``session.new`` in
-    ``before_commit`` silently missed their notification (notably the child
-    SM Approval Pending row created while raising a QA Request).
+    before their final ``db.commit()``. SQLAlchemy removes flushed audit and
+    outbox rows from ``session.new``; retaining both collections keeps
+    routing, delivery triggering, and recipient-count logs accurate for the
+    entire transaction. This notably covers child SM Approval Pending rows
+    created while raising a QA Request.
     """
     tracked = session.info.setdefault("email_notification_actions", [])
     known = {id(action) for action in tracked}
@@ -715,6 +716,12 @@ def _before_flush(session: SASession, flush_context, instances) -> None:
         if isinstance(action, models.ApprovalAction) and id(action) not in known:
             tracked.append(action)
             known.add(id(action))
+    tracked_outbox = session.info.setdefault("email_notification_outbox", [])
+    known_outbox = {id(notification) for notification in tracked_outbox}
+    for notification in session.new:
+        if isinstance(notification, models.EmailNotification) and id(notification) not in known_outbox:
+            tracked_outbox.append(notification)
+            known_outbox.add(id(notification))
 
 
 def _before_commit(session: SASession) -> None:
@@ -730,9 +737,13 @@ def _before_commit(session: SASession) -> None:
         return
     session.info["email_notification_listener"] = True
     try:
-        preexisting_outbox_count = sum(
-            isinstance(item, models.EmailNotification) for item in session.new
-        )
+        tracked_outbox = list(session.info.get("email_notification_outbox", []))
+        known_outbox = {id(notification) for notification in tracked_outbox}
+        for item in session.new:
+            if isinstance(item, models.EmailNotification) and id(item) not in known_outbox:
+                tracked_outbox.append(item)
+                known_outbox.add(id(item))
+        preexisting_outbox_count = len(tracked_outbox)
         # A single endpoint can log several history rows while moving one
         # record through intermediate states (e.g. Submitted then SM
         # Approval Pending). Route only the final row for that record, based
@@ -758,7 +769,13 @@ def _before_commit(session: SASession) -> None:
         # The after-commit hook must run only for the transaction that
         # actually created workflow messages. Delivery itself commits status
         # changes too, and must never recursively spawn more delivery threads.
-        outbox_count = sum(isinstance(item, models.EmailNotification) for item in session.new)
+        tracked_outbox = list(session.info.get("email_notification_outbox", []))
+        known_outbox = {id(notification) for notification in tracked_outbox}
+        for item in session.new:
+            if isinstance(item, models.EmailNotification) and id(item) not in known_outbox:
+                tracked_outbox.append(item)
+                known_outbox.add(id(item))
+        outbox_count = len(tracked_outbox)
         if outbox_count:
             session.info["email_notifications_created"] = True
             logger.info(
@@ -775,6 +792,7 @@ def _before_commit(session: SASession) -> None:
 
 def _after_commit(session: SASession) -> None:
     session.info.pop("email_notification_actions", None)
+    session.info.pop("email_notification_outbox", None)
     if not session.info.pop("email_notifications_created", False):
         return
     if _enabled():
@@ -809,6 +827,7 @@ def start_outbox_poller() -> None:
 
 def _after_rollback(session: SASession) -> None:
     session.info.pop("email_notification_actions", None)
+    session.info.pop("email_notification_outbox", None)
     session.info.pop("email_notifications_created", None)
 
 
