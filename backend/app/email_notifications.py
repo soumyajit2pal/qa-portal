@@ -540,7 +540,7 @@ def _status_label(value) -> str:
     return " ".join(word if word.upper() in acronyms else word.title() for word in words)
 
 
-def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
+def _queue_for_action(db: SASession, action: models.ApprovalAction) -> int:
     # Before SMTP is deliberately enabled, do not accumulate weeks of stale
     # workflow mail that would surprise users on the first activation.
     if not _enabled():
@@ -548,18 +548,23 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
             "SMTP workflow notification skipped entity_type=%s entity_id=%s reason=smtp_disabled",
             action.entity_type, action.entity_id,
         )
-        return
+        return 0
     if getattr(action, "_email_notifications_queued", False):
         logger.info(
             "SMTP workflow notification skipped entity_type=%s entity_id=%s reason=already_evaluated",
             action.entity_type, action.entity_id,
         )
-        return
+        return 0
     action._email_notifications_queued = True
     target = _target(action, db)
+    logger.info(
+        "SMTP workflow action evaluating entity_type=%s entity_id=%s step=%s decision=%s target_status=%s",
+        action.entity_type, action.entity_id, action.step_name or "<none>", action.decision or "<none>",
+        getattr(target, "status", None) if target else "<target_not_found>",
+    )
     route = _notification_route(db, action, target)
     if not route:
-        return
+        return 0
     reference = _portal_reference(action, target)
     recipient_ids = route.recipient_ids - {action.actor_id}
     if not recipient_ids:
@@ -567,7 +572,7 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
             "SMTP workflow notification skipped reference=%s reason=actor_is_only_recipient actor_id=%s",
             reference, action.actor_id,
         )
-        return
+        return 0
     users = db.query(models.User).filter(models.User.id.in_(recipient_ids), models.User.is_active == True).all()  # noqa: E712
     portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
     path = _portal_link(action, reference)
@@ -619,9 +624,10 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
             "SMTP workflow notification not queued reference=%s reason=no_deliverable_recipient resolved_recipient_count=%s",
             reference, len(recipient_ids),
         )
+    return queued_count
 
 
-def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]) -> None:
+def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]) -> int:
     """Create one summary email per recipient/stage for a test-case batch.
 
     Test cases are routinely submitted, recommended, or approved in bulk.
@@ -631,7 +637,7 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
     """
     if actions and not _enabled():
         logger.info("SMTP test-case digest skipped action_count=%s reason=smtp_disabled", len(actions))
-        return
+        return 0
     groups: dict[tuple[int, str, bool, str], list[tuple[models.ApprovalAction, object, NotificationRoute]]] = {}
     for action in actions:
         if getattr(action, "_email_notifications_queued", False):
@@ -647,6 +653,7 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
             groups.setdefault(key, []).append((action, target, route))
 
     portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
+    queued_count = 0
     for (recipient_id, label, action_required, status), entries in groups.items():
         user = db.get(models.User, recipient_id)
         email = (user.email or "").strip() if user else ""
@@ -688,7 +695,9 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
             approval_action=first_action, recipient_email=email, subject=subject,
             body=body, html_body=html_body,
         ))
+        queued_count += 1
         logger.info("SMTP notification queued category=test_case_digest recipient=%s count=%s", email, len(references))
+    return queued_count
 
 
 def _before_commit(session: SASession) -> None:
@@ -699,6 +708,9 @@ def _before_commit(session: SASession) -> None:
         return
     session.info["email_notification_listener"] = True
     try:
+        preexisting_outbox_count = sum(
+            isinstance(item, models.EmailNotification) for item in session.new
+        )
         # A single endpoint can log several history rows while moving one
         # record through intermediate states (e.g. Submitted then SM
         # Approval Pending). Route only the final row for that record, based
@@ -708,19 +720,33 @@ def _before_commit(session: SASession) -> None:
         for action in actions:
             final_actions[(action.entity_type, action.entity_id)] = action
         logger.info(
-            "SMTP workflow evaluation started approval_action_count=%s final_action_count=%s smtp_enabled=%s",
+            "SMTP workflow evaluation started approval_action_count=%s final_action_count=%s smtp_enabled=%s actions=%s",
             len(actions), len(final_actions), _enabled(),
+            "; ".join(
+                f"{action.entity_type}:{action.entity_id}:{action.step_name or '-'}:{action.decision or '-'}"
+                for action in final_actions.values()
+            ),
         )
         test_case_actions = [action for action in final_actions.values() if action.entity_type == "TEST_CASE"]
-        _queue_test_case_digests(session, test_case_actions)
+        routed_outbox_count = _queue_test_case_digests(session, test_case_actions)
         for action in final_actions.values():
             if action.entity_type == "TEST_CASE":
                 continue
-            _queue_for_action(session, action)
+            routed_outbox_count += _queue_for_action(session, action)
         # The after-commit hook must run only for the transaction that
         # actually created workflow messages. Delivery itself commits status
         # changes too, and must never recursively spawn more delivery threads.
-        session.info["email_notifications_created"] = True
+        outbox_count = sum(isinstance(item, models.EmailNotification) for item in session.new)
+        if outbox_count:
+            session.info["email_notifications_created"] = True
+            logger.info(
+                "SMTP workflow evaluation completed routed_outbox_count=%s direct_outbox_count=%s total_outbox_count=%s",
+                routed_outbox_count, preexisting_outbox_count, outbox_count,
+            )
+        else:
+            logger.warning(
+                "SMTP workflow evaluation completed routed_outbox_count=0 total_outbox_count=0 reason=no_notification_created",
+            )
     finally:
         session.info.pop("email_notification_listener", None)
 
