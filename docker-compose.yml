@@ -28,6 +28,9 @@ services:
     environment:
       # Runtime uploads always use this Docker-managed container path.
       UPLOAD_STORAGE_ROOT: /data/qualityops/uploads
+      # Document Portal is a separate top-level folder on the same durable
+      # shared volume. Every API worker therefore sees the same repository.
+      DOCUMENT_PORTAL_ROOT: /data/qualityops/uploads/document-portal
 
     volumes:
       # Set UPLOAD_STORAGE_HOST_PATH to an absolute host/NFS directory to

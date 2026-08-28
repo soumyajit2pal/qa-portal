@@ -1,5 +1,5 @@
-import React, { ReactNode, Suspense, lazy, useEffect } from 'react'
-import { Routes, Route, Navigate, Link, Outlet } from 'react-router-dom'
+import React, { ReactNode, Suspense, lazy, useEffect, useState } from 'react'
+import { Routes, Route, Navigate, Link, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
 import DepartmentPrompt from './components/DepartmentPrompt'
@@ -43,6 +43,72 @@ const Admin = lazy(() => import('./modules/governance/Admin'))
 const DepartmentAdmin = lazy(() => import('./modules/governance/DepartmentAdmin'))
 const AuditLog = lazy(() => import('./modules/governance/AuditLog'))
 const ChecklistConfig = lazy(() => import('./modules/governance/ChecklistConfig'))
+const DocumentPortal = lazy(() => import('./modules/governance/DocumentPortal'))
+
+const DOCUMENT_PORTAL_ROLES = new Set([
+  'DOCUMENT_PORTAL_VIEWER',
+  'DOCUMENT_PORTAL_CONTRIBUTOR',
+  'DOCUMENT_PORTAL_MANAGER',
+])
+
+function isDocumentPortalOnly(user: UserOut | null): boolean {
+  const roles = user?.roles || []
+  return roles.length > 0 && roles.every((role) => DOCUMENT_PORTAL_ROLES.has(role))
+}
+
+function DocumentPortalOnlyAccessDenied() {
+  return (
+    <section className="card empty-state" role="alert" aria-live="polite">
+      <h2>You don’t have access to this module</h2>
+      <p className="msg">Your account has access only to Document Portal. Contact an Administrator if you need access to another module.</p>
+    </section>
+  )
+}
+
+function isAccessApprovalPending(user: UserOut | null): boolean {
+  return !!user && user.needs_role_review && !user.needs_department_selection && user.roles.length === 0
+}
+
+function AccessApprovalPending() {
+  const { refreshUser, logout } = useAuth()
+  const [checking, setChecking] = useState(false)
+
+  async function checkApprovalStatus() {
+    setChecking(true)
+    try {
+      await refreshUser()
+    } catch {
+      // Keep the pending state visible if the status check is temporarily
+      // unavailable; the next check can safely be retried.
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  return (
+    <section className="card empty-state" role="status" aria-live="polite">
+      <h2>Access approval pending</h2>
+      <p className="msg">
+        Your department has been submitted. An Administrator or Department Coordinator must assign your portal role before you can use QA Portal.
+      </p>
+      <p className="muted small">You will be able to use the assigned modules after the approval is completed.</p>
+      <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 16 }}>
+        <button className="btn btn-primary" onClick={checkApprovalStatus} disabled={checking}>
+          {checking ? 'Checking…' : 'Check approval status'}
+        </button>
+        <button className="btn" onClick={logout}>Log out</button>
+      </div>
+    </section>
+  )
+}
+
+function DocumentOnlyAccessGuard({ children, user }: { children: ReactNode; user: UserOut }) {
+  const location = useLocation()
+  if (isDocumentPortalOnly(user) && !location.pathname.startsWith('/document-portal')) {
+    return <DocumentPortalOnlyAccessDenied />
+  }
+  return <>{children}</>
+}
 
 // Test Management module (Project Management / Test Repository / Test
 // Execution) -- a Zephyr-style test case management layer, kept as its own
@@ -82,7 +148,7 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
           AuthContext's justLoggedIn is true, which stays true across that
           whole exchange, so it still fires right after DepartmentPrompt is
           dismissed rather than being skipped entirely. */}
-      {!user.needs_department_selection && <PendingApprovalsNotice />}
+      {!user.needs_department_selection && !isAccessApprovalPending(user) && <PendingApprovalsNotice />}
     </Layout>
   )
 }
@@ -110,7 +176,11 @@ function ProtectedLayout() {
   if (!user) return <Navigate to="/login" replace />
   return (
     <AuthenticatedChrome user={user}>
-      <Outlet />
+      {isAccessApprovalPending(user) ? <AccessApprovalPending /> : (
+        <DocumentOnlyAccessGuard user={user}>
+          <Outlet />
+        </DocumentOnlyAccessGuard>
+      )}
     </AuthenticatedChrome>
   )
 }
@@ -118,6 +188,12 @@ function ProtectedLayout() {
 function QaGroupOnly({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   return hasDepartment(user, QA_DEPARTMENT) ? <>{children}</> : <Navigate to="/" replace />
+}
+
+function DocumentPortalOnly({ children }: { children: ReactNode }) {
+  const { user } = useAuth()
+  return user?.roles.some((role) => ['ADMIN', 'DOCUMENT_PORTAL_VIEWER', 'DOCUMENT_PORTAL_CONTRIBUTOR', 'DOCUMENT_PORTAL_MANAGER'].includes(role))
+    ? <>{children}</> : <Navigate to="/" replace />
 }
 
 // Reported directly: "Help & user Manual should come on login page as well,
@@ -136,7 +212,13 @@ function QaGroupOnly({ children }: { children: ReactNode }) {
 function HelpRoute() {
   const { user, loading } = useAuth()
   if (loading) return <ModuleFallback />
-  if (user) return <AuthenticatedChrome user={user}><Help /></AuthenticatedChrome>
+  if (user) return (
+    <AuthenticatedChrome user={user}>
+      {isAccessApprovalPending(user)
+        ? <AccessApprovalPending />
+        : (isDocumentPortalOnly(user) ? <DocumentPortalOnlyAccessDenied /> : <Help />)}
+    </AuthenticatedChrome>
+  )
   return <PublicHelp />
 }
 
@@ -242,6 +324,7 @@ export default function App() {
           <Route path="/department-admin" element={<ModuleBoundary moduleName="Governance"><DepartmentAdmin /></ModuleBoundary>} />
           <Route path="/audit-log" element={<ModuleBoundary moduleName="Governance"><AuditLog /></ModuleBoundary>} />
           <Route path="/checklist-config" element={<ModuleBoundary moduleName="Governance"><ChecklistConfig /></ModuleBoundary>} />
+          <Route path="/document-portal" element={<DocumentPortalOnly><ModuleBoundary moduleName="Document Portal"><DocumentPortal /></ModuleBoundary></DocumentPortalOnly>} />
 
           {/* Test Management module */}
           <Route path="/test-projects" element={<ModuleBoundary moduleName="Test Management"><TestProjects /></ModuleBoundary>} />

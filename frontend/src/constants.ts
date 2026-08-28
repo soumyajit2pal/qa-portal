@@ -38,6 +38,9 @@ export const ROLE_LABELS: Record<string, string> = {
   // _redact_confidential_roles), so this label being present here doesn't by
   // itself expose anything to anyone who isn't already an Admin.
   SCALE_6_PLUS: 'Scale 6+',
+  DOCUMENT_PORTAL_VIEWER: 'Document Portal Viewer',
+  DOCUMENT_PORTAL_CONTRIBUTOR: 'Document Portal Contributor',
+  DOCUMENT_PORTAL_MANAGER: 'Document Portal Manager',
 }
 
 export const ALL_ROLES = Object.keys(ROLE_LABELS)

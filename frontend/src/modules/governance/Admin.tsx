@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
-import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
+import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, QA_DEPARTMENT, hasRole } from '../../constants'
 import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch } from '../../components/Icons'
 import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
@@ -27,16 +27,18 @@ const EMPTY_FORM = {
 }
 type CreateUserForm = typeof EMPTY_FORM
 
+const COE_DEFAULT_ROLES = ['QA_ENGINEER', 'DOCUMENT_PORTAL_VIEWER']
+
 // `roles` defaults to every assignable role (ALL_ROLES) -- exported with that
 // default so DepartmentAdmin.tsx can reuse this same chip-select, just
 // restricted to whichever of DEPARTMENT_ADMIN_ASSIGNABLE_ROLES /
 // QA_ADMIN_ASSIGNABLE_ROLES applies to the logged-in local admin, instead of
 // duplicating the checkbox/styling logic for its own narrower role picker.
-export function RoleChipSelect({ value, onChange, disabled, roles = ALL_ROLES }: {
-  value: string[]; onChange: (roles: string[]) => void; disabled?: boolean; roles?: string[]
+export function RoleChipSelect({ value, onChange, disabled, disabledRoles = [], roles = ALL_ROLES }: {
+  value: string[]; onChange: (roles: string[]) => void; disabled?: boolean; disabledRoles?: string[]; roles?: string[]
 }) {
   function toggle(role: string) {
-    if (disabled) return
+    if (disabled || disabledRoles.includes(role)) return
     const has = value.includes(role)
     onChange(has ? value.filter((r) => r !== role) : [...value, role])
   }
@@ -44,9 +46,10 @@ export function RoleChipSelect({ value, onChange, disabled, roles = ALL_ROLES }:
     <div className="chip-select">
       {roles.map((r) => {
         const active = value.includes(r)
+        const roleDisabled = !!disabled || disabledRoles.includes(r)
         return (
-          <label key={r} className={`chip-toggle ${active ? 'active' : ''} ${disabled ? 'disabled' : ''}`}>
-            <input type="checkbox" checked={active} disabled={disabled} onChange={() => toggle(r)} />
+          <label key={r} className={`chip-toggle ${active ? 'active' : ''} ${roleDisabled ? 'disabled' : ''}`}>
+            <input type="checkbox" checked={active} disabled={roleDisabled} onChange={() => toggle(r)} />
             <span className="chip-dot">{active && <IconCheckCircle width={9} height={9} strokeWidth={3} />}</span>
             {ROLE_LABELS[r]}
           </label>
@@ -95,6 +98,14 @@ function CreateUserModal({ onClose, onCreated, departmentOptions }: {
   const [departments, setDepartments] = useState<string[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  const hasQaDepartmentAccess = departments.includes(QA_DEPARTMENT)
+
+  useEffect(() => {
+    if (hasQaDepartmentAccess) setForm((current) => ({
+      ...current,
+      roles: Array.from(new Set([...current.roles, ...COE_DEFAULT_ROLES])),
+    }))
+  }, [hasQaDepartmentAccess])
 
   function set<K extends keyof CreateUserForm>(k: K, v: CreateUserForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
@@ -206,6 +217,11 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const isOwnAdminAccount = userRow.id === currentUserId && (userRow.roles || []).includes('ADMIN')
+  const hasQaDepartmentAccess = departments.includes(QA_DEPARTMENT)
+
+  useEffect(() => {
+    if (hasQaDepartmentAccess) setRoles((values) => Array.from(new Set([...values, ...COE_DEFAULT_ROLES])))
+  }, [hasQaDepartmentAccess])
 
   async function save(e: React.FormEvent) {
     e.preventDefault()
@@ -633,8 +649,8 @@ export default function Admin() {
           <div className="body">
             <div className="title">{reviewCount} account{reviewCount > 1 ? 's' : ''} need role review</div>
             <div className="sub">
-              Auto-provisioned on first LDAP login with the default Requester role — assign the
-              correct role below to grant proper access and clear the flag.
+              A new LDAP user requires access review — assign or confirm the
+              correct role below to complete the review and clear the flag.
             </div>
           </div>
         </div>

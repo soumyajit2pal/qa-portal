@@ -26,6 +26,7 @@ logger = logging.getLogger("qa_portal.main")
 from .database import SessionLocal, AuditSessionLocal
 from . import cache, models, email_notifications  # noqa: F401  (models ensures models are registered before create_all)
 from .auth import decode_access_token
+from .constants import is_document_portal_only
 from .audit_service import write_audit
 from .documents import migrate_legacy_document_layout
 from .routers import (
@@ -33,7 +34,7 @@ from .routers import (
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config,
-    pending_approvals, defects, jobs,
+    pending_approvals, defects, jobs, document_portal,
 )
 
 # Reported: "Custom Fields not working" traced back to an Oracle identifier-
@@ -91,10 +92,14 @@ app = FastAPI(
 # Workflow emails are queued transactionally for every approval action. SMTP
 # delivery remains disabled until deployment sets SMTP_ENABLED=true.
 email_notifications.install_outbox_listener()
-if email_notifications.smtp_readiness()[0]:
+smtp_ready, smtp_reason = email_notifications.smtp_readiness()
+if smtp_ready:
+    logger.info("SMTP delivery is enabled; durable outbox polling started.")
     # Resume any notifications delayed by a temporary SMTP outage. The
     # outbox's atomic claim makes this safe with many workers.
     email_notifications.start_outbox_poller()
+else:
+    logger.info("SMTP delivery is disabled or incomplete: %s", smtp_reason)
 
 app.add_middleware(
     CORSMiddleware,
@@ -212,6 +217,7 @@ _MODULE_PATH_PREFIXES = [
     ("/api/audit", "AUDIT"),
     ("/api/checklist-config", "CHECKLIST_CONFIG"),
     ("/api/pending-approvals", "PENDING_APPROVAL"),
+    ("/api/document-portal", "DOCUMENT_PORTAL"),
     ("/api/system-settings", "SYSTEM_SETTING"),
 ]
 
@@ -328,6 +334,139 @@ def _write_request_audit(request, request_id, status_code, duration_ms, error_na
         db.close()
 
 
+def _log_file_operation(request, response) -> None:
+    """Record completed file operations without ever inspecting file bodies.
+
+    Request uploads, evidence attachments, import spreadsheets and generated
+    downloads live in several independent routers.  This single successful
+    response boundary gives operations one dependable trail for all of them.
+    Document Portal has richer item-level logging in its own router, so it is
+    intentionally excluded here to avoid duplicate records.
+    """
+    if response.status_code >= 400:
+        return
+    path = request.url.path
+    if path.startswith("/api/document-portal"):
+        return
+    method = request.method.upper()
+    snapshot = getattr(getattr(request, "state", None), "current_user_snapshot", None) or {}
+    username = snapshot.get("username") or "unknown"
+    lower_path = path.lower()
+    if method == "GET" and ("/download" in lower_path or lower_path.startswith("/api/export")):
+        logger.info("File download requested user=%s path=%s status=%s", username, path, response.status_code)
+    elif method in {"POST", "PUT", "PATCH"} and any(
+        marker in lower_path for marker in ("/documents", "/attachments", "/images", "/import", "/bulk-seed")
+    ):
+        logger.info("File upload or import completed user=%s method=%s path=%s status=%s", username, method, path, response.status_code)
+
+
+_DOCUMENT_PORTAL_ALLOWED_API_PATHS = {
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/me",
+    "/api/health",
+}
+
+
+@app.middleware("http")
+async def pending_access_approval_api_guard(request, call_next):
+    """Do not expose portal data while a newly provisioned LDAP account waits.
+
+    Department selection identifies the correct Coordinator; it must not be
+    treated as approval to use the portal. This check uses the live database
+    role assignments so it releases immediately after approval.
+    """
+    path = request.url.path
+    if not path.startswith("/api") or path in _DOCUMENT_PORTAL_ALLOWED_API_PATHS:
+        return await call_next(request)
+
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        return await call_next(request)
+    try:
+        claims = decode_access_token(auth_header.split(" ", 1)[1])
+        username = claims.get("sub")
+    except Exception:
+        return await call_next(request)
+    if not username:
+        return await call_next(request)
+
+    with SessionLocal() as db:
+        user = db.query(models.User).filter(models.User.username == username).first()
+        # While the department picker is open, /api/departments must remain
+        # available. Once it has been saved, an LDAP account with zero roles
+        # is deliberately limited to /me and logout until approval.
+        if (
+            not user
+            or not user.is_active
+            or user.needs_department_selection
+            or not user.needs_role_review
+            or user.roles
+        ):
+            return await call_next(request)
+        request.state.current_user_snapshot = {
+            "id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "roles_csv": user.roles_csv,
+        }
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": "Your access request is pending Administrator or Department Coordinator approval.",
+            "status_code": 403,
+        },
+    )
+
+
+@app.middleware("http")
+async def document_portal_only_api_guard(request, call_next):
+    """Keep document-only accounts inside the Document Portal at API level.
+
+    The frontend guard gives a clear page-level explanation, while this
+    server-side guard prevents a direct URL or manually issued API request
+    from exposing any other module's data. It confirms the role assignment
+    in the database before blocking, so a user whose access has been
+    expanded is not kept unnecessarily inside the Document Portal.
+    """
+    path = request.url.path
+    if (
+        not path.startswith("/api")
+        or path.startswith("/api/document-portal")
+        or path in _DOCUMENT_PORTAL_ALLOWED_API_PATHS
+    ):
+        return await call_next(request)
+
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        return await call_next(request)
+    try:
+        claims = decode_access_token(auth_header.split(" ", 1)[1])
+        username = claims.get("sub")
+    except Exception:
+        return await call_next(request)
+    if not username or not is_document_portal_only(claims.get("roles")):
+        return await call_next(request)
+
+    with SessionLocal() as db:
+        user = db.query(models.User).filter(models.User.username == username).first()
+        if not user or not user.is_active or not is_document_portal_only(user.roles):
+            return await call_next(request)
+        request.state.current_user_snapshot = {
+            "id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "roles_csv": user.roles_csv,
+        }
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": "You only have access to Document Portal.",
+            "status_code": 403,
+        },
+    )
+
+
 @app.middleware("http")
 async def application_audit_middleware(request, call_next):
     """Capture every API access without holding up successful responses."""
@@ -385,6 +524,7 @@ async def application_audit_middleware(request, call_next):
         response.background = BackgroundTasks(
             [task for task in (response.background, audit_task) if task is not None]
         )
+    _log_file_operation(request, response)
     if deep_logging_enabled():
         logger.debug(
             "API request completed method=%s path=%s status=%s duration_ms=%s",
@@ -425,6 +565,7 @@ app.include_router(audit.router)
 app.include_router(checklist_config.router)
 app.include_router(pending_approvals.router)
 app.include_router(jobs.router)
+app.include_router(document_portal.router)
 
 
 @app.get("/api/health")

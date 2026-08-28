@@ -9,7 +9,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, foreign
 from .db_base import Base
-from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES, SUPPRESSION_TERMINAL_STATUSES
+from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES, SUPPRESSION_TERMINAL_STATUSES, Role
 
 # Unlike SQLite/PostgreSQL/MySQL, SQLAlchemy does NOT automatically make a
 # bare `Column(Integer, primary_key=True)` self-generating on Oracle -- Oracle
@@ -179,17 +179,20 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     # Set True when a User row is auto-created via LDAP just-in-time
     # provisioning (first successful login for an unknown username); cleared
-    # once an admin explicitly reassigns a role in the Admin section.
+    # once an Administrator or the mapped Department Coordinator explicitly
+    # assigns an approved role through access management.
     needs_role_review = Column(Boolean, default=False)
-    # Set True at the same moment as needs_role_review above -- on first-ever
-    # LDAP login (JIT provisioning, see routers/auth.py::login) -- since the
+    # Set True for a normal first-ever LDAP login (JIT provisioning, see
+    # routers/auth.py::login) -- since the
     # directory's own "department" attribute is free text and often blank or
     # not an exact match for one of our canonical qap_departments.name values
     # (case/wording differences), the person is prompted once, right after
     # that first login, to explicitly confirm/pick their department from the
     # real list themselves (see PATCH /api/auth/me). Cleared the moment they
     # do. Unlike needs_role_review, this is never cleared by an admin action
-    # -- only the user's own self-service pick resolves it.
+    # -- only the user's own self-service pick resolves it. External
+    # document-only identities are a deliberate exception: they are assigned
+    # `Other` automatically and therefore start with this flag False.
     needs_department_selection = Column(Boolean, default=False)
     # Set by a System Admin only (PATCH /api/auth/users/{id} -- Admin.tsx's
     # "Users & Access" page; never exposed on the narrower local-admin
@@ -239,7 +242,9 @@ class User(Base):
         """True if the user is an Administrator, or holds at least one of the
         given roles. Called with no arguments, checks for Administrator only."""
         codes = set(self.roles)
-        return "ADMIN" in codes or bool(codes & set(roles))
+        if "ADMIN" in codes or bool(codes & set(roles)):
+            return True
+        return False
 
     @property
     def departments(self) -> List[str]:
@@ -506,7 +511,6 @@ class QARequest(Base):
 
     status = Column(String(32), default=GatewayStatus.DRAFT, index=True)
     requester_id = Column(Integer, ForeignKey("qap_users.id"))
-
     # Set by routers/qa_requests.py::_resolve_application_name every time
     # this gateway is created/edited, whether application_name resolved to
     # an already-APPROVED master entry or a brand-new/still-PENDING one --

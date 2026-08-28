@@ -53,9 +53,9 @@ export default function DepartmentPrompt() {
     // same safe exit path as "Log out instead" rather than bypassing setup.
     <Modal title="Welcome — one more step" onClose={logout} preventBackdropClose variant="dialog">
       <p className="muted small" style={{ marginTop: -4, marginBottom: 16 }}>
-        Hi {user?.full_name || 'there'} — this is your first time signing in. Select your department access below so
-        the right people (your SM, Department Head) can review requests you raise. Choose only your primary
-        department. If you work across departments, an Administrator can add secondary departments later.
+        Hi {user?.full_name || 'there'} — this is your first time signing in. Select your department below so an
+        Administrator or Department Coordinator can review your access request and assign the correct role. Choose
+        only your primary department. If you work across departments, an Administrator can add secondary departments later.
       </p>
       <form onSubmit={save}>
         <section className="ldap-department-picker">
@@ -73,7 +73,7 @@ export default function DepartmentPrompt() {
         <ErrorText error={saveError} />
         <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
           <button type="submit" className="btn btn-primary" disabled={busy || !selected}>
-            {busy ? 'Saving...' : 'Save & Continue'}
+            {busy ? 'Submitting...' : 'Submit access request'}
           </button>
           <button type="button" className="btn" onClick={logout}>Log out instead</button>
         </div>

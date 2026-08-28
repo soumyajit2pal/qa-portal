@@ -6,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
-from .. import models, schemas, pagination
+from .. import models, schemas, pagination, email_notifications
 from ..database import get_db
 from ..audit_service import snapshot_changes, user_snapshot, write_audit
 from ..auth import (
@@ -14,31 +14,37 @@ from ..auth import (
 )
 from ..deps import get_current_user, require_roles
 from ..constants import (
-    Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES, DEFAULT_LDAP_PROVISION_ROLE,
+    Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES,
     DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES, CONFIDENTIAL_ROLES,
-    QA_DEPARTMENT,
+    QA_DEPARTMENT, OTHER_DEPARTMENT,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+_COE_DEFAULT_ROLES = (Role.QA_ENGINEER, Role.DOCUMENT_PORTAL_VIEWER)
 
-def _ldap_default_role_for_department(department: str | None) -> str:
-    """Role applied after a JIT LDAP user's one-time department selection.
 
-    The picker normally returns the canonical QA_DEPARTMENT value. The
-    normalized aliases make the rule robust to an older department master
-    containing "Quality Assurance" or "COE Quality Assurance" without
-    broadening it to unrelated departments that merely contain "QA".
+def _is_document_only_ldap_username(username: str) -> bool:
+    """External identities do not use the bank `b…` username convention.
+
+    `b0` is already covered by this rule because it begins with `b`; the
+    explicit normalization keeps the decision stable regardless of LDAP's
+    username casing.  These accounts are deliberately limited to Document
+    Portal Viewer on their first login, pending Administrator review.
     """
-    normalized = " ".join(
-        "".join(ch if ch.isalnum() else " " for ch in (department or "").casefold()).split()
-    )
-    qa_names = {
-        " ".join("".join(ch if ch.isalnum() else " " for ch in QA_DEPARTMENT.casefold()).split()),
-        "quality assurance",
-        "coe quality assurance",
-    }
-    return Role.QA_ENGINEER if normalized in qa_names else Role.REQUESTER
+    return not username.strip().casefold().startswith("b")
+
+
+def _with_coe_default_roles(roles: list[str], departments: list[str]) -> list[str]:
+    """COE users always receive baseline QA and Document Portal access.
+
+    Existing roles are retained; this only adds the two required baseline
+    roles.  Removing the COE department does not silently remove roles, which
+    avoids an unexpected loss of access and keeps role removal explicit.
+    """
+    if QA_DEPARTMENT not in departments:
+        return list(roles)
+    return list(dict.fromkeys([*roles, *_COE_DEFAULT_ROLES]))
 
 
 def _redact_confidential_roles(user: "models.User", viewer: "models.User") -> "schemas.UserOut":
@@ -65,13 +71,16 @@ def _redact_confidential_roles(user: "models.User", viewer: "models.User") -> "s
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.username == form_data.username).first()
     just_provisioned = False
+    document_only_ldap_account = False
 
     if not user:
         # Unknown username: just-in-time provision from LDAP rather than requiring
         # an admin to pre-create the account. A successful directory bind on this
-        # first login creates the local User row automatically, defaulting to the
-        # lowest-privilege role and flagged for an admin to review in the Admin
-        # section (needs_role_review) -- this is where "proper access" gets granted.
+        # first login creates a local User row with *no* application role.
+        # The person must first select their department, then an Administrator
+        # or that department's Coordinator approves access by assigning roles.
+        # This deliberately never grants Requester (or any other) access from
+        # an unaudited self-service selection.
         try:
             profile = ldap_authenticate_with_profile(form_data.username, form_data.password)
         except LDAPAuthError:
@@ -82,12 +91,20 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
                         details={"reason": "Invalid username or password"})
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
+        document_only_ldap_account = _is_document_only_ldap_username(form_data.username)
         user = models.User(
             username=form_data.username,
             full_name=profile.get("full_name") or form_data.username,
             email=profile.get("email"),
-            department=profile.get("department"),
-            role_assignments=[models.UserRole(role=DEFAULT_LDAP_PROVISION_ROLE)],
+            department=OTHER_DEPARTMENT if document_only_ldap_account else profile.get("department"),
+            department_assignments=(
+                [models.UserDepartment(department=OTHER_DEPARTMENT)]
+                if document_only_ldap_account else []
+            ),
+            role_assignments=(
+                [models.UserRole(role=Role.DOCUMENT_PORTAL_VIEWER)]
+                if document_only_ldap_account else []
+            ),
             login_type=LoginType.LDAP,
             hashed_password=None,
             needs_role_review=True,
@@ -97,7 +114,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
             # returned from the directory (often blank, or free text that
             # doesn't exactly match one of our canonical department names) is
             # only ever a starting guess. See PATCH /api/auth/me below.
-            needs_department_selection=True,
+            needs_department_selection=not document_only_ldap_account,
         )
         db.add(user)
         try:
@@ -140,10 +157,22 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
 
     token = create_access_token({"sub": user.username, "roles": user.roles}, )
     if just_provisioned:
+        # An external/document-only identity is already placed in Other and
+        # can safely use only Document Portal. Alert every active Admin when
+        # SMTP is enabled so the remaining access review is not overlooked.
+        queued_admin_notifications = (
+            email_notifications.queue_access_review_notifications(db, user)
+            if document_only_ldap_account else 0
+        )
         write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_AUTO_PROVISIONED",
                     actor=user, request=request, status_code=201, target_type="USER",
                     target_id=user.id, target_name=user.full_name,
-                    details={"after": user_snapshot(user), "source": "LDAP first login"})
+                    details={
+                        "after": user_snapshot(user),
+                        "source": "LDAP first login",
+                        "document_only": document_only_ldap_account,
+                        "admin_notifications_queued": queued_admin_notifications,
+                    })
     write_audit(db, event_type="AUTHENTICATION", action="LOGIN_SUCCESS", actor=user,
                 request=request, status_code=200,
                 details={"login_type": user.login_type, "just_provisioned": just_provisioned})
@@ -183,25 +212,20 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
     _set_user_departments(db, current_user, [primary_department])
     current_user.needs_department_selection = False
 
-    # A brand-new LDAP user is provisioned as Requester only until they pick
-    # a canonical department. On that one-time confirmation, QA department
-    # users receive the QA Engineer default; every other department retains
-    # Requester. Do not overwrite roles if an administrator already reviewed
-    # or modified the account before the user completed this prompt.
-    current_roles = set(current_user.roles)
-    if (
-        current_user.needs_role_review
-        and current_roles == {DEFAULT_LDAP_PROVISION_ROLE}
-    ):
-        default_role = _ldap_default_role_for_department(primary_department)
-        if default_role != DEFAULT_LDAP_PROVISION_ROLE:
-            current_user.role_assignments = [models.UserRole(role=default_role)]
     db.commit()
     db.refresh(current_user)
-    write_audit(db, event_type="ACCESS_MANAGEMENT", action="SELF_PROFILE_UPDATED",
+    # The durable `needs_role_review` state is the approval request. It is
+    # visible first in Admin's review queue and in the selected department's
+    # Coordinator roster. Either authorized reviewer completes it by assigning
+    # a role through their existing, server-scoped access-management endpoint.
+    write_audit(db, event_type="ACCESS_MANAGEMENT", action="LDAP_ACCESS_APPROVAL_REQUESTED",
                 actor=current_user, request=request, status_code=200, target_type="USER",
                 target_id=current_user.id, target_name=current_user.full_name,
-                details={"changes": snapshot_changes(before, user_snapshot(current_user))})
+                details={
+                    "changes": snapshot_changes(before, user_snapshot(current_user)),
+                    "department": primary_department,
+                    "approvers": ["Administrator", "Department Coordinator"],
+                })
     return current_user
 
 
@@ -350,6 +374,8 @@ def _set_user_departments(db: Session, user: models.User, departments: list) -> 
     for d in departments:
         db.add(models.UserDepartment(user_id=user.id, department=d))
     user.department = departments[0] if departments else None
+    db.flush()
+    db.expire(user, ["department_assignments"])
 
 
 @router.post("/users", response_model=schemas.UserOut)
@@ -364,6 +390,7 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
     _validate_roles(payload.roles)
     roles = _dedupe_roles(payload.roles)
     departments = _validate_departments(db, _resolve_departments_payload(payload.department, payload.departments))
+    roles = _with_coe_default_roles(roles, departments)
     login_type = payload.login_type or LoginType.STANDARD
     if login_type not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{login_type}'")
@@ -378,6 +405,7 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
         hashed_password=hash_password(payload.password) if login_type == LoginType.STANDARD else None,
     )
     db.add(user)
+    db.flush()
     db.commit()
     db.refresh(user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_CREATED", actor=current_user,
@@ -430,6 +458,11 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
         new_departments = _validate_departments(db, raw_departments)
     elif raw_department is not _UNSET:
         new_departments = _validate_departments(db, [raw_department] if raw_department else [])
+    effective_departments = new_departments if new_departments is not None else user.departments
+    effective_roles = _with_coe_default_roles(
+        new_roles if new_roles is not None else user.roles,
+        effective_departments,
+    )
     if "login_type" in data and data["login_type"] not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{data['login_type']}'")
     # Note: switching an LDAP account to Standard leaves it with no usable
@@ -439,7 +472,7 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
         setattr(user, k, v)
     if new_departments is not None:
         _set_user_departments(db, user, new_departments)
-    if new_roles is not None:
+    if set(effective_roles) != set(user.roles):
         # Replace the full set of role assignments (not a merge/append).
         # Delete the old rows and flush *before* adding the new ones -- if we
         # instead did `user.role_assignments = [...]` in one step, and the new
@@ -451,12 +484,15 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
         for ra in list(user.role_assignments):
             db.delete(ra)
         db.flush()
-        for r in new_roles:
+        for r in effective_roles:
             db.add(models.UserRole(user_id=user.id, role=r))
+        db.flush()
+        db.expire(user, ["role_assignments"])
         # An explicit role assignment is exactly the review action the
         # "needs_role_review" flag (set on auto-provisioned LDAP accounts) is
         # waiting for.
         user.needs_role_review = False
+
     db.commit()
     db.refresh(user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_ACCESS_UPDATED", actor=current_user,
@@ -630,7 +666,9 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
         # assignable subset submitted here is only ever a partial view of
         # ALL_ROLES.
         preserved = [r for r in user.roles if r not in assignable]
-        new_roles = list(dict.fromkeys(preserved + payload.roles))
+        new_roles = _with_coe_default_roles(
+            list(dict.fromkeys(preserved + payload.roles)), user.departments,
+        )
         for ra in list(user.role_assignments):
             db.delete(ra)
         db.flush()

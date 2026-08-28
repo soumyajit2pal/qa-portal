@@ -599,7 +599,8 @@ def _pending_count_statement(user: models.User):
     if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         for (model, _entity_type, _path, _module_label, _labels, _lead_column,
              assigned_status, verification_status) in _READINESS_MODULES:
-            add_count(model, model.status.in_([assigned_status, verification_status]))
+            conditions = [model.status.in_([assigned_status, verification_status])]
+            add_count(model, *conditions, join=(models.QARequest, model.qa_request_id == models.QARequest.id, True))
 
     if user.has_role(Role.SM):
         conditions = [models.SuppressionRequest.status == "SM_APPROVAL_PENDING"]

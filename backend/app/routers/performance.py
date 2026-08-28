@@ -148,7 +148,7 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
     q = db.query(models.PerformanceRequest).join(
         models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id, isouter=True
     ).options(
-        joinedload(models.PerformanceRequest.qa_request).joinedload(models.QARequest.application_master)
+        joinedload(models.PerformanceRequest.qa_request).joinedload(models.QARequest.application_master),
     )
     scope = dashboard_department_scope(current_user)
     delegated_to_user = models.QARequest.delegations.any(and_(
@@ -187,7 +187,8 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
 def get_performance(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # PAG-006 -- the detail endpoint the frontend fetches from when a list
     # row is opened, now that the list above only returns PerformanceListOut.
-    return _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id)
+    return obj
 
 
 # Standalone creation is DISABLED -- Performance requests can only originate

@@ -87,6 +87,12 @@ function navGroups(user: UserOut | null): NavGroup[] {
       ],
     },
     {
+      label: 'Document Management',
+      items: hasRole(user, 'DOCUMENT_PORTAL_VIEWER', 'DOCUMENT_PORTAL_CONTRIBUTOR', 'DOCUMENT_PORTAL_MANAGER')
+        ? [{ to: '/document-portal', label: 'Document Portal', icon: IconFolder }]
+        : [],
+    },
+    {
       label: 'Governance',
       items: [
         { to: '/signoff', label: 'QA Clearance', icon: IconCertificate },
@@ -120,7 +126,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
   if (adminItems.length > 0) {
     groups.push({ label: 'Administration', items: adminItems })
   }
-  return groups
+  return groups.filter((group) => group.items.length > 0)
 }
 
 // Maps each request type's own ID prefix (see models.py's gen_id calls) to

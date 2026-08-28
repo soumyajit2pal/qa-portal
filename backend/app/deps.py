@@ -36,7 +36,10 @@ def get_current_user(
     # this same request.
     user = (
         db.query(models.User)
-        .options(selectinload(models.User.role_assignments), selectinload(models.User.department_assignments))
+        .options(
+            selectinload(models.User.role_assignments),
+            selectinload(models.User.department_assignments),
+        )
         .filter(models.User.username == username)
         .first()
     )
@@ -86,6 +89,20 @@ def require_roles(*roles):
             )
         return current_user
     return checker
+
+
+def require_document_portal_viewer(current_user: models.User = Depends(get_current_user)) -> models.User:
+    if not current_user.has_role(
+        Role.DOCUMENT_PORTAL_VIEWER, Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER,
+    ):
+        raise HTTPException(status_code=403, detail="You do not have access to Document Management")
+    return current_user
+
+
+def require_document_portal_contributor(current_user: models.User = Depends(get_current_user)) -> models.User:
+    if not current_user.has_role(Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER):
+        raise HTTPException(status_code=403, detail="You have view-only Document Management access")
+    return current_user
 
 
 def require_same_department(current_user: models.User, entity_department) -> None:
@@ -181,6 +198,7 @@ def dashboard_department_scope(current_user: models.User) -> Optional[list]:
     rather than filtering down to "department IS NULL" rows only."""
     if current_user.has_role(Role.ADMIN):
         return None
+    # QA working roles retain their established cross-department scope.
     if set(current_user.roles) & DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES:
         return None
     return current_user.departments or None

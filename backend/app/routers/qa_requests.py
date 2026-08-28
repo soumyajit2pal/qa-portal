@@ -29,6 +29,7 @@ from ..pdf_export import build_request_detail_pdf
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
 
+
 def _log(db: Session, entity_id: int, step: str, user: models.User, decision: str, comments: Optional[str]):
     db.add(models.ApprovalAction(
         entity_type="QA_REQUEST", entity_id=entity_id, step_name=step,

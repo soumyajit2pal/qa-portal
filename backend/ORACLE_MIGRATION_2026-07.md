@@ -780,8 +780,8 @@ copies re-synced and confirmed identical via `diff -rq` (only the standard `.env
 ## 18. Test Management user pickers scoped to a configurable department list, not a hardcoded COE - Quality Assurance check per site
 
 **Reported:** "everywhere in test management whenever asking for users/members just show only user from
-COE - Quality Assurance, and make as list, so that in future if I want to add any other team like TCS-QA along with COE - Quality Assurance
-that can work, rather than long code change."
+COE - Quality Assurance, with one governed source of truth rather than
+individual per-screen checks."
 
 **Before:** every Test Management user picker (Project owner, Project members, default Reviewer/default QA
 Lead, per-item Reviewer/QA Lead reassignment, Cycle owner, runner assignment) fetched the app-wide `GET
@@ -793,8 +793,8 @@ hardcoded a single `!= QA_DEPARTMENT` comparison.
 
 **Fix:**
 - `constants.py`: new `TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS = [QA_DEPARTMENT]` — a list, not a single
-  string, positioned right next to `QA_DEPARTMENT` with a docstring explaining it's the one place to widen
-  Test Management to another team later (e.g. append `"TCS-QA"`).
+  string, positioned right next to `QA_DEPARTMENT` with a docstring explaining it is the governed source of
+  truth for Test Management eligibility.
 - `test_projects.py`: new `GET /api/test-projects/eligible-users` — same shape as `GET /api/auth/users`
   (`schemas.UserOut[]`), filtered to `User.is_active == True` and `User.department.in_(TEST_MANAGEMENT_
   ELIGIBLE_DEPARTMENTS)`. Declared in `test_projects.py` since it's already "the single entry point every
@@ -808,10 +808,9 @@ hardcoded a single `!= QA_DEPARTMENT` comparison.
   switched from `/api/auth/users` to `/api/test-projects/eligible-users`. No other module's user pickers
   were touched — they still intentionally see the full user list.
 
-**Net effect:** adding a second team later is a one-line change (`TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS =
-[QA_DEPARTMENT, "TCS-QA"]`) — every Test Management picker and both runner-eligibility checks pick it up
-automatically, with no per-screen or per-endpoint code change. Behavior today is unchanged (the list still
-contains only `"COE - Quality Assurance"`), so this is a pure refactor, not a behavior change, for existing users.
+**Net effect:** Test Management eligibility is governed centrally by `TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS`.
+Behavior today is unchanged (the list contains only `"COE - Quality Assurance"`), so this is a pure refactor,
+not a behavior change, for existing users.
 
 **Verified:** `python3 -m py_compile app/*.py app/routers/*.py` and `npx tsc --noEmit -p .` both clean.
 Documents and outputs copies re-synced and confirmed identical via `diff -rq` (only the standard
@@ -1024,8 +1023,8 @@ differ).
 user which is not correct."
 
 **Root cause:** `frontend/src/modules/test-management/Defects.tsx` fetched its `users` list from
-`/api/test-projects/eligible-users` -- the Test Management picker introduced in section 1 of this log's IT-QA/
-TCS-QA config work, which is deliberately restricted to `TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS` (currently just
+`/api/test-projects/eligible-users` -- the Test Management picker, which is deliberately restricted to
+`TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS` (currently just
 `"IT - QA"`). `TransitionModal`'s "Assigned" step used that same fixed IT-QA-only list for its Assignee
 picker regardless of what the adjacent "Department" field was set to -- so routing a defect to, say,
 Development still only ever offered QA team members as the responsible user. The backend transition endpoint

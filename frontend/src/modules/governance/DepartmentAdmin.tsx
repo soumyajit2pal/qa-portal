@@ -38,6 +38,7 @@ export default function DepartmentAdmin() {
 
   const isQAAdmin = hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA')
   const isDeptAdmin = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM')
+  const pendingReviewCount = users.filter((row) => row.needs_role_review && row.roles.length === 0).length
 
   if (!isQAAdmin && !isDeptAdmin) {
     return (
@@ -81,6 +82,14 @@ export default function DepartmentAdmin() {
           'still require a System Admin, as does any account marked "Managed by Admin Only" (won\'t appear below).'
         }
       />
+      {pendingReviewCount > 0 && (
+        <div className="alert-banner" style={{ marginBottom: 16 }}>
+          <div className="body">
+            <div className="title">{pendingReviewCount} access request{pendingReviewCount === 1 ? '' : 's'} awaiting your review</div>
+            <div className="sub">Assign an appropriate role below to approve access for a new LDAP user in your department.</div>
+          </div>
+        </div>
+      )}
       <Card>
         <Table
           rowKey="id"

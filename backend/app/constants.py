@@ -26,15 +26,31 @@ class Role:
     ADMIN = "ADMIN"                             # Configuration & Access
     SM = "SM"
     SCALE_6_PLUS = "SCALE_6_PLUS"
+    DOCUMENT_PORTAL_VIEWER = "DOCUMENT_PORTAL_VIEWER"
+    DOCUMENT_PORTAL_CONTRIBUTOR = "DOCUMENT_PORTAL_CONTRIBUTOR"
+    DOCUMENT_PORTAL_MANAGER = "DOCUMENT_PORTAL_MANAGER"
 
 ALL_ROLES = [
     Role.REQUESTER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD,
     Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.SECURITY_ANALYST,
     Role.APPLICATION_OWNER, Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM, Role.SM, Role.ADMIN,
     Role.SCALE_6_PLUS,
+    Role.DOCUMENT_PORTAL_VIEWER, Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER,
 ]
 
 CONFIDENTIAL_ROLES = {Role.SCALE_6_PLUS}
+DOCUMENT_PORTAL_ROLES = {
+    Role.DOCUMENT_PORTAL_VIEWER,
+    Role.DOCUMENT_PORTAL_CONTRIBUTOR,
+    Role.DOCUMENT_PORTAL_MANAGER,
+}
+
+def is_document_portal_only(roles) -> bool:
+    """Whether an account has document access and no other application role."""
+    assigned_roles = set(roles or [])
+    return bool(assigned_roles) and assigned_roles.issubset(DOCUMENT_PORTAL_ROLES)
+
+
 DEPARTMENT_ADMIN_ASSIGNABLE_ROLES = [
     Role.REQUESTER, Role.BUSINESS_ANALYST, Role.APPLICATION_OWNER, Role.SM,
 ]
@@ -85,13 +101,6 @@ LOGIN_TYPE_LABELS = {
     LoginType.LDAP: "LDAP / Active Directory",
 }
 
-# Role granted automatically when a brand-new LDAP account is just-in-time
-# provisioned on its first successful login (see routers/auth.py::login).
-# Deliberately the lowest-privilege role in the system -- the account is
-# flagged (User.needs_role_review) until an admin reviews it and assigns
-# the role it actually needs.
-DEFAULT_LDAP_PROVISION_ROLE = Role.REQUESTER
-
 ROLE_LABELS = {
     Role.REQUESTER: "Requester (Developer) / Others",
     Role.BUSINESS_ANALYST: "Business Analyst",
@@ -106,6 +115,9 @@ ROLE_LABELS = {
     Role.SM: "SM",
     Role.ADMIN: "Administrator",
     Role.SCALE_6_PLUS: "Scale 6+",
+    Role.DOCUMENT_PORTAL_VIEWER: "Document Portal Viewer",
+    Role.DOCUMENT_PORTAL_CONTRIBUTOR: "Document Portal Contributor",
+    Role.DOCUMENT_PORTAL_MANAGER: "Document Portal Manager",
 }
 
 # ---- Departments (Admin section: user mapping = department + role(s)) ----
@@ -123,27 +135,24 @@ SEED_DEPARTMENTS = [
 "CBS PMO - Remittance",
 "CBS PMO - API Interface",
 "CBS PMO - IBU (International Banking Unit)",
+"Other",
 ]
+
+# Neutral organisational home for external/document-only accounts.  This is
+# intentionally separate from the QA and business departments; module access
+# is still determined entirely by the assigned Document Portal role(s).
+OTHER_DEPARTMENT = "Other"
 
 # Central department that owns the QA Clearance Certificate workflow. Its
 # linked testing request may belong to any business department, but the
 # certificate itself is raised and approved entirely inside COE - Quality Assurance.
 QA_DEPARTMENT = "COE - Quality Assurance"
 
-# Reported directly: "everywhere in test management whenever asking for
-# users/members just show only users from COE - Quality Assurance, and make as list, so that in
-# future if I want to add any other team like TCS-QA along with COE - Quality Assurance that
-# can work, rather than long code change" -- single source of truth for
-# which department(s) are eligible to appear in every Test Management user
-# picker (Project owner/members, default Reviewer/QA Lead, per-item
-# Reviewer/QA Lead reassignment, Cycle owner) and to pass the runner /
-# assignment-manager department checks in routers/test_execution.py
-# (_runner_or_404, _require_qa_assignment_manager). Everything that used to
-# hardcode `== QA_DEPARTMENT` / `!= QA_DEPARTMENT` for Test Management now
-# reads this list instead -- bringing on another team (e.g. a "TCS-QA"
-# vendor team) later is a one-line append here, not a hunt through every
-# individual check. Starts as just the one department, same effective
-# behavior as before this change.
+# Single source of truth for departments eligible to appear in Test
+# Management user pickers (project owner/members, reviewer/QA Lead, cycle
+# owner) and pass runner/assignment-manager department checks. The current
+# policy is intentionally COE-only; any future expansion must be an explicit
+# governance decision rather than an implicit provider-routing feature.
 TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS = [QA_DEPARTMENT]
 
 # ---- Module 1: QA Request (gateway) / Functional Testing Request ----

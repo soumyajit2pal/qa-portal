@@ -897,7 +897,7 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
   useEffect(() => { api.get<ThreeWOut>(`/api/dashboard/3w${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
 
   async function openProject(projectId: string) {
-    try { setDetail(await api.get<ThreeWDetailOut>(`/api/dashboard/3w/${projectId}`)) } catch (err) { setError(err) }
+    try { setDetail(await api.get<ThreeWDetailOut>(`/api/dashboard/3w/${projectId}${rangeQuery({ preset: 'all', from: '', to: '' })}`)) } catch (err) { setError(err) }
   }
 
   if (error) return <ErrorText error={error} />
@@ -1005,12 +1005,14 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
     if (!user?.id) return
     setLoaded(false)
     function fetchUnified(extraQuery: string): Promise<UnifiedRequestRow[]> {
+      const query = new URLSearchParams(extraQuery)
+      const scopedQuery = query.toString()
       return Promise.all([
-        api.get<PageOut<QARequestListOut>>(`/api/qa-requests?${extraQuery}&page_size=100`).then((p) => p.items),
-        api.get<PageOut<FunctionalListOut>>(`/api/functional-requests?${extraQuery}&page_size=100`).then((p) => p.items),
-        api.get<PageOut<SASTListOut>>(`/api/sast-requests?${extraQuery}&page_size=100`).then((p) => p.items),
-        api.get<PageOut<DASTListOut>>(`/api/dast-requests?${extraQuery}&page_size=100`).then((p) => p.items),
-        api.get<PageOut<PerformanceListOut>>(`/api/performance-requests?${extraQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<QARequestListOut>>(`/api/qa-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<FunctionalListOut>>(`/api/functional-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<SASTListOut>>(`/api/sast-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<DASTListOut>>(`/api/dast-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
+        api.get<PageOut<PerformanceListOut>>(`/api/performance-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
       ]).then(([r, f, sast, dast, perf]) => {
         const all = [
           ...toUnified('QA Request', r),
@@ -1607,7 +1609,7 @@ export default function Dashboard() {
         </div>
         <div className="dashboard-header-status"><i /><span><strong>Systems operational</strong><small>Live portal data</small></span></div>
       </div>
-      <div className="tester-period-filter" role="group" aria-label="Dashboard reporting period">
+      <div className="tester-period-filter" role="group" aria-label="Dashboard filters">
         <div><strong>Reporting period</strong><span>All dates use India Standard Time (IST). Dashboard metrics, activity, insights, and requests use this created/raised-date range.</span></div>
         <div className="tester-period-presets">
           {([

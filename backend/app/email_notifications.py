@@ -65,6 +65,78 @@ def smtp_readiness() -> tuple[bool, str | None]:
     return True, None
 
 
+def queue_access_review_notifications(db: SASession, user: models.User) -> int:
+    """Queue one access-review email for each active Administrator.
+
+    Account-access review is a real approval event but not a business-request
+    workflow, so it deliberately uses its own `USER_ACCESS` action rather
+    than pretending it belongs to a QA request.  The action also keeps the
+    email outbox's mandatory foreign key and duplicate protection intact.
+    Like workflow mail, this queues only when SMTP is enabled, preventing a
+    surprise backlog from being sent weeks after a relay is configured.
+    """
+    if not _enabled():
+        logger.info("SMTP access-review notification skipped user=%s reason=smtp_disabled", user.username)
+        return 0
+    admins = (
+        db.query(models.User)
+        .join(models.UserRole)
+        .filter(
+            models.User.is_active == True,  # noqa: E712
+            models.UserRole.role == Role.ADMIN,
+        )
+        .all()
+    )
+    recipients = [admin for admin in admins if (admin.email or "").strip()]
+    if not recipients:
+        logger.warning("SMTP access-review notification skipped user=%s reason=no_active_admin_recipient", user.username)
+        return 0
+
+    department = user.primary_department or user.department or "Other"
+    portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
+    path = "/admin"
+    url = f"{portal_url}{path}" if portal_url else path
+    subject = f"Access review required: {user.full_name} ({user.username})"
+    body = (
+        "QA PORTAL ACCESS REVIEW REQUIRED\n\n"
+        "A newly provisioned LDAP account requires access review.\n\n"
+        f"User: {user.full_name}\nUsername: {user.username}\n"
+        f"Department: {department}\n"
+        f"Current role(s): {', '.join(user.roles) or 'No portal role assigned'}\n\n"
+        f"Review access: {url}\n"
+    )
+    html_body = f"""<!doctype html><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
+<div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
+  <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">Access review required</div></div>
+  <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">New LDAP access request</h1>
+    <p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">Review this account and assign the appropriate portal role.</p>
+    <table style=\"width:100%;border-collapse:collapse;font-size:14px\"><tr><td style=\"padding:9px 0;color:#627981;width:38%\">User</td><td style=\"padding:9px 0;font-weight:600\">{escape(user.full_name)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Username</td><td style=\"padding:9px 0\">{escape(user.username)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Department</td><td style=\"padding:9px 0\">{escape(department)}</td></tr><tr><td style=\"padding:9px 0;color:#627981\">Current role(s)</td><td style=\"padding:9px 0\">{escape(', '.join(user.roles) or 'No portal role assigned')}</td></tr></table>
+    <a href=\"{escape(url, quote=True)}\" style=\"display:inline-block;margin-top:18px;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">Review in QA Portal</a>
+  </div>
+  <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">This is an automated QA Portal access-management notification.</div>
+</div></body></html>"""
+    action = models.ApprovalAction(
+        entity_type="USER_ACCESS",
+        entity_id=user.id,
+        step_name="Access review",
+        actor_id=user.id,
+        actor_role=user.roles_csv,
+        decision="Access review requested",
+        comments=f"New LDAP account mapped to {department}.",
+    )
+    db.add(action)
+    for admin in recipients:
+        db.add(models.EmailNotification(
+            approval_action=action,
+            recipient_email=admin.email.strip(),
+            subject=subject,
+            body=body,
+            html_body=html_body,
+        ))
+        logger.info("SMTP notification queued category=access_review recipient=%s user=%s", admin.email.strip(), user.username)
+    return len(recipients)
+
+
 def _target(action: models.ApprovalAction, db: SASession):
     mapping = {
         "QA_REQUEST": models.QARequest, "FUNCTIONAL_REQUEST": models.FunctionalRequest,
@@ -206,23 +278,46 @@ def _notification_route(db: SASession, action: models.ApprovalAction, target) ->
     receives the next one. Returned work goes to the requester. This mirrors
     the Pending Approvals queue and prevents duplicate/noisy notifications.
     """
-    if not target or not _is_workflow_transition(action):
+    reference = _portal_reference(action, target)
+    if not target:
+        logger.warning(
+            "SMTP workflow notification skipped reference=%s entity_type=%s entity_id=%s reason=target_not_found",
+            reference, action.entity_type, action.entity_id,
+        )
+        return None
+    if not _is_workflow_transition(action):
+        logger.info(
+            "SMTP workflow notification skipped reference=%s status=%s decision=%s reason=non_workflow_action",
+            reference, getattr(target, "status", None), action.decision or "",
+        )
         return None
 
     roles = _next_approver_roles(target)
     if roles:
         department = QA_DEPARTMENT if isinstance(target, models.TestCase) else _department(target)
         recipients = _role_user_ids(db, roles, department)
+        logger.info(
+            "SMTP workflow route evaluated reference=%s status=%s roles=%s department=%s eligible_recipient_count=%s",
+            reference, getattr(target, "status", None), ",".join(sorted(roles)), department or "<any>", len(recipients),
+        )
         if recipients:
             label = _role_label(roles)
             return NotificationRoute(
                 recipients, label, True,
                 f"Your {label} review is required before this workflow can continue.",
             )
+        logger.warning(
+            "SMTP workflow notification skipped reference=%s status=%s reason=no_active_recipient_for_role roles=%s department=%s",
+            reference, getattr(target, "status", None), ",".join(sorted(roles)), department or "<any>",
+        )
 
     status = str(getattr(target, "status", "") or "").upper()
     requester_ids = _requester_user_ids(target)
     if not requester_ids:
+        logger.info(
+            "SMTP workflow notification skipped reference=%s status=%s reason=no_recipient_route",
+            reference, status,
+        )
         return None
     if status.startswith("RETURNED") or status in {"SM_REJECTED", "ASSIGNED_TO_REQUESTER", "WAITING_FOR_FIX", "REQUESTER_VERIFICATION"}:
         return NotificationRoute(
@@ -281,20 +376,32 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
     # Before SMTP is deliberately enabled, do not accumulate weeks of stale
     # workflow mail that would surprise users on the first activation.
     if not _enabled():
+        logger.info(
+            "SMTP workflow notification skipped entity_type=%s entity_id=%s reason=smtp_disabled",
+            action.entity_type, action.entity_id,
+        )
         return
     if getattr(action, "_email_notifications_queued", False):
+        logger.info(
+            "SMTP workflow notification skipped entity_type=%s entity_id=%s reason=already_evaluated",
+            action.entity_type, action.entity_id,
+        )
         return
     action._email_notifications_queued = True
     target = _target(action, db)
     route = _notification_route(db, action, target)
     if not route:
         return
+    reference = _portal_reference(action, target)
     recipient_ids = route.recipient_ids - {action.actor_id}
     if not recipient_ids:
+        logger.info(
+            "SMTP workflow notification skipped reference=%s reason=actor_is_only_recipient actor_id=%s",
+            reference, action.actor_id,
+        )
         return
     users = db.query(models.User).filter(models.User.id.in_(recipient_ids), models.User.is_active == True).all()  # noqa: E712
     portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
-    reference = _portal_reference(action, target)
     path = _portal_link(action, reference)
     url = f"{portal_url}{path}" if portal_url else path
     status = _status_label(getattr(target, "status", None))
@@ -319,6 +426,8 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
   </div>
   <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">This is an automated QA Portal workflow notification.</div>
 </div></body></html>"""
+    queued_count = 0
+    missing_email_users = []
     for user in users:
         email = (user.email or "").strip()
         if email:
@@ -329,6 +438,20 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> None:
                 # generated ID into this mandatory FK during the same flush.
                 approval_action=action, recipient_email=email, subject=subject, body=body, html_body=html_body,
             ))
+            queued_count += 1
+            logger.info("SMTP notification queued category=workflow recipient=%s reference=%s action=%s", email, reference, action.decision or "Updated")
+        else:
+            missing_email_users.append(user.username)
+    if missing_email_users:
+        logger.warning(
+            "SMTP workflow notification recipient skipped reference=%s reason=missing_email users=%s",
+            reference, ",".join(missing_email_users),
+        )
+    if not queued_count:
+        logger.warning(
+            "SMTP workflow notification not queued reference=%s reason=no_deliverable_recipient resolved_recipient_count=%s",
+            reference, len(recipient_ids),
+        )
 
 
 def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]) -> None:
@@ -339,6 +462,9 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
     mailbox noise, so all records from the same transaction and workflow
     checkpoint are presented as one actionable summary instead.
     """
+    if actions and not _enabled():
+        logger.info("SMTP test-case digest skipped action_count=%s reason=smtp_disabled", len(actions))
+        return
     groups: dict[tuple[int, str, bool, str], list[tuple[models.ApprovalAction, object, NotificationRoute]]] = {}
     for action in actions:
         if getattr(action, "_email_notifications_queued", False):
@@ -358,6 +484,10 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
         user = db.get(models.User, recipient_id)
         email = (user.email or "").strip() if user else ""
         if not email:
+            logger.warning(
+                "SMTP test-case digest recipient skipped recipient_id=%s reason=missing_or_inactive_email",
+                recipient_id,
+            )
             continue
         first_action, _, route = entries[0]
         references = list(dict.fromkeys(_portal_reference(action, target) for action, target, _ in entries))
@@ -395,6 +525,7 @@ def _queue_test_case_digests(db: SASession, actions: list[models.ApprovalAction]
             approval_action=first_action, recipient_email=email, subject=subject,
             body=body, html_body=html_body,
         ))
+        logger.info("SMTP notification queued category=test_case_digest recipient=%s count=%s", email, len(references))
 
 
 def _before_commit(session: SASession) -> None:
@@ -413,6 +544,10 @@ def _before_commit(session: SASession) -> None:
         final_actions = {}
         for action in actions:
             final_actions[(action.entity_type, action.entity_id)] = action
+        logger.info(
+            "SMTP workflow evaluation started approval_action_count=%s final_action_count=%s smtp_enabled=%s",
+            len(actions), len(final_actions), _enabled(),
+        )
         test_case_actions = [action for action in final_actions.values() if action.entity_type == "TEST_CASE"]
         _queue_test_case_digests(session, test_case_actions)
         for action in final_actions.values():
@@ -428,8 +563,13 @@ def _before_commit(session: SASession) -> None:
 
 
 def _after_commit(session: SASession) -> None:
-    if session.info.pop("email_notifications_created", False) and _enabled():
+    if not session.info.pop("email_notifications_created", False):
+        return
+    if _enabled():
+        logger.info("SMTP outbox delivery trigger scheduled after workflow evaluation")
         deliver_pending_async()
+    else:
+        logger.info("SMTP outbox delivery trigger skipped reason=smtp_disabled")
 
 
 def deliver_pending_async() -> None:
@@ -471,6 +611,7 @@ def install_outbox_listener() -> None:
 
 def _send(notification: models.EmailNotification) -> None:
     settings = _smtp_settings()
+    logger.info("SMTP notification sending id=%s recipient=%s approval_action_id=%s subject=%s", notification.id, notification.recipient_email, notification.approval_action_id, notification.subject)
     message = EmailMessage()
     message["Subject"] = notification.subject
     message["From"] = f'{settings["from_name"]} <{settings["from_address"]}>'
@@ -543,6 +684,7 @@ def _deliver_one(notification_id: int, now: datetime.datetime) -> bool:
             notification.sent_at = models.now()
             notification.last_error = None
             db.commit()
+            logger.info("SMTP notification sent id=%s recipient=%s approval_action_id=%s subject=%s", notification.id, notification.recipient_email, notification.approval_action_id, notification.subject)
             return True
         except Exception as exc:
             notification.last_error = str(exc)[:2000]
@@ -552,7 +694,7 @@ def _deliver_one(notification_id: int, now: datetime.datetime) -> bool:
                 notification.status = "RETRY"
                 notification.next_attempt_at = models.now() + datetime.timedelta(minutes=2 ** notification.attempts)
             db.commit()
-            logger.warning("Email delivery failed for outbox item %s: %s", notification_id, exc)
+            logger.warning("SMTP notification failed id=%s recipient=%s approval_action_id=%s attempts=%s status=%s error=%s", notification_id, notification.recipient_email, notification.approval_action_id, notification.attempts, notification.status, exc)
             return False
     except Exception:
         db.rollback()
@@ -565,9 +707,18 @@ def _deliver_one(notification_id: int, now: datetime.datetime) -> bool:
 def deliver_pending(limit: int = 20) -> int:
     ready, reason = smtp_readiness()
     if not ready:
-        logger.debug("Email outbox delivery skipped: %s", reason)
+        logger.warning("SMTP outbox delivery skipped reason=%s", reason)
         return 0
     now = models.now()
     # Do not let a bad mailbox, an SMTP refusal, or a transient DB error for
     # one recipient abort delivery for every other recipient in this batch.
-    return sum(_deliver_one(notification_id, now) for notification_id in _candidate_notification_ids(now, limit))
+    notification_ids = _candidate_notification_ids(now, limit)
+    if not notification_ids:
+        return 0
+    logger.info("SMTP outbox delivery started batch_size=%s", len(notification_ids))
+    delivered = sum(_deliver_one(notification_id, now) for notification_id in notification_ids)
+    logger.info(
+        "SMTP outbox delivery completed batch_size=%s delivered_count=%s unsuccessful_count=%s",
+        len(notification_ids), delivered, len(notification_ids) - delivered,
+    )
+    return delivered

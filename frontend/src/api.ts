@@ -300,6 +300,14 @@ export const api = {
     triggerDownload(blob, filename)
   },
 
+  // Same authenticated Blob handoff as downloadFile, for endpoints whose
+  // download selection is expressed as JSON (for example, a folder/file
+  // selection that the server turns into one ZIP archive).
+  downloadPost: async (path: string, body: unknown, filename: string): Promise<void> => {
+    const blob = await request<Blob>(path, { method: 'POST', body, isBlob: true })
+    triggerDownload(blob, filename)
+  },
+
   // Authenticated Blob fetch used when a protected file must be displayed
   // inline (for example, images pasted into a Jira-style comment). Native
   // <img src> requests cannot attach the portal's Bearer token, so callers
@@ -326,6 +334,47 @@ export const api = {
     })
     return request<T>(path, { method: 'POST', body: form, formEncoded: true, timeoutMs })
   },
+
+  // XHR is used only where a user needs granular upload progress. Fetch does
+  // not expose request-body progress, while the Document Portal must report
+  // each file's transfer state for large evidence-folder uploads.
+  uploadFormWithProgress: <T = any>(
+    path: string,
+    fields: Record<string, string | Blob | undefined | null>,
+    onProgress: (loaded: number, total: number) => void,
+    timeoutMs: number = 5 * 60_000,
+  ): Promise<T> => new Promise((resolve, reject) => {
+    const form = new FormData()
+    Object.entries(fields).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) form.append(key, value)
+    })
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${BASE_URL}${path}`)
+    const token = getToken()
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.timeout = timeoutMs
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded, event.total)
+    }
+    xhr.onerror = () => reject(new HttpError('QualityOps could not connect to the application service. Check your network connection and try again.', 0))
+    xhr.ontimeout = () => reject(new HttpError(STATUS_MESSAGES[408], 408))
+    xhr.onload = () => {
+      let payload: any = null
+      try { payload = xhr.responseText ? JSON.parse(xhr.responseText) : null } catch { /* handled below */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        cacheGeneration += 1
+        completedGets.clear()
+        inFlightGets.clear()
+        mutationListeners.forEach((listener) => listener({ path, method: 'POST' }))
+        resolve(payload as T)
+        return
+      }
+      reject(new HttpError(formatBackendReason(payload?.detail ?? payload) || statusMessage(xhr.status, xhr.statusText), xhr.status))
+    }
+    updateActivity(1)
+    xhr.onloadend = () => updateActivity(-1)
+    xhr.send(form)
+  }),
 
   // Multipart form with repeatable file fields. Used by rich comments,
   // where formatted body text and several pasted images are submitted as

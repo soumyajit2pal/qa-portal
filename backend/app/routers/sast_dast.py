@@ -1057,7 +1057,8 @@ def get_sast(req_id: int, db: Session = Depends(get_db), current_user: models.Us
     # module already had one), and frontend code that re-fetched the entire
     # unpaginated list just to find one row by id (see SAST.tsx's own
     # resolveFinding) now uses this instead.
-    return _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    return obj
 
 
 # Standalone SAST request creation is DISABLED per request -- SAST requests
@@ -1563,7 +1564,8 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
 @router.get("/api/dast-requests/{req_id}", response_model=schemas.DASTOut)
 def get_dast(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # PAG-006, same reasoning as get_sast above -- did not exist before.
-    return _dast_out(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
+    obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    return _dast_out(obj, current_user)
 
 
 @router.post("/api/dast-requests", response_model=schemas.DASTOut)

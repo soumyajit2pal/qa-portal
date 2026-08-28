@@ -98,21 +98,16 @@ def _require_no_active_project_for_application(db: Session, application_master_i
 @router.get("/eligible-users", response_model=List[schemas.UserOut])
 def list_eligible_test_management_users(db: Session = Depends(get_db),
                                         current_user: models.User = Depends(get_current_user)):
-    """Reported directly: "everywhere in test management whenever asking for
-    users/members just show only users from COE - Quality Assurance, and make as list, so that
-    in future if I want to add any other team like TCS-QA along with COE - Quality Assurance
-    that can work, rather than long code change."
+    """Return the governed COE QA user pool for Test Management pickers.
 
     Every Test Management user picker (Project owner/members, default
     Reviewer/QA Lead, per-item Reviewer/QA Lead reassignment, Cycle owner)
     calls this endpoint instead of the app-wide `GET /api/auth/users` list
     (which every other module still uses unfiltered, since Requesters/
     Department Heads/Business Analysts etc. legitimately need users outside
-    COE - Quality Assurance). Filtered to `constants.TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS` --
-    adding another team there is the only change needed to widen every
-    picker in Projects/Repository/Execution at once, plus the matching
-    runner/assignment-manager checks in `test_execution.py`, which read the
-    same list.
+    COE - Quality Assurance). Filtered to
+    `constants.TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS`, which is intentionally
+    restricted to COE under the current governance policy.
 
     Declared here (not in a shared/generic module) because this is the one
     router every Test Management screen already depends on for its own

@@ -2,7 +2,7 @@ import datetime
 from collections import Counter
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from .. import models, cache
@@ -42,8 +42,10 @@ def _join_qa_department(query, model, scope):
     # 2026-08 "one user can be on multiple departments" CR -- scope is now a
     # list of departments (dashboard_department_scope's own docstring), so
     # this is an `.in_()` membership filter, not `==`.
-    return query.join(models.QARequest, model.qa_request_id == models.QARequest.id) \
-                .filter(models.QARequest.department.in_(scope))
+    query = query.join(models.QARequest, model.qa_request_id == models.QARequest.id)
+    if scope:
+        query = query.filter(models.QARequest.department.in_(scope))
+    return query
 
 
 def _date_bounds(date_from: str | None, date_to: str | None):
@@ -78,8 +80,8 @@ def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction]) ->
     per entity table (plus one QA-request lookup for all linked children).
 
     Values are ``(request_ref, department, qa_status, requester_id)``.  The
-    latter two are needed to preserve the generic feed's hidden-foreign-draft
-    rule for QA gateway records.
+    latter two values preserve the generic feed's hidden-foreign-draft rule
+    for QA gateway records.
     """
     ids_by_type: dict[str, set[int]] = {}
     for row in rows:
@@ -132,15 +134,25 @@ def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction]) ->
         qa = qa_by_id.get(row.qa_request_id)
         result[("DEFECT", row.id)] = (row.defect_key, qa.department if qa else None, None, None)
 
-    direct_specs = (
-        ("SUPPRESSION", models.SuppressionRequest, models.SuppressionRequest.suppression_id, models.SuppressionRequest.department),
-        ("SIGNOFF", models.QASignOff, models.QASignOff.certificate_id, models.QASignOff.department),
-    )
+    direct_specs = (("SIGNOFF", models.QASignOff, models.QASignOff.certificate_id, models.QASignOff.department),)
     for entity_type, model, ref_column, department_column in direct_specs:
         ids = ids_by_type.get(entity_type, set())
         if ids:
             for row in db.query(model.id, ref_column, department_column).filter(model.id.in_(ids)).all():
                 result[(entity_type, row.id)] = (row[1], row[2], None, None)
+
+    suppression_ids = ids_by_type.get("SUPPRESSION", set())
+    if suppression_ids:
+        suppression_rows = db.query(
+            models.SuppressionRequest.id, models.SuppressionRequest.suppression_id,
+            models.SuppressionRequest.department,
+        ).outerjoin(models.SASTRequest, models.SuppressionRequest.sast_request_id == models.SASTRequest.id) \
+         .outerjoin(models.DASTRequest, models.SuppressionRequest.dast_request_id == models.DASTRequest.id) \
+         .outerjoin(models.QARequest, or_(models.SASTRequest.qa_request_id == models.QARequest.id,
+                                          models.DASTRequest.qa_request_id == models.QARequest.id)) \
+         .filter(models.SuppressionRequest.id.in_(suppression_ids)).all()
+        for row in suppression_rows:
+            result[("SUPPRESSION", row.id)] = (row.suppression_id, row.department, None, None)
     return result
 
 
@@ -531,14 +543,14 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     # Period filters apply only to completed-work history below. Capacity is
     # a current-state view, so an active assignment must never disappear just
     # because its request was raised before the selected reporting window.
-    functional_requests = (db.query(models.FunctionalRequest)
-                           .filter(models.FunctionalRequest.status.in_(TESTER_WORKLOAD_STATUSES)).all())
-    performance_requests = (db.query(models.PerformanceRequest)
-                            .filter(models.PerformanceRequest.status.in_(PERFORMANCE_TESTER_WORKLOAD_STATUSES)).all())
-    sast_requests = (db.query(models.SASTRequest)
-                     .filter(models.SASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all())
-    dast_requests = (db.query(models.DASTRequest)
-                     .filter(models.DASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all())
+    functional_requests = _join_qa_department(db.query(models.FunctionalRequest), models.FunctionalRequest, None) \
+        .filter(models.FunctionalRequest.status.in_(TESTER_WORKLOAD_STATUSES)).all()
+    performance_requests = _join_qa_department(db.query(models.PerformanceRequest), models.PerformanceRequest, None) \
+        .filter(models.PerformanceRequest.status.in_(PERFORMANCE_TESTER_WORKLOAD_STATUSES)).all()
+    sast_requests = _join_qa_department(db.query(models.SASTRequest), models.SASTRequest, None) \
+        .filter(models.SASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all()
+    dast_requests = _join_qa_department(db.query(models.DASTRequest), models.DASTRequest, None) \
+        .filter(models.DASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all()
 
     def role_label(user) -> str:
         roles = []
@@ -628,7 +640,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
         (models.DASTRequest, "DAST", SAST_DAST_TERMINAL_STATUSES, "security_analyst_id"),
     ]
     for model, source, terminal_statuses, assignment_field in completed_sources:
-        completed = (_in_period(db.query(model), model.updated_at, date_from, date_to)
+        completed = (_join_qa_department(_in_period(db.query(model), model.updated_at, date_from, date_to), model, None)
                      .filter(model.status.in_(terminal_statuses)).all())
         for request in completed:
             raw_assignment = getattr(request, assignment_field)
@@ -1069,7 +1081,7 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     scope = dashboard_department_scope(current_user)
     # 2026-08 CR -- scope is now a list; join it into a stable, readable cache
     # key segment (sorted so department order never produces a cache miss).
-    cache_key = f"dashboard:summary:v1:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
+    cache_key = f"dashboard:summary:v4:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
     cached = cache.get_json(cache_key)
     if cached is not None:
         return cached
@@ -1360,7 +1372,8 @@ def dashboard_attention_detail(
 
 # ---------------- 4.9.5 / 4.9.6 Security Dashboards ----------------
 @router.get("/security/sast")
-def security_sast(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def security_sast(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
     reqs = _join_qa_department(
         _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to), models.SASTRequest, scope).all()
@@ -1400,7 +1413,8 @@ def security_sast(date_from: str | None = Query(None), date_to: str | None = Que
 
 
 @router.get("/security/dast")
-def security_dast(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def security_dast(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                  db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
     reqs = _join_qa_department(
         _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to), models.DASTRequest, scope).all()
@@ -1436,7 +1450,8 @@ def security_dast(date_from: str | None = Query(None), date_to: str | None = Que
 
 # ---------------- 4.9.7 Suppression Dashboard ----------------
 @router.get("/suppression")
-def suppression_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def suppression_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                          db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
     q = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to)
     # SuppressionRequest.department is a real column (auto-populated at
@@ -1543,7 +1558,8 @@ PERFORMANCE_PENDING_WITH = {
 
 
 @router.get("/3w")
-def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None), db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None),
+                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """
     'Know What Is Pending, Where It Is Pending, and Since When' -- section 4.9.8.
     Aggregates pending items across QA requests, SAST/DAST requests and suppression

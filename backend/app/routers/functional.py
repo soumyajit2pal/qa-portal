@@ -160,7 +160,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
     q = db.query(models.FunctionalRequest).join(
         models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id, isouter=True
     ).options(
-        joinedload(models.FunctionalRequest.qa_request).joinedload(models.QARequest.application_master)
+        joinedload(models.FunctionalRequest.qa_request).joinedload(models.QARequest.application_master),
     )
     scope = dashboard_department_scope(current_user)
     delegated_to_user = models.QARequest.delegations.any(and_(
@@ -198,7 +198,8 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
 
 @router.get("/{req_id}", response_model=schemas.FunctionalOut)
 def get_functional(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id)
+    return obj
 
 
 # Standalone creation is DISABLED -- a Functional Testing Request can only
