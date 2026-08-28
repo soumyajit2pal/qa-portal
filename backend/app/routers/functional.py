@@ -3,7 +3,7 @@ from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, literal, or_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 
@@ -17,6 +17,14 @@ from .. import application_names as app_names
 from .. import reassignment
 
 router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
+
+# Linking is traceability, not an execution-result operation.  A test cycle
+# may therefore be attached while it is still being prepared (Draft/Ready),
+# as well as after its own execution has started.  Blocked and Completed
+# cycles stay excluded: a blocked cycle must be explicitly resumed first and
+# a completed cycle is terminal.  Keeping this list in one place prevents
+# the picker endpoint and the save endpoint from drifting apart again.
+_LINKABLE_TEST_CYCLE_STATUSES = ("Draft", "Ready", "In Progress")
 
 # ---------------------------------------------------------------------------
 # Functional Testing Request lifecycle -- covers whichever of Functional
@@ -169,10 +177,21 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
         models.QARequestDelegation.status == "ACTIVE",
         models.QARequestDelegation.assigned_to_id == current_user.id,
     ))
+    # A delegation is exceptional, temporary input access.  The normal
+    # ownership fields are the assigned QA Lead and the comma-separated QA
+    # Tester IDs.  The previous filter used only `delegated_to_user`, making
+    # “Assigned to Me” empty for virtually every real Functional assignment.
+    named_assignee = or_(
+        models.FunctionalRequest.qa_lead_id == current_user.id,
+        func.instr(
+            literal(",") + func.coalesce(models.FunctionalRequest.assigned_tester_ids, "") + literal(","),
+            f",{current_user.id},",
+        ) > 0,
+    )
     if scope:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
-        q = q.filter(delegated_to_user)
+        q = q.filter(or_(named_assignee, delegated_to_user))
     q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.FunctionalRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
@@ -648,10 +667,10 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
                           .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
                           .filter(models.TestCycle.id == payload.test_cycle_id,
                                   models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
-                          models.TestCycle.status == "In Progress")
+                                  models.TestCycle.status.in_(_LINKABLE_TEST_CYCLE_STATUSES))
                           .first())
         if not selected_cycle:
-            raise HTTPException(400, "The selected test cycle is no longer active or eligible")
+            raise HTTPException(400, "The selected test cycle is no longer eligible (only Draft, Ready, or In Progress cycles can be linked)")
         if existing_link and existing_link.cycle_id != selected_cycle.id:
             raise HTTPException(400, f"Test cycle {cycle.cycle_key} is already linked to this request")
         cycle = selected_cycle
@@ -700,7 +719,7 @@ def eligible_test_cycles(req_id: int, db: Session = Depends(get_db),
              .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
              .outerjoin(models.TestCycleChildRequestLink, models.TestCycleChildRequestLink.cycle_id == models.TestCycle.id)
              .filter(models.TestProject.is_active == True,  # noqa: E712 - Oracle requires = 1, not IS 1
-                     models.TestCycle.status == "In Progress",
+                     models.TestCycle.status.in_(_LINKABLE_TEST_CYCLE_STATUSES),
                      models.TestCycleChildRequestLink.id.is_(None)))
     application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
     if application_master_id:

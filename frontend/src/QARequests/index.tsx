@@ -185,7 +185,7 @@ export default function QARequests() {
             All Requests
           </button>
           <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>
-            Assigned to Me
+            My Drafts / Delegated
           </button>
         </div>
       </div>

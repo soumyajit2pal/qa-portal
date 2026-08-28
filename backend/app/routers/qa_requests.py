@@ -412,6 +412,18 @@ def list_requests(params: pagination.PageParams = Depends(),
         models.QARequestDelegation.target_type == "QA_REQUEST",
         models.QARequestDelegation.assigned_to_id == current_user.id,
     ))
+    # A gateway request has no permanent per-person assignee; its workflow
+    # work is represented by child requests. Here “my work” therefore means
+    # a draft raised by the user or a temporary delegation explicitly given
+    # to them. The UI labels this accurately instead of claiming a generic
+    # assignment that does not exist in the data model.
+    my_gateway_input_work = or_(
+        delegated_to_user,
+        and_(
+            models.QARequest.requester_id == current_user.id,
+            models.QARequest.status == GatewayStatus.DRAFT,
+        ),
+    )
     q = pagination.apply_status_filter(q, params, models.QARequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
     if application_name:
@@ -435,7 +447,7 @@ def list_requests(params: pagination.PageParams = Depends(),
     if scope:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
-        q = q.filter(delegated_to_user)
+        q = q.filter(my_gateway_input_work)
     # Broad "requests or IDs" search (topbar search box and the QA Requests
     # list's own search field) -- matches Request ID, Application Name, or
     # The consolidated CR/EPIC identifier is stored in cr_number.

@@ -3,7 +3,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, literal, or_
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models, pagination, schemas
@@ -157,10 +157,19 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
         models.QARequestDelegation.status == "ACTIVE",
         models.QARequestDelegation.assigned_to_id == current_user.id,
     ))
+    # “Assigned to Me” must reflect the real Performance QA Lead/tester
+    # assignment, not only a temporary delegation record.
+    named_assignee = or_(
+        models.PerformanceRequest.engineer_id == current_user.id,
+        func.instr(
+            literal(",") + func.coalesce(models.PerformanceRequest.assigned_tester_ids, "") + literal(","),
+            f",{current_user.id},",
+        ) > 0,
+    )
     if scope:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
-        q = q.filter(delegated_to_user)
+        q = q.filter(or_(named_assignee, delegated_to_user))
     q = pagination.apply_search(q, params, models.PerformanceRequest.request_id, models.PerformanceRequest.application_name)
     q = pagination.apply_status_filter(q, params, models.PerformanceRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)

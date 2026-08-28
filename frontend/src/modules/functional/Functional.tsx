@@ -552,7 +552,7 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
     {answer === "yes" && <div className="execution-cycle-picker">
       <ClearableSearchInput value={search} onChange={(event) => setSearch(event.target.value)} onClear={() => setSearch("")} placeholder="Search cycle name, ID or project…" clearLabel="Clear test cycle search" />
       {loading && <p className="muted">Loading eligible test cycles…</p>}
-      {!loading && cycles.length === 0 && !error && <div className="execution-cycle-empty"><strong>No eligible test cycles found</strong><span>Only unlinked Not Started or In Progress cycles from an active project for this application can be selected.</span></div>}
+      {!loading && cycles.length === 0 && !error && <div className="execution-cycle-empty"><strong>No eligible test cycles found</strong><span>Only unlinked Draft, Ready, or In Progress cycles from an active project for this application can be selected.</span></div>}
       {!loading && cycles.length > 0 && visibleCycles.length === 0 && <p className="muted">No test cycles match your search.</p>}
       <div className="execution-cycle-list">
         {visibleCycles.map((cycle) => <button type="button" key={cycle.id} className={selectedCycleId === cycle.id ? "selected" : ""} onClick={() => setSelectedCycleId(cycle.id)}>
@@ -1932,7 +1932,7 @@ export default function Functional() {
       <div className="toolbar module-assignment-toolbar">
         <div className="tabs" style={{ margin: 0 }}>
           <button type="button" className={!assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(false)}>All Requests</button>
-          <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>Assigned to Me</button>
+          <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>My Assigned Work</button>
         </div>
       </div>
       {/* <div className="toolbar">

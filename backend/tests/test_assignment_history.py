@@ -12,7 +12,10 @@ class AssignmentHistoryTests(unittest.TestCase):
         engine = create_engine("sqlite:///:memory:")
         models.Base.metadata.create_all(
             engine,
-            tables=[models.User.__table__, models.AssignmentHistory.__table__],
+            tables=[
+                models.User.__table__, models.UserRole.__table__,
+                models.ApprovalAction.__table__, models.AssignmentHistory.__table__,
+            ],
         )
         self.db = sessionmaker(bind=engine)()
         self.actor = models.User(id=1, username="manager", full_name="Manager", login_type="STANDARD")
@@ -64,6 +67,24 @@ class AssignmentHistoryTests(unittest.TestCase):
         self.assertIsNotNone(rows[0].unassigned_at)
         self.assertEqual(rows[1].assignee_id, self.second.id)
         self.assertIsNone(rows[1].unassigned_at)
+
+
+    def test_reassignment_audit_keeps_long_assignee_labels(self):
+        """Audit labels are display values, not short workflow status codes."""
+        previous = "First QA Engineer, Second QA Engineer"
+        current = "Third QA Engineer, Fourth QA Engineer"
+        self.assertGreater(len(current), 30)
+        reassignment.record_reassignment(
+            self.db, "FUNCTIONAL_REQUEST", 41, self.actor,
+            previous, current, "Workload balanced",
+            assignment_role="QA_TESTER",
+            previous_assignee_ids=[], new_assignee_ids=[],
+        )
+        self.db.commit()
+        audit = self.db.query(models.ApprovalAction).one()
+        self.assertEqual(audit.previous_state, previous)
+        self.assertEqual(audit.new_state, current)
+        self.assertEqual(models.ApprovalAction.__table__.c.new_state.type.length, 1000)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ export default function Login() {
     setBusy(true)
     setError(null)
     try {
-      await login(username, password)
+      await login(username.trim().toLowerCase(), password)
       navigate('/')
     } catch (err: any) {
       setError(err.message || 'Login failed')
@@ -81,7 +81,16 @@ export default function Login() {
               <label htmlFor="login-username">Username</label>
               <div className="login-input-wrap">
                 <IconUsers />
-                <input id="login-username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus required />
+                <input
+                  id="login-username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value.toLowerCase())}
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  autoFocus
+                  required
+                />
               </div>
             </div>
 

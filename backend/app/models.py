@@ -1663,8 +1663,15 @@ class ApprovalAction(Base):
     # elsewhere is expected, not a data-quality gap. "Delegated role" is
     # deliberately not modeled -- delegation (APR-012) was explicitly
     # descoped for this pass (see ORACLE_MIGRATION_2026-07.md).
-    previous_state = Column(String(30), nullable=True)
-    new_state = Column(String(30), nullable=True)
+    # Assignment/reassignment events also use these audit fields to retain
+    # the human-readable prior/new assignee label. A multi-tester label can
+    # be far longer than a workflow status (the production ORA-12899 was a
+    # 40-character example), so 30 characters is not a safe audit limit.
+    # Keep this bounded VARCHAR rather than truncating history; 1,000 chars
+    # covers a large comma-separated group while staying within Oracle's
+    # standard VARCHAR2 limit.
+    previous_state = Column(String(1000), nullable=True)
+    new_state = Column(String(1000), nullable=True)
 
     actor = relationship("User", foreign_keys=[actor_id])
     # The SMTP outbox is attached by relationship (rather than copying

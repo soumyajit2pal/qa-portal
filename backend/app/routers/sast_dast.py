@@ -1023,10 +1023,16 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
         models.QARequestDelegation.status == "ACTIVE",
         models.QARequestDelegation.assigned_to_id == current_user.id,
     ))
+    # Security Lead/Analyst fields are the actual assignment source. A
+    # delegation is only an optional, temporary input hand-off.
+    named_assignee = or_(
+        models.SASTRequest.security_lead_id == current_user.id,
+        models.SASTRequest.security_analyst_id == current_user.id,
+    )
     if scope:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
-        q = q.filter(delegated_to_user)
+        q = q.filter(or_(named_assignee, delegated_to_user))
     q = pagination.apply_search(q, params, models.SASTRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.SASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
@@ -1535,10 +1541,14 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
         models.QARequestDelegation.status == "ACTIVE",
         models.QARequestDelegation.assigned_to_id == current_user.id,
     ))
+    named_assignee = or_(
+        models.DASTRequest.security_lead_id == current_user.id,
+        models.DASTRequest.security_analyst_id == current_user.id,
+    )
     if scope:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
-        q = q.filter(delegated_to_user)
+        q = q.filter(or_(named_assignee, delegated_to_user))
     q = pagination.apply_search(q, params, models.DASTRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.DASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)

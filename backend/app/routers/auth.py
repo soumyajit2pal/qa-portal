@@ -24,6 +24,16 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 _COE_DEFAULT_ROLES = (Role.QA_ENGINEER, Role.DOCUMENT_PORTAL_VIEWER)
 
 
+def _canonical_login_username(username: str) -> str:
+    """Use one canonical, case-insensitive username form at sign-in.
+
+    LDAP bank IDs and local portal usernames are managed as lowercase
+    identities. Normalizing at the API boundary also protects non-browser
+    clients from bypassing the login screen's lowercase input behavior.
+    """
+    return (username or "").strip().lower()
+
+
 def _is_document_only_ldap_username(username: str) -> bool:
     """External identities do not use the bank `b…` username convention.
 
@@ -69,7 +79,8 @@ def _redact_confidential_roles(user: "models.User", viewer: "models.User") -> "s
 
 @router.post("/login", response_model=schemas.Token)
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.username == form_data.username).first()
+    username = _canonical_login_username(form_data.username)
+    user = db.query(models.User).filter(func.lower(models.User.username) == username).first()
     just_provisioned = False
     document_only_ldap_account = False
 
@@ -82,19 +93,19 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         # This deliberately never grants Requester (or any other) access from
         # an unaudited self-service selection.
         try:
-            profile = ldap_authenticate_with_profile(form_data.username, form_data.password)
+            profile = ldap_authenticate_with_profile(username, form_data.password)
         except LDAPAuthError:
             profile = None
         if not profile:
             write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
-                        actor_username=form_data.username, request=request, status_code=401,
+                        actor_username=username, request=request, status_code=401,
                         details={"reason": "Invalid username or password"})
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
-        document_only_ldap_account = _is_document_only_ldap_username(form_data.username)
+        document_only_ldap_account = _is_document_only_ldap_username(username)
         user = models.User(
-            username=form_data.username,
-            full_name=profile.get("full_name") or form_data.username,
+            username=username,
+            full_name=profile.get("full_name") or username,
             email=profile.get("email"),
             department=OTHER_DEPARTMENT if document_only_ldap_account else profile.get("department"),
             department_assignments=(
@@ -124,7 +135,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         except IntegrityError:
             # Lost a race with a concurrent first-login for the same username.
             db.rollback()
-            user = db.query(models.User).filter(models.User.username == form_data.username).first()
+            user = db.query(models.User).filter(func.lower(models.User.username) == username).first()
 
     if not user.is_active:
         write_audit(db, event_type="AUTHENTICATION", action="LOGIN_BLOCKED", outcome="FAILED",
@@ -136,7 +147,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         # otherwise verify them the normal way for this account's login type.
         if user.login_type == LoginType.LDAP:
             try:
-                authenticated = ldap_authenticate(form_data.username, form_data.password)
+                authenticated = ldap_authenticate(username, form_data.password)
             except LDAPAuthError as e:
                 write_audit(db, event_type="AUTHENTICATION", action="LOGIN_ERROR", outcome="FAILED",
                             actor=user, request=request, status_code=503,

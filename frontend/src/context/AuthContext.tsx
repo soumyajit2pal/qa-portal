@@ -57,7 +57,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { loadMe() }, [loadMe])
 
   const login = async (username: string, password: string): Promise<LoginResult> => {
-    const res = await api.login(username, password)
+    // The sign-in field already displays lowercase input; normalize here as
+    // well so every caller of AuthContext follows the same login identity.
+    const res = await api.login(username.trim().toLowerCase(), password)
     setToken(res.access_token)
     const me = await api.get<UserOut>('/api/auth/me')
     setUser(me)

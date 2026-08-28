@@ -1158,7 +1158,7 @@ export default function DAST() {
       <div className="toolbar module-assignment-toolbar">
         <div className="tabs" style={{ margin: 0 }}>
           <button type="button" className={!assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(false)}>All Requests</button>
-          <button type="button" className={assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(true)}>Assigned to Me</button>
+          <button type="button" className={assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(true)}>My Assigned Work</button>
         </div>
       </div>
       <Card>

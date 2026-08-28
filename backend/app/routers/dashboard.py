@@ -1320,7 +1320,7 @@ def dashboard_attention_detail(
             suppressions = suppressions.filter(models.SuppressionRequest.department.in_(scope))
         suppression_pending_with = {
             "Draft": "Requester",
-            "SM_APPROVAL_PENDING": "Service Manager",
+            "SM_APPROVAL_PENDING": "SM",
             "RETURNED_BY_SM": "Requester",
             "DEPARTMENT_HEAD_APPROVAL_PENDING": "Department Head",
             "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
