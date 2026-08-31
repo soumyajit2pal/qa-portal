@@ -141,7 +141,7 @@ export default function PendingApprovals() {
   }
 
   return (
-    <div>
+    <div className="pending-approvals-page">
       <ErrorText error={error} />
       <PageHeader
         title="Pending Approvals" count={total}
@@ -186,7 +186,13 @@ export default function PendingApprovals() {
             return (
             <Card key={group.key} className={`pending-approval-group${isCollapsed ? ' collapsed' : ''}`}>
               <div className="pending-approval-parent">
-                <button type="button" className="pending-approval-parent-toggle" onClick={() => toggleGroup(group.key)} aria-expanded={!isCollapsed}>
+                <button
+                  type="button"
+                  className="pending-approval-parent-toggle"
+                  onClick={() => toggleGroup(group.key)}
+                  aria-expanded={!isCollapsed}
+                  title={`${isCollapsed ? 'Expand' : 'Collapse'} ${group.parentId}`}
+                >
                   <span className="pending-approval-chevron">⌄</span>
                   <span className="pending-approval-parent-icon">{parentIcon}</span>
                   <span className="pending-approval-parent-copy">
@@ -213,7 +219,14 @@ export default function PendingApprovals() {
                         </div>
                       )}
                       {items.map((item, index) => (
-                        <button type="button" className="pending-approval-child" key={item._key} onClick={() => openFromPending(item.path)}>
+                        <button
+                          type="button"
+                          className="pending-approval-child"
+                          key={item._key}
+                          onClick={() => openFromPending(item.path)}
+                          aria-label={`Review ${item.display_id || item.title}`}
+                          title={`Open ${item.display_id || 'approval'} for review`}
+                        >
                           <span className="pending-approval-branch" aria-hidden="true">{index === items.length - 1 ? '└' : '├'}</span>
                           <span className="pending-approval-child-main">
                             <span className="pending-approval-child-heading">
@@ -222,13 +235,13 @@ export default function PendingApprovals() {
                             </span>
                             <span className="pending-approval-child-title">{item.title}</span>
                             <span className="pending-approval-child-meta">
-                              <span>{item.category.replace(' -- ', ' · ')}</span>
-                              {item.department && <span>{item.department}</span>}
-                              {item.submitted_by && <span>From {item.submitted_by}</span>}
-                              {item.submitted_at && <span>{formatDateTimeIST(item.submitted_at)}</span>}
+                              <span><b>Checkpoint</b>{item.category.replace(' -- ', ' · ')}</span>
+                              {item.department && <span><b>Department</b>{item.department}</span>}
+                              {item.submitted_by && <span><b>Submitted by</b>{item.submitted_by}</span>}
+                              {item.submitted_at && <span><b>Received</b>{formatDateTimeIST(item.submitted_at)}</span>}
                             </span>
                           </span>
-                          <span className="pending-approval-open">Review <b>→</b></span>
+                          <span className="pending-approval-open">Review now <b>→</b></span>
                         </button>
                       ))}
                     </React.Fragment>

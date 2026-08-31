@@ -15,6 +15,7 @@ import JiraRichTextField from '../../components/JiraRichTextField'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import LinkedDefects from '../../components/LinkedDefects'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import { IconFolder, IconGrid, IconInbox, IconLock, IconPlus, IconTrash, IconWorkflow } from '../../components/Icons'
 
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
@@ -2180,15 +2181,15 @@ export default function TestExecution() {
     <ul className="tm-cycle-nested">
       {cycles.map((cycle) => (
         <li className="tm-cycle-row" key={cycle.id}>
-          <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)} title={`${cycle.name} · ${cycle.cycle_key} · ${cycle.status}`}>
+          <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)} title={`Open ${cycle.name} (${cycle.cycle_key})`}>
             <span className="tm-cycle-row-copy"><i aria-hidden="true" /><span><strong>{cycle.name}</strong><small>{cycle.cycle_key}</small></span></span><Badge status={cycle.status} />
           </button>
-          {canDeleteCycle && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title="Delete test cycle" aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}>×</button>}
+          {canDeleteCycle && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title={`Delete ${cycle.name}`} aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}><IconTrash aria-hidden="true" /></button>}
         </li>
       ))}
       {cycles.length === 0 && <li className="tm-cycle-empty">No cycles here yet.</li>}
       {canExec && projectIsActive && (
-        <li><button type="button" className="tm-cycle-nested-add" onClick={() => setShowNewCycle(true)}>+ Create cycle</button></li>
+        <li><button type="button" className="tm-cycle-nested-add" onClick={() => setShowNewCycle(true)}><IconPlus aria-hidden="true" /> Create cycle</button></li>
       )}
     </ul>
   )
@@ -2225,7 +2226,7 @@ export default function TestExecution() {
         <div className={`tm-workspace tm-execution-workspace tm-execution-refined${cycleSidebarCollapsed ? ' cycle-sidebar-collapsed' : ''}`}>
           <aside className="tm-tree-panel tm-cycle-panel">
             <div className="tm-cycle-sidebar-head">
-              {!cycleSidebarCollapsed && <div className="tm-cycle-sidebar-title"><span aria-hidden="true">C</span><div><small>Execution workspace</small><strong>Cycle navigator</strong></div></div>}
+              {!cycleSidebarCollapsed && <div className="tm-cycle-sidebar-title"><span aria-hidden="true"><IconWorkflow /></span><div><small>Execution workspace</small><strong>Cycle navigator</strong></div></div>}
               <div className="tm-cycle-sidebar-tools">
                 {!cycleSidebarCollapsed && <span title={`${cycleFolderTotals.total} total cycles`}>{cycleFolderTotals.total}</span>}
                 <button
@@ -2251,12 +2252,12 @@ export default function TestExecution() {
                 beneath it (nestedCycleList, computed above) -- see that
                 variable's own comment for why. */}
             {!cycleSidebarCollapsed && <>
-              <div className="tm-cycle-scope-label">View</div>
+              <div className="tm-cycle-scope-label">Cycle views</div>
               <ul className="plain-list tm-cycle-scope-list">
               <li className="tm-cycle-scope-item">
                 <div className="tm-folder-row">
                   <button type="button" className={`link-btn ${selectedCycleFolder === '' ? 'active' : ''}`} onClick={() => setSelectedCycleFolder('')}>
-                    <span aria-hidden="true">A</span> All cycles <em>{cycleFolderTotals.total}</em>
+                    <IconGrid aria-hidden="true" /> <span className="tm-cycle-link-label">All cycles</span> <em>{cycleFolderTotals.total}</em>
                   </button>
                 </div>
                 {selectedCycleFolder === '' && nestedCycleList}
@@ -2264,7 +2265,7 @@ export default function TestExecution() {
               <li className="tm-cycle-scope-item">
                 <div className="tm-folder-row">
                   <button type="button" className={`link-btn ${selectedCycleFolder === CYCLE_UNFILED ? 'active' : ''}`} onClick={() => setSelectedCycleFolder(CYCLE_UNFILED)}>
-                    <span aria-hidden="true">U</span> Unfiled <em>{cycleFolderTotals.unfiled_count}</em>
+                    <IconInbox aria-hidden="true" /> <span className="tm-cycle-link-label">Unfiled</span> <em>{cycleFolderTotals.unfiled_count}</em>
                   </button>
                 </div>
                 {selectedCycleFolder === CYCLE_UNFILED && nestedCycleList}
@@ -2276,11 +2277,11 @@ export default function TestExecution() {
                 <li key={f.id}>
                   <div className="tm-folder-row">
                     <button type="button" className={`link-btn ${selectedCycleFolder === f.id ? 'active' : ''}`} onClick={() => setSelectedCycleFolder(f.id)}>
-                      <span className={f.access_grants.length ? 'restricted' : ''} aria-hidden="true">{f.access_grants.length ? '◈' : '□'}</span> {f.name} <em>{f.cycle_count}</em>
+                      {f.access_grants.length ? <IconLock className="restricted" aria-hidden="true" /> : <IconFolder aria-hidden="true" />} <span className="tm-cycle-link-label">{f.name}</span> <em>{f.cycle_count}</em>
                     </button>
                     {canExec && projectIsActive && (
                       <div className="tm-folder-actions">
-                        <button type="button" className="tm-folder-action" title="Manage access" aria-label={`Manage access for ${f.name}`} onClick={() => setManagingCycleFolderAccess(f)}>🔑</button>
+                        <button type="button" className="tm-folder-action" title="Manage access" aria-label={`Manage access for ${f.name}`} onClick={() => setManagingCycleFolderAccess(f)}><IconLock aria-hidden="true" /></button>
                         <button type="button" className="tm-folder-action" title="Rename folder" aria-label={`Rename ${f.name}`} onClick={() => setEditingCycleFolder(f)}>✎</button>
                         {canManageExecutionGovernance && (
                           <button type="button" className="tm-folder-action tm-folder-delete" title="Delete folder" aria-label={`Delete ${f.name}`} onClick={() => setCycleFolderToDelete(f)}>×</button>
@@ -2293,7 +2294,7 @@ export default function TestExecution() {
               ))}
               </ul>
             </>}
-            {!cycleSidebarCollapsed && canExec && projectIsActive && <button type="button" className="tm-tree-add" onClick={() => setShowNewCycleFolder(true)}>+ Add folder</button>}
+            {!cycleSidebarCollapsed && canExec && projectIsActive && <button type="button" className="tm-tree-add" onClick={() => setShowNewCycleFolder(true)}><IconPlus aria-hidden="true" /> Add folder</button>}
           </aside>
           <section className="tm-main-panel">
           {cycleId ? (

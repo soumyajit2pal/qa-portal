@@ -39,6 +39,15 @@ export const IconPlus = (p: IconProps) => (
 export const IconFolder = (p: IconProps) => (
   <svg {...base} {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" /></svg>
 )
+export const IconInbox = (p: IconProps) => (
+  <svg {...base} {...p}><path d="M4 5h16v14H4Z" /><path d="M4 14h5l1.5 2h3L15 14h5" /></svg>
+)
+export const IconArchive = (p: IconProps) => (
+  <svg {...base} {...p}><path d="M4 8h16v12H4Z" /><path d="M3 4h18v4H3Z" /><path d="M9 12h6" /></svg>
+)
+export const IconTrash = (p: IconProps) => (
+  <svg {...base} {...p}><path d="M4 7h16" /><path d="M9 7V4h6v3" /><path d="M6.5 7l1 13h9l1-13" /><path d="M10 11v5M14 11v5" /></svg>
+)
 export const IconPlay = (p: IconProps) => (
   <svg {...base} {...p}><circle cx="12" cy="12" r="9" /><path d="M10 8.5l6 3.5-6 3.5v-7Z" /></svg>
 )
@@ -56,6 +65,12 @@ export const IconChart = (p: IconProps) => (
 )
 export const IconWorkflow = (p: IconProps) => (
   <svg {...base} {...p}><circle cx="5" cy="6" r="2.2" /><circle cx="19" cy="6" r="2.2" /><circle cx="12" cy="18" r="2.2" /><path d="M7 7l10 0M6 8l5 8M18 8l-5 8" /></svg>
+)
+export const IconExpand = (p: IconProps) => (
+  <svg {...base} {...p}><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" /></svg>
+)
+export const IconContract = (p: IconProps) => (
+  <svg {...base} {...p}><path d="M8 8H3V3M16 8h5V3M8 16H3v5M16 16h5v5" /></svg>
 )
 export const IconCheckCircle = (p: IconProps) => (
   <svg {...base} {...p}><circle cx="12" cy="12" r="9" /><path d="M8.5 12.5l2.2 2.2L16 9.5" /></svg>

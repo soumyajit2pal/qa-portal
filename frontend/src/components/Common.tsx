@@ -348,6 +348,9 @@ interface ModalProps {
   onClose: () => void;
   children?: ReactNode;
   wide?: boolean;
+  // Content-sized dialog for short forms and confirmations. This keeps a
+  // one- or two-field task from inheriting the spacious record-detail size.
+  compact?: boolean;
   // 'drawer' (default): right-side slide-over -- gives most record detail
   // views (SAST/DAST, Suppression, Sign-off, Admin forms, etc.) room to
   // breathe and keeps the surrounding page visible/in context, matching the
@@ -373,6 +376,7 @@ export function Modal({
   onClose,
   children,
   wide,
+  compact,
   variant = "drawer",
   preventBackdropClose,
 }: ModalProps) {
@@ -410,7 +414,7 @@ export function Modal({
         onClick={handleBackdropClick}
       >
         <div
-          className={`dialog ${wide ? "dialog-wide" : ""} ${
+          className={`dialog ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${
             shake ? "modal-shake" : ""
           }`}
           onClick={(e) => e.stopPropagation()}

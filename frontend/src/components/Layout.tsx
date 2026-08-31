@@ -214,6 +214,19 @@ export default function Layout({ children }: { children?: ReactNode }) {
   useEffect(() => { setSidebarOpen(false) }, [location.pathname])
   useEffect(() => { setUserMenuOpen(false) }, [location.pathname])
   useEffect(() => {
+    // Keep Global Search consistent with the page it navigated to. Without
+    // this, a CR traceability URL opened from a bookmark/refresh showed an
+    // empty global box while the page displayed the CR in a second local
+    // box, making it look as though two unrelated searches were active.
+    const params = new URLSearchParams(location.search)
+    setSearch(
+      params.get('cr_number') ||
+      params.get('search') ||
+      params.get('open') ||
+      ''
+    )
+  }, [location.pathname, location.search])
+  useEffect(() => {
     if (!userMenuOpen) return
     function onDocMouseDown(e: MouseEvent) {
       if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) setUserMenuOpen(false)
@@ -262,6 +275,18 @@ export default function Layout({ children }: { children?: ReactNode }) {
 
   function handleLogout() {
     logout()
+  }
+
+  function clearGlobalSearch() {
+    setSearch('')
+    const params = new URLSearchParams(location.search)
+    const hadActiveSearch = ['cr_number', 'search', 'open'].some((key) => params.has(key))
+    if (!hadActiveSearch) return
+    params.delete('cr_number')
+    params.delete('search')
+    params.delete('open')
+    const remaining = params.toString()
+    navigate(`${location.pathname}${remaining ? `?${remaining}` : ''}`, { replace: true })
   }
 
   function submitSearch(e: React.FormEvent) {
@@ -377,7 +402,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
           </div>
           <form className="search-box" onSubmit={submitSearch}>
             <IconSearch width={16} height={16} />
-            <ClearableSearchInput ref={searchInputRef} aria-label="Global search" placeholder="Search requests, applications or IDs…" value={search} onChange={(e) => setSearch(e.target.value)} onClear={() => setSearch('')} clearLabel="Clear global search" wrapperClassName="search-grow" />
+            <ClearableSearchInput ref={searchInputRef} aria-label="Global search" placeholder="Search requests, applications or IDs…" value={search} onChange={(e) => setSearch(e.target.value)} onClear={clearGlobalSearch} clearLabel="Clear global search" wrapperClassName="search-grow" />
             <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">

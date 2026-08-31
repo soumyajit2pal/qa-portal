@@ -19,6 +19,44 @@ import ClearableSearchInput from "../components/ClearableSearchInput";
 import RaisedHistoryFilter from "../components/RaisedHistoryFilter";
 import { usePaginatedList } from "../hooks/usePaginatedList";
 
+type LinkedRequestKind = "Functional QA" | "SAST" | "DAST" | "Performance" | "Clearance";
+
+interface LinkedRequestSearchResult {
+  key: string;
+  kind: LinkedRequestKind;
+  path: string;
+  request: QARequestListOut["linked_functional_requests"][number];
+}
+
+const LINKED_REQUEST_GROUPS: Array<{
+  field: keyof Pick<QARequestListOut,
+    "linked_functional_requests" |
+    "linked_sast_requests" |
+    "linked_dast_requests" |
+    "linked_performance_requests" |
+    "linked_signoffs"
+  >;
+  kind: LinkedRequestKind;
+  path: string;
+}> = [
+  { field: "linked_functional_requests", kind: "Functional QA", path: "/functional-requests" },
+  { field: "linked_sast_requests", kind: "SAST", path: "/sast" },
+  { field: "linked_dast_requests", kind: "DAST", path: "/dast" },
+  { field: "linked_performance_requests", kind: "Performance", path: "/performance" },
+  { field: "linked_signoffs", kind: "Clearance", path: "/signoff" },
+];
+
+function linkedRequestsFor(row: QARequestListOut): LinkedRequestSearchResult[] {
+  return LINKED_REQUEST_GROUPS.flatMap(({ field, kind, path }) =>
+    (row[field] || []).map((request) => ({
+      key: `${kind}-${request.id}`,
+      kind,
+      path,
+      request,
+    }))
+  );
+}
+
 // The QA Requests list page -- the intake gateway. "Raise QA Request" opens
 // the wizard (NewRequestModal); clicking a row opens the detail/edit view
 // (RequestDetail). See ./buildSteps.ts, ./validation.ts and ./steps/* for how
@@ -191,6 +229,18 @@ export default function QARequests() {
     navigate(`${location.pathname}${remaining ? `?${remaining}` : ""}`, { replace: true });
   }
 
+  const linkedResultCount = requests.reduce(
+    (count, request) => count + linkedRequestsFor(request).length,
+    0
+  );
+
+  function openLinkedRequest(event: React.MouseEvent, linked: LinkedRequestSearchResult) {
+    // The surrounding table row opens the parent QA Request. A linked chip
+    // is a more specific destination, so keep that row handler from firing.
+    event.stopPropagation();
+    navigate(`${linked.path}?open=${encodeURIComponent(linked.request.request_id)}`);
+  }
+
   return (
     <div>
       <ErrorText error={error} />
@@ -198,34 +248,55 @@ export default function QARequests() {
           components/Layout.tsx's "New QA request" button, gated on the same
           REQUESTER/BUSINESS_ANALYST roles) -- not duplicated here. */}
       <PageHeader
-        title="QA Requests"
+        title={crNumber ? `${crNumber} traceability` : "QA Requests"}
         count={total}
-        subtitle="The intake gateway — raise a request here, then track progress on each linked Functional/SAST/DAST/Performance request from its own page."
+        subtitle={crNumber
+          ? "Every visible QA gateway and linked workflow raised under this exact CR/EPIC number. Select a linked record to open it in its owning module."
+          : "The intake gateway — raise a request here, then track progress on each linked Functional/SAST/DAST/Performance request from its own page."}
       />
-      <div className="toolbar">
-        <ClearableSearchInput
-          placeholder="Search by request ID, application, CR number, or project..."
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); setCrNumber(""); }}
-          onClear={clearSearch}
-          clearLabel="Clear QA Request search"
-          wrapperClassName="search-grow"
-        />
-        {crNumber && (
-          <span className="badge badge-blue" title={`Showing every QA Request raised under ${crNumber} exactly`}>
-            Exact match: {crNumber}
-          </span>
+      <div className={`toolbar qa-request-toolbar ${crNumber ? "is-traceability" : ""}`}>
+        {!crNumber && (
+          <ClearableSearchInput
+            placeholder="Filter QA Requests by ID, application, CR number, or project..."
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setCrNumber(""); }}
+            onClear={clearSearch}
+            clearLabel="Clear QA Request search"
+            wrapperClassName="search-grow qa-request-local-search"
+          />
         )}
-        <div className="tabs" style={{ margin: 0 }}>
-          <button type="button" className={!assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(false)}>
-            All Requests
-          </button>
-          <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>
-            My Drafts / Delegated
+        <div className="qa-request-filter-row">
+          <div className="tabs qa-request-scope-tabs" style={{ margin: 0 }}>
+            <button type="button" className={!assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(false)}>
+              All Requests
+            </button>
+            <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>
+              My Drafts / Delegated
+            </button>
+          </div>
+          <RaisedHistoryFilter value={raisedHistory} onChange={setRaisedHistory} />
+        </div>
+      </div>
+
+      {crNumber && !loading && (
+        <div className="cr-trace-summary" role="status" aria-live="polite">
+          <div>
+            <span>Exact CR/EPIC</span>
+            <strong>{crNumber}</strong>
+          </div>
+          <div>
+            <span>QA requests</span>
+            <strong>{total}</strong>
+          </div>
+          <div>
+            <span>Linked records on this page</span>
+            <strong>{linkedResultCount}</strong>
+          </div>
+          <button type="button" className="cr-trace-clear" onClick={clearSearch}>
+            Exit traceability
           </button>
         </div>
-        <RaisedHistoryFilter value={raisedHistory} onChange={setRaisedHistory} />
-      </div>
+      )}
 
       <Card>
         <Table
@@ -268,6 +339,32 @@ export default function QARequests() {
               ),
               filterValue: (r) => r.change_description || "",
             },
+            ...(crNumber ? [{
+              key: "linked_requests",
+              header: "Linked Records",
+              filterable: false,
+              render: (r: QARequestListOut) => {
+                const linked = linkedRequestsFor(r);
+                if (linked.length === 0) return <span className="muted">None yet</span>;
+                return (
+                  <div className="cr-linked-records">
+                    {linked.map((item) => (
+                      <button
+                        type="button"
+                        className="cr-linked-record"
+                        key={item.key}
+                        onClick={(event) => openLinkedRequest(event, item)}
+                        title={`Open ${item.kind} request ${item.request.request_id}`}
+                      >
+                        <span>{item.kind}</span>
+                        <strong>{item.request.request_id}</strong>
+                        <Badge status={item.request.status} />
+                      </button>
+                    ))}
+                  </div>
+                );
+              },
+            }] : []),
             {
               key: "requester_id",
               header: "Requester",

@@ -508,7 +508,15 @@ def list_requests(params: pagination.PageParams = Depends(),
     # topbar global search uses it whenever the typed term matches the
     # CR-<digits>/EPIC-<digits> pattern (see Layout.tsx's submitSearch).
     if cr_number:
-        q = q.filter(func.upper(models.QARequest.cr_number) == cr_number.strip().upper())
+        normalized_cr_number = cr_number.strip().upper()
+        q = q.filter(or_(
+            func.upper(models.QARequest.cr_number) == normalized_cr_number,
+            # Historical records created before CR/EPIC consolidation can
+            # still carry their identifier in epic_number. They belong in
+            # the same exact traceability result instead of disappearing
+            # from a global EPIC-number lookup.
+            func.upper(models.QARequest.epic_number) == normalized_cr_number,
+        ))
     if not current_user.has_role(Role.ADMIN):
         # Draft and Cancelled gateways are both scratch work that was never
         # actually raised (Cancelled is only ever reached FROM Draft -- see

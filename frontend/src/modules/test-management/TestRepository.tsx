@@ -21,6 +21,7 @@ import ClearableSearchInput from '../../components/ClearableSearchInput'
 import LinkedDefects from '../../components/LinkedDefects'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import { IconArchive, IconFolder, IconGrid, IconInbox, IconTrash } from '../../components/Icons'
 
 // 2026-08 "Simplified Test Management" NEW-path group-pending statuses --
 // reported directly: "show the group name where pending approval, on click
@@ -227,6 +228,7 @@ function FolderTreeRows({
                   <span className="tm-folder-toggle tm-folder-toggle-leaf">└</span>
                 )}
                 <button className={`link-btn ${selectedFolder === f.id ? 'active' : ''}`} onClick={() => onSelect(f.id)}>
+                  <IconFolder className="tm-folder-glyph" aria-hidden="true" />
                   <span className="tm-folder-identity"><strong>{f.name}</strong><small>Created by {f.created_by_name || 'Unknown user'}</small></span>
                   <em>{folderCounts[f.id] || 0}</em>
                 </button>
@@ -289,7 +291,7 @@ function NewFolderModal({ projectId, folders, onClose, onCreated }: {
   }
 
   return (
-    <Modal title="New Folder" onClose={onClose}>
+    <Modal title="New Folder" onClose={onClose} variant="dialog" compact preventBackdropClose>
       <form onSubmit={submit}>
         <Field label="Parent Folder">
           {/* Searchable -- a project's folder tree only grows over time. */}
@@ -366,7 +368,7 @@ function FolderMoveCopyModal({ mode, folder, folders, onClose, onDone }: {
   }
 
   return (
-    <Modal title={mode === 'move' ? `Move "${folder.name}"` : `Copy "${folder.name}"`} onClose={onClose}>
+    <Modal title={mode === 'move' ? `Move "${folder.name}"` : `Copy "${folder.name}"`} onClose={onClose} variant="dialog" compact preventBackdropClose>
       <form onSubmit={submit}>
         <Field label="Destination">
           <SearchableSelect
@@ -430,7 +432,7 @@ function RenameFolderModal({ folder, onClose, onRenamed }: {
   }
 
   return (
-    <Modal title={`Rename "${folder.name}"`} onClose={onClose}>
+    <Modal title={`Rename "${folder.name}"`} onClose={onClose} variant="dialog" compact preventBackdropClose>
       <form onSubmit={submit}>
         <Field label="Folder Name *">
           <input required value={name} onChange={(e) => setName(e.target.value)} autoFocus />
@@ -3154,28 +3156,30 @@ export default function TestRepository() {
               >{repositoryStructureCollapsed ? '›' : '‹'}</button>
             </div>
             {!repositoryStructureCollapsed && <ul className="plain-list">
-              <li>
-                <button className={`link-btn ${selectedFolder === '' ? 'active' : ''}`} onClick={() => setSelectedFolder('')}>
-                  <span>▦</span> All test cases <em>{summary?.total ?? 0}</em>
+              <li className="tm-tree-section-label" aria-hidden="true"><span>Library views</span></li>
+              <li className="tm-tree-system-item">
+                <button title="Show all test cases" className={`link-btn ${selectedFolder === '' ? 'active' : ''}`} onClick={() => setSelectedFolder('')}>
+                  <IconGrid aria-hidden="true" /> <span className="tm-tree-link-label">All test cases</span> <em>{summary?.total ?? 0}</em>
                 </button>
               </li>
-              <li>
-                <button className={`link-btn ${selectedFolder === UNFILED ? 'active' : ''}`} onClick={() => setSelectedFolder(UNFILED)}>
-                  <span>◇</span> Unfiled <em>{unfiledCount}</em>
+              <li className="tm-tree-system-item">
+                <button title="Show unfiled test cases" className={`link-btn ${selectedFolder === UNFILED ? 'active' : ''}`} onClick={() => setSelectedFolder(UNFILED)}>
+                  <IconInbox aria-hidden="true" /> <span className="tm-tree-link-label">Unfiled</span> <em>{unfiledCount}</em>
                 </button>
               </li>
               {/* 2026-08 "Create Recycle bin and Archive folder" requirement --
                   two pinned pseudo-folders, same treatment as Unfiled above. */}
-              <li>
-                <button className={`link-btn ${selectedFolder === ARCHIVE_VIEW ? 'active' : ''}`} onClick={() => setSelectedFolder(ARCHIVE_VIEW)}>
-                  <span>🗄</span> Archived <em>{summary?.archived_count ?? 0}</em>
+              <li className="tm-tree-system-item">
+                <button title="Show archived test cases" className={`link-btn ${selectedFolder === ARCHIVE_VIEW ? 'active' : ''}`} onClick={() => setSelectedFolder(ARCHIVE_VIEW)}>
+                  <IconArchive aria-hidden="true" /> <span className="tm-tree-link-label">Archived</span> <em>{summary?.archived_count ?? 0}</em>
                 </button>
               </li>
-              <li>
-                <button className={`link-btn ${selectedFolder === RECYCLE_BIN ? 'active' : ''}`} onClick={() => setSelectedFolder(RECYCLE_BIN)}>
-                  <span>🗑</span> Recycle Bin <em>{summary?.recycle_bin_count ?? 0}</em>
+              <li className="tm-tree-system-item">
+                <button title="Open Recycle Bin" className={`link-btn ${selectedFolder === RECYCLE_BIN ? 'active' : ''}`} onClick={() => setSelectedFolder(RECYCLE_BIN)}>
+                  <IconTrash aria-hidden="true" /> <span className="tm-tree-link-label">Recycle Bin</span> <em>{summary?.recycle_bin_count ?? 0}</em>
                 </button>
               </li>
+              <li className="tm-tree-section-label tm-tree-folder-label" aria-hidden="true"><span>Project folders</span><em>{folders.length}</em></li>
               <FolderTreeRows
                 nodes={folderTree}
                 selectedFolder={selectedFolder}
