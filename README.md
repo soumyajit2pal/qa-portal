@@ -10,7 +10,8 @@ A full-stack quality operations platform built from the **"Centralized QA Portal
   [Frontend architecture](#frontend-architecture) for why this project tried, then backed away
   from, a Module Federation split).
 - **Backend:** FastAPI + SQLAlchemy (used purely as the Oracle query/ORM layer, not for
-  database portability), JWT authentication, RBAC across 9 roles. One deployable API.
+  database portability), JWT authentication, RBAC across 9 roles. The core workflow API
+  and the high-volume Document Portal API run as separate deployable services.
 - **Database:** Oracle only. The app reads `DATABASE_URL` and refuses to start without an
   Oracle connection string — there is no SQLite or other fallback (see
   [Database setup](#database-setup)).
@@ -116,7 +117,7 @@ qualityops/
     vite.config.ts
     Dockerfile, nginx.conf.template   # nginx.conf itself kept only as a reference (see "Enable HTTPS")
     src/                    # see Frontend architecture above
-  docker-compose.yml         # backend + frontend, 2 services
+  docker-compose.yml         # core API, isolated Document Portal API, frontend and Redis
   README.md
 ```
 
@@ -292,7 +293,7 @@ Point `DATABASE_URL` at your Oracle instance via an env var or `.env` file next 
 host-installed Oracle from inside Docker on Mac/Windows; on Linux use the host's real IP or
 `--add-host`).
 
-The backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`) and
+The core backend runs 4 worker processes by default (`WEB_CONCURRENCY`, see `backend/Dockerfile`) and
 a `redis` service is included and wired up by default (`REDIS_URL`) -- required for cache
 correctness (dashboard summary + reference-data caching, see `backend/app/cache.py`) and for the
 one-time startup migration to run once per deployment instead of once per
@@ -300,6 +301,31 @@ worker (see `backend/app/main.py`'s startup-lock comment) whenever more than one
 running. The app still runs fine without Redis reachable -- caching and the startup lock both
 degrade to a no-op/permissive fallback -- but then each of the 4 workers keeps its own cache and
 the startup task can run up to 4 times.
+
+### Production Oracle pool capacity
+
+The Oracle pool is **per backend worker**, not per deployment. Before production rollout, set the
+connection budget in the deployment `.env` based on Oracle's allowed application sessions:
+
+```text
+maximum possible Oracle sessions = WEB_CONCURRENCY ×
+  ((DB_POOL_SIZE + DB_MAX_OVERFLOW) + (AUDIT_DB_POOL_SIZE + AUDIT_DB_MAX_OVERFLOW))
+```
+
+For example, the current `8 + 4` main pool and `3 + 4` audit pool with four backend workers can
+open up to 76 Oracle sessions. Leave capacity for Oracle administration and other applications;
+do not raise pool values blindly. The API health response and slow-request logs include the local
+worker's checked-in/checked-out pool counts, and a pool timeout is returned as retryable HTTP 503
+with a request ID rather than an opaque HTTP 500.
+
+The application keeps access-control lookups short-lived and limits dashboard fan-out so normal
+dashboard traffic does not retain guard connections or create a large burst of simultaneous list
+queries. If pool pressure remains after deployment sizing, investigate slow Oracle SQL/indexes and
+the logged pool counters before increasing the connection limit.
+
+Long-running imports and exports are also queued with `BACKGROUND_JOB_WORKERS` (default `2`) per
+backend worker. Those jobs each use their own database session, so include this bounded number in
+operational capacity planning and keep it below the main request pool size.
 
 ### Workflow email notifications
 
@@ -528,12 +554,20 @@ Backing endpoints: `GET/PATCH /api/auth/users/{id}`, `GET /api/auth/users/all`,
   root Compose `.env` to bind that container directory to a host/NFS folder; otherwise Docker
   uses the `qa_portal_uploads` named volume. Recreate the backend container after changing the
   host path. The upload location cannot be changed from the application UI.
-- The authenticated **Document Portal** uses the dedicated
-  `/data/qualityops/uploads/document-portal` child folder on that same durable volume. Configure
-  `DOCUMENT_PORTAL_ROOT` only to a persistent shared volume that every backend worker can read and
-  write; do not point it at a container-local temporary directory. It supports nested folders,
-  uploads (including uploaded folder hierarchy), search, downloads/ZIP, rename and move, and
-  intentionally exposes no delete operation. Configure normal backup/retention for this folder.
+- The authenticated **Document Portal** runs in its own `document_portal` API container and is
+  reverse-proxied at the same `/api/document-portal` URL. It has its own worker pool, log volume,
+  multipart temporary directory, and persistent storage mount, so large uploads, downloads, ZIP
+  creation, searches and filesystem scans cannot consume the core workflow API workers or its
+  upload disk. Its Oracle pool is separately capped by
+  `DOCUMENT_PORTAL_DB_POOL_SIZE`/`DOCUMENT_PORTAL_DB_MAX_OVERFLOW`, so upload sessions cannot
+  exhaust core workflow connections. Set `DOCUMENT_PORTAL_STORAGE_HOST_PATH=/absolute/dedicated/disk-or-nfs-path` in
+  the root Compose `.env` for production; otherwise Compose creates `qa_portal_documents`.
+  The service stores repository files beneath that mount's `repository/` folder and temporary
+  multipart data beneath `work/`. Before the first isolated deployment, copy existing files from
+  the old `<UPLOAD_STORAGE_ROOT>/document-portal` location into `repository/`; do not delete the
+  old data until the migrated repository has been verified and backed up. The portal supports
+  nested folders, uploads (including uploaded folder hierarchy), search, downloads/ZIP, rename
+  and move, and intentionally exposes no delete operation.
 - Set `SECRET_KEY` to a long random value via environment variable/secrets manager, never
   the placeholder in `.env.example`.
 - Tune `pool_size`/`max_overflow` in `app/database.py` to your Oracle session limits and

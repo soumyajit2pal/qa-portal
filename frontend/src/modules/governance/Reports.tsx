@@ -32,12 +32,30 @@ export default function Reports() {
         title="Reports & Export Centre"
         subtitle="Every export embeds report name, module, generated-by/at, applied filters and total record count in the file header. Access is governed by your logged-in role."
       />
-      <Card title="Report date range" subtitle="Dates use India Standard Time (IST). Exports include only records created or logged within this period. Leave both dates blank for all available data.">
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'end' }}>
-          <label><span className="muted small">From</span><input type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setDateFrom(event.target.value)} /></label>
-          <label><span className="muted small">To</span><input type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setDateTo(event.target.value)} /></label>
-          {(dateFrom || dateTo) && <button className="btn btn-sm" onClick={() => { setDateFrom(''); setDateTo('') }}>Clear range</button>}
+      <Card className="report-period-card">
+        <div className="report-period-heading">
+          <div className="report-period-title">
+            <span className="report-period-icon" aria-hidden="true">◷</span>
+            <div>
+              <span>Reporting period</span>
+              <p>Limit every export to the records created or logged within this period.</p>
+            </div>
+          </div>
+          <span className="report-period-timezone">IST · India Standard Time</span>
         </div>
+        <div className="report-period-controls">
+          <label className="report-period-field">
+            <span>From date</span>
+            <input aria-label="Report date range from" type="date" value={dateFrom} max={dateTo || undefined} onChange={(event) => setDateFrom(event.target.value)} />
+          </label>
+          <span className="report-period-arrow" aria-hidden="true">→</span>
+          <label className="report-period-field">
+            <span>To date</span>
+            <input aria-label="Report date range to" type="date" value={dateTo} min={dateFrom || undefined} onChange={(event) => setDateTo(event.target.value)} />
+          </label>
+          {(dateFrom || dateTo) && <button className="btn btn-sm report-period-clear" onClick={() => { setDateFrom(''); setDateTo('') }}>Reset period</button>}
+        </div>
+        <p className="report-period-note">Leave both dates empty to export all available historical records.</p>
       </Card>
       {GROUPS.map((group) => (
         <Card key={group} title={`${group} Reports`}>

@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text as sqlalchemy_text
+from sqlalchemy.exc import DBAPIError, TimeoutError as SQLAlchemyTimeoutError
 from starlette.background import BackgroundTask, BackgroundTasks
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -23,19 +24,30 @@ configure_logging()  # must run before `from .database import ...` below, since
                       # this and database.py's own call are both harmless.
 logger = logging.getLogger("qa_portal.main")
 
-from .database import SessionLocal, AuditSessionLocal
+from .database import SessionLocal, AuditSessionLocal, main_pool_metrics
 from . import cache, models, email_notifications  # noqa: F401  (models ensures models are registered before create_all)
 from .auth import decode_access_token
 from .constants import is_document_portal_only
 from .audit_service import write_audit
 from .documents import migrate_legacy_document_layout
+from .resilience import CircuitOpenError, database_circuit, is_transient_database_error, snapshot as resilience_snapshot
 from .routers import (
     auth, qa_requests, functional,
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config,
-    pending_approvals, defects, jobs, document_portal,
+    pending_approvals, defects, jobs,
 )
+
+
+# Production Compose runs file traffic in app.document_portal_main so large
+# transfers never share the core workflow workers. Traditional local/QA
+# startup (`uvicorn app.main:app`) has no second ASGI process, however, so it
+# embeds the same router by default. Set DOCUMENT_PORTAL_EMBEDDED=false only
+# when nginx routes Document Portal traffic to the dedicated service.
+DOCUMENT_PORTAL_EMBEDDED = os.getenv("DOCUMENT_PORTAL_EMBEDDED", "true").strip().lower() in {"1", "true", "yes", "on"}
+if DOCUMENT_PORTAL_EMBEDDED:
+    from .routers import document_portal
 
 # Reported: "Custom Fields not working" traced back to an Oracle identifier-
 # length violation in one table's DDL (see the ORACLE_MIGRATION log's own
@@ -364,8 +376,26 @@ _DOCUMENT_PORTAL_ALLOWED_API_PATHS = {
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/me",
+    "/api/auth/me/email",
     "/api/health",
 }
+
+
+def _ldap_email_completion_required(user: models.User) -> bool:
+    """Whether an approved LDAP account must supply its notification email.
+
+    Department choice and role review must finish first.  This avoids
+    presenting two blocking onboarding actions at once and ensures that a
+    person whose access is still pending cannot infer that their request has
+    been approved merely because the email form appeared.
+    """
+    return bool(
+        user.login_type == "LDAP"
+        and not user.needs_department_selection
+        and not user.needs_role_review
+        and user.roles
+        and not (user.email or "").strip()
+    )
 
 
 @app.middleware("http")
@@ -391,29 +421,84 @@ async def pending_access_approval_api_guard(request, call_next):
     if not username:
         return await call_next(request)
 
+    # Do not forward the request from inside this context manager.  Doing so
+    # used to retain one Oracle connection for the *entire* downstream API
+    # request. Together with the email guard below, one dashboard request
+    # consumed three pool connections (two guards plus its route session).
+    # Under concurrent dashboard loads that exhausted the pool even though
+    # every route's own get_db dependency correctly closes its session.
     with SessionLocal() as db:
         user = db.query(models.User).filter(models.User.username == username).first()
         # While the department picker is open, /api/departments must remain
         # available. Once it has been saved, an LDAP account with zero roles
         # is deliberately limited to /me and logout until approval.
-        if (
+        allow_request = (
             not user
             or not user.is_active
             or user.needs_department_selection
             or not user.needs_role_review
             or user.roles
-        ):
-            return await call_next(request)
-        request.state.current_user_snapshot = {
-            "id": user.id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "roles_csv": user.roles_csv,
-        }
+        )
+        if not allow_request:
+            request.state.current_user_snapshot = {
+                "id": user.id,
+                "username": user.username,
+                "full_name": user.full_name,
+                "roles_csv": user.roles_csv,
+            }
+    if allow_request:
+        return await call_next(request)
     return JSONResponse(
         status_code=403,
         content={
             "detail": "Your access request is pending Administrator or Department Coordinator approval.",
+            "status_code": 403,
+        },
+    )
+
+
+@app.middleware("http")
+async def ldap_email_completion_api_guard(request, call_next):
+    """Require a notification address before exposing approved LDAP access.
+
+    The mandatory browser modal gives users a clear recovery path, and this
+    companion guard closes the direct-URL/API bypass path while their account
+    still has no mail address for workflow notifications.
+    """
+    path = request.url.path
+    if not path.startswith("/api") or path in _DOCUMENT_PORTAL_ALLOWED_API_PATHS:
+        return await call_next(request)
+
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        return await call_next(request)
+    try:
+        claims = decode_access_token(auth_header.split(" ", 1)[1])
+        username = claims.get("sub")
+    except Exception:
+        return await call_next(request)
+    if not username:
+        return await call_next(request)
+
+    # Same lifetime rule as the pending-access guard above: this read is only
+    # a gate decision, so its database connection must be returned before the
+    # actual endpoint begins its own work.
+    with SessionLocal() as db:
+        user = db.query(models.User).filter(models.User.username == username).first()
+        allow_request = not user or not user.is_active or not _ldap_email_completion_required(user)
+        if not allow_request:
+            request.state.current_user_snapshot = {
+                "id": user.id,
+                "username": user.username,
+                "full_name": user.full_name,
+                "roles_csv": user.roles_csv,
+            }
+    if allow_request:
+        return await call_next(request)
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": "Add your notification email address before using QA Portal.",
             "status_code": 403,
         },
     )
@@ -448,16 +533,20 @@ async def document_portal_only_api_guard(request, call_next):
     if not username or not is_document_portal_only(claims.get("roles")):
         return await call_next(request)
 
+    # This guard applies to a narrow account type, but it follows the same
+    # strict connection-lifetime rule as the two general guards above.
     with SessionLocal() as db:
         user = db.query(models.User).filter(models.User.username == username).first()
-        if not user or not user.is_active or not is_document_portal_only(user.roles):
-            return await call_next(request)
-        request.state.current_user_snapshot = {
-            "id": user.id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "roles_csv": user.roles_csv,
-        }
+        allow_request = not user or not user.is_active or not is_document_portal_only(user.roles)
+        if not allow_request:
+            request.state.current_user_snapshot = {
+                "id": user.id,
+                "username": user.username,
+                "full_name": user.full_name,
+                "roles_csv": user.roles_csv,
+            }
+    if allow_request:
+        return await call_next(request)
     return JSONResponse(
         status_code=403,
         content={
@@ -481,7 +570,71 @@ async def application_audit_middleware(request, call_next):
     if deep_logging_enabled():
         logger.debug("API request started method=%s path=%s", request.method, request.url.path)
     try:
+        database_circuit.check()
         response = await call_next(request)
+    except CircuitOpenError as exc:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        logger.warning(
+            "Database request rejected reason=circuit_open method=%s path=%s retry_after=%ss pool=%s",
+            request.method, request.url.path, exc.retry_after_seconds, main_pool_metrics(),
+        )
+        reset_request_id(request_log_token)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "The database is temporarily busy. Please retry in a moment.",
+                "request_id": request_id,
+            },
+            headers={"Retry-After": str(exc.retry_after_seconds), "X-Audit-Request-ID": request_id, "X-Request-ID": request_id},
+        )
+    except SQLAlchemyTimeoutError:
+        # A pool timeout is temporary capacity pressure, not an application
+        # defect.  It must be visible to operations with the pool snapshot,
+        # and clients receive a retryable 503 instead of an opaque 500.
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        pool = main_pool_metrics()
+        logger.error(
+            "Database pool exhausted method=%s path=%s duration_ms=%s pool=%s",
+            request.method, request.url.path, duration_ms, pool,
+        )
+        database_circuit.record_failure()
+        if not skip_audit:
+            _write_request_audit(request, request_id, 503, duration_ms, "DatabasePoolTimeout")
+        reset_request_id(request_log_token)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "The database is temporarily busy. Please retry in a moment.",
+                "request_id": request_id,
+            },
+            headers={"Retry-After": "2", "X-Audit-Request-ID": request_id, "X-Request-ID": request_id},
+        )
+    except DBAPIError as exc:
+        if not is_transient_database_error(exc):
+            if not skip_audit:
+                _write_request_audit(
+                    request, request_id, 500,
+                    round((time.perf_counter() - started) * 1000, 2),
+                    type(exc).__name__,
+                )
+            reset_request_id(request_log_token)
+            raise
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        database_circuit.record_failure()
+        retry_after = database_circuit.snapshot().retry_after_seconds or 2
+        logger.error(
+            "Transient database failure method=%s path=%s duration_ms=%s retry_after=%ss pool=%s",
+            request.method, request.url.path, duration_ms, retry_after, main_pool_metrics(), exc_info=True,
+        )
+        reset_request_id(request_log_token)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "The database is temporarily unavailable. Please retry in a moment.",
+                "request_id": request_id,
+            },
+            headers={"Retry-After": str(retry_after), "X-Audit-Request-ID": request_id, "X-Request-ID": request_id},
+        )
     except Exception as exc:
         if not skip_audit:
             _write_request_audit(
@@ -500,6 +653,8 @@ async def application_audit_middleware(request, call_next):
         raise
 
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    if response.status_code < 500:
+        database_circuit.record_success()
     # DSH-007 -- see _DASHBOARD_SUMMARY_INVALIDATING_MODULES' own comment.
     # cache.delete_prefix() is a best-effort SCAN+DEL that never raises
     # (see cache.py's own docstring), so this is safe to run inline on the
@@ -537,8 +692,9 @@ async def application_audit_middleware(request, call_next):
             slow_request_ms = 2000
         if duration_ms >= slow_request_ms:
             logger.warning(
-                "Slow API request method=%s path=%s status=%s duration_ms=%s threshold_ms=%s",
+                "Slow API request method=%s path=%s status=%s duration_ms=%s threshold_ms=%s pool=%s",
                 request.method, request.url.path, response.status_code, duration_ms, slow_request_ms,
+                main_pool_metrics(),
             )
     reset_request_id(request_log_token)
     return response
@@ -565,7 +721,16 @@ app.include_router(audit.router)
 app.include_router(checklist_config.router)
 app.include_router(pending_approvals.router)
 app.include_router(jobs.router)
-app.include_router(document_portal.router)
+if DOCUMENT_PORTAL_EMBEDDED:
+    app.include_router(document_portal.router)
+    logger.warning(
+        "Document Portal is running in embedded mode. Use the dedicated document_portal service in production."
+    )
+else:
+    # Production Compose routes this prefix to app.document_portal_main in its
+    # own container. Keeping upload/download streams out of core workflow
+    # workers protects approvals, dashboards and normal request actions.
+    logger.info("Document Portal routes are delegated to the dedicated service.")
 
 
 @app.get("/api/health")
@@ -588,4 +753,6 @@ def health():
         "status": "ok" if db_ok else "degraded",
         "database": "ok" if db_ok else "unreachable",
         "cache": cache_status,
+        "database_pool": main_pool_metrics(),
+        "circuits": resilience_snapshot(),
     }

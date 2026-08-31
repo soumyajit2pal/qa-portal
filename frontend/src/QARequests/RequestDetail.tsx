@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { api, HttpError } from "../api";
 import { formatDateTimeIST } from "../time";
 import { useAuth } from "../context/AuthContext";
 import { Link, useNavigate } from "react-router-dom";
@@ -19,6 +19,7 @@ import {
   GATEWAY_CANCELLABLE_STATUSES,
   GATEWAY_EDITABLE_STATUSES,
   GATEWAY_STATUS_LABELS,
+  FUNCTIONAL_BUCKET_TYPES,
   hasRole,
   hasDepartment,
 } from "../constants";
@@ -43,8 +44,11 @@ interface RequestDetailProps {
   req: QARequestOut;
   onClose: () => void;
   onChanged: (req: QARequestOut) => void;
+  onUnavailable: () => void;
   users: UserOut[];
 }
+
+type EvidenceStepKey = "functional" | "sast" | "dast" | "performance";
 
 // The "view an existing QA Request" modal -- Overview / Documents / History
 // tabs, plus the gateway-level actions (Submit, Cancel, Edit) and the "Edit
@@ -53,6 +57,7 @@ export function RequestDetail({
   req,
   onClose,
   onChanged,
+  onUnavailable,
   users,
 }: RequestDetailProps) {
   const { user } = useAuth();
@@ -62,19 +67,14 @@ export function RequestDetail({
   const [history, setHistory] = useState<ApprovalActionOut[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const statusRefreshInFlight = useRef(false);
   const [editingReq, setEditingReq] = useState(false);
-  // Evidence-document count per draft checklist item, keyed "<kind>:<index>"
-  // -- used only to build a heads-up prompt at Submit/Raise time (see
-  // handleSubmitClick below). Evidence is no longer mandatory (Raise/Submit
-  // is never blocked on it), but it's still useful to nudge the requester
-  // upfront -- at request-creation time -- about which readiness checklist
-  // item(s) have no evidence attached yet, rather than a QA Lead discovering
-  // that gap much later at Readiness Verification.
+  const [evidenceStep, setEvidenceStep] = useState<EvidenceStepKey | undefined>();
+  const [evidenceItem, setEvidenceItem] = useState<string | undefined>();
+  // Evidence-document count per draft checklist item, keyed "<kind>:<index>".
+  // Mandatory checklist items require at least one uploaded file before the
+  // request can be raised; the backend enforces the same rule.
   const [draftEvidenceCounts, setDraftEvidenceCounts] = useState<Record<string, number>>({});
-  // Set when Submit/Raise is clicked and at least one checklist item still
-  // has no evidence attached -- shows the informational pop-up below instead
-  // of submitting immediately. Confirming from that pop-up proceeds anyway.
-  const [confirmSubmitNoEvidence, setConfirmSubmitNoEvidence] = useState(false);
   // Shown after saving edits to a request that's still sitting in Draft --
   // same "nothing has actually been submitted yet" reminder as the one shown
   // right after creating a brand-new request (see ./index.tsx).
@@ -118,13 +118,52 @@ export function RequestDetail({
       setDocuments(docs);
       setHistory(hist);
     } catch (err) {
+      // Do not render an access error for a row that became stale between
+      // opening the drawer and loading its supporting data.
+      if (err instanceof HttpError && (err.status === 403 || err.status === 404)) {
+        onUnavailable();
+        return;
+      }
       setError(err);
     }
-  }, [req.id]);
+  }, [onUnavailable, req.id]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // A request may be changed by a different approver while this drawer is
+  // open. Refresh just the record/status instead of forcing a full browser
+  // reload. If it is no longer visible (for example a stale Draft row), close
+  // the drawer and let the parent list re-query its current scope.
+  const refreshActualStatus = useCallback(async () => {
+    // A slow network/database response must not let interval ticks build up
+    // concurrent requests for the same open drawer.
+    if (statusRefreshInFlight.current) return;
+    statusRefreshInFlight.current = true;
+    try {
+      const fresh = await api.get<QARequestOut>(`/api/qa-requests/${req.id}`);
+      onChanged(fresh);
+    } catch (caught) {
+      if (caught instanceof HttpError && (caught.status === 403 || caught.status === 404)) {
+        onUnavailable();
+      }
+    } finally {
+      statusRefreshInFlight.current = false;
+    }
+  }, [onChanged, onUnavailable, req.id]);
+
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (!document.hidden) void refreshActualStatus();
+    };
+    const interval = window.setInterval(refreshIfVisible, 15_000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [refreshActualStatus]);
 
   // Pulled out as its own callback (rather than only living inline inside a
   // useEffect) so it can also be re-run on demand -- specifically whenever
@@ -291,7 +330,7 @@ export function RequestDetail({
 
   const pendingMandatory: string[] = [];
 
-  if (requestTypeList.includes("Functional Testing")) {
+  if (requestTypeList.some((requestType) => FUNCTIONAL_BUCKET_TYPES.includes(requestType))) {
     const checkedSet = new Set(req.draft_checked_items || []);
     pendingMandatory.push(
       ...functionalChecklist.filter(
@@ -325,71 +364,47 @@ export function RequestDetail({
     );
   }
 
-  // Informational only -- evidence is never itself required to Submit/Raise
-  // (see handleSubmitClick below; being self-declared ready IS required for
-  // a mandatory item, on any of the four modules -- see pendingMandatory
-  // above). Still worth flagging upfront which readiness checklist item(s)
-  // have nothing attached yet, since it's easier for the requester to add it
-  // now, while everything's fresh, than to be asked for it later during
-  // Readiness Verification. Applies to all 4 request types.
-  const itemsWithoutEvidence: string[] = [];
+  // A supporting-evidence upload is now a hard raise gate for mandatory
+  // readiness items. Optional items may still be checked without evidence.
+  const missingMandatoryEvidence: { item: string; step: EvidenceStepKey }[] = [];
 
-  if (requestTypeList.includes("Functional Testing")) {
-    const checkedSet = new Set(req.draft_checked_items || []);
+  if (requestTypeList.some((requestType) => FUNCTIONAL_BUCKET_TYPES.includes(requestType))) {
     functionalChecklist.forEach((c, index) => {
-      if (
-        (c.is_mandatory || checkedSet.has(c.item)) &&
-        (draftEvidenceCounts[`functional:${index}`] ?? 0) === 0
-      ) {
-        itemsWithoutEvidence.push(c.item);
+      if (c.is_mandatory && (draftEvidenceCounts[`functional:${index}`] ?? 0) === 0) {
+        missingMandatoryEvidence.push({ item: c.item, step: "functional" });
       }
     });
   }
   if (requestTypeList.includes("SAST")) {
-    const checkedSet = new Set(req.draft_sast_checked_items || []);
     sastChecklist.forEach((c, index) => {
-      if (
-        (c.is_mandatory || checkedSet.has(c.item)) &&
-        (draftEvidenceCounts[`sast:${index}`] ?? 0) === 0
-      ) {
-        itemsWithoutEvidence.push(c.item);
+      if (c.is_mandatory && (draftEvidenceCounts[`sast:${index}`] ?? 0) === 0) {
+        missingMandatoryEvidence.push({ item: c.item, step: "sast" });
       }
     });
   }
   if (requestTypeList.includes("DAST")) {
-    const checkedSet = new Set(req.draft_dast_checked_items || []);
     dastChecklist.forEach((c, index) => {
-      if (
-        (c.is_mandatory || checkedSet.has(c.item)) &&
-        (draftEvidenceCounts[`dast:${index}`] ?? 0) === 0
-      ) {
-        itemsWithoutEvidence.push(c.item);
+      if (c.is_mandatory && (draftEvidenceCounts[`dast:${index}`] ?? 0) === 0) {
+        missingMandatoryEvidence.push({ item: c.item, step: "dast" });
       }
     });
   }
   if (requestTypeList.includes("Performance Testing")) {
-    const checkedSet = new Set(req.draft_performance_checked_items || []);
     performanceChecklist.forEach((c, index) => {
-      if (
-        (c.is_mandatory || checkedSet.has(c.item)) &&
-        (draftEvidenceCounts[`performance:${index}`] ?? 0) === 0
-      ) {
-        itemsWithoutEvidence.push(c.item);
+      if (c.is_mandatory && (draftEvidenceCounts[`performance:${index}`] ?? 0) === 0) {
+        missingMandatoryEvidence.push({ item: c.item, step: "performance" });
       }
     });
   }
 
-  // Submit/Raise itself is never blocked on evidence -- if some checklist
-  // item(s) have nothing attached, show a one-time heads-up (ConfirmModal
-  // below) instead of submitting immediately; "Raise Anyway" proceeds,
-  // "Go Back" just closes the pop-up so the requester can attach evidence
-  // first if they want to.
   function handleSubmitClick() {
-    if (itemsWithoutEvidence.length > 0) {
-      setConfirmSubmitNoEvidence(true);
-    } else {
-      act("submit");
+    if (missingMandatoryEvidence.length > 0) {
+      setEvidenceStep(missingMandatoryEvidence[0].step);
+      setEvidenceItem(missingMandatoryEvidence[0].item);
+      setEditingReq(true);
+      return;
     }
+    act("submit");
   }
 
   // Reported directly: a "sibling" gateway that resolved to the exact same
@@ -746,6 +761,31 @@ export function RequestDetail({
               </ul>
             </div>
           )}
+          {canSubmit && missingMandatoryEvidence.length > 0 && (
+            <div
+              style={{
+                marginTop: 8,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                borderRadius: 10,
+                padding: "10px 14px",
+                color: "#991b1b",
+                fontSize: 13,
+              }}
+            >
+              <strong>Cannot Submit / Raise yet</strong> — attach supporting evidence for every mandatory readiness checklist item:
+              <ul style={{ margin: "6px 0 0", paddingLeft: 20 }}>
+                {missingMandatoryEvidence.map(({ item, step }) => <li key={`${step}:${item}`}>{item}</li>)}
+              </ul>
+              <button type="button" className="btn btn-sm" style={{ marginTop: 8 }} onClick={() => {
+                setEvidenceStep(missingMandatoryEvidence[0].step);
+                setEvidenceItem(missingMandatoryEvidence[0].item);
+                setEditingReq(true);
+              }}>
+                Attach missing evidence
+              </button>
+            </div>
+          )}
           {req.remarks && (
             <p>
               <strong>Remarks:</strong> {req.remarks}
@@ -779,7 +819,11 @@ export function RequestDetail({
                 <button
                   className="btn btn-sm"
                   disabled={!!busyAction}
-                  onClick={() => setEditingReq(true)}
+                  onClick={() => {
+                    setEvidenceStep(undefined);
+                    setEvidenceItem(undefined);
+                    setEditingReq(true);
+                  }}
                 >
                   Edit Request
                 </button>
@@ -798,13 +842,15 @@ export function RequestDetail({
               />
               {canSubmit && (
                 <button
-                  className="btn btn-primary btn-sm"
-                  disabled={!!busyAction || applicationNameRejected || pendingMandatory.length > 0}
+                className="btn btn-primary btn-sm"
+                  disabled={!!busyAction || applicationNameRejected || pendingMandatory.length > 0 || missingMandatoryEvidence.length > 0}
                   title={
                     applicationNameRejected
                       ? "This request's Application Name was rejected -- edit the request first"
                       : pendingMandatory.length > 0
                       ? "Complete the mandatory checklist item(s) below first"
+                      : missingMandatoryEvidence.length > 0
+                      ? "Attach evidence for every mandatory readiness checklist item first"
                       : undefined
                   }
                   onClick={handleSubmitClick}
@@ -950,8 +996,12 @@ export function RequestDetail({
         <NewRequestModal
           editing={req}
           delegatedEditing={!!isActiveDelegate}
+          initialStepKey={evidenceStep}
+          initialEvidenceItem={evidenceItem}
           onClose={() => {
             setEditingReq(false);
+            setEvidenceStep(undefined);
+            setEvidenceItem(undefined);
             // Evidence attach/remove inside the wizard's checklist steps
             // happens immediately against the backend (ChecklistEvidencePicker
             // uploads/deletes on click, not on wizard Save) -- so evidence may
@@ -961,6 +1011,8 @@ export function RequestDetail({
           }}
           onCreated={(updated) => {
             setEditingReq(false);
+            setEvidenceStep(undefined);
+            setEvidenceItem(undefined);
             onChanged(updated);
             load();
             loadDraftEvidenceCounts();
@@ -1007,35 +1059,6 @@ export function RequestDetail({
             setConfirmCancel(false);
             setError(null);
           }}
-        />
-      )}
-
-      {confirmSubmitNoEvidence && (
-        <ConfirmModal
-          title="Evidence not attached yet"
-          message={
-            <div style={{ fontSize: 13.5 }}>
-              <p style={{ margin: 0 }}>
-                The following readiness checklist item(s) don't have any
-                evidence document attached yet. It's easier to attach it now,
-                during request creation, than to be asked for it later --
-                but this won't stop you from raising the request:
-              </p>
-              <ul style={{ margin: "10px 0 0", paddingLeft: 20 }}>
-                {itemsWithoutEvidence.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          }
-          confirmLabel={busyAction === "submit" ? "Raising..." : "Raise Anyway"}
-          cancelLabel="Go Back"
-          busy={busyAction === "submit"}
-          onConfirm={() => {
-            setConfirmSubmitNoEvidence(false);
-            act("submit");
-          }}
-          onCancel={() => setConfirmSubmitNoEvidence(false)}
         />
       )}
 

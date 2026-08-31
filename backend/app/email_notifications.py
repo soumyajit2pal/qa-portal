@@ -21,10 +21,15 @@ from sqlalchemy.orm import Session as SASession, joinedload
 from . import models
 from .constants import QA_DEPARTMENT, Role
 from .database import SessionLocal
+from .resilience import CircuitOpenError, smtp_circuit
 
 logger = logging.getLogger("qa_portal.email")
 _listener_installed = False
 _poller_started = False
+_delivery_lock = threading.Lock()
+_delivery_scheduler_lock = threading.Lock()
+_delivery_worker_running = False
+_delivery_rerun_requested = False
 _MAX_ATTEMPTS = 5
 _EMAIL_TEMPLATE_MARKER = "qa-portal-email-template:v1"
 
@@ -85,16 +90,19 @@ def _html_email(title: str, subtitle: str, instruction: str, *,
             '<p style="margin:0 0 10px;color:#627981;font-size:13px">Current status</p>'
             f'<p style="margin:0 0 18px;font-weight:600">{escape(status)}</p>'
         )
-    return f"""<!doctype html><!-- {_EMAIL_TEMPLATE_MARKER} --><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,sans-serif;color:#19333b\">
-<div style=\"max-width:640px;margin:24px auto;background:#ffffff;border:1px solid #dce7e9;border-radius:12px;overflow:hidden\">
-  <div style=\"padding:20px 28px;background:#0d6678;color:#ffffff\"><strong style=\"font-size:18px;letter-spacing:.3px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;opacity:.88\">{escape(subtitle)}</div></div>
-  <div style=\"padding:26px 28px\"><h1 style=\"margin:0 0 10px;font-size:22px;color:#173d49\">{escape(title)}</h1>
-    <p style=\"margin:0 0 18px;font-size:15px;line-height:1.55\">{escape(instruction)}</p>
+    # This is the only approved visual format.  Do not introduce a template
+    # per notification type: every caller supplies content to these same six
+    # areas (header, title, instruction, status, detail panel and CTA).
+    return f"""<!doctype html><!-- {_EMAIL_TEMPLATE_MARKER} --><html><body style=\"margin:0;background:#f3f7f8;font-family:Arial,Helvetica,sans-serif;color:#19333b\">
+<div style=\"max-width:704px;margin:16px auto;background:#ffffff;border:1px solid #d7e5e8;border-radius:12px;overflow:hidden\">
+  <div style=\"padding:20px 30px;background:#116b7d;color:#ffffff\"><strong style=\"font-size:19px;letter-spacing:.1px\">QA Portal</strong><div style=\"margin-top:5px;font-size:12px;line-height:1.25\">{escape(subtitle)}</div></div>
+  <div style=\"padding:28px 30px 26px\"><h1 style=\"margin:0 0 12px;font-size:24px;line-height:1.2;color:#193d49\">{escape(title)}</h1>
+    <p style=\"margin:0 0 21px;font-size:16px;line-height:1.45;color:#203a43\">{escape(instruction)}</p>
     {status_html}
-    <div style=\"margin:18px 0;padding:12px 14px;background:#f5f8f9;border-left:3px solid #0d6678;font-size:13px;line-height:1.5\"><strong>{escape(panel_title)}</strong>{panel_html}</div>
-    <a href=\"{escape(action_url, quote=True)}\" style=\"display:inline-block;padding:12px 18px;background:#0d6678;color:#ffffff;text-decoration:none;border-radius:7px;font-weight:bold\">{escape(action_label)}</a>
+    <div style=\"margin:18px 0 20px;padding:12px 17px;background:#f4f7f8;border-left:3px solid #147d91;font-size:13px;line-height:1.5;color:#19333b\"><strong>{escape(panel_title)}</strong>{panel_html}</div>
+    <a href=\"{escape(action_url, quote=True)}\" style=\"display:inline-block;padding:13px 18px;background:#116b7d;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;font-size:16px\">{escape(action_label)}</a>
   </div>
-  <div style=\"padding:14px 28px;background:#f7fafb;color:#71858c;font-size:11px\">{escape(footer)}</div>
+  <div style=\"padding:14px 30px;background:#f7fafb;color:#71858c;font-size:12px;line-height:1.3\">{escape(footer)}</div>
 </div></body></html>"""
 
 
@@ -296,6 +304,102 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
             queued_count += 1
             logger.info("SMTP notification queued category=access_review recipient=%s user=%s", email, user.username)
     return queued_count
+
+
+def queue_test_cycle_assignment_notification(
+    db: SASession,
+    *,
+    action: models.ApprovalAction,
+    recipient: models.User,
+    cycle: models.TestCycle,
+    test_cases: list[models.TestCase],
+) -> int:
+    """Queue one actionable email for a runner's cycle assignment batch.
+
+    Adding or assigning a batch of testcases must not create one mailbox item
+    per testcase.  A single ApprovalAction anchors one durable outbox record
+    per recipient, while the email lists the governed testcase IDs and opens
+    the exact cycle.  The supplied action is marked as handled so the generic
+    test-case workflow listener does not create a second, less useful digest
+    for the same assignment.
+    """
+    references = list(dict.fromkeys(
+        str(getattr(test_case, "test_case_key", None) or f"Testcase #{getattr(test_case, 'id', '—')}")
+        for test_case in test_cases
+    ))
+    if not references:
+        return 0
+    if not _enabled():
+        logger.info(
+            "SMTP test-cycle assignment notification skipped cycle=%s recipient=%s reason=smtp_disabled",
+            cycle.cycle_key, recipient.username,
+        )
+        return 0
+    if not recipient.is_active:
+        logger.warning(
+            "SMTP test-cycle assignment notification skipped cycle=%s recipient=%s reason=inactive_user",
+            cycle.cycle_key, recipient.username,
+        )
+        return 0
+    if recipient.id == action.actor_id:
+        logger.info(
+            "SMTP test-cycle assignment notification skipped cycle=%s recipient=%s reason=actor_is_assignee",
+            cycle.cycle_key, recipient.username,
+        )
+        return 0
+    email = (recipient.email or "").strip()
+    if not email:
+        logger.warning(
+            "SMTP test-cycle assignment notification skipped cycle=%s recipient=%s reason=missing_email",
+            cycle.cycle_key, recipient.username,
+        )
+        return 0
+
+    # The normal workflow listener sees these TEST_CASE audit actions in the
+    # same commit. This dedicated assignment digest is the authoritative
+    # notification for this action, so suppress its generic fallback.
+    action._email_notifications_queued = True
+    shown_references = references[:20]
+    remaining = len(references) - len(shown_references)
+    type_label = "Test Case" if len(references) == 1 else "Test Cases"
+    portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
+    path = f"/test-execution?project={cycle.project_id}&cycle={cycle.id}"
+    url = f"{portal_url}{path}" if portal_url else path
+    subject = f"Action required: {len(references)} {type_label} assigned — {cycle.cycle_key}"
+    item_lines = "\n".join(f"• {reference}" for reference in shown_references)
+    if remaining:
+        item_lines += f"\n• and {remaining} more"
+    body = (
+        "QA PORTAL ACTION REQUIRED\n\n"
+        f"You have been assigned {len(references)} {type_label.lower()} in {cycle.cycle_key} — {cycle.name}. "
+        "Open the test cycle to record execution results.\n\n"
+        "Current status: Assigned to you\n\n"
+        f"Test cases:\n{item_lines}\n\n"
+        f"Open Test Cycle: {url}\n"
+    )
+    html_items = "".join(f"<li style=\"margin:4px 0\">{escape(reference)}</li>" for reference in shown_references)
+    if remaining:
+        html_items += f"<li style=\"margin:4px 0\">and {remaining} more</li>"
+    html_body = _html_email(
+        f"{len(references)} {type_label}",
+        "Action required · Test cycle assignment",
+        f"You have been assigned testcases in {cycle.cycle_key} — {cycle.name}. Open the cycle to record execution results.",
+        status="Assigned to you",
+        panel_title="Test cases",
+        panel_html=f"<ul style=\"margin:8px 0 0;padding-left:20px\">{html_items}</ul>",
+        action_label="Open Test Cycle",
+        action_url=url,
+    )
+    if not _queue_email_notification(
+        db, action, email, subject=subject, body=body, html_body=html_body,
+        category="test_cycle_assignment",
+    ):
+        return 0
+    logger.info(
+        "SMTP notification queued category=test_cycle_assignment recipient=%s cycle=%s testcase_count=%s",
+        email, cycle.cycle_key, len(references),
+    )
+    return 1
 
 
 def _target(action: models.ApprovalAction, db: SASession):
@@ -936,8 +1040,38 @@ def _after_commit(session: SASession) -> None:
 
 
 def deliver_pending_async() -> None:
-    """Wake an outbox worker without delaying the completed API request."""
-    threading.Thread(target=deliver_pending, name="email-outbox", daemon=True).start()
+    """Wake one coalesced outbox worker without delaying the API request.
+
+    A workflow-heavy import or bulk approval can commit many times in a few
+    seconds. Starting one thread per commit used to let those workers contend
+    for the same database pool (and SMTP relay). Keep at most one delivery
+    worker per application process; work committed while it is active asks it
+    to make one additional pass after its current batch. The durable outbox
+    and periodic poller remain the cross-process reliability mechanism.
+    """
+    global _delivery_worker_running, _delivery_rerun_requested
+    with _delivery_scheduler_lock:
+        if _delivery_worker_running:
+            _delivery_rerun_requested = True
+            logger.info("SMTP outbox delivery trigger coalesced reason=worker_already_running")
+            return
+        _delivery_worker_running = True
+
+    def _run_coalesced() -> None:
+        global _delivery_worker_running, _delivery_rerun_requested
+        while True:
+            try:
+                deliver_pending()
+            except Exception:
+                logger.exception("SMTP outbox delivery worker failed")
+            with _delivery_scheduler_lock:
+                if _delivery_rerun_requested:
+                    _delivery_rerun_requested = False
+                    continue
+                _delivery_worker_running = False
+                return
+
+    threading.Thread(target=_run_coalesced, name="email-outbox", daemon=True).start()
 
 
 def start_outbox_poller() -> None:
@@ -978,6 +1112,14 @@ def install_outbox_listener() -> None:
 
 def _send(notification: models.EmailNotification) -> None:
     settings = _smtp_settings()
+    try:
+        smtp_circuit.check()
+    except CircuitOpenError as exc:
+        logger.warning(
+            "SMTP notification deferred id=%s recipient=%s reason=circuit_open retry_after=%ss",
+            notification.id, notification.recipient_email, exc.retry_after_seconds,
+        )
+        raise
     logger.info("SMTP notification sending id=%s recipient=%s approval_action_id=%s subject=%s", notification.id, notification.recipient_email, notification.approval_action_id, notification.subject)
     message = EmailMessage()
     message["Subject"] = notification.subject
@@ -996,12 +1138,17 @@ def _send(notification: models.EmailNotification) -> None:
         )
     message.add_alternative(html_body, subtype="html")
     smtp_class = smtplib.SMTP_SSL if settings["ssl"] else smtplib.SMTP
-    with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"]) as client:
-        if settings["starttls"]:
-            client.starttls()
-        if settings["username"]:
-            client.login(settings["username"], settings["password"])
-        client.send_message(message)
+    try:
+        with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"]) as client:
+            if settings["starttls"]:
+                client.starttls()
+            if settings["username"]:
+                client.login(settings["username"], settings["password"])
+            client.send_message(message)
+    except Exception:
+        smtp_circuit.record_failure()
+        raise
+    smtp_circuit.record_success()
 
 
 def _candidate_notification_ids(now: datetime.datetime, limit: int) -> list[int]:
@@ -1081,6 +1228,17 @@ def _deliver_one(notification_id: int, now: datetime.datetime) -> bool:
 
 
 def deliver_pending(limit: int = 20) -> int:
+    """Deliver a bounded batch, with one local DB/SMTP worker at a time."""
+    if not _delivery_lock.acquire(blocking=False):
+        logger.info("SMTP outbox delivery skipped reason=delivery_already_running")
+        return 0
+    try:
+        return _deliver_pending(limit)
+    finally:
+        _delivery_lock.release()
+
+
+def _deliver_pending(limit: int = 20) -> int:
     ready, reason = smtp_readiness()
     if not ready:
         logger.warning("SMTP outbox delivery skipped reason=%s", reason)

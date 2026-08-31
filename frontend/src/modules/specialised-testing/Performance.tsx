@@ -19,6 +19,7 @@ import {
 } from '../../constants'
 import { PerformanceOut, PerformanceListOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -820,12 +821,13 @@ export default function Performance() {
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
   const [assignedOnly, setAssignedOnly] = useState(false)
+  const [raisedHistory, setRaisedHistory] = useState({ from: '', to: '' })
 
   const {
     items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
     loading, setPage, setPageSize, reload,
   } = usePaginatedList<PerformanceListOut>('/api/performance-requests', {
-    extra: { assigned_to_me: assignedOnly ? 'true' : undefined },
+    extra: { assigned_to_me: assignedOnly ? 'true' : undefined, raised_from: raisedHistory.from || undefined, raised_to: raisedHistory.to || undefined },
   })
 
   useEffect(() => {
@@ -871,6 +873,7 @@ export default function Performance() {
           <button type="button" className={!assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(false)}>All Requests</button>
           <button type="button" className={assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(true)}>My Assigned Work</button>
         </div>
+        <RaisedHistoryFilter value={raisedHistory} onChange={setRaisedHistory} />
       </div>
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}

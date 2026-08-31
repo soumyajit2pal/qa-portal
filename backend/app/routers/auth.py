@@ -21,8 +21,6 @@ from ..constants import (
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-_COE_DEFAULT_ROLES = (Role.QA_ENGINEER, Role.DOCUMENT_PORTAL_VIEWER)
-
 
 def _canonical_login_username(username: str) -> str:
     """Use one canonical, case-insensitive username form at sign-in.
@@ -43,18 +41,6 @@ def _is_document_only_ldap_username(username: str) -> bool:
     Portal Viewer on their first login, pending Administrator review.
     """
     return not username.strip().casefold().startswith("b")
-
-
-def _with_coe_default_roles(roles: list[str], departments: list[str]) -> list[str]:
-    """COE users always receive baseline QA and Document Portal access.
-
-    Existing roles are retained; this only adds the two required baseline
-    roles.  Removing the COE department does not silently remove roles, which
-    avoids an unexpected loss of access and keeps role removal explicit.
-    """
-    if QA_DEPARTMENT not in departments:
-        return list(roles)
-    return list(dict.fromkeys([*roles, *_COE_DEFAULT_ROLES]))
 
 
 def _redact_confidential_roles(user: "models.User", viewer: "models.User") -> "schemas.UserOut":
@@ -200,6 +186,56 @@ def logout(request: Request, db: Session = Depends(get_db),
 
 @router.get("/me", response_model=schemas.UserOut)
 def me(current_user: models.User = Depends(get_current_user)):
+    return current_user
+
+
+@router.patch("/me/email", response_model=schemas.UserOut)
+def complete_ldap_email(
+    payload: schemas.LdapEmailCompletion,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Save the mandatory notification address for an approved LDAP account.
+
+    The browser displays this only when an LDAP account has completed its
+    access review and the directory supplied no email.  Enforcing the same
+    condition here prevents the endpoint from being used as a broader
+    profile-edit API, while still allowing an already-approved person to
+    recover from the missing LDAP attribute without waiting for an admin.
+    """
+    if current_user.login_type != LoginType.LDAP:
+        raise HTTPException(status_code=403, detail="This email completion step applies only to LDAP accounts.")
+    if current_user.needs_department_selection or current_user.needs_role_review or not current_user.roles:
+        raise HTTPException(
+            status_code=403,
+            detail="Your access must be approved before you can complete the notification email step.",
+        )
+
+    if (current_user.email or "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail="A notification email is already configured. Ask an Administrator or Department Coordinator to change it.",
+        )
+
+    email = str(payload.email).strip().lower()
+
+    before = user_snapshot(current_user)
+    current_user.email = email
+    db.commit()
+    db.refresh(current_user)
+    write_audit(
+        db,
+        event_type="ACCESS_MANAGEMENT",
+        action="LDAP_NOTIFICATION_EMAIL_COMPLETED",
+        actor=current_user,
+        request=request,
+        status_code=200,
+        target_type="USER",
+        target_id=current_user.id,
+        target_name=current_user.full_name,
+        details={"changes": snapshot_changes(before, user_snapshot(current_user))},
+    )
     return current_user
 
 
@@ -401,7 +437,6 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
     _validate_roles(payload.roles)
     roles = _dedupe_roles(payload.roles)
     departments = _validate_departments(db, _resolve_departments_payload(payload.department, payload.departments))
-    roles = _with_coe_default_roles(roles, departments)
     login_type = payload.login_type or LoginType.STANDARD
     if login_type not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{login_type}'")
@@ -469,11 +504,12 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
         new_departments = _validate_departments(db, raw_departments)
     elif raw_department is not _UNSET:
         new_departments = _validate_departments(db, [raw_department] if raw_department else [])
-    effective_departments = new_departments if new_departments is not None else user.departments
-    effective_roles = _with_coe_default_roles(
-        new_roles if new_roles is not None else user.roles,
-        effective_departments,
-    )
+    # Role assignment is exact.  Being mapped to COE - Quality Assurance is
+    # an organisational scope, not an implicit grant of QA Engineer or
+    # Document Portal access.  This lets an administrator assign an
+    # executive-only role (for example AGM - QA) without silently expanding
+    # that person's permissions.
+    effective_roles = new_roles if new_roles is not None else user.roles
     if "login_type" in data and data["login_type"] not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{data['login_type']}'")
     # Note: switching an LDAP account to Standard leaves it with no usable
@@ -677,9 +713,7 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
         # assignable subset submitted here is only ever a partial view of
         # ALL_ROLES.
         preserved = [r for r in user.roles if r not in assignable]
-        new_roles = _with_coe_default_roles(
-            list(dict.fromkeys(preserved + payload.roles)), user.departments,
-        )
+        new_roles = list(dict.fromkeys(preserved + payload.roles))
         for ra in list(user.role_assignments):
             db.delete(ra)
         db.flush()

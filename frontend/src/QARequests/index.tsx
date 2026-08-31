@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, HttpError, subscribeToApiMutations } from "../api";
 import { formatDateTimeIST } from "../time";
 import {
   Badge,
@@ -10,12 +10,13 @@ import {
   Table,
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
-import { GATEWAY_STATUSES, GATEWAY_STATUS_LABELS, GATEWAY_PENDING_WITH } from "../constants";
+import { GATEWAY_PENDING_WITH } from "../constants";
 import { QARequestListOut, QARequestOut, UserOut } from "../types";
 import { classificationSummary, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
 import { RequestDetail } from "./RequestDetail";
 import ClearableSearchInput from "../components/ClearableSearchInput";
+import RaisedHistoryFilter from "../components/RaisedHistoryFilter";
 import { usePaginatedList } from "../hooks/usePaginatedList";
 
 // The QA Requests list page -- the intake gateway. "Raise QA Request" opens
@@ -27,8 +28,8 @@ export default function QARequests() {
   const navigate = useNavigate();
   const searchParams = new URLSearchParams(location.search);
   const [users, setUsers] = useState<UserOut[]>([]);
-  const [statusFilter, setStatusFilter] = useState("");
   const [assignedOnly, setAssignedOnly] = useState(false);
+  const [raisedHistory, setRaisedHistory] = useState({ from: "", to: "" });
   const [search, setSearch] = useState(
     searchParams.get("search") || searchParams.get("application_name") || searchParams.get("cr_number") || ""
   );
@@ -64,13 +65,41 @@ export default function QARequests() {
     // narrows to exactly that CR, and combining both would just be
     // redundant (harmless, but pointless) until the user edits the box.
     search: crNumber ? undefined : search,
-    status: statusFilter ? [statusFilter] : undefined,
-    extra: { assigned_to_me: assignedOnly ? "true" : undefined, cr_number: crNumber || undefined },
+    extra: {
+      assigned_to_me: assignedOnly ? "true" : undefined,
+      cr_number: crNumber || undefined,
+      raised_from: raisedHistory.from || undefined,
+      raised_to: raisedHistory.to || undefined,
+    },
   });
 
   useEffect(() => {
     api.get<UserOut[]>("/api/auth/users").then(setUsers).catch(setError);
   }, []);
+
+  // Keep statuses current without asking users to refresh the browser. A
+  // successful mutation in this tab updates immediately; a conservative
+  // visibility-aware poll also captures changes made by another approver,
+  // browser, or API client. Hidden tabs do not poll.
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (!document.hidden) reload();
+    };
+    const unsubscribe = subscribeToApiMutations((event) => {
+      // Application approval actions can advance the parent QA Request as
+      // well, so they need the same immediate list refresh.
+      if (event.path.startsWith("/api/qa-requests") || event.path.startsWith("/api/applications")) {
+        refreshIfVisible();
+      }
+    });
+    const interval = window.setInterval(refreshIfVisible, 20_000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      unsubscribe();
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [reload]);
 
   useEffect(() => {
     // Reacts to location.state on every navigation to this route -- not just
@@ -107,11 +136,29 @@ export default function QARequests() {
       const full = await api.get<QARequestOut>(`/api/qa-requests/${id}`);
       setSelected(full);
     } catch (err) {
+      // The row may have changed visibility (for example a Draft was raised
+      // or cancelled in another session) between the list response and this
+      // click. Re-query the list instead of surfacing a misleading 403.
+      if (err instanceof HttpError && (err.status === 403 || err.status === 404)) {
+        setSelected(null);
+        reload();
+        return;
+      }
       setError(err);
     } finally {
       setOpeningId(null);
     }
-  }, []);
+  }, [reload]);
+
+  const handleUnavailable = useCallback(() => {
+    setSelected(null);
+    reload();
+  }, [reload]);
+
+  const handleChanged = useCallback((updated: QARequestOut) => {
+    setSelected(updated);
+    reload();
+  }, [reload]);
 
   // Pending Approvals and other deep links can open the parent gateway's
   // drawer immediately instead of landing on its filtered list first.
@@ -169,17 +216,6 @@ export default function QARequests() {
             Exact match: {crNumber}
           </span>
         )}
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-        >
-          <option value="">All statuses</option>
-          {GATEWAY_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {GATEWAY_STATUS_LABELS[s] || s}
-            </option>
-          ))}
-        </select>
         <div className="tabs" style={{ margin: 0 }}>
           <button type="button" className={!assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(false)}>
             All Requests
@@ -188,6 +224,7 @@ export default function QARequests() {
             My Drafts / Delegated
           </button>
         </div>
+        <RaisedHistoryFilter value={raisedHistory} onChange={setRaisedHistory} />
       </div>
 
       <Card>
@@ -301,10 +338,8 @@ export default function QARequests() {
           req={selected}
           users={users}
           onClose={() => setSelected(null)}
-          onChanged={(updated) => {
-            setSelected(updated);
-            reload();
-          }}
+          onUnavailable={handleUnavailable}
+          onChanged={handleChanged}
         />
       )}
       {draftNotice && (

@@ -38,6 +38,8 @@ import os
 import threading
 from typing import Any, Optional
 
+from .resilience import CircuitOpenError, redis_circuit
+
 logger = logging.getLogger("qa_portal.cache")
 
 REDIS_URL = os.getenv("REDIS_URL")
@@ -56,11 +58,27 @@ _init_attempted = False
 _warned_unavailable = False
 
 
+def _cache_circuit_allows() -> bool:
+    try:
+        redis_circuit.check()
+        return True
+    except CircuitOpenError as exc:
+        logger.info("Redis cache bypassed reason=circuit_open retry_after=%ss", exc.retry_after_seconds)
+        return False
+
+
+def _cache_failure(operation: str, exc: Exception) -> None:
+    redis_circuit.record_failure()
+    logger.warning("Redis %s failed; treating cache as unavailable.", operation, exc_info=True)
+
+
 def _get_client():
     """Lazily builds (once) and returns the redis client, or None if caching
     is disabled/unconfigured/unavailable. Safe to call from any request --
     never raises."""
     global _client, _init_attempted, _warned_unavailable
+    if not _cache_circuit_allows():
+        return None
     if _client is not None:
         return _client
     if not CACHE_ENABLED or not REDIS_URL:
@@ -87,12 +105,14 @@ def _get_client():
                 decode_responses=True,
             )
             client.ping()
-        except Exception:
+        except Exception as exc:
+            redis_circuit.record_failure()
             if not _warned_unavailable:
                 logger.warning("Redis at %s is unreachable; caching is disabled.", _masked(REDIS_URL), exc_info=True)
                 _warned_unavailable = True
             return None
         logger.info("Connected to Redis for caching.")
+        redis_circuit.record_success()
         _client = client
         return _client
 
@@ -125,8 +145,12 @@ def ping() -> bool:
     if client is None:
         return False
     try:
-        return bool(client.ping())
-    except Exception:
+        result = bool(client.ping())
+        if result:
+            redis_circuit.record_success()
+        return result
+    except Exception as exc:
+        _cache_failure("PING", exc)
         return False
 
 
@@ -136,8 +160,9 @@ def get_json(key: str) -> Optional[Any]:
         return None
     try:
         raw = client.get(_key(key))
-    except Exception:
-        logger.warning("Redis GET failed for key=%s; treating as cache miss.", key, exc_info=True)
+        redis_circuit.record_success()
+    except Exception as exc:
+        _cache_failure("GET", exc)
         return None
     if raw is None:
         return None
@@ -154,9 +179,10 @@ def set_json(key: str, value: Any, ttl_seconds: int) -> bool:
         return False
     try:
         client.set(_key(key), json.dumps(value, default=str, ensure_ascii=False), ex=max(1, ttl_seconds))
+        redis_circuit.record_success()
         return True
-    except Exception:
-        logger.warning("Redis SET failed for key=%s; continuing without caching this value.", key, exc_info=True)
+    except Exception as exc:
+        _cache_failure("SET", exc)
         return False
 
 
@@ -169,9 +195,11 @@ def delete(*keys: str) -> int:
     if client is None:
         return 0
     try:
-        return client.delete(*(_key(k) for k in keys))
-    except Exception:
-        logger.warning("Redis DEL failed for keys=%s.", keys, exc_info=True)
+        deleted = client.delete(*(_key(k) for k in keys))
+        redis_circuit.record_success()
+        return deleted
+    except Exception as exc:
+        _cache_failure("DEL", exc)
         return 0
 
 
@@ -193,9 +221,11 @@ def try_acquire_lock(key: str, ttl_seconds: int = 300) -> bool:
     if client is None:
         return True
     try:
-        return bool(client.set(_key(key), "1", nx=True, ex=max(1, ttl_seconds)))
-    except Exception:
-        logger.warning("Redis lock acquisition failed for key=%s; proceeding as if acquired.", key, exc_info=True)
+        acquired = bool(client.set(_key(key), "1", nx=True, ex=max(1, ttl_seconds)))
+        redis_circuit.record_success()
+        return acquired
+    except Exception as exc:
+        _cache_failure("lock acquisition", exc)
         return True
 
 
@@ -213,6 +243,7 @@ def delete_prefix(prefix: str) -> int:
     try:
         for found_key in client.scan_iter(match=pattern, count=200):
             deleted += client.delete(found_key)
-    except Exception:
-        logger.warning("Redis SCAN/DEL failed for prefix=%s.", prefix, exc_info=True)
+        redis_circuit.record_success()
+    except Exception as exc:
+        _cache_failure("SCAN/DEL", exc)
     return deleted

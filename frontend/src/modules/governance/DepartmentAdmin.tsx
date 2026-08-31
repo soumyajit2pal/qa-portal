@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
+import { Navigate } from 'react-router-dom'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
-import { hasRole, ROLE_LABELS, DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES } from '../../constants'
+import { ROLE_LABELS, DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES } from '../../constants'
 import { UserOut } from '../../types'
 import { RoleChipSelect } from './Admin'
 
@@ -28,17 +29,29 @@ export default function DepartmentAdmin() {
   const [savingId, setSavingId] = useState<number | null>(null)
   const [emailTarget, setEmailTarget] = useState<UserOut | null>(null)
 
+  // `hasRole()` intentionally makes an ADMIN satisfy every role check across
+  // normal portal workflows. This access-management page is different: its
+  // purpose is a *bounded* department coordinator workspace. Read the real
+  // assignments here so an Administrator is sent to the unrestricted Users
+  // & Access workspace instead of seeing coordinator-only API errors.
+  const assignedRoles = user?.roles || []
+  const isSystemAdmin = assignedRoles.includes('ADMIN')
+  const isQAAdmin = assignedRoles.some((role) => ['CHIEF_MANAGER_QA', 'AGM_QA'].includes(role))
+  const isDeptAdmin = assignedRoles.some((role) => ['DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM'].includes(role))
+
   // SRS 7.2 pagination rollout -- deliberately left unpaginated (see
   // routers/auth.py::list_local_admin_users' own docstring). This roster is
   // scoped to one department's own headcount, not an org-wide directory.
   const load = useCallback(async () => {
     try { setUsers(await api.get<UserOut[]>('/api/auth/local-admin/users')) } catch (err) { setError(err) }
   }, [])
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    if (!isSystemAdmin) void load()
+  }, [isSystemAdmin, load])
 
-  const isQAAdmin = hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA')
-  const isDeptAdmin = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM')
   const pendingReviewCount = users.filter((row) => row.needs_role_review && row.roles.length === 0).length
+
+  if (isSystemAdmin) return <Navigate to="/admin" replace />
 
   if (!isQAAdmin && !isDeptAdmin) {
     return (
@@ -50,10 +63,7 @@ export default function DepartmentAdmin() {
 
   // Mirrors routers/auth.py::_local_admin_assignable_roles -- an Executive
   // COE manages the QA team's own working roles, a business Department Head
-  // manages everyone else's. hasRole(user, 'ADMIN', ...) always short-
-  // circuits true, so an Admin account (which can also reach this page)
-  // falls through to the QA-Admin check first here purely for a stable
-  // default -- Admins normally use /admin instead of this page anyway.
+  // manages everyone else's.
   const assignableRoles = isQAAdmin ? QA_ADMIN_ASSIGNABLE_ROLES : DEPARTMENT_ADMIN_ASSIGNABLE_ROLES
 
   async function patchUser(id: number, changes: { email?: string | null; roles?: string[]; is_active?: boolean }): Promise<boolean> {

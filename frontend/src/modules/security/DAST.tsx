@@ -12,6 +12,7 @@ import RequestDelegation from '../../components/RequestDelegation'
 import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
 import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
 import { SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
 
 function userName(users: UserOut[], id?: number | null): string | null {
@@ -1109,12 +1110,13 @@ export default function DAST() {
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
   const [assignedOnly, setAssignedOnly] = useState(false)
+  const [raisedHistory, setRaisedHistory] = useState({ from: '', to: '' })
 
   const {
     items: rows, page, pageSize, total, totalPages, hasNext, hasPrevious,
     loading, setPage, setPageSize, reload,
   } = usePaginatedList<DASTListOut>('/api/dast-requests', {
-    extra: { assigned_to_me: assignedOnly ? 'true' : undefined },
+    extra: { assigned_to_me: assignedOnly ? 'true' : undefined, raised_from: raisedHistory.from || undefined, raised_to: raisedHistory.to || undefined },
   })
 
   useEffect(() => {
@@ -1160,6 +1162,7 @@ export default function DAST() {
           <button type="button" className={!assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(false)}>All Requests</button>
           <button type="button" className={assignedOnly ? 'active' : ''} onClick={() => setAssignedOnly(true)}>My Assigned Work</button>
         </div>
+        <RaisedHistoryFilter value={raisedHistory} onChange={setRaisedHistory} />
       </div>
       <Card>
         <Table rowKey="id" onRowClick={(r) => openRequest(r)}

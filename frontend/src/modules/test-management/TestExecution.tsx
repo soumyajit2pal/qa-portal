@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { api, waitForJob } from '../../api'
+import { api, mapWithConcurrency, waitForJob } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
@@ -949,12 +949,12 @@ function ImageGallery({ basePath, readOnly, emptyText }: { basePath: string; rea
         const docs = await api.get<RequestDocumentOut[]>(basePath)
         if (!active) return
         setDocuments(docs)
-        const loaded = await Promise.all(docs.map(async (document) => {
+        const loaded = await mapWithConcurrency(docs, 3, async (document) => {
           const blob = await api.getBlob(`${basePath}/${document.id}/download`)
           const url = URL.createObjectURL(blob)
           createdUrls.push(url)
           return [document.id, url] as const
-        }))
+        })
         if (active) setUrls(Object.fromEntries(loaded))
       } catch (err) { if (active) setError(err) }
     }
@@ -2222,7 +2222,7 @@ export default function TestExecution() {
         <div className="info-banner">This project is inactive. Existing cycles and results are read-only until the project is reactivated.</div>
       )}
       {projectId && (
-        <div className={`tm-workspace tm-execution-workspace${cycleSidebarCollapsed ? ' cycle-sidebar-collapsed' : ''}`}>
+        <div className={`tm-workspace tm-execution-workspace tm-execution-refined${cycleSidebarCollapsed ? ' cycle-sidebar-collapsed' : ''}`}>
           <aside className="tm-tree-panel tm-cycle-panel">
             <div className="tm-cycle-sidebar-head">
               {!cycleSidebarCollapsed && <div className="tm-cycle-sidebar-title"><span aria-hidden="true">C</span><div><small>Execution workspace</small><strong>Cycle navigator</strong></div></div>}
@@ -2298,8 +2298,8 @@ export default function TestExecution() {
           <section className="tm-main-panel">
           {cycleId ? (
             <>
-              <div className="tm-cycle-header tm-cycle-command">
-                <div>
+              <div className="tm-cycle-header tm-cycle-command tm-cycle-command-refined">
+                <div className="tm-cycle-command-copy">
                   <span>{selectedCycle?.cycle_key}</span>
                   <h3>{selectedCycle?.name}</h3>
                   <p>{selectedCycle?.description || 'Execute and monitor the selected test set.'}</p>
@@ -2347,26 +2347,25 @@ export default function TestExecution() {
                   </div>
                 )}
               </div>
-              <section className="tm-execution-overview" aria-label="Cycle execution overview">
-                <div className="tm-execution-progress-card">
-                  <div className="tm-progress-ring" style={{ background: `conic-gradient(#245b8f ${progressRate}%, #e5ebf1 ${progressRate}% 100%)` }}>
-                    <div><strong>{progressRate}%</strong><span>complete</span></div>
+              <section className="tm-execution-snapshot" aria-label="Cycle execution overview">
+                <div className="tm-snapshot-progress">
+                  <div className="tm-snapshot-progress-copy">
+                    <small>Execution progress</small>
+                    <strong>{executedCount}<em> / {cycleExecutionTotal}</em></strong>
+                    <span>testcases executed</span>
                   </div>
-                  <div className="tm-progress-copy">
-                    <small>Cycle progress</small>
-                    <h4>{executedCount} of {cycleExecutionTotal} testcases executed</h4>
-                    <p>{cycleExecutionTotal - executedCount > 0 ? `${cycleExecutionTotal - executedCount} testcase${cycleExecutionTotal - executedCount === 1 ? '' : 's'} remaining in this cycle.` : 'All testcases in this cycle have an execution result.'}</p>
-                    <div className="tm-progress-foot">
-                      <span><b>{totalRunCount}</b> total attempts</span>
-                      <span><b>{myAssignmentCount}</b> in my queue</span>
+                  <div className="tm-snapshot-progress-detail">
+                    <div className="tm-snapshot-track" role="progressbar" aria-label="Cycle completion" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progressRate}>
+                      <i style={{ width: `${progressRate}%` }} />
                     </div>
+                    <p>{cycleExecutionTotal - executedCount > 0 ? `${cycleExecutionTotal - executedCount} testcase${cycleExecutionTotal - executedCount === 1 ? '' : 's'} remaining · ${totalRunCount} total attempts` : `All testcases have an execution result · ${totalRunCount} total attempts`}</p>
                   </div>
                 </div>
-                <div className="tm-execution-health-grid">
+                <div className="tm-snapshot-metrics">
                   <div data-tone="success"><small>Pass rate</small><strong>{passRate}%</strong><span>{passCount} passed</span></div>
                   <div data-tone={attentionCount ? 'warning' : 'neutral'}><small>Needs attention</small><strong>{attentionCount}</strong><span>{executionSummary?.status_counts.Fail || 0} failed · {executionSummary?.status_counts.Blocked || 0} blocked</span></div>
-                  <div data-tone={unassignedCount ? 'warning' : 'success'}><small>Assignment coverage</small><strong>{assignedCount}<em> / {cycleExecutionTotal}</em></strong><span>{unassignedCount ? `${unassignedCount} unassigned` : 'Fully assigned'}</span></div>
-                  <div data-tone="info"><small>My execution queue</small><strong>{myAssignmentCount}</strong><span>Assigned to me</span></div>
+                  <div data-tone={unassignedCount ? 'warning' : 'success'}><small>Assignment</small><strong>{assignedCount}<em> / {cycleExecutionTotal}</em></strong><span>{unassignedCount ? `${unassignedCount} unassigned` : 'Fully assigned'}</span></div>
+                  <div data-tone="info"><small>My queue</small><strong>{myAssignmentCount}</strong><span>Assigned to me</span></div>
                 </div>
               </section>
               <section className="tm-testcase-workbench">

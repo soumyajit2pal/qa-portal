@@ -28,11 +28,13 @@ never applies authorization itself; it has no opinion on any entity's
 access rules, only on how a filtered, authorized, sorted query becomes a
 page of results.
 """
+import datetime
 from typing import Generic, List, Optional, TypeVar
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import asc, desc, or_
+from sqlalchemy import and_, asc, desc, or_
 from sqlalchemy.orm import Query as SAQuery
 
 T = TypeVar("T")
@@ -60,6 +62,8 @@ class PageParams:
         search: Optional[str] = Query(None, description="Free-text search"),
         status: Optional[List[str]] = Query(None, description="One or more status filters"),
         department: Optional[str] = Query(None, description="Department filter, where authorized"),
+        raised_from: Optional[str] = Query(None, description="Optional IST raised-date range start for terminal history"),
+        raised_to: Optional[str] = Query(None, description="Optional IST raised-date range end for terminal history"),
         sort_by: Optional[str] = Query(None, description="Approved sorting field"),
         sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     ):
@@ -79,6 +83,8 @@ class PageParams:
         self.search = search.strip() if search and search.strip() else None
         self.status = status or None
         self.department = department
+        self.raised_from = raised_from.strip() if raised_from and raised_from.strip() else None
+        self.raised_to = raised_to.strip() if raised_to and raised_to.strip() else None
         self.sort_by = sort_by.strip() if sort_by else None
         self.sort_order = sort_order
 
@@ -132,6 +138,43 @@ def apply_department_filter(query: SAQuery, params: PageParams, department_colum
     if not params.department:
         return query
     return query.filter(department_column == params.department)
+
+
+def _raised_date_bound(value: str, *, end: bool) -> datetime.datetime:
+    """Parse an API date/datetime into an IST wall-clock value for Oracle."""
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(422, "Raised date must be ISO-8601 (YYYY-MM-DD or datetime).") from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+    if len(value) == 10:
+        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999) if end else parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+    return parsed
+
+
+def apply_terminal_raised_date_filter(query: SAQuery, params: PageParams, status_column, created_at_column, terminal_statuses) -> SAQuery:
+    """Filter historical terminal rows by raised date without hiding live work.
+
+    The optional list-page date range is deliberately *not* a blanket filter:
+    every Draft, active, returned, assigned and pending request remains in the
+    result set regardless of age. Only terminal history is narrowed. This
+    prevents an old but still-actionable request from disappearing from an
+    operational queue merely because a user is reviewing recent history.
+    """
+    if not params.raised_from and not params.raised_to:
+        return query
+    start = _raised_date_bound(params.raised_from, end=False) if params.raised_from else None
+    end = _raised_date_bound(params.raised_to, end=True) if params.raised_to else None
+    if start and end and start > end:
+        raise HTTPException(422, "Raised-date From cannot be after To.")
+    terminal = tuple(getattr(status, "value", status) for status in terminal_statuses)
+    historical_conditions = [status_column.in_(terminal)]
+    if start:
+        historical_conditions.append(created_at_column >= start)
+    if end:
+        historical_conditions.append(created_at_column <= end)
+    return query.filter(or_(status_column.is_(None), status_column.notin_(terminal), and_(*historical_conditions)))
 
 
 def apply_sort(query: SAQuery, params: PageParams, sortable: dict, default_column, id_column) -> SAQuery:

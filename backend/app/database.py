@@ -77,11 +77,11 @@ def _env_bool(name: str, default: bool) -> bool:
 # scaled down per-worker once running with multiple API workers, see
 # INF-001) without a code change:
 #   DB_POOL_SIZE      -- baseline pooled connections per engine (per worker
-#                         process -- each worker gets its own pool). Default 10.
+#                         process -- each worker gets its own pool). Default 8.
 #   DB_MAX_OVERFLOW   -- extra connections allowed beyond pool_size under
-#                         burst load, closed once idle. Default 20.
+#                         burst load, closed once idle. Default 4.
 #   DB_POOL_TIMEOUT   -- seconds to wait for a pooled connection before
-#                         raising, rather than hanging indefinitely. Default 30.
+#                         raising, rather than hanging indefinitely. Default 15.
 #   DB_POOL_RECYCLE   -- seconds before a pooled connection is transparently
 #                         recycled, avoiding stale/dropped Oracle sessions
 #                         (e.g. behind a firewall idle-connection reaper).
@@ -89,9 +89,9 @@ def _env_bool(name: str, default: bool) -> bool:
 #   DB_POOL_PRE_PING  -- validate a connection with a lightweight ping before
 #                         handing it out, so a dead connection is replaced
 #                         instead of surfacing as a query error. Default true.
-POOL_SIZE = _env_int("DB_POOL_SIZE", 10)
-MAX_OVERFLOW = _env_int("DB_MAX_OVERFLOW", 20)
-POOL_TIMEOUT = _env_int("DB_POOL_TIMEOUT", 30)
+POOL_SIZE = _env_int("DB_POOL_SIZE", 8)
+MAX_OVERFLOW = _env_int("DB_MAX_OVERFLOW", 4)
+POOL_TIMEOUT = _env_int("DB_POOL_TIMEOUT", 15)
 POOL_RECYCLE = _env_int("DB_POOL_RECYCLE", 1800)
 POOL_PRE_PING = _env_bool("DB_POOL_PRE_PING", True)
 
@@ -138,6 +138,22 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def main_pool_metrics() -> dict[str, int]:
+    """Return a cheap, connection-free snapshot of the primary pool.
+
+    This is intentionally limited to QueuePool's local counters: it never
+    checks out a connection merely to report pool health.  It is used by the
+    slow-request/error logs and health endpoint so operations can see pool
+    pressure before it becomes a user-visible timeout.
+    """
+    return {
+        "size": int(engine.pool.size()),
+        "checked_in": int(engine.pool.checkedin()),
+        "checked_out": int(engine.pool.checkedout()),
+        "overflow": int(engine.pool.overflow()),
+    }
 
 
 # 2026-08 -- dedicated pool for audit writes (see main.py's

@@ -1,8 +1,10 @@
+import base64
 import datetime
+import json
 from collections import Counter
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from .. import models, cache
@@ -11,7 +13,7 @@ from ..deps import get_current_user, dashboard_department_scope
 from ..pagination import PageParams
 from ..xlsx_export import new_workbook, add_summary_sheet, add_table_sheet, workbook_response
 from ..constants import (
-    Role, QAStatus, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
+    Role, QAStatus, GATEWAY_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
     QA_DEPARTMENT, QA_REQUEST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
     SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
 )
@@ -67,6 +69,298 @@ def _in_period(query, column, date_from: str | None, date_to: str | None):
     if end:
         query = query.filter(column <= end)
     return query
+
+
+_DASHBOARD_REQUEST_PAGE_SIZES = {5, 10, 25, 50, 100}
+_DASHBOARD_REQUEST_TERMINAL_STATUSES = {
+    "QA Request": set(GATEWAY_TERMINAL_STATUSES),
+    "Functional QA": set(QA_REQUEST_TERMINAL_STATUSES),
+    "SAST": set(SAST_DAST_TERMINAL_STATUSES),
+    "DAST": set(SAST_DAST_TERMINAL_STATUSES),
+    "Performance": set(PERFORMANCE_TERMINAL_STATUSES),
+}
+_DASHBOARD_FEED_TYPE_RANKS = {
+    "QA Request": 5,
+    "Functional QA": 4,
+    "SAST": 3,
+    "DAST": 2,
+    "Performance": 1,
+}
+
+
+def _encode_dashboard_request_cursor(row) -> str:
+    """Encode the final row of a page for stateless keyset pagination."""
+    payload = {
+        "created_at": row["created_at"].isoformat(),
+        "id": int(row["id"]),
+        "type_rank": int(row["type_rank"]),
+    }
+    return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def _decode_dashboard_request_cursor(value: str | None) -> tuple[datetime.datetime, int, int] | None:
+    if not value:
+        return None
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        created_at = datetime.datetime.fromisoformat(payload["created_at"])
+        if created_at.tzinfo:
+            created_at = created_at.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+        row_id = int(payload["id"])
+        type_rank = int(payload["type_rank"])
+        if row_id < 1 or type_rank not in _DASHBOARD_FEED_TYPE_RANKS.values():
+            raise ValueError("out of range")
+        return created_at, row_id, type_rank
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "Invalid dashboard request page cursor.") from exc
+
+
+def _dashboard_requests_scope_predicate(model, qa_model, scope_name: str, current_user, visible_scope: list | None):
+    """Filter one branch of the unified dashboard request feed.
+
+    ``mine`` keeps the existing requester's-own-record behaviour while
+    respecting normal department visibility. ``department`` deliberately
+    uses the user's actual department membership even for globally-visible
+    QA/Admin roles: the UI label is "My Department", not "Every Department".
+    """
+    def department_predicate(departments):
+        if model is qa_model:
+            return qa_model.department.in_(departments)
+        # Keep child request reads requester-first.  An explicit JOIN to the
+        # parent makes Oracle choose a slow parent-first plan at scale, even
+        # though the child has a selective requester/timestamp index. A parent
+        # ID subquery has the same fail-closed permission semantics (standalone
+        # children have no matching parent) without losing that access path.
+        return model.qa_request_id.in_(
+            select(qa_model.id).where(qa_model.department.in_(departments))
+        )
+
+    if scope_name == "mine":
+        clauses = [model.requester_id == current_user.id]
+        if visible_scope:
+            clauses.append(department_predicate(visible_scope))
+        return clauses
+    departments = current_user.departments or ([current_user.department] if current_user.department else [])
+    # Use a SQL comparison rather than a Python Boolean literal here: Oracle
+    # has no BOOLEAN SQL type, while ``1 = 0`` is portable and guarantees an
+    # empty result for an account with no department membership.
+    return [department_predicate(departments)] if departments else [literal(1) == literal(0)]
+
+
+@router.get("/requests")
+def dashboard_requests(
+    scope: str = Query("mine", pattern="^(mine|department)$"),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25),
+    cursor: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """One paginated, IST-filtered request feed for the Dashboard Requests tab.
+
+    This replaces five independent page_size=100 list calls. Each branch
+    selects only the fields the table displays; Oracle performs the date and
+    visibility filters before the UNION, then a single ordered page is read.
+    Counts are grouped in SQL so dashboard metrics remain exact even when the
+    user is looking at only one page.
+    """
+    if page_size not in _DASHBOARD_REQUEST_PAGE_SIZES:
+        raise HTTPException(400, f"page_size must be one of {sorted(_DASHBOARD_REQUEST_PAGE_SIZES)}")
+
+    start, end = _date_bounds(date_from, date_to)
+    visible_scope = dashboard_department_scope(current_user)
+
+    def filters(model, qa_model):
+        predicates = _dashboard_requests_scope_predicate(model, qa_model, scope, current_user, visible_scope)
+        if start:
+            predicates.append(model.created_at >= start)
+        if end:
+            predicates.append(model.created_at <= end)
+        return predicates
+
+    qa = models.QARequest
+    functional = models.FunctionalRequest
+    sast = models.SASTRequest
+    dast = models.DASTRequest
+    performance = models.PerformanceRequest
+
+    # A dashboard can legitimately have tens of thousands of historical
+    # requests.  The former implementation carried `change_description`
+    # (Oracle CLOB) through a five-way UNION, then sorted/grouped every row to
+    # render just one 25-row page.  At 15k rows that took 22+ seconds and held
+    # a pooled Oracle connection for the entire time.  Keep the large work
+    # narrow and indexed (ID/status/timestamp only), then fetch presentation
+    # fields -- including the CLOB -- for the current page only.
+    child_specs = (
+        ("Functional QA", functional),
+        ("SAST", sast),
+        ("DAST", dast),
+        ("Performance", performance),
+    )
+    def child_source(model):
+        # Department visibility is applied by the requester-first EXISTS
+        # predicate in `_dashboard_requests_scope_predicate`, not a JOIN.
+        return select().select_from(model)
+
+    # Each branch groups directly on its base table.  This lets Oracle use the
+    # requester/date composites and avoids materialising the full feed merely
+    # to calculate the three cards above the table.
+    count_statements = [
+        select(
+            literal("QA Request").label("type"), qa.status.label("status"), func.count().label("count"),
+        ).where(*filters(qa, qa)).group_by(qa.status)
+    ]
+    for request_type, model in child_specs:
+        count_statements.append(
+            child_source(model)
+            .with_only_columns(
+                literal(request_type).label("type"), model.status.label("status"), func.count().label("count"),
+            )
+            .where(*filters(model, qa))
+            .group_by(model.status)
+        )
+    grouped_counts = db.execute(union_all(*count_statements)).all()
+    total = active_total = terminal_total = 0
+    for request_type, status, count in grouped_counts:
+        count = int(count)
+        total += count
+        terminal = status in _DASHBOARD_REQUEST_TERMINAL_STATUSES.get(request_type, set())
+        if terminal:
+            terminal_total += count
+        elif status != "DRAFT":
+            active_total += count
+
+    # The result set may change between a user opening a later page and the
+    # next refresh. Clamp instead of returning a false empty page when that
+    # happens (for example, after requests are cancelled or removed).
+    total_pages = max(1, -(-total // page_size))
+    effective_page = min(page, total_pages)
+    cursor_state = _decode_dashboard_request_cursor(cursor)
+    if effective_page > 1 and cursor_state is None:
+        raise HTTPException(400, "A page cursor is required after the first dashboard request page.")
+
+    # Do not globally sort the UNION.  Ask each indexed source for at most one
+    # small candidate page, merge 5 × (page_size + 1) rows in Python, then
+    # fetch details for the winning rows.  This is keyset pagination: its
+    # cost is constant for page 2, page 200 or page 2,000, unlike OFFSET.
+    def cursor_predicate(model, type_rank: int):
+        if cursor_state is None:
+            return None
+        cursor_at, cursor_id, cursor_type_rank = cursor_state
+        return or_(
+            model.created_at < cursor_at,
+            and_(model.created_at == cursor_at, model.id < cursor_id),
+            and_(
+                model.created_at == cursor_at,
+                model.id == cursor_id,
+                literal(type_rank) < cursor_type_rank,
+            ),
+        )
+
+    def candidate_rows(request_type: str, model, *, is_child: bool = False):
+        type_rank = _DASHBOARD_FEED_TYPE_RANKS[request_type]
+        if is_child:
+            statement = child_source(model).with_only_columns(
+                model.id.label("id"), model.status.label("status"),
+                model.created_at.label("created_at"),
+            )
+        else:
+            statement = select(
+                model.id.label("id"), model.status.label("status"),
+                model.created_at.label("created_at"),
+            )
+        statement = statement.where(*filters(model, qa))
+        seek = cursor_predicate(model, type_rank)
+        if seek is not None:
+            statement = statement.where(seek)
+        rows = db.execute(
+            statement.order_by(model.created_at.desc(), model.id.desc()).limit(page_size + 1)
+        ).mappings().all()
+        # Keep presentation constants out of Oracle's FETCH FIRST query. With
+        # Oracle's bind-sensitive optimizer, selecting ``:value AS type``
+        # caused an otherwise indexed child query to choose a multi-second
+        # plan. Adding two tiny constants after the read is deterministic and
+        # avoids that plan instability entirely.
+        return [
+            {**dict(row), "type": request_type, "type_rank": type_rank}
+            for row in rows
+        ]
+
+    candidates = candidate_rows("QA Request", qa)
+    for request_type, model in child_specs:
+        candidates.extend(candidate_rows(request_type, model, is_child=True))
+    candidates.sort(key=lambda row: (row["created_at"], row["id"], row["type_rank"]), reverse=True)
+    has_next = len(candidates) > page_size
+    page_keys = candidates[:page_size]
+    next_cursor = _encode_dashboard_request_cursor(page_keys[-1]) if has_next and page_keys else None
+
+    page_ids_by_type: dict[str, list[int]] = {}
+    for row in page_keys:
+        page_ids_by_type.setdefault(row["type"], []).append(row["id"])
+
+    # Read rich presentation data only for the page.  All child details use
+    # the parent gateway as their source of application/department/change
+    # information; an outer join preserves any legacy standalone child rows.
+    detail_by_key: dict[tuple[str, int], dict] = {}
+    # Oracle returns Text/CLOB as a locator. Fetching even 25 locators forces
+    # extra driver round trips one row at a time, which was the remaining
+    # 11-second delay after the feed itself became indexed. The table renders
+    # a truncated preview, so ask Oracle for exactly that bounded VARCHAR2
+    # preview instead. The complete description remains available on each
+    # request's detail page.
+    change_description_preview = func.dbms_lob.substr(qa.change_description, 500, 1).label("change_description")
+    qa_ids = page_ids_by_type.get("QA Request", [])
+    if qa_ids:
+        for row in db.execute(
+            select(
+                qa.id, qa.request_id, qa.application_name, qa.department,
+                qa.status, qa.requester_id, qa.created_at, change_description_preview,
+            ).where(qa.id.in_(qa_ids))
+        ).mappings():
+            detail_by_key[("QA Request", row["id"])] = dict(row)
+    for request_type, model in child_specs:
+        child_ids = page_ids_by_type.get(request_type, [])
+        if not child_ids:
+            continue
+        for row in db.execute(
+            select(
+                model.id, model.request_id, qa.application_name, qa.department,
+                model.status, model.requester_id, model.created_at, change_description_preview,
+            )
+            .select_from(model)
+            .outerjoin(qa, model.qa_request_id == qa.id)
+            .where(model.id.in_(child_ids))
+        ).mappings():
+            detail_by_key[(request_type, row["id"])] = dict(row)
+
+    items = []
+    for feed_row in page_keys:
+        item = detail_by_key.get((feed_row["type"], feed_row["id"]))
+        # A row can be deleted after the narrow page query but before the
+        # detail query. Omit only that raced row; the next refresh reclamps
+        # the page/counts as normal.
+        if item is None:
+            continue
+        item["type"] = feed_row["type"]
+        item["uid"] = f"{item['type']}-{item['id']}"
+        item["request_id"] = item["request_id"] or f"Draft #{item['id']}"
+        item["application_name"] = item["application_name"] or "—"
+        items.append(item)
+    return {
+        "items": items,
+        "page": effective_page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_next": has_next,
+        "has_previous": cursor_state is not None,
+        "active_total": active_total,
+        "terminal_total": terminal_total,
+        "next_cursor": next_cursor,
+    }
 
 
 def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction]) -> dict[tuple[str, int], tuple[str | None, str | None, str | None, int | None]]:

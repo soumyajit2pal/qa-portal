@@ -120,7 +120,15 @@ function navGroups(user: UserOut | null): NavGroup[] {
     adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers })
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
   }
-  if (hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'CHIEF_MANAGER_QA', 'AGM_QA')) {
+  // Do not show the narrower Department Coordinator workspace merely because
+  // `hasRole` grants Administrators its usual superuser shortcut. System
+  // Admins belong in Users & Access, where every department and role is
+  // available; this page is deliberately limited to a coordinator's own
+  // department and was producing a misleading 403 for Admin accounts.
+  const isDepartmentCoordinator = (user?.roles || []).some((role) => [
+    'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'CHIEF_MANAGER_QA', 'AGM_QA',
+  ].includes(role))
+  if (isDepartmentCoordinator) {
     adminItems.push({ to: '/department-admin', label: 'Department Coordinator', icon: IconUsers })
   }
   if (adminItems.length > 0) {

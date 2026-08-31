@@ -10,6 +10,37 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Route all high-volume repository operations to their isolated service.
+    # Request buffering is disabled so nginx does not create a second large
+    # temporary upload on the frontend container's filesystem.
+    location = /api/document-portal {
+        client_max_body_size 550m;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_pass http://document_portal:8000/api/document-portal;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location ^~ /api/document-portal/ {
+        client_max_body_size 550m;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_pass http://document_portal:8000/api/document-portal/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
     location /api/ {
         proxy_pass http://backend:8000/api/;
 

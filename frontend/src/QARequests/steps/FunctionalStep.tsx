@@ -17,6 +17,7 @@ interface Props {
   // each ChecklistEvidencePicker instance fetching its own).
   savedEvidenceFor: (kind: EvidenceKind, itemIndex: number) => DraftChecklistEvidenceOut[];
   onEvidenceChanged: () => void;
+  focusEvidenceItem?: string;
 }
 
 // Shown only while a Functional-bucket type (Functional/Sanity/Regression
@@ -26,7 +27,7 @@ interface Props {
 // checklist self-declaration -- folded into this same step (not a separate
 // one) to match how SAST/DAST already self-declare their own Security
 // Readiness checklist within their own step (see SastStep.tsx/DastStep.tsx).
-export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEvidenceFiles, savedEvidenceFor, onEvidenceChanged }: Props) {
+export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEvidenceFiles, savedEvidenceFor, onEvidenceChanged, focusEvidenceItem }: Props) {
   function toggleChecked(item: string) {
     set(
       "checked_items",
@@ -71,10 +72,11 @@ export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEv
         heading="Readiness checklist — self-declaration"
         description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. The QA Lead will verify every declaration independently."
         noticeLabel="Before SM approval"
-        noticeText="Every mandatory criterion must be selected. Evidence is recommended for mandatory and selected items."
+        noticeText="Every mandatory criterion must be selected and have supporting evidence attached before the request can be raised."
         selectedItems={form.checked_items} onToggle={toggleChecked}
         draftRequestId={draftRequestId} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles}
         savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={onEvidenceChanged}
+        focusEvidenceItem={focusEvidenceItem}
       />
     </div>
   );

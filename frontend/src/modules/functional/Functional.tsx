@@ -25,6 +25,7 @@ import UserAssignSelect from "../../components/UserAssignSelect";
 import ConfirmModal from "../../components/ConfirmModal";
 import JiraActivity from "../../components/JiraActivity";
 import ClearableSearchInput from "../../components/ClearableSearchInput";
+import RaisedHistoryFilter from "../../components/RaisedHistoryFilter";
 import RoleGroupLink from "../../components/RoleGroupLink";
 import RequestDelegation from "../../components/RequestDelegation";
 import {
@@ -1862,6 +1863,7 @@ export default function Functional() {
   const [users, setUsers] = useState<UserOut[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
   const [assignedOnly, setAssignedOnly] = useState(false);
+  const [raisedHistory, setRaisedHistory] = useState({ from: "", to: "" });
   // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
   // FunctionalListOut shape; opening a request fetches the full
   // FunctionalOut record fresh via GET /api/functional-requests/{id} before
@@ -1876,7 +1878,7 @@ export default function Functional() {
     loading, setPage, setPageSize, reload,
   } = usePaginatedList<FunctionalListOut>("/api/functional-requests", {
     status: statusFilter ? [statusFilter] : undefined,
-    extra: { assigned_to_me: assignedOnly ? "true" : undefined },
+    extra: { assigned_to_me: assignedOnly ? "true" : undefined, raised_from: raisedHistory.from || undefined, raised_to: raisedHistory.to || undefined },
   });
 
   useEffect(() => {
@@ -1934,6 +1936,7 @@ export default function Functional() {
           <button type="button" className={!assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(false)}>All Requests</button>
           <button type="button" className={assignedOnly ? "active" : ""} onClick={() => setAssignedOnly(true)}>My Assigned Work</button>
         </div>
+        <RaisedHistoryFilter value={raisedHistory} onChange={setRaisedHistory} />
       </div>
       {/* <div className="toolbar">
         <select

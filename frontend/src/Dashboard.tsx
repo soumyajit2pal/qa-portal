@@ -10,11 +10,6 @@ import {
   IconGrid, IconWarning, IconApprove, IconWorkflow, IconCheckCircle,
 } from './components/Icons'
 import {
-  GATEWAY_TERMINAL_STATUSES, QA_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES,
-  PERFORMANCE_TERMINAL_STATUSES,
-} from './constants'
-import {
-  QARequestListOut, PageOut, FunctionalListOut, SASTListOut, DASTListOut, PerformanceListOut,
   ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut, DashboardSummaryOut,
   SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard,
   DashboardAttentionMetric, DashboardAttentionOut, DashboardAttentionRow,
@@ -49,58 +44,17 @@ interface UnifiedRequestRow {
   change_description?: string | null
 }
 
-function toUnified(type: string, rows: {
-  id: number; request_id?: string | null; application_name?: string | null
-  department?: string | null; status: string; requester_id?: number | null; created_at: string
-  change_description?: string | null
-}[]): UnifiedRequestRow[] {
-  return rows.map((r) => ({
-    // A still-Draft QA Request gateway has no request_id yet -- see the
-    // backend's matching column comment -- so fall back to a stable
-    // placeholder rather than showing a blank/undefined cell here.
-    id: r.id, uid: `${type}-${r.id}`, request_id: r.request_id || `Draft #${r.id}`, type, application_name: r.application_name || '—',
-    department: r.department, status: r.status, requester_id: r.requester_id, created_at: r.created_at,
-    change_description: r.change_description,
-  }))
-}
-
-// DAST previously fell back to the first scan target's URL when the
-// delegated application_name wasn't set (e.g. a standalone/legacy DAST
-// request with no linked QA Request) -- but `targets` isn't part of the
-// lightweight PAG-005 list schema this now consumes (see DASTListOut), so
-// this mapper is kept separate mainly for its own '—' fallback and type,
-// not for that target-URL fallback anymore (mirrors the same simplification
-// made in Suppression.tsx's selectRequest).
-function toUnifiedDast(rows: DASTListOut[]): UnifiedRequestRow[] {
-  return rows.map((r) => ({
-    id: r.id, uid: `DAST-${r.id}`, request_id: r.request_id, type: 'DAST',
-    application_name: r.application_name || '—',
-    department: r.department, status: r.status, requester_id: r.requester_id, created_at: r.created_at,
-    change_description: r.change_description,
-  }))
-}
-
-// Each request type has its own terminal-status vocabulary (see constants.ts)
-// -- reused here rather than guessing at a generic "is this closed" rule, so
-// "Active" always agrees with what that type's own detail page considers open.
-const TERMINAL_STATUSES_BY_TYPE: Record<string, string[]> = {
-  'QA Request': GATEWAY_TERMINAL_STATUSES,
-  'Functional QA': QA_TERMINAL_STATUSES,
-  SAST: SAST_DAST_TERMINAL_STATUSES,
-  DAST: SAST_DAST_TERMINAL_STATUSES,
-  Performance: PERFORMANCE_TERMINAL_STATUSES,
-}
-// Reported directly: "Draft should not be seen in Active" -- a Draft is not
-// yet even submitted for review, so it shouldn't count as "in progress"
-// alongside genuinely in-flight requests, even though DRAFT was never in any
-// type's own terminal-status list (it isn't terminal either -- it just
-// hasn't started).
-function isActiveRequest(row: UnifiedRequestRow): boolean {
-  if (row.status === 'DRAFT') return false
-  return !(TERMINAL_STATUSES_BY_TYPE[row.type] || []).includes(row.status)
-}
-function isTerminalRequest(row: UnifiedRequestRow): boolean {
-  return (TERMINAL_STATUSES_BY_TYPE[row.type] || []).includes(row.status)
+interface DashboardRequestsPage {
+  items: UnifiedRequestRow[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+  has_next: boolean
+  has_previous: boolean
+  next_cursor?: string | null
+  active_total: number
+  terminal_total: number
 }
 
 const TYPE_TO_PATH: Record<string, string> = {
@@ -121,18 +75,25 @@ const DONUT_COLORS = ['#4f46e5', '#16a34a', '#d97706', '#dc2626', '#7c3aed']
 // findings, pending-approval gates) with no per-request created_at of their
 // own to filter by, so they intentionally stay as-is; a note next to the
 // filter says so rather than silently doing nothing.
-type RaisedRangePreset = 'all' | '1h' | '3d' | '15d' | '1m' | 'custom'
+type RaisedRangePreset = '7d' | '30d' | '3m' | '6m' | 'custom'
 interface RaisedRange {
   preset: RaisedRangePreset
   from: string
   to: string
 }
-const DEFAULT_RAISED_RANGE: RaisedRange = { preset: 'all', from: '', to: '' }
+// A rolling 30-day view is the operational default. Historical data remains
+// available in Reports & Export Centre, where it does not burden every
+// dashboard visit.
+const DEFAULT_RAISED_RANGE: RaisedRange = { preset: '30d', from: '', to: '' }
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
 
 /** Format an instant for API filters without converting it to UTC/GMT. */
 function toIstApiDateTime(date: Date): string {
   return new Date(date.getTime() + IST_OFFSET_MS).toISOString().replace('Z', '+05:30')
+}
+
+function toIstDateInputValue(date: Date): string {
+  return new Date(date.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10)
 }
 
 /** Date-only inputs represent calendar dates in the QA Portal's IST timezone. */
@@ -141,12 +102,10 @@ function istDateAt(date: string, time: string): Date {
 }
 
 function rangeBounds(range: RaisedRange): { start?: Date; end?: Date } {
-  if (range.preset === 'all') return {}
-  if (range.preset === '1h') return { start: new Date(Date.now() - 60 * 60 * 1000), end: new Date() }
-  if (range.preset === '3d') return { start: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000), end: new Date() }
-  if (range.preset === '15d') return { start: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000), end: new Date() }
-  if (range.preset === '1m') {
-    const start = new Date(); start.setMonth(start.getMonth() - 1)
+  if (range.preset === '7d') return { start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), end: new Date() }
+  if (range.preset === '30d') return { start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), end: new Date() }
+  if (range.preset === '3m' || range.preset === '6m') {
+    const start = new Date(); start.setMonth(start.getMonth() - (range.preset === '3m' ? 3 : 6))
     return { start, end: new Date() }
   }
   const start = range.from ? istDateAt(range.from, '00:00:00') : undefined
@@ -164,23 +123,9 @@ function rangeQuery(range: RaisedRange): string {
 }
 
 function isWithinRaisedRange(dateStr: string, range: RaisedRange): boolean {
-  if (range.preset === 'all') return true
   const t = new Date(dateStr).getTime()
-  if (range.preset === '1h') return t >= Date.now() - 60 * 60 * 1000
-  if (range.preset === '3d') return t >= Date.now() - 3 * 24 * 60 * 60 * 1000
-  if (range.preset === '15d') return t >= Date.now() - 15 * 24 * 60 * 60 * 1000
-  if (range.preset === '1m') {
-    const oneMonthAgo = new Date()
-    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
-    return t >= oneMonthAgo.getTime()
-  }
-  // custom
-  if (range.from && t < istDateAt(range.from, '00:00:00').getTime()) return false
-  if (range.to) {
-    const toEnd = istDateAt(range.to, '23:59:59.999')
-    if (t > toEnd.getTime()) return false
-  }
-  return true
+  const { start, end } = rangeBounds(range)
+  return (!start || t >= start.getTime()) && (!end || t <= end.getTime())
 }
 
 function timeAgo(dateStr: string): string {
@@ -191,6 +136,44 @@ function timeAgo(dateStr: string): string {
   if (hrs < 24) return `${hrs} hr${hrs > 1 ? 's' : ''} ago`
   const days = Math.round(hrs / 24)
   return `${days} day${days > 1 ? 's' : ''} ago`
+}
+
+/** A page-shaped loading state preserves the dashboard layout while data loads. */
+function Shimmer({ className = '' }: { className?: string }) {
+  return <span className={`shimmer ${className}`} aria-hidden="true" />
+}
+
+function DashboardLoadingSkeleton({ variant = 'dashboard' }: { variant?: 'dashboard' | 'requests' | 'insights' }) {
+  if (variant === 'requests') {
+    return (
+      <div className="dashboard-loading dashboard-loading-requests" role="status" aria-label="Loading requests" aria-busy="true">
+        <Shimmer className="dashboard-loading-note" />
+        <section className="dashboard-loading-panel">
+          <div className="dashboard-loading-tabs"><Shimmer /><Shimmer /></div>
+          <div className="dashboard-loading-metrics">
+            {[0, 1, 2].map((item) => <div key={item}><Shimmer className="dashboard-loading-icon" /><Shimmer className="dashboard-loading-value" /><Shimmer className="dashboard-loading-label" /></div>)}
+          </div>
+          <div className="dashboard-loading-table">
+            <div className="dashboard-loading-table-head"><Shimmer /><Shimmer /><Shimmer /><Shimmer /></div>
+            {[0, 1, 2, 3, 4].map((item) => <div key={item} className="dashboard-loading-table-row"><Shimmer /><Shimmer /><Shimmer /><Shimmer /></div>)}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  return (
+    <div className={`dashboard-loading dashboard-loading-${variant}`} role="status" aria-label="Loading dashboard data" aria-busy="true">
+      <div className="dashboard-loading-metrics">
+        {[0, 1, 2, 3].map((item) => <div key={item}><Shimmer className="dashboard-loading-icon" /><Shimmer className="dashboard-loading-value" /><Shimmer className="dashboard-loading-label" /></div>)}
+      </div>
+      <section className="dashboard-loading-panel">
+        <div className="dashboard-loading-section-head"><Shimmer /><Shimmer /></div>
+        <div className="dashboard-loading-columns"><Shimmer /><Shimmer /><Shimmer /></div>
+      </section>
+      <div className="dashboard-loading-secondary"><Shimmer /><Shimmer /></div>
+    </div>
+  )
 }
 
 function downloadCsv<T extends Record<string, any>>(filename: string, rows: T[], columns: { key: string; header: string }[]) {
@@ -497,26 +480,37 @@ function CommandCentre({ range }: { range: RaisedRange }) {
   }
 
   useEffect(() => {
+    let cancelled = false
     const query = rangeQuery(range)
-    Promise.all([
-      // project-wise/3w are only ever fetched by this Command Centre tab, so
-      // their own department scoping (see backend dashboard_department_scope)
-      // is applied unconditionally server-side -- no flag needed here.
-      api.get<ProjectWiseOut>(`/api/dashboard/project-wise${query}`),
-      api.get<ThreeWOut>(`/api/dashboard/3w${query}`),
-      // The dashboard renders only five rows.  Its dedicated endpoint applies
-      // period/scope filtering and resolves references in batches, rather
-      // than fetching the audit feed's hundreds of approval records.
-      api.get<ApprovalActionOut[]>(`/api/dashboard/recent-activity${query}${query ? '&' : '?'}limit=5`),
-      // DSH-001..004 -- replaces this tab's own client-side derivation of
-      // active/nearing-release/critical-pending counts and the Functional
-      // lifecycle breakdown from 4-5 fully-fetched request collections (see
-      // dashboard.py::dashboard_summary's own docstring for exactly which
-      // numbers respect date_from/date_to vs. stay all-time).
-      api.get<DashboardSummaryOut>(`/api/dashboard/summary${query}`),
-    ]).then(([p, w, a, s]) => {
-      setProj(p); setThreeW(w); setActivity(a); setSummary(s)
-    }).catch(setError)
+    setError(null)
+    async function loadCommandCentre() {
+      try {
+        // Keep the dashboard responsive without creating a four-connection
+        // burst for every visitor.  Two bounded batches are a deliberate
+        // production-load limit; each endpoint remains independently cached
+        // or optimized server-side.
+        const [p, w] = await Promise.all([
+          api.get<ProjectWiseOut>(`/api/dashboard/project-wise${query}`),
+          api.get<ThreeWOut>(`/api/dashboard/3w${query}`),
+        ])
+        const [a, s] = await Promise.all([
+          // The dashboard renders only five rows. Its dedicated endpoint
+          // resolves references in batches rather than downloading the audit
+          // feed's full history.
+          api.get<ApprovalActionOut[]>(`/api/dashboard/recent-activity${query}${query ? '&' : '?'}limit=5`),
+          // DSH-001..004 summary is cached server-side and replaces the
+          // earlier browser-side list aggregation.
+          api.get<DashboardSummaryOut>(`/api/dashboard/summary${query}`),
+        ])
+        if (!cancelled) {
+          setProj(p); setThreeW(w); setActivity(a); setSummary(s)
+        }
+      } catch (loadError) {
+        if (!cancelled) setError(loadError)
+      }
+    }
+    void loadCommandCentre()
+    return () => { cancelled = true }
   }, [range])
 
   const teams = useMemo(() => threeW ? Object.keys(threeW.team_wise_distribution) : [], [threeW])
@@ -544,7 +538,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
   )
 
   if (error) return <ErrorText error={error} />
-  if (!proj || !threeW || !summary) return <p className="muted">Loading...</p>
+  if (!proj || !threeW || !summary) return <DashboardLoadingSkeleton />
 
   const m = proj.metrics
   const slaWithin = threeW.items.filter((i) => i.ageing_days <= 7).length
@@ -639,10 +633,8 @@ function CommandCentre({ range }: { range: RaisedRange }) {
                   loading={attentionLoading && attentionMetric === 'pending-decisions'}
                   onOpen={() => openAttention('pending-decisions')} />
         <StatCard icon={IconWorkflow} iconClass="purple" tag="Child requests" value={activeRequestsCount} label="Active child requests"
-                  hint={range.preset === 'all'
-                    ? 'Non-draft Functional, SAST, DAST, and Performance requests that are still open.'
-                    : 'Still-open child requests raised within the selected period.'}
-                  footline={`${summary.child_requests_total} total child request${summary.child_requests_total === 1 ? '' : 's'}${range.preset === 'all' ? ' in your visible scope' : ' in the selected range'}`}
+                  hint="Still-open Functional, SAST, DAST, and Performance requests raised within the selected period."
+                  footline={`${summary.child_requests_total} total child request${summary.child_requests_total === 1 ? '' : 's'} in the selected range`}
                   loading={attentionLoading && attentionMetric === 'active-requests'}
                   onOpen={() => openAttention('active-requests')} />
       </div>
@@ -822,7 +814,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         >
           <LifecycleStepper statusCounts={summary.functional_status_counts} />
         </Card>
-        <Card title="Recent Activity" subtitle={range.preset === 'all' ? 'Live updates from across the portal' : 'Activity within the selected reporting period'}>
+        <Card title="Recent Activity" subtitle="Activity within the selected reporting period">
           <RecentActivity items={filteredActivity} />
         </Card>
       </div>
@@ -840,7 +832,7 @@ function SecurityTab({ range }: { range: RaisedRange }) {
       .then(([s, d]) => { setSast(s); setDast(d) }).catch(setError)
   }, [range])
   if (error) return <ErrorText error={error} />
-  if (!sast || !dast) return <p className="muted">Loading...</p>
+  if (!sast || !dast) return <DashboardLoadingSkeleton variant="insights" />
   return (
     <div>
       <div className="section-title">SAST</div>
@@ -876,7 +868,7 @@ function SuppressionTab({ range }: { range: RaisedRange }) {
   const [error, setError] = useState<unknown>(null)
   useEffect(() => { api.get<SuppressionDashboard>(`/api/dashboard/suppression${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
   if (error) return <ErrorText error={error} />
-  if (!data) return <p className="muted">Loading...</p>
+  if (!data) return <DashboardLoadingSkeleton variant="insights" />
   return (
     <div>
       <div className="grid grid-4">
@@ -897,11 +889,11 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
   useEffect(() => { api.get<ThreeWOut>(`/api/dashboard/3w${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
 
   async function openProject(projectId: string) {
-    try { setDetail(await api.get<ThreeWDetailOut>(`/api/dashboard/3w/${projectId}${rangeQuery({ preset: 'all', from: '', to: '' })}`)) } catch (err) { setError(err) }
+    try { setDetail(await api.get<ThreeWDetailOut>(`/api/dashboard/3w/${projectId}${rangeQuery(range)}`)) } catch (err) { setError(err) }
   }
 
   if (error) return <ErrorText error={error} />
-  if (!data) return <p className="muted">Loading...</p>
+  if (!data) return <DashboardLoadingSkeleton variant="insights" />
 
   return (
     <div>
@@ -968,32 +960,23 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
 // department-scoped view is a deliberate, separate destination instead of
 // something narrowing the default landing view.
 //
-// Reported directly (live undercount, not just "lots of API calling"): this
-// used to take the same 5 department-wide, page_size=100-capped request
-// lists CommandCentre fetched and filter them client-side down to "mine"
-// (requester_id === user.id) / "my department". That silently dropped a
-// user's own older requests once their department's *total* volume for a
-// single request type crossed 100 rows -- the client-side filter was
-// narrowing an already-truncated page 1, not the user's actual complete
-// history. DSH-001..004 removed CommandCentre's need for these lists
-// entirely (it now uses /api/dashboard/summary), so there's no longer
-// anything to share a hoisted fetch with -- this tab now owns two
-// independently server-scoped fetches instead: `requester_id=<me>` for "My
-// Requests" and `department=<mine>` for "My Department" (see
-// qa_requests.py/functional.py/sast_dast.py/performance.py's new
-// requester_id param). Both are still capped at page_size=100 per request
-// type, but that's now a defensible "one person's, or one department's,
-// total lifetime volume of a single request type" ceiling -- the same class
-// of accepted compromise as MyExecutions.tsx's assignment=mine or Pending
-// Approvals' bounded personal queue -- instead of resting on an unrelated
-// org-wide page 1.
+// The table is backed by one dedicated, paginated dashboard endpoint. Oracle
+// applies the user's scope and IST reporting period to each request type
+// before the union, so the browser never has to load or filter five large
+// request lists locally.
 function MyRequestsTab({ range }: { range: RaisedRange }) {
   const navigate = useNavigate()
   const { user } = useAuth()
   const [reqScope, setReqScope] = useState<'mine' | 'department'>('mine')
-  const [myRequests, setMyRequests] = useState<UnifiedRequestRow[]>([])
-  const [departmentRequests, setDepartmentRequests] = useState<UnifiedRequestRow[]>([])
-  const [loaded, setLoaded] = useState(false)
+  const [requestPage, setRequestPage] = useState<DashboardRequestsPage | null>(null)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(25)
+  // The Dashboard feed uses server keyset pagination, not an ever-growing
+  // OFFSET scan.  Table only exposes Previous/Next navigation, so retaining
+  // the cursor used for each visited page gives users normal back navigation
+  // without putting the database back through a global sort.
+  const [pageCursors, setPageCursors] = useState<Record<number, string | null>>({ 1: null })
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<unknown>(null)
   // 2026-08 "one user can be on multiple departments" CR -- "My department"
   // now means the UNION across every department this user belongs to, not
@@ -1001,96 +984,67 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
   const myDepartments = user?.departments && user.departments.length
     ? user.departments : (user?.department ? [user.department] : [])
 
+  // A reporting-period change can reduce the result set.  Always return to
+  // the first server page so a previously valid later page never presents as
+  // a misleading empty state.
+  useEffect(() => {
+    setPage(1)
+    setPageCursors({ 1: null })
+  }, [range.preset, range.from, range.to])
+
   useEffect(() => {
     if (!user?.id) return
-    setLoaded(false)
-    function fetchUnified(extraQuery: string): Promise<UnifiedRequestRow[]> {
-      const query = new URLSearchParams(extraQuery)
-      const scopedQuery = query.toString()
-      return Promise.all([
-        api.get<PageOut<QARequestListOut>>(`/api/qa-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
-        api.get<PageOut<FunctionalListOut>>(`/api/functional-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
-        api.get<PageOut<SASTListOut>>(`/api/sast-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
-        api.get<PageOut<DASTListOut>>(`/api/dast-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
-        api.get<PageOut<PerformanceListOut>>(`/api/performance-requests?${scopedQuery}&page_size=100`).then((p) => p.items),
-      ]).then(([r, f, sast, dast, perf]) => {
-        const all = [
-          ...toUnified('QA Request', r),
-          ...toUnified('Functional QA', f),
-          ...toUnified('SAST', sast),
-          ...toUnifiedDast(dast),
-          ...toUnified('Performance', perf),
-        ]
-        return all.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      })
-    }
-    // `apply_department_filter` is still a single-value equality filter on
-    // the backend, a deliberate per-request search/narrow control -- see its
-    // own list_requests docstring -- so this fetches once per department and
-    // merges/dedupes client-side rather than widening that filter's own
-    // semantics.
-    Promise.all([
-      fetchUnified(`requester_id=${user.id}`),
-      // A user with no department mapped (rare -- e.g. some executive
-      // accounts) has no meaningful "my department" set; skip the fetch
-      // rather than asking the backend for department="" (which would 400/
-      // filter to nothing useful, not "no department").
-      myDepartments.length
-        ? Promise.all(myDepartments.map((dept) => fetchUnified(`department=${encodeURIComponent(dept)}`)))
-          .then((batches) => {
-            const seen = new Set<string>()
-            const merged: UnifiedRequestRow[] = []
-            for (const batch of batches) {
-              for (const row of batch) {
-                if (seen.has(row.uid)) continue
-                seen.add(row.uid)
-                merged.push(row)
-              }
-            }
-            return merged.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-          })
-        : Promise.resolve([]),
-    ]).then(([mine, department]) => {
-      setMyRequests(mine); setDepartmentRequests(department); setLoaded(true)
-    }).catch(setError)
-  }, [user?.id, user?.department, user?.departments])
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    const query = new URLSearchParams(rangeQuery(range).replace(/^\?/, ''))
+    query.set('scope', reqScope)
+    query.set('page', String(page))
+    query.set('page_size', String(pageSize))
+    const cursor = pageCursors[page]
+    if (cursor) query.set('cursor', cursor)
+    api.get<DashboardRequestsPage>(`/api/dashboard/requests?${query.toString()}`)
+      .then((result) => { if (!cancelled) setRequestPage(result) })
+      .catch((loadError) => { if (!cancelled) setError(loadError) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [user?.id, reqScope, page, pageSize, pageCursors, range.preset, range.from, range.to])
 
-  const filteredMyRequests = myRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
-  const filteredDepartmentRequests = departmentRequests.filter((r) => isWithinRaisedRange(r.created_at, range))
-  const scopedRequests = reqScope === 'mine' ? filteredMyRequests : filteredDepartmentRequests
-  const scopedActiveCount = scopedRequests.filter(isActiveRequest).length
-  // Computed the same way as isActiveRequest's own terminal-status check
-  // (not just "total minus active") so a Draft request -- neither active nor
-  // terminal now that Draft is excluded from Active above -- isn't
-  // miscounted as "Closed / cancelled" either; it still counts toward Total
-  // requests, just not toward either of the other two cards.
-  const scopedTerminalCount = scopedRequests.filter(isTerminalRequest).length
+  function changeRequestPage(nextPage: number) {
+    if (nextPage > page) {
+      const nextCursor = requestPage?.next_cursor
+      if (!nextCursor) return
+      setPageCursors((current) => ({ ...current, [nextPage]: nextCursor }))
+    }
+    setPage(nextPage)
+  }
+
+  const scopedRequests = requestPage?.items || []
 
   if (error) return <ErrorText error={error} />
-  if (!loaded) return <p className="muted">Loading...</p>
+  if (!requestPage && loading) return <DashboardLoadingSkeleton variant="requests" />
 
   return (
     <div>
       <p className="muted small">
-        Everything raised by you, or by {myDepartments.length ? myDepartments.join(', ') : 'your department'}, across every request type — QA
-        Request, Functional QA, SAST, DAST and Performance.
+        Results are filtered by the reporting period in Oracle and paged across every request type — QA Request, Functional QA, SAST, DAST and Performance.
       </p>
       <Card
         right={(
           <div className="pill-tabs">
-            <button className={reqScope === 'mine' ? 'active' : ''} onClick={() => setReqScope('mine')}>
-              My Requests ({filteredMyRequests.length})
+            <button className={reqScope === 'mine' ? 'active' : ''} onClick={() => { setReqScope('mine'); setPage(1); setPageCursors({ 1: null }) }}>
+              My Requests{reqScope === 'mine' && requestPage ? ` (${requestPage.total})` : ''}
             </button>
-            <button className={reqScope === 'department' ? 'active' : ''} onClick={() => setReqScope('department')}>
-              {myDepartments.length ? myDepartments.join(', ') : 'My Department'} ({filteredDepartmentRequests.length})
+            <button className={reqScope === 'department' ? 'active' : ''} onClick={() => { setReqScope('department'); setPage(1); setPageCursors({ 1: null }) }}>
+              {myDepartments.length ? myDepartments.join(', ') : 'My Department'}{reqScope === 'department' && requestPage ? ` (${requestPage.total})` : ''}
             </button>
           </div>
         )}
       >
         <div className="grid grid-3">
-          <StatCard icon={IconGrid} iconClass="blue" value={scopedRequests.length} label="Total requests" />
-          <StatCard icon={IconWorkflow} iconClass="purple" value={scopedActiveCount} label="Active / in progress" />
-          <StatCard icon={IconCheckCircle} iconClass="amber" value={scopedTerminalCount} label="Closed / cancelled" />
+          <StatCard icon={IconGrid} iconClass="blue" value={requestPage?.total || 0} label="Total requests" />
+          <StatCard icon={IconWorkflow} iconClass="purple" value={requestPage?.active_total || 0} label="Active / in progress" />
+          <StatCard icon={IconCheckCircle} iconClass="amber" value={requestPage?.terminal_total || 0} label="Closed / cancelled" />
         </div>
 
         <div style={{ marginTop: 18 }}>
@@ -1116,8 +1070,19 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
               { key: 'created_at', header: 'Raised', render: (r) => timeAgo(r.created_at) },
             ]}
             rows={scopedRequests}
+            server={{
+              page: requestPage?.page || page,
+              pageSize: requestPage?.page_size || pageSize,
+              total: requestPage?.total || 0,
+              totalPages: requestPage?.total_pages || 1,
+              hasNext: requestPage?.has_next || false,
+              hasPrevious: requestPage?.has_previous || false,
+              onPageChange: changeRequestPage,
+              onPageSizeChange: (nextPageSize) => { setPageSize(nextPageSize); setPage(1); setPageCursors({ 1: null }) },
+              loading,
+            }}
           />
-          {scopedRequests.length === 0 && (
+          {!loading && scopedRequests.length === 0 && (
             <p className="muted small" style={{ marginTop: 8 }}>
               {reqScope === 'mine' ? "You haven't raised any requests yet." : 'No requests found for your department yet.'}
             </p>
@@ -1384,7 +1349,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
     return result
   }, {})
   const bounds = rangeBounds(range)
-  const periodLabel = range.preset === 'all' ? 'All recorded activity (IST)' : `${bounds.start ? formatDateIST(bounds.start) : 'Beginning'} – ${bounds.end ? formatDateIST(bounds.end) : 'Today'} (IST)`
+  const periodLabel = `${bounds.start ? formatDateIST(bounds.start) : 'Beginning'} – ${bounds.end ? formatDateIST(bounds.end) : 'Today'} (IST)`
 
   function exportContribution() {
     downloadCsv('qa-contribution-and-coverage.csv', filteredRows.map((row) => ({
@@ -1613,10 +1578,16 @@ export default function Dashboard() {
         <div><strong>Reporting period</strong><span>All dates use India Standard Time (IST). Dashboard metrics, activity, insights, and requests use this created/raised-date range.</span></div>
         <div className="tester-period-presets">
           {([
-            ['all', 'All time'], ['1h', 'Last hour'], ['3d', 'Last 3 days'], ['15d', 'Last 15 days'], ['1m', 'Last month'], ['custom', 'Custom dates'],
+            ['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['3m', 'Last 3 months'], ['6m', 'Last 6 months'], ['custom', 'Custom dates'],
           ] as Array<[RaisedRangePreset, string]>).map(([preset, label]) => (
             <button key={preset} type="button" className={range.preset === preset ? 'active' : ''}
-                    onClick={() => setRange((current) => ({ ...current, preset }))}>{label}</button>
+                    onClick={() => setRange((current) => preset === 'custom'
+                      ? {
+                          preset,
+                          from: current.from || toIstDateInputValue(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)),
+                          to: current.to || toIstDateInputValue(new Date()),
+                        }
+                      : { ...current, preset })}>{label}</button>
           ))}
         </div>
         {range.preset === 'custom' && <div className="tester-custom-dates">

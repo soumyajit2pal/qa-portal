@@ -1014,6 +1014,12 @@ export interface TestProjectOut {
   shared_with_you?: boolean
 }
 
+export interface TestProjectSummaryCountsOut {
+  project_id: number
+  test_case_count: number
+  cycle_count: number
+}
+
 // 2026-08 "view-only access to department/user" CR -- mirrors backend
 // schemas.TestProjectViewGrantOut. Exactly one of department/user_id is set
 // per row.
@@ -1465,6 +1471,12 @@ export interface TestExecutionOut {
   // this is only for disabling the option and explaining why before the
   // user even submits.
   linked_defects?: LinkedGovernedDefectRef[]
+}
+
+export interface MyExecutionOut {
+  project: TestProjectOut
+  cycle: TestCycleOut
+  execution: TestExecutionOut
 }
 
 // Mirrors backend schemas.DefectLinkableExecutionOut -- the batch

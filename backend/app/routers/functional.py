@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
+from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, QA_REQUEST_TERMINAL_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
@@ -195,6 +195,9 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
     q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.FunctionalRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    q = pagination.apply_terminal_raised_date_filter(
+        q, params, models.FunctionalRequest.status, models.FunctionalRequest.created_at, QA_REQUEST_TERMINAL_STATUSES,
+    )
     # Module-specific, same reasoning/reported issue as qa_requests.py's own
     # requester_id addition -- lets Dashboard.tsx's "My Requests" tab filter
     # server-side instead of over a department-wide, page_size=100-capped

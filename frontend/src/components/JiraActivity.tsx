@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react'
-import { api } from '../api'
+import { api, mapWithConcurrency } from '../api'
 import { formatDateIST, formatDateTimeIST } from '../time'
 import { useAuth } from '../context/AuthContext'
 import { ROLE_LABELS } from '../constants'
@@ -161,11 +161,11 @@ export function AuthenticatedMarkdown({ value, basePath }: { value: string; base
     let active = true
     const createdUrls: string[] = []
     api.get<RequestDocumentOut[]>(basePath).then(async (documents) => {
-      const loaded = await Promise.all(documents.map(async (document) => {
+      const loaded = await mapWithConcurrency(documents, 3, async (document) => {
         const blob = await api.getBlob(`${basePath}/${document.id}/download`)
         const url = URL.createObjectURL(blob); createdUrls.push(url)
         return [document.file_name, url] as const
-      }))
+      })
       if (active) setAttachmentUrls(Object.fromEntries(loaded))
       else loaded.forEach(([, url]) => URL.revokeObjectURL(url))
     }).catch(() => undefined)
@@ -186,12 +186,12 @@ function CommentContent({ commentId, value }: { commentId: number; value: string
         const docs = await api.get<RequestDocumentOut[]>(`/api/approvals/comments/${commentId}/attachments`)
         if (!active) return
         setDocuments(docs)
-        const loaded = await Promise.all(docs.map(async (document) => {
+        const loaded = await mapWithConcurrency(docs, 3, async (document) => {
           const blob = await api.getBlob(`/api/approvals/comments/${commentId}/attachments/${document.id}/download`)
           const url = URL.createObjectURL(blob)
           createdUrls.push(url)
           return [document.id, url] as const
-        }))
+        })
         if (active) setUrls(Object.fromEntries(loaded))
         else loaded.forEach(([, url]) => URL.revokeObjectURL(url))
       } catch {

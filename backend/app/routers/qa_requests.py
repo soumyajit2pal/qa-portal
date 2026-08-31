@@ -240,6 +240,46 @@ def _draft_evidence_module(db: Session, kind: str, item_index: int) -> str:
     return f"{_DRAFT_EVIDENCE_PREFIXES[kind]}_{item_index:02d}"
 
 
+def _missing_mandatory_draft_evidence(db: Session, qa_request: "models.QARequest",
+                                      request_types: list[str]) -> list[str]:
+    """Return mandatory readiness items that do not have a real attachment.
+
+    Draft evidence is stored by stable wizard kind/index until child
+    checklist rows exist.  The check uses the live Admin configuration, just
+    like the existing self-declaration gate, and confirms the stored file is
+    still present instead of treating a stale database row as evidence.
+    """
+    selected_modules = []
+    if any(request_type in FUNCTIONAL_BUCKET_TYPES for request_type in request_types):
+        selected_modules.append(("functional", "FUNCTIONAL"))
+    if "SAST" in request_types:
+        selected_modules.append(("sast", "SAST"))
+    if "DAST" in request_types:
+        selected_modules.append(("dast", "DAST"))
+    if "Performance Testing" in request_types:
+        selected_modules.append(("performance", "PERFORMANCE"))
+
+    required = []
+    for kind, module in selected_modules:
+        for item_index, template in enumerate(get_template_items(db, module)):
+            if template.is_mandatory:
+                required.append((_draft_evidence_module(db, kind, item_index), template.item))
+    if not required:
+        return []
+
+    documents = (db.query(models.RequestDocument)
+                 .filter(
+                     models.RequestDocument.request_id == qa_request.id,
+                     models.RequestDocument.module.in_([module for module, _ in required]),
+                 )
+                 .all())
+    available_modules = {
+        document.module for document in documents
+        if document.stored_path and os.path.isfile(doc_store.full_path(document))
+    }
+    return [item for module, item in required if module not in available_modules]
+
+
 def _promote_draft_checklist_evidence(db: Session, qa_request: "models.QARequest") -> None:
     """Moves Draft-wizard evidence onto the actual checklist rows created by
     _sync_linked_child_requests. Only database keys change; stored_path keeps
@@ -452,6 +492,11 @@ def list_requests(params: pagination.PageParams = Depends(),
     # list's own search field) -- matches Request ID, Application Name, or
     # The consolidated CR/EPIC identifier is stored in cr_number.
     q = pagination.apply_search(q, params, models.QARequest.request_id, models.QARequest.application_name, models.QARequest.cr_number)
+    # A raised-date filter narrows only cancelled gateway history. Raised
+    # gateways can still have active child work, so they remain visible.
+    q = pagination.apply_terminal_raised_date_filter(
+        q, params, models.QARequest.status, models.QARequest.created_at, [GatewayStatus.CANCELLED],
+    )
     # Exact CR/EPIC number lookup -- reported directly: "in global search if
     # any one wants to search by cr number as well, can we get all requests
     # details based on that cr?" The `search` param above already ilike-
@@ -1499,7 +1544,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # means every module has to honor it the same way, not just three of
     # four.
     pending_checklist_items = []
-    if "Functional Testing" in request_types:
+    if any(request_type in FUNCTIONAL_BUCKET_TYPES for request_type in request_types):
         functional_checked_set = set(checked_items)
         pending_checklist_items += [
             template.item for template in get_template_items(db, "FUNCTIONAL")
@@ -1529,6 +1574,14 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
             "Cannot raise -- the following mandatory checklist item(s) must be "
             "self-declared ready first (Edit Request): "
             + "; ".join(pending_checklist_items),
+        )
+
+    missing_mandatory_evidence = _missing_mandatory_draft_evidence(db, obj, request_types)
+    if missing_mandatory_evidence:
+        raise HTTPException(
+            400,
+            "Cannot raise -- attach supporting evidence for the following mandatory readiness checklist item(s) first (Edit Request): "
+            + "; ".join(missing_mandatory_evidence),
         )
 
     # Reported directly: DAST scans and Performance tests are never run

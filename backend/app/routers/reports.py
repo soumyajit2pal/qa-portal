@@ -145,6 +145,77 @@ def qa_request_summary(date_from: str | None = None, date_to: str | None = None,
     return out
 
 
+@router.get("/functional-request-register")
+def functional_request_register(date_from: str | None = None, date_to: str | None = None,
+                                db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """One row per Functional Testing child request.
+
+    The QA Request Register deliberately gives a gateway-level view. This
+    register is the operational counterpart for the Functional workflow: its
+    own business ID, actual workflow status, assignment, and the parent
+    change/release context.  It uses the same department scope as the
+    Functional Requests screen, so an export cannot expose another
+    department's requests.
+    """
+    q = (db.query(models.FunctionalRequest)
+         .join(models.QARequest,
+               models.FunctionalRequest.qa_request_id == models.QARequest.id,
+               isouter=True)
+         .options(joinedload(models.FunctionalRequest.qa_request)))
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        # FunctionalRequest.department is a delegated property, hence the
+        # explicit parent join rather than filtering a non-column property.
+        q = q.filter(models.QARequest.department.in_(scope))
+    rows = _in_period(q, models.FunctionalRequest.created_at, date_from, date_to) \
+        .order_by(models.FunctionalRequest.created_at.desc()).all()
+
+    people_ids = {
+        user_id
+        for item in rows
+        for user_id in (
+            item.requester_id,
+            item.department_head_id,
+            item.qa_lead_id,
+            item.qa_request.requester_id if item.qa_request else None,
+        )
+    }
+    for item in rows:
+        people_ids.update(
+            int(value) for value in (item.assigned_tester_ids or "").split(",")
+            if value.strip().isdigit()
+        )
+    names = _user_name_map(db, people_ids)
+
+    return [{
+        "Functional Request ID": item.request_id,
+        "QA Request ID": item.qa_request.request_id if item.qa_request else None,
+        "Application": item.application_name,
+        "Department": item.department,
+        "Request Type(s)": item.request_types,
+        "Change Description": item.change_description,
+        "CR Number/EPIC Number": item.cr_number or item.epic_number,
+        "Previous Completed Request ID": item.bug_fix_source_request_id if item.change_type == "Bug Fix" else None,
+        "Change Type": item.change_type,
+        "Environment": item.environment,
+        "Target Promotion Environment": item.target_promotion_environment,
+        "Target Release Date": item.target_release_date,
+        "Priority": item.priority,
+        "Risk": item.risk_rating,
+        "Status": item.status,
+        "Requester": names.get(item.requester_id or (item.qa_request.requester_id if item.qa_request else None)),
+        "Department Head": names.get(item.department_head_id),
+        "QA Lead": names.get(item.qa_lead_id),
+        "Assigned Testers": ", ".join(
+            names.get(int(value), f"User #{value}")
+            for value in (item.assigned_tester_ids or "").split(",")
+            if value.strip().isdigit()
+        ),
+        "Created At": item.created_at,
+        "Last Updated": item.updated_at,
+    } for item in rows]
+
+
 @router.get("/test-cycle-summary")
 def test_cycle_summary(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """One compact row per visible cycle; avoids exporting every execution attempt."""
@@ -532,6 +603,7 @@ def audit_evidence(date_from: str | None = None, date_to: str | None = None, db:
 
 REPORT_REGISTRY = {
     "qa-request-summary": qa_request_summary,
+    "functional-request-register": functional_request_register,
     "test-cycle-summary": test_cycle_summary,
     "defect-retest-register": defect_retest_register,
     "performance-testing": performance_testing_report,

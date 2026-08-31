@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, waitForJob } from '../../api'
+import { api, mapWithConcurrency, waitForJob } from '../../api'
 import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge, InfoTooltip, WorkflowDecisionPanel } from '../../components/Common'
@@ -1284,11 +1284,11 @@ function TestCaseVersionsModal({ testCase, versions, onClose }: {
 
   useEffect(() => {
     let active = true
-    Promise.all(versions.map((v) =>
+    mapWithConcurrency(versions, 3, (v) =>
       api.get<TestCaseVersionOut>(`/api/test-repository/test-cases/${testCase.id}/versions/${v.id}`)
         .then((full) => [v.id, full] as const)
         .catch(() => null)
-    )).then((results) => {
+    ).then((results) => {
       if (!active) return
       const next: Record<number, TestCaseVersionOut> = {}
       results.forEach((entry) => { if (entry) next[entry[0]] = entry[1] })

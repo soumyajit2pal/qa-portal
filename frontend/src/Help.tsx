@@ -67,22 +67,27 @@ const MANUAL_TOPICS: ManualTopic[] = [
     keywords: 'project shared with you view access view only repository folder tag testcase test case version major minor superseded compare details bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete my executions qa group runner assign reassign reason change attempt defect rejected duplicate not a defect blocked checkout checkin export actual result image test cycle folder department access restricted unfiled folder scoped stats summary cards',
   },
   {
-    id: 'collaboration', number: '09', title: 'Comments and collaboration',
+    id: 'document-portal', number: '09', title: 'Document Portal',
+    summary: 'Controlled documents, folders, downloads, uploads, and document-only access.',
+    keywords: 'document portal document management viewer contributor manager upload folder rename move download zip selection storage deletion disabled access only document role',
+  },
+  {
+    id: 'collaboration', number: '10', title: 'Comments and collaboration',
     summary: 'Jira-style comments, rich text, images, attachments, and activity history.',
     keywords: 'comment activity rich text bullet image paste attachment collaboration jira edit delete history table merged cell colspan rowspan pdf export',
   },
   {
-    id: 'find-report', number: '10', title: 'Find, monitor, and report',
+    id: 'find-report', number: '11', title: 'Find, monitor, and report',
     summary: 'Global search, dashboard periods, tester tracking, occupancy, approval search, and exports.',
-    keywords: 'search id tqa tc dashboard insights columns date range last 3 days 15 days one month custom from to qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals report export workflow log cr number epic number exact match',
+    keywords: 'search id tqa tc dashboard insights columns date range last 7 days 30 days 3 months 6 months custom raised date historical completed requests closed history active pending qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals report export workflow log cr number epic number exact match',
   },
   {
-    id: 'audit', number: '11', title: 'Audit and control',
+    id: 'audit', number: '12', title: 'Audit and control',
     summary: 'Login history, access changes, workflow actions, evidence, and audit review.',
     keywords: 'audit log login logout access change roles status approval evidence export trace who when what',
   },
   {
-    id: 'troubleshooting', number: '12', title: 'Troubleshooting and FAQ',
+    id: 'troubleshooting', number: '13', title: 'Troubleshooting and FAQ',
     summary: 'Missing actions, 400/403/404 errors, import issues, storage paths, assignments, and escalation.',
     keywords: 'error 400 403 404 popup reason guidance missing button import skipped failed permission inactive unassigned upload path storage excel troubleshoot faq',
   },
@@ -98,6 +103,9 @@ const ROLE_ROWS = [
   ['QA Lead', 'Verify readiness, assign QA/Security work, review test cases, manage testing, and approve QA Clearance.', 'Cross-department QA delivery role.'],
   ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'COE - Quality Assurance security delivery role.'],
   ['Chief Manager / AGM – COE', 'Approve QA Clearance and coordinate QA-team working roles.', 'COE - Quality Assurance governance role; Department Coordinator access.'],
+  ['Document Portal Viewer', 'Browse, search, and download files or folder/selection ZIP files.', 'Document Portal only when this is the account’s only role.'],
+  ['Document Portal Contributor', 'Viewer capabilities plus create folders, upload, rename, and move documents.', 'Document Portal only when this is the account’s only role; deletion is disabled.'],
+  ['Document Portal Manager', 'Same controlled repository capabilities as Contributor in the current portal.', 'Document Portal only when this is the account’s only role; deletion is disabled.'],
   ['Administrator', 'Manage all accounts, departments, privileged roles, checklist configuration, and system-wide access.', 'System-wide; assign only when operationally required.'],
 ]
 
@@ -209,7 +217,7 @@ export default function Help() {
         <div className="help-hero-meta">
           <span>Audience</span><strong>All portal users</strong>
           <span>Manual status</span><strong>Current portal workflow</strong>
-          <span>Last reviewed</span><strong>23 August 2026</strong>
+          <span>Last reviewed</span><strong>31 August 2026</strong>
         </div>
       </div>
 
@@ -217,7 +225,7 @@ export default function Help() {
         <div className="help-quick-links" aria-label="Common portal actions">
           <Link to="/qa-requests"><IconWorkflow /><span><strong>Raise a QA Request</strong><small>Start the intake form</small></span><IconArrowRight /></Link>
           <Link to="/pending-approvals"><IconApprove /><span><strong>My Pending Approvals</strong><small>See actions waiting for you</small></span><IconArrowRight /></Link>
-          <Link to="/test-repository"><IconFolder /><span><strong>Test Repository</strong><small>Author and review test cases</small></span><IconArrowRight /></Link>
+          <Link to="/document-portal"><IconFolder /><span><strong>Document Portal</strong><small>Browse controlled documents</small></span><IconArrowRight /></Link>
           <Link to="/test-execution"><IconPlay /><span><strong>Test Execution</strong><small>Run assigned test cases</small></span><IconArrowRight /></Link>
         </div>
       )}
@@ -256,6 +264,7 @@ export default function Help() {
               <SopSteps items={[
                 { title: 'Sign in', text: 'Use the login method assigned to your account: Standard credentials or LDAP / Active Directory.' },
                 { title: 'Complete first-login setup', text: 'A new LDAP user selects exactly one primary department. Secondary department access can be added later only by an Administrator. No portal role is granted at this step: an Administrator or the selected department’s Coordinator must approve access and assign the correct role.' },
+                { title: 'Add a notification email when prompted', text: 'After access is approved, an LDAP account without an email address must supply one before using portal screens. This ensures workflow notifications have a valid recipient.' },
                 { title: 'Check pending work', text: 'Review Pending Approvals and status badges before starting a new action.' },
                 { title: 'Use record IDs', text: 'Reference the full TQA ID in comments, evidence, exports, and support requests so the exact record is traceable.' },
               ]} />
@@ -264,6 +273,7 @@ export default function Help() {
                 <li><IconCheckCircle />Use the Columns control on portal data tables to add API fields or hide columns. The original designed columns remain the default and your choices are saved for that table.</li>
                 <li><IconCheckCircle />Use the filter icon beside a column heading, type to search the suggested values, then select one; tables paginate automatically.</li>
                 <li><IconCheckCircle />Request drawers open expanded. They remain open until Close is selected; use the expand control to switch between expanded and standard width.</li>
+                <li><IconCheckCircle />QA Request lists refresh after an action in the same browser. While the tab is visible, the list also checks for another user’s change; an open request drawer refreshes the actual record status without a browser reload.</li>
                 <li><IconCheckCircle />Dashboard keeps operational items on the landing view. Open Insights for focused Security, Suppression, or 3W analysis.</li>
                 <li><IconCheckCircle />After a successful create, save, assignment, upload, workflow decision, or removal, a green toast confirms that the server accepted the action.</li>
                 <li><IconCheckCircle />Approval, return, rejection, reassignment, deletion, and other consequential actions use a confirmation or decision dialog before submission.</li>
@@ -323,6 +333,7 @@ export default function Help() {
                 { title: 'Find or create the account', text: 'System Administrators use Users & Access. Department Coordinators search their department roster and manage an existing eligible user.' },
                 { title: 'Set the correct department', text: 'Department mapping must be correct before roles are assigned. Business approvals use this mapping; QA delivery roles must be mapped to COE - Quality Assurance.' },
                 { title: 'Assign all required roles', text: 'Select every approved role chip. Existing roles outside a Department Coordinator’s assignable scope are preserved and cannot be removed from that page.' },
+                { title: 'Apply document-only access deliberately', text: 'Only a System Administrator assigns Document Portal Viewer, Contributor, or Manager. An account holding only document roles is limited to Document Portal; other navigation routes show an access message.' },
                 { title: 'Confirm and verify', text: 'Review the confirmation, save, then search for the user again and verify department, roles, login type, and Active status.' },
                 { title: 'Record and review', text: 'Use Audit Log to verify the change. Review multi-role and privileged access periodically and remove roles that are no longer justified.' },
               ]} />
@@ -353,7 +364,7 @@ export default function Help() {
               <SopSteps items={[
                 { title: 'Prepare before opening the form', text: 'Collect the change reference, application, environments, release date, contacts, testing scope, repository or URL details, risk, and readiness evidence.' },
                 { title: 'Select required testing', text: 'Choose Functional, Sanity, Regression, UAT Support, Performance, SAST, and/or DAST. The form displays the correct detail and self-declaration section for each selection.' },
-                { title: 'Complete readiness self-declaration', text: 'Confirm each applicable criterion and attach its evidence during request creation. Evidence is expected before the request reaches approvers or QA readiness.' },
+                { title: 'Complete readiness self-declaration', text: 'Confirm each applicable criterion and attach evidence for every mandatory item during request creation. A request cannot be raised while mandatory evidence is missing.' },
                 { title: 'Save Draft or Submit', text: 'Draft keeps the gateway editable. Submit validates mandatory data and raises linked request records when any required application-name approval is complete.' },
                 { title: 'Delegate for input when needed', text: 'Whenever a request is with the requester for drafting or corrections, the requester can assign any active user—even from another department—to edit it and upload documents. The requester remains the owner and workflow progression stays locked until the assignee returns it or the requester recalls it.' },
                 { title: 'Track linked records', text: 'Open the gateway details to see each generated TQA-FUNC, TQA-SAST, TQA-DAST, or TQA-PERF ID and its independent status.' },
@@ -409,7 +420,7 @@ export default function Help() {
               <p className="help-inline-note">This is an auditable in-application electronic signature. A certificate-based PKI signature using a USB token, DSC provider, or enterprise signing gateway requires a separately configured trust-provider integration.</p>
               <h3 className="help-subheading">Evidence rules</h3>
               <ul className="help-check-list">
-                <li><IconCheckCircle />Attach evidence beside the relevant readiness criterion during request preparation.</li>
+                <li><IconCheckCircle />Attach evidence beside the relevant readiness criterion during request preparation. A mandatory criterion needs both its requester declaration and at least one uploaded evidence file before Submit / Raise is allowed.</li>
                 <li><IconCheckCircle />Evidence is editable before Department Head approval.</li>
                 <li><IconCheckCircle />After Department Head approval, normal evidence upload is locked to protect the approved record.</li>
                 <li><IconCheckCircle />If any later stage returns the request, Edit Details allows the requester to add the corrective evidence.</li>
@@ -518,6 +529,26 @@ export default function Help() {
             </ManualSection>
           )}
 
+          {visibleIds.has('document-portal') && (
+            <ManualSection {...topic('document-portal')}>
+              <div className="help-card-grid three">
+                <article><IconFolder /><h3>Viewer</h3><p>Browse the repository, search, download a file, or download one or more selected items as a ZIP.</p></article>
+                <article><IconUsers /><h3>Contributor</h3><p>Also create folders, upload files or folder trees, rename items, and move them within the repository.</p></article>
+                <article><IconShield /><h3>Manager</h3><p>Has the same controlled repository actions as Contributor today. Deletion is disabled for every role.</p></article>
+              </div>
+              <SopSteps items={[
+                { title: 'Open the controlled repository', text: 'Use Document Portal from the navigation. Search first when you know the name; otherwise use the folder tree and breadcrumb trail to navigate.' },
+                { title: 'Upload deliberately', text: 'Contributors and Managers can upload files or a folder hierarchy. Select how duplicates are handled: keep both, replace the existing file, or skip and report the duplicate.' },
+                { title: 'Organize without deleting', text: 'Create folders and use Rename or Move to correct organization. The repository deliberately has no delete action, preserving recoverability and audit evidence.' },
+                { title: 'Download safely', text: 'Download a single file, a folder ZIP, or a selected set. Large archive preparation can take time; keep the page open until the browser receives the download.' },
+              ]} />
+              <Callout title="Document-only access stays inside Document Portal">
+                An account with only Document Portal roles can use this repository but cannot access requests, dashboards, approvals, or other portal modules. The restriction is enforced in both navigation and the API.
+              </Callout>
+              <p className="help-inline-note">All Document Portal timestamps are shown in India Standard Time (IST). In production, file transfers run in the dedicated Document Portal service so uploads and ZIP work do not consume core workflow capacity.</p>
+            </ManualSection>
+          )}
+
           {visibleIds.has('collaboration') && (
             <ManualSection {...topic('collaboration')}>
               <div className="help-card-grid three">
@@ -549,13 +580,16 @@ export default function Help() {
             <ManualSection {...topic('find-report')}>
               <div className="help-card-grid three">
                 <article><IconSearch /><h3>Global search</h3><p>Search a full TQA ID from the top bar. Short test-case input such as TC-02 is normalized to TQA-TC-02 automatically. A CR or EPIC number (e.g. CR-1042) jumps to the QA Requests list showing every request raised under that exact CR, with its linked Functional/SAST/DAST/Performance/Clearance requests alongside each row.</p></article>
-                <article><IconChart /><h3>Dashboard</h3><p>Dashboard date controls provide All time, Last hour, Last 3 days, Last 15 days, Last month, and a custom From/To range. Attention cards explain their source and open consolidated, server-paginated records for the selected metric.</p></article>
+                <article><IconChart /><h3>Dashboard</h3><p>The Dashboard opens to the last 30 days and provides Last 7 days, Last 30 days, Last 3 months, Last 6 months, and a custom From/To range. Use Reports & Export Centre for unrestricted historical exports. Attention cards explain their source and open consolidated, server-paginated records for the selected metric.</p></article>
                 <article><IconApprove /><h3>Approval queues</h3><p>Pending Approvals groups pending child requests under their parent request or Test Project, supports category filters, and provides server-side page-size and next/previous controls. Approval Workflow Log supports server-side search and entity filtering.</p></article>
               </div>
+              <Callout title="Historical completed requests">
+                Each request list has an optional <strong>Historical completed requests</strong> Raised-date range. It filters closed, cancelled, and finally rejected records in the database. Draft, active, assigned, returned, and approval-pending work always remains visible, regardless of age.
+              </Callout>
               <h3 className="help-subheading">QA Tester Overview: who worked on which request</h3>
               <p><strong>Contribution & Coverage</strong> is the default management view. It reports original testcases created, governed defects raised, governed defect retests, retained execution attempts, distinct Test Projects with actual activity, current execution assignments, and the tester's last activity in the selected period. Testcase versions do not inflate authoring totals.</p>
               <SopSteps items={[
-                { title: 'Choose a period', text: 'Use All time, Last 3 days, Last 15 days, Last month, or Custom. For Custom, enter From and To dates; the To date includes the complete selected day.' },
+                { title: 'Choose a period', text: 'Use Last 7 days, Last 30 days, Last 3 months, Last 6 months, or Custom. For Custom, enter From and To dates; the To date includes the complete selected day. Use Reports & Export Centre for unrestricted historical exports.' },
                 { title: 'Filter the management view', text: 'Search for a tester or filter by department and project. Summary cards, charts, the table, and CSV export all follow the visible filtered set.' },
                 { title: 'Open contribution evidence', text: 'Select a tester or any metric count to inspect testcases, defects, retests, execution attempts, projects, or current execution assignments. Select an evidence row to open its source record.' },
                 { title: 'Review capacity separately', text: 'Switch to Capacity & Occupancy for current Functional, Performance, SAST, and DAST assignment load and the completed-request ledger.' },
@@ -592,8 +626,9 @@ export default function Help() {
                 <li><IconCheckCircle />Results are searched and paginated on the server. Clear the search to restore the complete accessible log.</li>
               </ul>
               <ul className="help-check-list">
-                <li><IconCheckCircle />Use module filters and status badges to narrow operational lists.</li>
-                <li><IconCheckCircle />Use Reports & Export Centre for the QA request register, cycle execution summary, defect/retest register, performance and security registers, testcase approval backlog, application scorecard, QA Clearance register, and approval audit evidence.</li>
+                <li><IconCheckCircle />Use the filter icon in a table column to narrow its visible results; QA Requests does not duplicate this with a separate page-level status selector.</li>
+                <li><IconCheckCircle />Use Reports & Export Centre for the QA Request Register, Functional Request Register, cycle execution summary, defect/retest register, performance and security registers, testcase approval backlog, application scorecard, QA Clearance register, and approval audit evidence.</li>
+                <li><IconCheckCircle />The Reporting period panel applies an IST From/To range to every export. Leave both dates empty to include all historical data available to your access scope.</li>
                 <li><IconCheckCircle />Use Repository and Test Execution exports for detailed test assets and run results.</li>
                 <li><IconCheckCircle />Inactive projects remain discoverable through the project status filter but cannot accept new repository or execution changes until reactivated.</li>
                 <li><IconCheckCircle />QA Certificate validation notes, defect review, and residual-risk sections support rich text, lists, and tables; exported PDFs preserve the formatted content.</li>

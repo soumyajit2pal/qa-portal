@@ -22,6 +22,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
+from .resilience import CircuitOpenError, fortify_circuit
+
 
 class FortifySSCError(Exception):
     pass
@@ -57,6 +59,12 @@ class FortifySSCClient:
         self._token: Optional[str] = None
 
     def _request(self, method: str, path: str, *, auth: Optional[str] = None, payload=None) -> dict:
+        try:
+            fortify_circuit.check()
+        except CircuitOpenError as exc:
+            raise FortifySSCError(
+                f"Fortify SSC is temporarily unavailable. Please retry in {exc.retry_after_seconds} seconds."
+            ) from exc
         url = f"{self.api_url}/{path.lstrip('/')}"
         headers = {"Accept": "application/json"}
         if auth:
@@ -70,11 +78,20 @@ class FortifySSCClient:
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
-                return json.loads(response.read().decode("utf-8"))
+                result = json.loads(response.read().decode("utf-8"))
+                fortify_circuit.record_success()
+                return result
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
+            # A 4xx proves SSC is reachable; only dependency-side overloads
+            # and failures should trip the circuit.
+            if exc.code == 429 or exc.code >= 500:
+                fortify_circuit.record_failure()
+            else:
+                fortify_circuit.record_success()
             raise FortifySSCError(f"Fortify SSC returned HTTP {exc.code}: {detail}") from exc
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            fortify_circuit.record_failure()
             raise FortifySSCError(f"Unable to read Fortify SSC: {exc}") from exc
 
     def _access_token(self) -> str:

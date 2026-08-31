@@ -3,6 +3,7 @@ import { Routes, Route, Navigate, Link, Outlet, useLocation } from 'react-router
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
 import DepartmentPrompt from './components/DepartmentPrompt'
+import EmailCompletionPrompt from './components/EmailCompletionPrompt'
 import PendingApprovalsNotice from './components/PendingApprovalsNotice'
 import { UserOut } from './types'
 import { hasDepartment, QA_DEPARTMENT } from './constants'
@@ -67,6 +68,15 @@ function DocumentPortalOnlyAccessDenied() {
 
 function isAccessApprovalPending(user: UserOut | null): boolean {
   return !!user && user.needs_role_review && !user.needs_department_selection && user.roles.length === 0
+}
+
+function isLdapEmailCompletionRequired(user: UserOut | null): boolean {
+  return !!user
+    && user.login_type === 'LDAP'
+    && !user.needs_department_selection
+    && !user.needs_role_review
+    && user.roles.length > 0
+    && !user.email?.trim()
 }
 
 function AccessApprovalPending() {
@@ -141,6 +151,11 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
           on top of the normal page (not instead of it) so it shows up
           immediately after login regardless of which page they land on. */}
       {user.needs_department_selection && <DepartmentPrompt />}
+      {/* LDAP can authenticate successfully without exposing the directory
+          email attribute. Once access is approved, do not allow a user into
+          the workflow until they provide the address that receives its
+          notifications. The backend enforces the identical condition. */}
+      {isLdapEmailCompletionRequired(user) && <EmailCompletionPrompt />}
       {/* Reported directly: "also show one info on login if there are any
           pending approval pending." Held back while DepartmentPrompt is
           still up (above) so a first-ever LDAP login never stacks two
@@ -148,7 +163,7 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
           AuthContext's justLoggedIn is true, which stays true across that
           whole exchange, so it still fires right after DepartmentPrompt is
           dismissed rather than being skipped entirely. */}
-      {!user.needs_department_selection && !isAccessApprovalPending(user) && <PendingApprovalsNotice />}
+      {!user.needs_department_selection && !isAccessApprovalPending(user) && !isLdapEmailCompletionRequired(user) && <PendingApprovalsNotice />}
     </Layout>
   )
 }

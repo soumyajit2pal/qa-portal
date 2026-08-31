@@ -1,7 +1,7 @@
 import datetime
 import re
 from typing import Optional, List, Dict, Literal
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator, model_validator
 
 RICH_TEXT_MAX_LENGTH = 10000
 
@@ -169,6 +169,16 @@ class DepartmentSelection(BaseModel):
         if not normalized:
             raise ValueError("Select your primary department")
         return normalized
+
+
+class LdapEmailCompletion(BaseModel):
+    """The notification address an approved LDAP user confirms themselves.
+
+    LDAP may not return a mail attribute for every identity.  This separate,
+    deliberately narrow payload keeps the required post-approval profile
+    completion endpoint from becoming a general self-service profile editor.
+    """
+    email: EmailStr
 
 
 class AuditLogOut(ORMModel):
@@ -1994,6 +2004,13 @@ class TestProjectOut(ORMModel):
     shared_with_you: bool = False
 
 
+class TestProjectSummaryCountsOut(BaseModel):
+    """Lightweight project-card totals returned in one batched query."""
+    project_id: int
+    test_case_count: int
+    cycle_count: int
+
+
 class TestProjectViewGrantOut(ORMModel):
     id: int
     project_id: int
@@ -2942,6 +2959,13 @@ class TestExecutionOut(ORMModel):
     # Governed Defect(s) (defects.py) linked to this slot -- see
     # LinkedGovernedDefectRef's own docstring.
     linked_defects: List[LinkedGovernedDefectRef] = []
+
+
+class MyExecutionOut(BaseModel):
+    """One signed-in tester assignment with its project and active cycle."""
+    project: TestProjectOut
+    cycle: TestCycleOut
+    execution: TestExecutionOut
 
 
 class TestExecutionSummaryOut(BaseModel):

@@ -250,7 +250,11 @@ def _archive(items: list[Path], name: str) -> Path:
         raise
 
 
+# Both forms are accepted explicitly. The UI uses the first form, while a
+# bookmarked/manual URL often carries a trailing slash; serving both avoids a
+# proxy-dependent redirect during initial repository loading.
 @router.get("")
+@router.get("/")
 def browse(
     path: str = Query(""),
     sort: Literal["name", "type", "size", "modified"] = Query("name"),

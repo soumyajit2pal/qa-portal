@@ -208,6 +208,68 @@ def list_test_projects(include_inactive: bool = Query(False), params: pagination
     return pagination.to_page_response(result, params)
 
 
+@router.get("/summary-counts", response_model=List[schemas.TestProjectSummaryCountsOut])
+def list_test_project_summary_counts(
+    include_inactive: bool = Query(False),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Return every visible project's card totals with three bounded queries.
+
+    Project Management previously made two requests for every project after
+    its initial directory load (test-case summary plus cycle list). That is a
+    200-request burst for 100 projects. Grouping each count in Oracle keeps
+    the card data exact without creating per-project database sessions.
+    """
+    projects = db.query(models.TestProject.id)
+    if not include_inactive:
+        projects = projects.filter(models.TestProject.is_active == True)  # noqa: E712
+    project_ids = viewable_project_ids(db, current_user)
+    if project_ids is not None:
+        projects = projects.filter(models.TestProject.id.in_(project_ids))
+    visible_ids = [project_id for (project_id,) in projects.all()]
+    if not visible_ids:
+        return []
+
+    # ``visible_ids`` comes from the same bounded project directory this
+    # module renders. Batch every IN predicate to remain safe if an admin's
+    # project estate ever exceeds Oracle's 1,000-expression limit.
+    case_counts: dict[int, int] = {}
+    cycle_counts: dict[int, int] = {}
+    for start in range(0, len(visible_ids), 900):
+        batch = visible_ids[start:start + 900]
+        case_counts.update({
+            int(project_id): int(count)
+            for project_id, count in (
+                db.query(models.TestCase.project_id, func.count(models.TestCase.id))
+                .filter(
+                    models.TestCase.project_id.in_(batch),
+                    models.TestCase.is_deleted == False,  # noqa: E712
+                    models.TestCase.status != "Archived",
+                )
+                .group_by(models.TestCase.project_id)
+                .all()
+            )
+        })
+        cycle_counts.update({
+            int(project_id): int(count)
+            for project_id, count in (
+                db.query(models.TestCycle.project_id, func.count(models.TestCycle.id))
+                .filter(models.TestCycle.project_id.in_(batch))
+                .group_by(models.TestCycle.project_id)
+                .all()
+            )
+        })
+    return [
+        {
+            "project_id": project_id,
+            "test_case_count": case_counts.get(project_id, 0),
+            "cycle_count": cycle_counts.get(project_id, 0),
+        }
+        for project_id in visible_ids
+    ]
+
+
 @router.get("/{project_id}/my-access", response_model=schemas.TestProjectMyAccessOut)
 def get_my_project_access(project_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):

@@ -19,6 +19,7 @@ export function ChecklistEvidencePicker({
   onReload,
   checked = false,
   required = false,
+  mandatory = false,
 }: {
   kind: EvidenceKind
   itemIndex: number
@@ -43,12 +44,10 @@ export function ChecklistEvidencePicker({
   // while checked, then the box got unticked again) stays visible/
   // deletable regardless -- only adding NEW evidence is blocked.
   checked?: boolean
-  // Whether this item is mandatory or self-declared checked -- purely a
-  // visual hint suggesting evidence would be useful here; nothing enforces
-  // it, raising the request works either way (see RequestDetail.tsx's
-  // non-blocking heads-up pop-up at Raise time for the one place this is
-  // actually surfaced as a prompt, not a requirement).
+  // Whether evidence is recommended for a selected optional item.
   required?: boolean
+  // Mandatory items need evidence before the request can be raised.
+  mandatory?: boolean
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [error, setError] = useState<unknown>(null)
@@ -96,6 +95,7 @@ export function ChecklistEvidencePicker({
         onAttach={() => inputRef.current?.click()}
         totalFiles={totalFiles}
         required={required}
+        mandatory={mandatory}
       >
           {savedFiles.map((document) => (
             <ChecklistEvidenceFileRow

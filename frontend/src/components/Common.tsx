@@ -2010,6 +2010,7 @@ export function SupportingEvidenceControl({
   onAttach,
   totalFiles,
   required = false,
+  mandatory = false,
   children,
 }: {
   canAttach?: boolean;
@@ -2018,6 +2019,7 @@ export function SupportingEvidenceControl({
   onAttach: () => void;
   totalFiles: number;
   required?: boolean;
+  mandatory?: boolean;
   children?: ReactNode;
 }) {
   return (
@@ -2037,11 +2039,15 @@ export function SupportingEvidenceControl({
           <span className="muted small" title="Evidence is locked after Department Head approval">Evidence locked</span>
         )}
         {totalFiles > 0 && <span className="badge badge-blue">{totalFiles} file{totalFiles !== 1 ? "s" : ""}</span>}
-        {required && totalFiles === 0 && (
-          <span className="badge badge-gray" title="Evidence is recommended for mandatory and selected checklist items.">
+        {mandatory && totalFiles === 0 ? (
+          <span className="badge badge-red" title="Evidence is required before this request can be raised.">
+            Evidence required
+          </span>
+        ) : required && totalFiles === 0 ? (
+          <span className="badge badge-gray" title="Evidence is recommended for selected checklist items.">
             Evidence recommended
           </span>
-        )}
+        ) : null}
       </div>
       {totalFiles > 0 && <div className="checklist-evidence-files">{children}</div>}
     </>

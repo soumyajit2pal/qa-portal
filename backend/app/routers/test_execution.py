@@ -8,7 +8,7 @@ from sqlalchemy import and_, exists, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
-from .. import models, schemas, pagination
+from .. import models, schemas, pagination, email_notifications
 from ..database import get_db
 from ..database import SessionLocal
 from ..deps import (
@@ -1458,6 +1458,48 @@ def list_blocked_failed_executions(db: Session = Depends(get_db),
     ]
 
 
+@router.get("/my-executions", response_model=List[schemas.MyExecutionOut])
+def list_my_executions(db: Session = Depends(get_db),
+                       current_user: models.User = Depends(get_current_user)):
+    """Return the current tester's actionable execution queue in one query.
+
+    The former browser implementation fetched every project, then every
+    project's cycles, then every in-progress cycle's assignments. Besides
+    growing as projects × cycles, it could open dozens of simultaneous API
+    requests for one page view. This joined query keeps the same eligibility,
+    active-project and in-progress-cycle rules while loading the exact rows
+    assigned to the current user only.
+    """
+    if not any(current_user.has_department(department) for department in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
+        raise HTTPException(403, "My execution assignments are restricted to the QA group")
+    q = (
+        db.query(models.TestExecution)
+        .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
+        .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+        .filter(
+            models.TestExecution.assigned_to_id == current_user.id,
+            models.TestProject.is_active == True,  # noqa: E712
+            or_(
+                models.TestProject.is_archived == False,  # noqa: E712
+                models.TestProject.is_archived.is_(None),
+            ),
+            models.TestCycle.status == "In Progress",
+        )
+        .options(
+            joinedload(models.TestExecution.cycle).joinedload(models.TestCycle.project),
+            *_LIST_EXECUTION_EAGER_LOADS,
+        )
+    )
+    project_ids = viewable_project_ids(db, current_user)
+    if project_ids is not None:
+        q = q.filter(models.TestProject.id.in_(project_ids))
+    executions = q.order_by(models.TestProject.name, models.TestCycle.name, models.TestExecution.id).all()
+    return [
+        {"project": execution.cycle.project, "cycle": execution.cycle, "execution": execution}
+        for execution in executions
+    ]
+
+
 @router.get("/cycles/{cycle_id}/candidate-test-cases", response_model=schemas.TestCaseCandidatePage)
 def list_cycle_candidate_test_cases(
     cycle_id: int,
@@ -1834,15 +1876,26 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
                 db, "TEST_EXECUTION", execution.id, "EXECUTION_RUNNER", current_user,
                 [], [assigned_runner.id], "Assigned when added to test cycle",
             )
+    assignment_actions = []
     for execution in created:
-        db.add(models.ApprovalAction(
+        action = models.ApprovalAction(
             entity_type="TEST_CASE", entity_id=execution.test_case_id, step_name="Test Cycle",
             actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Added to Cycle",
             comments=(
                 f"Added to {cycle.cycle_key} - {cycle.name}."
                 + (f" Assigned to {assigned_runner.full_name}." if assigned_runner else "")
             ),
-        ))
+        )
+        db.add(action)
+        assignment_actions.append(action)
+    if assigned_runner and created:
+        email_notifications.queue_test_cycle_assignment_notification(
+            db,
+            action=assignment_actions[0],
+            recipient=assigned_runner,
+            cycle=cycle,
+            test_cases=[selected_by_id[execution.test_case_id] for execution in created],
+        )
     db.commit()
     if not created:
         return []
@@ -1987,7 +2040,7 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
     obj.assigned_by_id = current_user.id
     obj.assigned_at = models.now()
     test_case_label = obj.test_case.test_case_key if obj.test_case else f"Testcase #{obj.test_case_id}"
-    db.add(models.ApprovalAction(
+    assignment_action = models.ApprovalAction(
         entity_type="TEST_CASE", entity_id=obj.test_case_id, step_name="Testcase Assignment",
         actor_id=current_user.id, actor_role=current_user.roles_csv,
         decision="Assigned" if target else "Unassigned",
@@ -1996,7 +2049,8 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
             f"{'assigned to ' + target.full_name if target else 'unassigned'}"
             + (f" (previously {previous_name})" if previous_name else "")
         ),
-    ))
+    )
+    db.add(assignment_action)
     if is_reassignment:
         reassignment.record_reassignment(
             db, "TEST_CASE", obj.test_case_id, current_user,
@@ -2013,6 +2067,11 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
             db, "TEST_EXECUTION", obj.id, "EXECUTION_RUNNER", current_user,
             [previous_id], [target.id if target else None], payload.reason,
             previous_assigned_at=previous_assigned_at,
+        )
+    if target:
+        email_notifications.queue_test_cycle_assignment_notification(
+            db, action=assignment_action, recipient=target, cycle=cycle,
+            test_cases=[obj.test_case],
         )
     db.commit()
     db.refresh(obj)
@@ -2071,12 +2130,15 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
         execution.test_case.test_case_key if execution.test_case else f"Testcase #{execution.test_case_id}"
         for execution in ordered
     ]
+    assignment_actions = []
     for execution, label in zip(ordered, labels):
-        db.add(models.ApprovalAction(
+        action = models.ApprovalAction(
             entity_type="TEST_CASE", entity_id=execution.test_case_id, step_name="Testcase Assignment",
             actor_id=current_user.id, actor_role=current_user.roles_csv, decision="Assigned",
             comments=f"{label} assigned to {target.full_name} in {cycle.cycle_key}.",
-        ))
+        )
+        db.add(action)
+        assignment_actions.append(action)
         if execution.id in {e.id for e in previously_assigned}:
             reassignment.record_reassignment(
                 db, "TEST_CASE", execution.test_case_id, current_user,
@@ -2094,6 +2156,10 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
                 [previous_ids[execution.id]], [target.id], payload.reason,
                 previous_assigned_at=previous_assigned_at[execution.id],
             )
+    email_notifications.queue_test_cycle_assignment_notification(
+        db, action=assignment_actions[0], recipient=target, cycle=cycle,
+        test_cases=[execution.test_case for execution in ordered],
+    )
     db.commit()
     for execution in ordered:
         db.refresh(execution)

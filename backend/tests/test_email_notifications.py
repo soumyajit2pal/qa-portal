@@ -72,6 +72,48 @@ class EmailNotificationTests(unittest.TestCase):
             db.close()
             engine.dispose()
 
+    def test_test_cycle_assignment_queues_one_consolidated_runner_email(self):
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine, tables=[
+            models.User.__table__, models.ApprovalAction.__table__, models.EmailNotification.__table__,
+        ])
+        db = sessionmaker(bind=engine)()
+        try:
+            runner = models.User(
+                id=7, username="qa.runner", full_name="QA Runner", email="runner@example.com",
+                login_type="STANDARD", is_active=True,
+            )
+            action = models.ApprovalAction(
+                entity_type="TEST_CASE", entity_id=46, actor_id=1,
+                step_name="Test Cycle", decision="Added to Cycle",
+            )
+            db.add_all([runner, action])
+            cycle = SimpleNamespace(id=33, project_id=12, cycle_key="TQA-CYC-33", name="August Regression")
+            cases = [
+                SimpleNamespace(id=46, test_case_key="TQA-TC-46"),
+                SimpleNamespace(id=47, test_case_key="TQA-TC-47"),
+            ]
+            settings = {
+                "SMTP_ENABLED": "true", "SMTP_HOST": "smtp.example.com",
+                "SMTP_FROM_ADDRESS": "qa-portal@example.com",
+            }
+            with patch.dict(os.environ, settings, clear=False):
+                queued = email_notifications.queue_test_cycle_assignment_notification(
+                    db, action=action, recipient=runner, cycle=cycle, test_cases=cases,
+                )
+            db.flush()
+            messages = db.query(models.EmailNotification).all()
+            self.assertEqual(queued, 1)
+            self.assertEqual(len(messages), 1)
+            self.assertEqual(messages[0].recipient_email, "runner@example.com")
+            self.assertIn("2 Test Cases assigned", messages[0].subject)
+            self.assertIn("TQA-TC-46", messages[0].html_body)
+            self.assertIn("TQA-TC-47", messages[0].html_body)
+            self.assertIn("/test-execution?project=12&amp;cycle=33", messages[0].html_body)
+        finally:
+            db.close()
+            engine.dispose()
+
     def test_workflow_action_creates_a_durable_recipient_outbox_item(self):
         engine = create_engine("sqlite:///:memory:")
         models.Base.metadata.create_all(engine, tables=[
@@ -122,6 +164,7 @@ class EmailNotificationTests(unittest.TestCase):
             self.assertIn("Action required", messages[0].subject)
             self.assertIn("Service Manager review", messages[0].body)
             self.assertIsNotNone(messages[0].html_body)
+            self.assertIn("qa-portal-email-template:v1", messages[0].html_body)
             self.assertIn("Open in QA Portal", messages[0].html_body)
 
             # When the SM completes their approval, only the next stage's
@@ -167,6 +210,80 @@ class EmailNotificationTests(unittest.TestCase):
             with patch.dict(os.environ, settings, clear=False), patch("app.email_notifications.deliver_pending_async"):
                 db.commit()
             self.assertEqual([item.recipient_email for item in db.query(models.EmailNotification).all()], ["sm@example.com"])
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_flushed_sm_action_is_still_queued_at_commit(self):
+        """QA-request raise flushes child actions before its final commit."""
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine, tables=[
+            models.User.__table__, models.UserRole.__table__, models.UserDepartment.__table__,
+            models.QARequest.__table__, models.FunctionalRequest.__table__, models.ApprovalAction.__table__, models.EmailNotification.__table__,
+        ])
+        db = sessionmaker(bind=engine)()
+        try:
+            requester = models.User(id=1, username="requester", full_name="Requester", email="requester@example.com", login_type="STANDARD")
+            sm = models.User(id=2, username="sm", full_name="SM", email="sm@example.com", login_type="STANDARD")
+            db.add_all([
+                requester, sm, models.UserRole(user_id=2, role=Role.SM),
+                models.QARequest(id=10, request_id="TQA-REQ-10", application_name="Portal", department="Operations", requester_id=1),
+                models.FunctionalRequest(id=20, request_id="TQA-FUNC-20", requester_id=1, qa_request_id=10, status=QAStatus.SM_APPROVAL_PENDING),
+            ])
+            db.flush()
+            install_outbox_listener()
+            db.add(models.ApprovalAction(
+                entity_type="FUNCTIONAL_REQUEST", entity_id=20, actor_id=1,
+                step_name="SM Approval", decision="Pending",
+            ))
+            # Mirrors _promote_draft_checklist_evidence: the audit action has
+            # already been flushed by the time submit_request commits.
+            db.flush()
+            settings = {"SMTP_ENABLED": "true", "SMTP_HOST": "smtp.example.com", "SMTP_FROM_ADDRESS": "qa-portal@example.com"}
+            with patch.dict(os.environ, settings, clear=False), patch("app.email_notifications.deliver_pending_async"):
+                db.commit()
+            self.assertEqual([item.recipient_email for item in db.query(models.EmailNotification).all()], ["sm@example.com"])
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_flushed_qa_request_children_all_queue_sm_notifications(self):
+        """The common QA-request raise path covers every child workflow type."""
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine, tables=[
+            models.User.__table__, models.UserRole.__table__, models.UserDepartment.__table__,
+            models.QARequest.__table__, models.FunctionalRequest.__table__, models.SASTRequest.__table__,
+            models.DASTRequest.__table__, models.PerformanceRequest.__table__,
+            models.ApprovalAction.__table__, models.EmailNotification.__table__,
+        ])
+        db = sessionmaker(bind=engine)()
+        try:
+            requester = models.User(id=1, username="requester", full_name="Requester", email="requester@example.com", login_type="STANDARD")
+            sm = models.User(id=2, username="sm", full_name="SM", email="sm@example.com", login_type="STANDARD")
+            db.add_all([
+                requester, sm, models.UserRole(user_id=2, role=Role.SM),
+                models.QARequest(id=10, request_id="TQA-REQ-10", application_name="Portal", department="Operations", requester_id=1),
+                models.FunctionalRequest(id=20, request_id="TQA-FUNC-20", requester_id=1, qa_request_id=10, status=QAStatus.SM_APPROVAL_PENDING),
+                models.SASTRequest(id=21, request_id="TQA-SAST-21", application_name="Portal", requester_id=1, qa_request_id=10, status="SM_APPROVAL_PENDING"),
+                models.DASTRequest(id=22, request_id="TQA-DAST-22", requester_id=1, qa_request_id=10, status="SM_APPROVAL_PENDING"),
+                models.PerformanceRequest(id=23, request_id="TQA-PERF-23", application_name="Portal", requester_id=1, qa_request_id=10, status="SM_APPROVAL_PENDING"),
+            ])
+            db.flush()
+            install_outbox_listener()
+            for entity_type, entity_id in (
+                ("FUNCTIONAL_REQUEST", 20), ("SAST", 21), ("DAST", 22), ("PERFORMANCE", 23),
+            ):
+                db.add(models.ApprovalAction(
+                    entity_type=entity_type, entity_id=entity_id, actor_id=1,
+                    step_name="SM Approval", decision="Pending",
+                ))
+            db.flush()
+            settings = {"SMTP_ENABLED": "true", "SMTP_HOST": "smtp.example.com", "SMTP_FROM_ADDRESS": "qa-portal@example.com"}
+            with patch.dict(os.environ, settings, clear=False), patch("app.email_notifications.deliver_pending_async"):
+                db.commit()
+            messages = db.query(models.EmailNotification).order_by(models.EmailNotification.approval_action_id).all()
+            self.assertEqual(len(messages), 4)
+            self.assertEqual({item.recipient_email for item in messages}, {"sm@example.com"})
         finally:
             db.close()
             engine.dispose()
@@ -269,6 +386,63 @@ class EmailNotificationTests(unittest.TestCase):
         finally:
             db.close()
             engine.dispose()
+
+    def test_existing_test_case_outbox_recipient_is_idempotent(self):
+        """A repeated bulk-submit evaluation must not turn an existing outbox row into a 500.
+
+        Oracle enforces the same invariant with
+        ``uq_qap_email_action_recipient``.  Exercise the application-side
+        check here so an existing durable recipient is treated as a harmless
+        duplicate rather than being inserted again.
+        """
+        engine = create_engine("sqlite:///:memory:")
+        models.Base.metadata.create_all(engine, tables=[
+            models.User.__table__, models.UserRole.__table__, models.UserDepartment.__table__,
+            models.ApplicationMaster.__table__, models.TestProject.__table__, models.TestCase.__table__,
+            models.ApprovalAction.__table__, models.EmailNotification.__table__,
+        ])
+        db = sessionmaker(bind=engine)()
+        try:
+            author = models.User(id=1, username="author", full_name="Author", email="author@example.com", login_type="STANDARD")
+            reviewer = models.User(id=2, username="qa", full_name="QA Reviewer", email="qa@example.com", login_type="STANDARD")
+            db.add_all([
+                author, reviewer,
+                models.UserRole(user_id=2, role=Role.QA_ENGINEER),
+                models.UserDepartment(user_id=2, department="COE - Quality Assurance"),
+                models.TestProject(id=10, project_key="TQA-PRJ-10", name="Portal Tests", department="COE - Quality Assurance"),
+                models.TestCase(id=20, test_case_key="TQA-TC-20", project_id=10, status="Recommendation Pending"),
+                models.ApprovalAction(entity_type="TEST_CASE", entity_id=20, actor_id=1, step_name="Test Case Approval Workflow", decision="Submitted"),
+            ])
+            # Keep initial setup free of listener-created mail, then model a
+            # previously durable recipient for this exact approval action.
+            install_outbox_listener()
+            with patch.dict(os.environ, {"SMTP_ENABLED": "false"}, clear=False):
+                db.commit()
+            action = db.query(models.ApprovalAction).one()
+            db.add(models.EmailNotification(
+                approval_action_id=action.id, recipient_email="qa@example.com",
+                subject="Existing", body="Existing",
+            ))
+            db.commit()
+
+            settings = {"SMTP_ENABLED": "true", "SMTP_HOST": "smtp.example.com", "SMTP_FROM_ADDRESS": "qa-portal@example.com"}
+            with patch.dict(os.environ, settings, clear=False):
+                self.assertEqual(email_notifications._queue_test_case_digests(db, [action]), 0)
+                db.commit()
+            self.assertEqual(db.query(models.EmailNotification).count(), 1)
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_legacy_outbox_body_is_rendered_in_the_shared_template(self):
+        legacy = SimpleNamespace(
+            subject="Older workflow mail",
+            body="A workflow update was recorded.\n\nOpen item: /functional-requests?open=TQA-FUNC-20",
+        )
+        html = email_notifications._legacy_html_email(legacy)
+        self.assertIn("qa-portal-email-template:v1", html)
+        self.assertIn("QA Portal", html)
+        self.assertIn("Open in QA Portal", html)
 
 
 if __name__ == "__main__":

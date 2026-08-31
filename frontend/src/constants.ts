@@ -807,6 +807,7 @@ export interface ReportDef {
 
 export const REPORTS: ReportDef[] = [
   { key: 'qa-request-summary', label: 'QA Request Register', group: 'Operational', description: 'Gateway requests with child Functional status and per-type priority/risk.' },
+  { key: 'functional-request-register', label: 'Functional Request Register', group: 'Operational', description: 'Functional workflow status, change/release context, QA Lead and tester assignments.' },
   { key: 'test-cycle-summary', label: 'Test Cycle Execution Summary', group: 'Operational', description: 'Cycle scope, assignment coverage, completion and latest execution results.' },
   { key: 'defect-retest-register', label: 'Defect & Retest Register', group: 'Operational', description: 'Governed defect lifecycle, ownership, resolution and retest evidence.' },
   { key: 'performance-testing', label: 'Performance Testing Register', group: 'Operational', description: 'Performance requests, workload target, environment, assignment and report state.' },

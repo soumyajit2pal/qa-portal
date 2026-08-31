@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
-import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, QA_DEPARTMENT, hasRole } from '../../constants'
+import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
 import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch } from '../../components/Icons'
 import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
@@ -26,8 +26,6 @@ const EMPTY_FORM = {
   roles: ['REQUESTER'] as string[], login_type: 'STANDARD', password: '',
 }
 type CreateUserForm = typeof EMPTY_FORM
-
-const COE_DEFAULT_ROLES = ['QA_ENGINEER', 'DOCUMENT_PORTAL_VIEWER']
 
 // `roles` defaults to every assignable role (ALL_ROLES) -- exported with that
 // default so DepartmentAdmin.tsx can reuse this same chip-select, just
@@ -98,15 +96,6 @@ function CreateUserModal({ onClose, onCreated, departmentOptions }: {
   const [departments, setDepartments] = useState<string[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const hasQaDepartmentAccess = departments.includes(QA_DEPARTMENT)
-
-  useEffect(() => {
-    if (hasQaDepartmentAccess) setForm((current) => ({
-      ...current,
-      roles: Array.from(new Set([...current.roles, ...COE_DEFAULT_ROLES])),
-    }))
-  }, [hasQaDepartmentAccess])
-
   function set<K extends keyof CreateUserForm>(k: K, v: CreateUserForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   async function submit(e: React.FormEvent) {
@@ -217,12 +206,6 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const isOwnAdminAccount = userRow.id === currentUserId && (userRow.roles || []).includes('ADMIN')
-  const hasQaDepartmentAccess = departments.includes(QA_DEPARTMENT)
-
-  useEffect(() => {
-    if (hasQaDepartmentAccess) setRoles((values) => Array.from(new Set([...values, ...COE_DEFAULT_ROLES])))
-  }, [hasQaDepartmentAccess])
-
   async function save(e: React.FormEvent) {
     e.preventDefault()
     if (!roles.length) { setError(new Error('Select at least one role')); return }

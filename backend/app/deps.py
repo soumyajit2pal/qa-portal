@@ -6,7 +6,7 @@ from jose import JWTError
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
-from .database import get_db
+from .database import SessionLocal, get_db
 from . import models
 from .auth import decode_access_token
 from .constants import Role
@@ -14,9 +14,8 @@ from .constants import Role
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-def get_current_user(
-    request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
-) -> models.User:
+def _resolve_current_user(request: Request, token: str, db: Session) -> models.User:
+    """Resolve an authenticated user while the supplied session is open."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -75,6 +74,31 @@ def get_current_user(
     return user
 
 
+def get_current_user(
+    request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+) -> models.User:
+    """Core-API user dependency; its request session is closed after the response."""
+    return _resolve_current_user(request, token, db)
+
+
+def get_document_portal_current_user(
+    request: Request, token: str = Depends(oauth2_scheme),
+) -> models.User:
+    """Authenticate a Document Portal request without pinning an Oracle session.
+
+    File uploads, downloads and ZIP streams can run for minutes. A normal
+    FastAPI generator dependency closes its database session only after that
+    response has finished streaming, which would let a few document transfers
+    exhaust this service's deliberately small Oracle pool. Resolve the user,
+    eagerly load the role/department assignments, then detach and close the
+    session before the filesystem operation begins.
+    """
+    with SessionLocal() as db:
+        user = _resolve_current_user(request, token, db)
+        db.expunge(user)
+        return user
+
+
 def require_roles(*roles):
     """Dependency factory: restricts an endpoint to users holding at least one
     of the given roles (ADMIN always allowed). A user may hold several roles
@@ -91,18 +115,41 @@ def require_roles(*roles):
     return checker
 
 
-def require_document_portal_viewer(current_user: models.User = Depends(get_current_user)) -> models.User:
+def require_document_portal_viewer(current_user: models.User = Depends(get_document_portal_current_user)) -> models.User:
     if not current_user.has_role(
         Role.DOCUMENT_PORTAL_VIEWER, Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER,
     ):
         raise HTTPException(status_code=403, detail="You do not have access to Document Management")
+    _require_ldap_notification_email(current_user)
     return current_user
 
 
-def require_document_portal_contributor(current_user: models.User = Depends(get_current_user)) -> models.User:
+def require_document_portal_contributor(current_user: models.User = Depends(get_document_portal_current_user)) -> models.User:
     if not current_user.has_role(Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER):
         raise HTTPException(status_code=403, detail="You have view-only Document Management access")
+    _require_ldap_notification_email(current_user)
     return current_user
+
+
+def _require_ldap_notification_email(current_user: models.User) -> None:
+    """Mirror the core API's mandatory LDAP email-completion guard.
+
+    Document Portal runs in a separate process and therefore cannot rely on
+    core ``main.py`` middleware.  Keeping this check in the shared document
+    access dependencies closes the direct-URL bypass while allowing first
+    login department selection/access review to complete normally.
+    """
+    if (
+        current_user.login_type == "LDAP"
+        and not current_user.needs_department_selection
+        and not current_user.needs_role_review
+        and current_user.roles
+        and not (current_user.email or "").strip()
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Add your notification email address before using QA Portal.",
+        )
 
 
 def require_same_department(current_user: models.User, entity_department) -> None:

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, mapWithConcurrency } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { Modal, ErrorText } from '../components/Common'
 import ConfirmModal from '../components/ConfirmModal'
@@ -24,6 +24,8 @@ interface NewRequestModalProps {
   onCreated: (req: QARequestOut) => void
   editing?: QARequestOut
   delegatedEditing?: boolean
+  initialStepKey?: 'functional' | 'sast' | 'dast' | 'performance'
+  initialEvidenceItem?: string
 }
 
 // Builds the wizard's initial form state -- blank for a brand-new request,
@@ -123,7 +125,7 @@ function buildInitialForm(editing: QARequestOut | undefined, department: string)
   }
 }
 
-export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing = false }: NewRequestModalProps) {
+export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing = false, initialStepKey, initialEvidenceItem }: NewRequestModalProps) {
   const { user } = useAuth()
   // 2026-08 "one user can be on multiple departments" CR, follow-up: the
   // department field is no longer locked -- a requester picks which of
@@ -154,7 +156,12 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
   const [savedEvidence, setSavedEvidence] = useState<Record<string, DraftChecklistEvidenceOut[]>>({})
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const [stepIndex, setStepIndex] = useState(0)
+  const [stepIndex, setStepIndex] = useState(() => {
+    const initialIndex = initialStepKey
+      ? buildSteps(form.request_types).findIndex((step) => step.key === initialStepKey)
+      : -1
+    return initialIndex >= 0 ? initialIndex : 0
+  })
   // This form can hold several steps' worth of typed-but-not-yet-saved
   // details -- preventBackdropClose already stops an accidental backdrop
   // click from silently throwing all of that away, but the header's own
@@ -285,14 +292,14 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
         // own request_id folder (backend/app/uploads/<request_id>/...).
         await api.uploadFiles(`/api/qa-requests/${saved.id}/documents`, files)
       }
-      await Promise.all(Object.entries(checklistEvidence).map(async ([key, evidence]) => {
+      await mapWithConcurrency(Object.entries(checklistEvidence), 2, async ([key, evidence]) => {
         if (evidence.length === 0) return
         const [kind, itemIndex] = key.split(':')
         await api.uploadFiles(
           `/api/qa-requests/${saved.id}/checklist-evidence/${kind}/${itemIndex}/documents`,
           evidence,
         )
-      }))
+      })
       onCreated(saved)
     } catch (err) {
       setError(err)
@@ -399,11 +406,11 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
 
         <form onSubmit={submit}>
           {step.key === 'details' && <DetailsStep form={form} set={set} departmentOptions={departmentOptions} departmentLocked={delegatedEditing} />}
-          {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
+          {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
           {step.key === 'type' && <TypeStep form={form} set={set} />}
-          {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
-          {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
-          {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} />}
+          {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
+          {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
+          {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
           {step.key === 'documents' && (
             <DocumentsStep form={form} set={set} editing={editing} files={files} setFiles={setFiles} />
           )}

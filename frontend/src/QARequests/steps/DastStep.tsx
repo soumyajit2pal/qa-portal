@@ -17,12 +17,13 @@ interface Props {
   setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void
   savedEvidenceFor: (kind: EvidenceKind, itemIndex: number) => DraftChecklistEvidenceOut[]
   onEvidenceChanged: () => void
+  focusEvidenceItem?: string
 }
 
 // Shown only while "DAST" is a selected request type -- fills in the
 // auto-created DAST request's target details and its own Security
 // Readiness checklist self-declaration, up front.
-export function DastStep({ form, set, existingDast, draftRequestId, evidenceFiles, setEvidenceFiles, savedEvidenceFor, onEvidenceChanged }: Props) {
+export function DastStep({ form, set, existingDast, draftRequestId, evidenceFiles, setEvidenceFiles, savedEvidenceFor, onEvidenceChanged, focusEvidenceItem }: Props) {
   function toggleChecked(item: string) {
     set(
       'dast_checked_items',
@@ -158,10 +159,11 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
             heading="Security readiness self-declaration"
             description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. The Security Analyst will verify every declaration independently."
             noticeLabel="Before SM approval"
-            noticeText="Every mandatory criterion must be selected. Evidence is recommended for mandatory and selected items."
+            noticeText="Every mandatory criterion must be selected and have supporting evidence attached before the request can be raised."
             selectedItems={form.dast_checked_items} onToggle={toggleChecked}
             draftRequestId={draftRequestId} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles}
             savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={onEvidenceChanged}
+            focusEvidenceItem={focusEvidenceItem}
           />
         </>
       )}

@@ -25,8 +25,9 @@ export default function ApiActivityIndicator() {
   if (!visible) return null
   return (
     <div className={`api-activity ${slow ? 'api-activity-slow' : ''}`} role="status" aria-live="polite">
-      <span className="api-activity-spinner" aria-hidden="true" />
-      <span>{slow ? 'The server is taking longer than usual…' : 'Loading…'}</span>
+      <div className="api-activity-rail" aria-hidden="true"><i /></div>
+      <span className="sr-only">{slow ? 'The portal is still loading data.' : 'Loading portal data.'}</span>
+      {slow && <span className="api-activity-note">Still loading your data…</span>}
     </div>
   )
 }

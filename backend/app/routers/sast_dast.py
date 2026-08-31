@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, SUPPRESSION_TERMINAL_STATUSES, is_readiness_evidence_editable, application_name_block_message
+from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
@@ -1036,6 +1036,9 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
     q = pagination.apply_search(q, params, models.SASTRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.SASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    q = pagination.apply_terminal_raised_date_filter(
+        q, params, models.SASTRequest.status, models.SASTRequest.created_at, SAST_DAST_TERMINAL_STATUSES,
+    )
     # Module-specific, same reasoning as qa_requests.py/functional.py's own
     # requester_id addition (reported directly -- Dashboard.tsx's "My
     # Requests" tab).
@@ -1552,6 +1555,9 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
     q = pagination.apply_search(q, params, models.DASTRequest.request_id, models.QARequest.application_name)
     q = pagination.apply_status_filter(q, params, models.DASTRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    q = pagination.apply_terminal_raised_date_filter(
+        q, params, models.DASTRequest.status, models.DASTRequest.created_at, SAST_DAST_TERMINAL_STATUSES,
+    )
     # Module-specific, same reasoning as qa_requests.py/functional.py's own
     # requester_id addition (reported directly -- Dashboard.tsx's "My
     # Requests" tab).

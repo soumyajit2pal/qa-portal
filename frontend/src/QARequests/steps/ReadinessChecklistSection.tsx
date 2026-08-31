@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 import { ErrorText } from '../../components/Common'
 import { DraftChecklistEvidenceOut } from '../../types'
 import { ChecklistEvidencePicker, EvidenceKind } from './ChecklistEvidencePicker'
@@ -21,6 +21,7 @@ interface Props {
   setEvidenceFiles: (kind: EvidenceKind, itemIndex: number, files: File[]) => void
   savedEvidenceFor: (kind: EvidenceKind, itemIndex: number) => DraftChecklistEvidenceOut[]
   onEvidenceChanged: () => void
+  focusEvidenceItem?: string
 }
 
 /** Shared, aligned self-declaration table used by every testing discipline. */
@@ -39,8 +40,16 @@ export function ReadinessChecklistSection({
   setEvidenceFiles,
   savedEvidenceFor,
   onEvidenceChanged,
+  focusEvidenceItem,
 }: Props) {
   const { items, loading, error } = useChecklistTemplate(module)
+  const focusRow = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (focusEvidenceItem && !loading) {
+      focusRow.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }, [focusEvidenceItem, loading, items.length])
 
   return (
     <section className="security-request-panel security-checklist-panel">
@@ -71,7 +80,7 @@ export function ReadinessChecklistSection({
             const checked = selectedItems.includes(item.item)
             const checkboxId = `${kind}-readiness-${item.id}`
             return (
-              <div className={`security-checklist-row ${checked ? 'is-checked' : ''}`} key={item.id}>
+              <div ref={item.item === focusEvidenceItem ? focusRow : undefined} className={`security-checklist-row ${checked ? 'is-checked' : ''}`} key={item.id}>
                 <div className="security-checklist-check">
                   <input
                     id={checkboxId}
@@ -96,7 +105,8 @@ export function ReadinessChecklistSection({
                   savedFiles={savedEvidenceFor(kind, itemIndex)}
                   onReload={onEvidenceChanged}
                   checked={checked}
-                  required={item.is_mandatory || checked}
+                  required={checked}
+                  mandatory={item.is_mandatory}
                 />
               </div>
             )

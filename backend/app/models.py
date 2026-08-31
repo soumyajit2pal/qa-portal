@@ -3267,6 +3267,14 @@ class DefectExecutionLink(Base):
 # Alembic-managed; all new index changes must be represented in a reviewed
 # revision and applied with `alembic upgrade head`.
 Index("ix_qap_req_dept_status_created", QARequest.department, QARequest.status, QARequest.created_at)
+# The unified Dashboard Requests feed filters the five request sources by
+# requester or department and then reads the newest page.  The status-first
+# list indexes above cannot serve those shapes because this feed deliberately
+# includes every status.  These short Oracle-safe composites avoid full scans
+# and large sorts for both normal users and globally-visible QA/Admin roles.
+Index("ix_qap_req_user_created", QARequest.requester_id, QARequest.created_at, QARequest.id)
+Index("ix_qap_req_dept_created", QARequest.department, QARequest.created_at, QARequest.id)
+Index("ix_qap_req_created_id", QARequest.created_at, QARequest.id)
 Index("ix_qap_req_bugfix_source", QARequest.bug_fix_source_request_id)
 Index("ix_qap_del_req_status", QARequestDelegation.qa_request_id, QARequestDelegation.status)
 Index("ix_qap_del_user_status", QARequestDelegation.assigned_to_id, QARequestDelegation.status)
@@ -3275,6 +3283,14 @@ Index("ix_qap_func_status_created", FunctionalRequest.status, FunctionalRequest.
 Index("ix_qap_sast_status_created", SASTRequest.status, SASTRequest.created_at)
 Index("ix_qap_dast_status_created", DASTRequest.status, DASTRequest.created_at)
 Index("ix_qap_perf_status_created", PerformanceRequest.status, PerformanceRequest.created_at)
+Index("ix_qap_func_user_created", FunctionalRequest.requester_id, FunctionalRequest.created_at, FunctionalRequest.id)
+Index("ix_qap_sast_user_created", SASTRequest.requester_id, SASTRequest.created_at, SASTRequest.id)
+Index("ix_qap_dast_user_created", DASTRequest.requester_id, DASTRequest.created_at, DASTRequest.id)
+Index("ix_qap_perf_user_created", PerformanceRequest.requester_id, PerformanceRequest.created_at, PerformanceRequest.id)
+Index("ix_qap_func_created_id", FunctionalRequest.created_at, FunctionalRequest.id)
+Index("ix_qap_sast_created_id", SASTRequest.created_at, SASTRequest.id)
+Index("ix_qap_dast_created_id", DASTRequest.created_at, DASTRequest.id)
+Index("ix_qap_perf_created_id", PerformanceRequest.created_at, PerformanceRequest.id)
 Index("ix_qap_appract_entity_created", ApprovalAction.entity_type, ApprovalAction.entity_id, ApprovalAction.created_at)
 # Dashboard recent activity is an unfiltered newest-first feed.  The entity
 # index above cannot support that ordering because its leading key is type.

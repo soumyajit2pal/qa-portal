@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
-from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, PERFORMANCE_STATUS_LABELS, is_readiness_evidence_editable, application_name_block_message
+from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, PERFORMANCE_STATUS_LABELS, PERFORMANCE_TERMINAL_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
@@ -173,6 +173,9 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
     q = pagination.apply_search(q, params, models.PerformanceRequest.request_id, models.PerformanceRequest.application_name)
     q = pagination.apply_status_filter(q, params, models.PerformanceRequest.status)
     q = pagination.apply_department_filter(q, params, models.QARequest.department)
+    q = pagination.apply_terminal_raised_date_filter(
+        q, params, models.PerformanceRequest.status, models.PerformanceRequest.created_at, PERFORMANCE_TERMINAL_STATUSES,
+    )
     # Module-specific, same reasoning as qa_requests.py/functional.py's own
     # requester_id addition (reported directly -- Dashboard.tsx's "My
     # Requests" tab).

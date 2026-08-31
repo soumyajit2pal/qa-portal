@@ -1,13 +1,15 @@
 """Filesystem-backed background jobs for long-running monolithic tasks.
 
 Status lives under the configured shared upload root, so every API worker
-can poll/download a job created by another worker. FastAPI executes the
-callable after the HTTP response has been sent. This removes request
-timeouts without introducing a second database schema; production should
-place the upload root on durable shared storage.
+can poll/download a job created by another worker. A small in-process worker
+queue executes callables after the HTTP response has been sent, preventing
+bursty imports/exports from consuming the interactive database pool. This
+removes request timeouts without introducing a second database schema;
+production should place the upload root on durable shared storage.
 """
 import json
 import os
+import queue
 import threading
 import uuid
 from typing import Any, Callable, Optional
@@ -22,6 +24,25 @@ from ..storage_config import get_upload_root
 
 router = APIRouter(prefix="/api/jobs", tags=["background-jobs"])
 _write_lock = threading.Lock()
+_worker_start_lock = threading.Lock()
+_job_queue: queue.Queue[tuple[str, Callable[[str], Optional[dict]]]] = queue.Queue()
+_workers_started = False
+
+
+def _job_worker_count() -> int:
+    """Bound DB-backed imports/exports per web process.
+
+    BackgroundTasks previously ran every submitted export/import concurrently.
+    Each job opens its own SessionLocal session, so a burst of user downloads
+    could consume the request pool. Two workers per process keep the work
+    moving while reserving the bulk of the pool for interactive workflow API
+    traffic. Deployment may tune this deliberately when it also sizes Oracle
+    session capacity.
+    """
+    try:
+        return max(1, min(int(os.getenv("BACKGROUND_JOB_WORKERS", "2")), 4))
+    except ValueError:
+        return 2
 
 
 def _job_dir(job_id: str) -> str:
@@ -94,6 +115,25 @@ def _run(job_id: str, action: Callable[[str], Optional[dict]]) -> None:
         )
 
 
+def _job_worker() -> None:
+    while True:
+        job_id, action = _job_queue.get()
+        try:
+            _run(job_id, action)
+        finally:
+            _job_queue.task_done()
+
+
+def _ensure_job_workers() -> None:
+    global _workers_started
+    with _worker_start_lock:
+        if _workers_started:
+            return
+        for number in range(_job_worker_count()):
+            threading.Thread(target=_job_worker, name=f"qa-portal-job-{number + 1}", daemon=True).start()
+        _workers_started = True
+
+
 def enqueue(background_tasks: BackgroundTasks, job_type: str, user_id: int,
             action: Callable[[str], Optional[dict]]) -> dict:
     job_id = uuid.uuid4().hex
@@ -110,7 +150,13 @@ def enqueue(background_tasks: BackgroundTasks, job_type: str, user_id: int,
         "error": None,
         "artifact_name": None,
     })
-    background_tasks.add_task(_run, job_id, action)
+    # Do not hand every job directly to Starlette's shared BackgroundTasks
+    # executor: bursty imports/exports would then all open database sessions
+    # together. The fixed queue above owns concurrency instead. Keep the
+    # parameter for compatible call sites and FastAPI route signatures.
+    del background_tasks
+    _ensure_job_workers()
+    _job_queue.put((job_id, action))
     return _read(job_id) or {"id": job_id, "status": "QUEUED"}
 
 

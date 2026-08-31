@@ -26,11 +26,10 @@ services:
       - .env
 
     environment:
-      # Runtime uploads always use this Docker-managed container path.
+      # Runtime request/evidence uploads stay with the core workflow API.
       UPLOAD_STORAGE_ROOT: /data/qualityops/uploads
-      # Document Portal is a separate top-level folder on the same durable
-      # shared volume. Every API worker therefore sees the same repository.
-      DOCUMENT_PORTAL_ROOT: /data/qualityops/uploads/document-portal
+      # nginx sends Document Portal traffic to the separate service below.
+      DOCUMENT_PORTAL_EMBEDDED: "false"
 
     volumes:
       # Set UPLOAD_STORAGE_HOST_PATH to an absolute host/NFS directory to
@@ -56,6 +55,66 @@ services:
       timeout: 7s
       retries: 5
       start_period: 30s
+
+    restart: unless-stopped
+
+  document_portal:
+    # Same vetted application image and shared Oracle/JWT configuration, but
+    # its own process pool, log volume and storage mount. This keeps large
+    # uploads, ZIP creation and filesystem traversal away from core API
+    # workers and from core request/evidence upload storage.
+    image: qualityops-backend:${IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    expose:
+      - "8000"
+
+    env_file:
+      - .env
+
+    environment:
+      WEB_CONCURRENCY: ${DOCUMENT_PORTAL_WEB_CONCURRENCY:-2}
+      # Each upload holds an authenticated DB session only for authorization
+      # and audit context. Keep this pool deliberately small so document
+      # transfers cannot consume the Oracle connections reserved for core.
+      DB_POOL_SIZE: ${DOCUMENT_PORTAL_DB_POOL_SIZE:-2}
+      DB_MAX_OVERFLOW: ${DOCUMENT_PORTAL_DB_MAX_OVERFLOW:-1}
+      DOCUMENT_PORTAL_ROOT: /data/qualityops/document-storage/repository
+      # Starlette buffers multipart input before the route streams it to its
+      # final destination. Put that temporary work on this service's own
+      # storage mount as well, not on the core host/container temp disk.
+      TMPDIR: /data/qualityops/document-storage/work
+
+    command:
+      - sh
+      - -c
+      - mkdir -p "$$DOCUMENT_PORTAL_ROOT" "$$TMPDIR" && exec uvicorn app.document_portal_main:app --host 0.0.0.0 --port 8000 --workers "$$WEB_CONCURRENCY"
+
+    volumes:
+      # Set DOCUMENT_PORTAL_STORAGE_HOST_PATH to a dedicated disk, NFS
+      # export, or object-storage gateway mount in production. The default
+      # named volume is isolated from qa_portal_uploads.
+      - ${DOCUMENT_PORTAL_STORAGE_HOST_PATH:-qa_portal_documents}:/data/qualityops/document-storage
+      - qa_portal_document_logs:/app/logs
+
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=5)); raise SystemExit(0 if d.get('status') == 'ok' else 1)"
+        ]
+      interval: 15s
+      timeout: 7s
+      retries: 5
+      start_period: 20s
 
     restart: unless-stopped
 
@@ -85,6 +144,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+      document_portal:
+        condition: service_healthy
     restart: unless-stopped
 
 
@@ -92,3 +153,5 @@ volumes:
   qa_portal_uploads:
   qa_portal_redis:
   qa_portal_logs:
+  qa_portal_documents:
+  qa_portal_document_logs:
