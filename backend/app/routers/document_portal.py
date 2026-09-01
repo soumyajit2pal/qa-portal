@@ -3,7 +3,8 @@
 This is the QA Portal integration of the supplied Upload Document application.
 It deliberately has no delete route: documents remain recoverable and every
 write goes through the existing authenticated ``/api`` middleware/audit trail.
-Set ``DOCUMENT_PORTAL_ROOT`` to a persistent shared volume in production.
+Set ``DOCUMENT_PORTAL_STORAGE_HOST_PATH`` to a persistent shared volume in
+production.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ router = APIRouter(prefix="/api/document-portal", tags=["Document Portal"])
 logger = logging.getLogger("qa_portal.document_portal")
 
 _DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "uploads" / "document_portal"
-DOCUMENT_ROOT = Path(os.getenv("DOCUMENT_PORTAL_ROOT", str(_DEFAULT_ROOT))).expanduser().resolve()
+DOCUMENT_ROOT = Path(os.getenv("DOCUMENT_PORTAL_STORAGE_HOST_PATH", str(_DEFAULT_ROOT))).expanduser().resolve()
 DOCUMENT_ROOT.mkdir(parents=True, exist_ok=True)
 MAX_FILE_SIZE = int(os.getenv("DOCUMENT_PORTAL_MAX_FILE_SIZE", str(500 * 1024 * 1024)))
 MINIMUM_FREE_BYTES = int(os.getenv("DOCUMENT_PORTAL_MINIMUM_FREE_BYTES", str(100 * 1024 * 1024)))

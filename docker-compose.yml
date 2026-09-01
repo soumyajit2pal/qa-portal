@@ -81,7 +81,7 @@ services:
       # transfers cannot consume the Oracle connections reserved for core.
       DB_POOL_SIZE: ${DOCUMENT_PORTAL_DB_POOL_SIZE:-2}
       DB_MAX_OVERFLOW: ${DOCUMENT_PORTAL_DB_MAX_OVERFLOW:-1}
-      DOCUMENT_PORTAL_ROOT: /data/qualityops/document-storage/repository
+      DOCUMENT_PORTAL_STORAGE_HOST_PATH: /data/qualityops/document-storage/repository
       # Starlette buffers multipart input before the route streams it to its
       # final destination. Put that temporary work on this service's own
       # storage mount as well, not on the core host/container temp disk.
@@ -90,7 +90,7 @@ services:
     command:
       - sh
       - -c
-      - mkdir -p "$$DOCUMENT_PORTAL_ROOT" "$$TMPDIR" && exec uvicorn app.document_portal_main:app --host 0.0.0.0 --port 8000 --workers "$$WEB_CONCURRENCY"
+      - mkdir -p "$$DOCUMENT_PORTAL_STORAGE_HOST_PATH" "$$TMPDIR" && exec uvicorn app.document_portal_main:app --host 0.0.0.0 --port 8000 --workers "$$WEB_CONCURRENCY"
 
     volumes:
       # Set DOCUMENT_PORTAL_STORAGE_HOST_PATH to a dedicated disk, NFS
