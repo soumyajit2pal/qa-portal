@@ -13,6 +13,7 @@ import {
   ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut, DashboardSummaryOut,
   SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard,
   DashboardAttentionMetric, DashboardAttentionOut, DashboardAttentionRow,
+  FortifySuppressedSeverity, FortifySuppressionDetailOut, FortifySuppressionDetailRow,
 } from './types'
 
 // A single request, whatever its underlying type, reduced to the handful of
@@ -864,9 +865,50 @@ function SecurityTab({ range }: { range: RaisedRange }) {
 }
 
 function SuppressionTab({ range }: { range: RaisedRange }) {
+  const navigate = useNavigate()
   const [data, setData] = useState<SuppressionDashboard | null>(null)
   const [error, setError] = useState<unknown>(null)
+  const [severity, setSeverity] = useState<FortifySuppressedSeverity | null>(null)
+  const [detail, setDetail] = useState<FortifySuppressionDetailOut | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<unknown>(null)
   useEffect(() => { api.get<SuppressionDashboard>(`/api/dashboard/suppression${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
+
+  async function loadDetails(selectedSeverity: FortifySuppressedSeverity, page: number, pageSize: number) {
+    setDetailLoading(true)
+    setDetailError(null)
+    try {
+      const query = new URLSearchParams(rangeQuery(range).replace(/^\?/, ''))
+      query.set('severity', selectedSeverity)
+      query.set('page', String(page))
+      query.set('page_size', String(pageSize))
+      setDetail(await api.get<FortifySuppressionDetailOut>(`/api/dashboard/suppression/fortify-details?${query.toString()}`))
+    } catch (err) {
+      setDetailError(err)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  function openDetails(key: string) {
+    if (!['Critical', 'High', 'Medium', 'Low'].includes(key)) return
+    const selectedSeverity = key as FortifySuppressedSeverity
+    setSeverity(selectedSeverity)
+    setDetail(null)
+    void loadDetails(selectedSeverity, 1, 5)
+  }
+
+  const detailColumns: TableColumn<FortifySuppressionDetailRow>[] = [
+    { key: 'type', header: 'Scan type' },
+    { key: 'request_id', header: 'Request ID' },
+    { key: 'application_name', header: 'Application' },
+    { key: 'application_version', header: 'Version' },
+    { key: 'department', header: 'Department', render: (row) => row.department || '—' },
+    { key: 'suppressed_count', header: severity || 'Suppressed', render: (row) => <strong>{row.suppressed_count}</strong> },
+    { key: 'suppressed_total', header: 'All suppressed' },
+    { key: 'imported_at', header: 'Latest import', render: (row) => row.imported_at ? formatDateTimeIST(row.imported_at) : '—' },
+  ]
+
   if (error) return <ErrorText error={error} />
   if (!data) return <DashboardLoadingSkeleton variant="insights" />
   return (
@@ -885,12 +927,49 @@ function SuppressionTab({ range }: { range: RaisedRange }) {
       </div>
       <div className="grid grid-2" style={{ marginTop: 16 }}>
         <Card title="Fortify Suppressed Findings by Severity" subtitle="Latest SSC snapshot · Critical, High, Medium, and Low">
-          <BarChart data={data.fortify_suppressed_severity_distribution} />
+          <BarChart data={data.fortify_suppressed_severity_distribution} onBarClick={openDetails} />
+          <p className="muted small" style={{ marginBottom: 0 }}>Select a non-zero severity to view application-wise details.</p>
         </Card>
         <Card title="QualityOps Suppression Status" subtitle="Approval requests by workflow state">
           <BarChart data={data.status_breakdown} />
         </Card>
       </div>
+      {severity && (
+        <Modal
+          title={detail?.title || `Fortify Suppressed ${severity} Findings`}
+          onClose={() => { setSeverity(null); setDetail(null); setDetailError(null) }}
+          wide
+        >
+          {detailLoading && <p className="muted">Loading application details…</p>}
+          <ErrorText error={detailError} />
+          {detail && (
+            <>
+              <div className="dashboard-drilldown-summary">
+                <div><strong>{detail.total}</strong><span>{detail.unit}</span></div>
+                <p>{detail.description}</p>
+              </div>
+              <Table
+                rowKey="key"
+                columns={detailColumns}
+                rows={detail.rows}
+                server={{
+                  page: detail.page,
+                  pageSize: detail.page_size,
+                  total: detail.total_rows,
+                  totalPages: detail.total_pages,
+                  hasNext: detail.has_next,
+                  hasPrevious: detail.has_previous,
+                  loading: detailLoading,
+                  onPageChange: (page) => loadDetails(severity, page, detail.page_size),
+                  onPageSizeChange: (pageSize) => loadDetails(severity, 1, pageSize),
+                }}
+                onRowClick={(row) => navigate(row.route)}
+              />
+              {detail.rows.length === 0 && <p className="muted small">No applications contribute to this severity in the selected period.</p>}
+            </>
+          )}
+        </Modal>
+      )}
     </div>
   )
 }

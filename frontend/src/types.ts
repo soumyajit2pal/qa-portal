@@ -972,6 +972,37 @@ export interface SuppressionDashboard {
   status_breakdown: Record<string, number>
 }
 
+export type FortifySuppressedSeverity = 'Critical' | 'High' | 'Medium' | 'Low'
+
+export interface FortifySuppressionDetailRow {
+  key: string
+  type: 'SAST' | 'DAST'
+  request_id: string
+  application_name: string
+  application_version: string
+  department?: string | null
+  severity: FortifySuppressedSeverity
+  suppressed_count: number
+  suppressed_total: number
+  imported_at?: string | null
+  route: string
+}
+
+export interface FortifySuppressionDetailOut {
+  metric: string
+  title: string
+  description: string
+  total: number
+  unit: string
+  rows: FortifySuppressionDetailRow[]
+  page: number
+  page_size: number
+  total_rows: number
+  total_pages: number
+  has_next: boolean
+  has_previous: boolean
+}
+
 // ---------------- Test Management (Project Management / Test Repository / Test Execution) ----------------
 // See backend models.TestProject's header comment for the full design --
 // one Project per Application, a folder tree of Test Cases under it, Test

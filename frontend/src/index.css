@@ -2138,6 +2138,9 @@ tbody tr:hover { background: #f8f9fc; }
 
 .bar-chart { display: flex; flex-direction: column; gap: 10px; }
 .bar-row { display: grid; grid-template-columns: 110px 1fr 30px; align-items: center; gap: 10px; font-size: 13px; }
+.bar-row-clickable { width:100%; padding:7px 6px; margin:-7px -6px; border:0; border-radius:8px; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+.bar-row-clickable:hover { background:var(--blue-50, #eff6ff); }
+.bar-row-clickable:focus-visible { outline:2px solid var(--primary, #245a92); outline-offset:2px; }
 .bar-track { background: #eef0f3; border-radius: 100px; height: 8px; overflow: hidden; }
 .bar-fill { background: linear-gradient(90deg, #60a5fa, var(--navy)); height: 100%; border-radius: 100px; transition: width .3s var(--ease); }
 .bar-row > * { min-width:0; }

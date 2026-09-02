@@ -1795,6 +1795,81 @@ def suppression_dashboard(date_from: str | None = Query(None), date_to: str | No
     }
 
 
+_FORTIFY_SUPPRESSED_FIELDS = {
+    "Critical": "suppressed_critical_count",
+    "High": "suppressed_high_count",
+    "Medium": "suppressed_medium_count",
+    "Low": "suppressed_low_count",
+}
+
+
+@router.get("/suppression/fortify-details")
+def fortify_suppression_details(
+    severity: str = Query(...),
+    params: PageParams = Depends(),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Application/request drill-down behind one suppressed-severity bar.
+
+    The selected reporting period and department visibility are deliberately
+    identical to ``suppression_dashboard``. Each row represents the latest
+    Fortify snapshot for one SAST or DAST request, which keeps the count
+    reconcilable with the chart and gives the UI an unambiguous source request
+    to open.
+    """
+    field_name = _FORTIFY_SUPPRESSED_FIELDS.get(severity)
+    if not field_name:
+        raise HTTPException(400, "severity must be Critical, High, Medium, or Low")
+
+    scope = dashboard_department_scope(current_user)
+    rows = []
+    for kind, model, path in (
+        ("SAST", models.SASTRequest, "/sast"),
+        ("DAST", models.DASTRequest, "/dast"),
+    ):
+        requests = _join_qa_department(
+            _in_period(db.query(model), model.created_at, date_from, date_to),
+            model,
+            scope,
+        ).all()
+        by_id = {request.id: request for request in requests}
+        for request_id, scan in _latest_scan_by_request(db, kind, by_id).items():
+            suppressed_count = int(getattr(scan, field_name, 0) or 0)
+            if suppressed_count <= 0:
+                continue
+            request = by_id[request_id]
+            rows.append({
+                "key": f"{kind}:{request.id}",
+                "type": kind,
+                "request_id": request.request_id,
+                "application_name": request.application_name or "—",
+                "application_version": scan.application_version or "—",
+                "department": request.department,
+                "severity": severity,
+                "suppressed_count": suppressed_count,
+                "suppressed_total": int(scan.suppressed_total_count or 0),
+                "imported_at": scan.imported_at,
+                "route": f"{path}?open={request.request_id}",
+            })
+
+    rows.sort(
+        key=lambda row: (row["suppressed_count"], row["imported_at"] or datetime.datetime.min),
+        reverse=True,
+    )
+    return _attention_response(
+        f"fortify-suppressed-{severity.lower()}",
+        f"Fortify Suppressed {severity} Findings",
+        f"Applications whose latest SAST or DAST Fortify snapshot contains suppressed {severity.lower()} findings. Select a row to open its source request.",
+        "suppressed findings",
+        sum(row["suppressed_count"] for row in rows),
+        rows,
+        params,
+    )
+
+
 # ---------------- 4.9.8 3W Project Dashboard (What / Where / Since When) ----------------
 STAGE_LABELS = {
     QAStatus.SUBMITTED: "SM Approval Pending",

@@ -314,14 +314,31 @@ export function MetricCard({
   );
 }
 
-export function BarChart({ data }: { data?: Record<string, number> | null }) {
+export function BarChart({
+  data,
+  onBarClick,
+}: {
+  data?: Record<string, number> | null;
+  onBarClick?: (key: string, value: number) => void;
+}) {
   const entries = Object.entries(data || {}).filter(([k]) => k);
   const max = Math.max(1, ...entries.map(([, v]) => v));
   if (entries.length === 0) return <p className="muted small">No data yet.</p>;
   return (
     <div className="bar-chart">
-      {entries.map(([k, v]) => (
-        <div className="bar-row" key={k}>
+      {entries.map(([k, v]) => {
+        const clickable = !!onBarClick && v > 0;
+        const Row = clickable ? "button" : "div";
+        return (
+        <Row
+          className={`bar-row${clickable ? " bar-row-clickable" : ""}`}
+          key={k}
+          {...(clickable ? {
+            type: "button" as const,
+            onClick: () => onBarClick(k, v),
+            title: `View application details for ${k.replace(/_/g, " ")}`,
+          } : {})}
+        >
           <span
             className="bar-label"
             title={k.replace(/_/g, " ")}
@@ -337,8 +354,8 @@ export function BarChart({ data }: { data?: Record<string, number> | null }) {
             />
           </div>
           <span className="bar-value">{v}</span>
-        </div>
-      ))}
+        </Row>
+      )})}
     </div>
   );
 }
