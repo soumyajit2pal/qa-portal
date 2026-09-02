@@ -813,6 +813,8 @@ export const REPORTS: ReportDef[] = [
   { key: 'performance-testing', label: 'Performance Testing Register', group: 'Operational', description: 'Performance requests, workload target, environment, assignment and report state.' },
   { key: 'sast-scan', label: 'SAST Scan Register', group: 'Security', description: 'SAST requests, application/build, workflow state and finding volume.' },
   { key: 'dast-scan', label: 'DAST Scan Register', group: 'Security', description: 'DAST requests, target environment, workflow state and finding volume.' },
+  { key: 'sast-observation-history', label: 'SAST Findings & Suppression History', group: 'Security', description: 'Every imported SAST scan and Fortify observation view, with Critical/High/Medium/Low findings and Security Auditor View suppression counts.' },
+  { key: 'dast-observation-history', label: 'DAST Findings & Suppression History', group: 'Security', description: 'Every imported DAST scan and Fortify observation view, with Critical/High/Medium/Low findings and Security Auditor View suppression counts.' },
   { key: 'severity-distribution', label: 'Security Finding Severity Distribution', group: 'Security', description: 'Combined SAST and DAST finding counts by severity.' },
   { key: 'suppression-register', label: 'Suppression Register', group: 'Security', description: 'Finding-level suppression requests and all governed decisions.' },
   { key: 'testcase-approval-summary', label: 'Testcase Approval Backlog', group: 'Management', description: 'Draft, recommendation, QA Lead approval and approved counts by project.' },

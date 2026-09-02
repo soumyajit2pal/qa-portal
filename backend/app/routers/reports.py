@@ -393,6 +393,125 @@ def dast_scan_report(date_from: str | None = None, date_to: str | None = None, d
     } for r in rows]
 
 
+def _security_observation_history(kind: str, date_from: str | None, date_to: str | None,
+                                  db: Session, current_user: models.User):
+    """Flatten every immutable Fortify scan and filter view for export.
+
+    SSC filter sets are overlapping observations, so each becomes its own
+    row instead of being summed. Suppression counts are available only for
+    the primary Security Auditor View and are emitted only on that row; this
+    keeps spreadsheet totals accurate when users aggregate the export.
+    """
+    request_model = models.SASTRequest if kind == "SAST" else models.DASTRequest
+    request_query = db.query(request_model)
+    scope = dashboard_department_scope(current_user)
+    if scope:
+        request_query = (
+            request_query
+            .join(models.QARequest, request_model.qa_request_id == models.QARequest.id)
+            .filter(models.QARequest.department.in_(scope))
+        )
+    requests = request_query.all()
+    by_id = {request.id: request for request in requests}
+    if not by_id:
+        return []
+
+    scans = (
+        db.query(models.SecurityScanResult)
+        .filter(
+            models.SecurityScanResult.request_type == kind,
+            models.SecurityScanResult.request_id.in_(by_id),
+        )
+        .order_by(
+            models.SecurityScanResult.request_id,
+            models.SecurityScanResult.imported_at.asc(),
+            models.SecurityScanResult.id.asc(),
+        )
+        .all()
+    )
+    imported_by = _user_name_map(db, [scan.imported_by_id for scan in scans])
+    start, end = _period_bounds(date_from, date_to)
+    scan_numbers: dict[int, int] = {}
+    out = []
+    for scan in scans:
+        scan_numbers[scan.request_id] = scan_numbers.get(scan.request_id, 0) + 1
+        if start and scan.imported_at < start:
+            continue
+        if end and scan.imported_at > end:
+            continue
+
+        request = by_id[scan.request_id]
+        scan_no = scan_numbers[scan.request_id]
+        filters = scan.filters or [{
+            "title": "Security Auditor View",
+            "critical_count": scan.critical_count,
+            "high_count": scan.high_count,
+            "medium_count": scan.medium_count,
+            "low_count": scan.low_count,
+            "total_count": scan.total_count,
+            "audit_url": scan.audit_url,
+        }]
+        primary_index = next((
+            index for index, observation in enumerate(filters)
+            if "security auditor view" in str(observation.get("title") or "").strip().casefold()
+        ), 0)
+        for index, observation in enumerate(filters):
+            is_primary = index == primary_index
+            row = {
+                "Scan Type": kind,
+                "Request ID": request.request_id,
+                "Application": scan.application_name,
+                "Application Version": scan.application_version,
+                "Department": request.department,
+                "Workflow Status": request.status,
+                "Scan No": scan_no,
+                "Scan Execution": "Initial Scan" if scan_no == 1 else "Rescan",
+                "Observation View": observation.get("title") or "Unnamed Filter",
+                "Active Critical": int(observation.get("critical_count") or 0),
+                "Active High": int(observation.get("high_count") or 0),
+                "Active Medium": int(observation.get("medium_count") or 0),
+                "Active Low": int(observation.get("low_count") or 0),
+                "Active Total": int(observation.get("total_count") or 0),
+                # Blank outside the primary view prevents the same suppressed
+                # findings being multiplied by the number of overlapping SSC
+                # filter rows in pivots or spreadsheet totals.
+                "Suppressed Critical (Security Auditor View)": int(scan.suppressed_critical_count or 0) if is_primary else None,
+                "Suppressed High (Security Auditor View)": int(scan.suppressed_high_count or 0) if is_primary else None,
+                "Suppressed Medium (Security Auditor View)": int(scan.suppressed_medium_count or 0) if is_primary else None,
+                "Suppressed Low (Security Auditor View)": int(scan.suppressed_low_count or 0) if is_primary else None,
+                "Suppressed Total (Security Auditor View)": int(scan.suppressed_total_count or 0) if is_primary else None,
+                "Provider Version ID": scan.provider_version_id,
+                "Imported By": imported_by.get(scan.imported_by_id),
+                "Imported At": scan.imported_at,
+                "Fortify Audit URL": observation.get("audit_url") or scan.audit_url,
+            }
+            if kind == "SAST":
+                row.update({
+                    "Build": request.build_number,
+                    "CR Number/EPIC Number": request.cr_number or request.epic_number,
+                })
+            else:
+                row.update({
+                    "Application URL": request.application_url,
+                    "Environment": request.environment,
+                    "CR Number/EPIC Number": request.cr_number or request.epic_number,
+                })
+            out.append(row)
+    return out
+
+
+@router.get("/sast-observation-history")
+def sast_observation_history(date_from: str | None = None, date_to: str | None = None,
+                             db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    return _security_observation_history("SAST", date_from, date_to, db, current_user)
+
+
+@router.get("/dast-observation-history")
+def dast_observation_history(date_from: str | None = None, date_to: str | None = None,
+                             db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    return _security_observation_history("DAST", date_from, date_to, db, current_user)
+
+
 @router.get("/performance-testing")
 def performance_testing_report(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     q = db.query(models.PerformanceRequest).options(joinedload(models.PerformanceRequest.qa_request))
@@ -609,6 +728,8 @@ REPORT_REGISTRY = {
     "performance-testing": performance_testing_report,
     "sast-scan": sast_scan_report,
     "dast-scan": dast_scan_report,
+    "sast-observation-history": sast_observation_history,
+    "dast-observation-history": dast_observation_history,
     "severity-distribution": severity_distribution,
     "suppression-register": suppression_register,
     "testcase-approval-summary": testcase_approval_summary,
