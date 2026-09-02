@@ -6372,6 +6372,15 @@ td { padding: 12px; }
 .security-scan-filter-breakdown { margin-bottom: 10px; }
 .security-scan-filter-breakdown:last-child { margin-bottom: 0; }
 .security-scan-filter-label { display: block; margin-bottom: 5px; color: #5b55c4; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .02em; }
+.security-scan-suppressed-summary { display: grid; grid-template-columns: minmax(220px,.72fr) minmax(0,1.6fr); align-items: center; gap: 14px; margin-top: 15px; padding: 13px; border: 1px solid #c7d2fe; border-radius: 11px; background: linear-gradient(120deg,var(--navy-50),#fff); }
+.security-scan-suppressed-summary > header { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.security-scan-suppressed-summary > header > div { display: grid; gap: 3px; min-width: 0; }
+.security-scan-suppressed-summary > header small { color: var(--navy); }
+.security-scan-suppressed-summary > header strong { color: var(--text); font-size: 12px; }
+.security-scan-suppressed-summary > header p { color: var(--muted); font-size: 9px; line-height: 1.45; }
+.security-scan-suppressed-icon { display: grid; place-items: center; flex: 0 0 31px; width: 31px; height: 31px; border-radius: 9px; color: #fff; background: var(--navy); font-size: 12px; font-weight: 850; box-shadow: 0 4px 10px rgba(79,70,229,.18); }
+.security-scan-suppressed-summary .security-scan-severity-grid { grid-template-columns: repeat(5,minmax(0,1fr)); }
+.security-scan-suppressed-summary .security-scan-severity-grid > div { background: rgba(255,255,255,.9); }
 .security-scan-history-table { margin-top: 14px; }
 .security-scan-history-table > strong { display: block; margin-bottom: 7px; color: #465964; font-size: 10px; }
 .security-scan-history-table table { background: #fff; }
@@ -6381,6 +6390,8 @@ td { padding: 12px; }
 @media (max-width: 760px) {
   .security-scan-severity-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.security-scan-severity-grid .total { grid-column: 1/-1; }.security-scan-results > header { flex-direction: column; }
   .security-scan-findings-compare { grid-template-columns: 1fr; }
+  .security-scan-suppressed-summary { grid-template-columns: 1fr; }
+  .security-scan-suppressed-summary .security-scan-severity-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 
 /* QualityOps content-surface blue normalization ----------------------------

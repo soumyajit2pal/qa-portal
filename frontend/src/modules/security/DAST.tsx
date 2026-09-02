@@ -661,7 +661,8 @@ function DASTDetail({ req, onClose, onChanged, users }: {
                 that manual "Log Finding" entry point was removed since
                 findings come from the SAST/DAST API, which made
                 req.findings permanently empty. */}
-            {t === 'findings' ? `Findings (${scanResults[0]?.total_count ?? 0})`
+            {t === 'findings'
+              ? `Findings (${scanResults[0]?.total_count ?? 0} active · ${scanResults[0]?.suppressed_total_count ?? 0} suppressed)`
               : t === 'history' ? 'Activity' : t[0].toUpperCase() + t.slice(1)}
           </button>
         ))}

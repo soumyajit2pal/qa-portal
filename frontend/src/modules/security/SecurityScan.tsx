@@ -133,6 +133,16 @@ function findingsByFilter(scan: SecurityScanResultOut) {
   )
 }
 
+function suppressedFindingsBreakdown(scan: SecurityScanResultOut) {
+  return severityBreakdown({
+    critical_count: scan.suppressed_critical_count ?? 0,
+    high_count: scan.suppressed_high_count ?? 0,
+    medium_count: scan.suppressed_medium_count ?? 0,
+    low_count: scan.suppressed_low_count ?? 0,
+    total_count: scan.suppressed_total_count ?? 0,
+  })
+}
+
 // 2026-08, reported directly: "if supression request then link that
 // request with that sast request, which should be linkable ... give
 // option to link and delink supression request from sast request and
@@ -346,6 +356,20 @@ export function SecurityScanResults({
           {findingsByFilter(current)}
         </div>
       </div>
+
+      <section className="security-scan-suppressed-summary" aria-label="Latest Fortify suppressed findings">
+        <header>
+          <span className="security-scan-suppressed-icon" aria-hidden="true">S</span>
+          <div>
+            <small>Current Fortify state · Security Auditor View</small>
+            <strong>Suppressed Findings</strong>
+            <p>
+              {current.application_name} v{current.application_version} · These findings are suppressed in Fortify SSC and are not included in the active finding totals above.
+            </p>
+          </div>
+        </header>
+        {suppressedFindingsBreakdown(current)}
+      </section>
 
       {/* 4.3 Scan History -- reported directly: "also split by filter,
           currently fixed to Security Auditor View only ... instead of
