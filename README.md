@@ -395,11 +395,32 @@ users without an email address are skipped.
 
 ### Enable HTTPS
 
-Out of the box (`docker compose up --build`, above) the app is HTTP-only, reachable at
-`http://localhost:8080`. Both paths below terminate TLS in this stack's own nginx (`frontend`)
-container, write their certificate into the same place, and need no `frontend/nginx.conf.template`
-changes either way -- only which bootstrap script you run differs. Pick based on how this server
-is reached:
+The frontend terminates TLS in nginx and publishes container port 443 on host port 8080. Keep the
+certificate and private key outside the image. Set one host directory in the environment file
+selected at deploy time; that directory must contain `qualityops.crt` and `qualityops.key`:
+
+```env
+# .env.uat
+TLS_CERT_HOST_PATH=./certs/
+
+# .env.prod (relative to the directory containing docker-compose.yml)
+TLS_CERT_HOST_PATH=./certs/
+```
+
+The directory and both required files must already exist and be readable before `compose up`:
+
+```text
+certs/
+├── qualityops.crt
+└── qualityops.key
+```
+
+The required-variable check in `docker-compose.yml` stops early with a clear configuration error
+if the directory setting is omitted. The
+same `qualityops-frontend` image can therefore be promoted unchanged between UAT and Production;
+certificates and private keys are never baked into or transferred with the image. Both paths below
+terminate TLS in this stack's own nginx (`frontend`) container. Pick based on how this server is
+reached:
 
 - **Have a real domain, and the server is reachable from the public internet on it?** Use
   [Path A](#path-a--public-domain-lets-encrypt) -- a trusted, browser-recognized certificate that

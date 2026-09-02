@@ -101,7 +101,11 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    # Third-party runtime image: keep the vendor name (do not present it as
+    # a QualityOps-built artifact), but fully qualify it so Podman never has
+    # to resolve an ambiguous short name. Load this exact tag before using
+    # `--pull never` on an offline host.
+    image: docker.io/library/redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
 
     healthcheck:
@@ -114,13 +118,18 @@ services:
       - qa_portal_redis:/data
 
   frontend:
+    image: qualityops-frontend:${IMAGE_TAG:-latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
       - "8080:443"
     volumes:
-      - ./certs:/etc/nginx/ssl:ro,Z
+      # The same frontend image is promoted through every environment. The
+      # selected host directory must contain qualityops.crt and qualityops.key.
+      # Mounting the directory keeps the environment configuration to one path
+      # while nginx continues to use stable in-container filenames.
+      - ${TLS_CERT_HOST_PATH:?Set TLS_CERT_HOST_PATH to the certificate directory in the selected environment file}:/etc/nginx/ssl:ro,Z
     depends_on:
       backend:
         condition: service_healthy
@@ -129,8 +138,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  qa_portal_uploads:
+  # These legacy volume keys are intentionally retained: renaming a volume
+  # disconnects an existing deployment from its persisted Redis data/logs.
   qa_portal_redis:
-  qa_portal_logs:
-  qa_portal_documents:
   qa_portal_document_logs:

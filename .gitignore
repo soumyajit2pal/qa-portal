@@ -1,10 +1,5 @@
 # Environment profiles may contain database, LDAP, SMTP, and signing secrets.
-.env
-.envb
-.env.*
 !.env.*.example
-backend/.env
-backend/.env.*
 !backend/.env.example
 !backend/.env.*.example
 
