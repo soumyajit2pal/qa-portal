@@ -554,6 +554,11 @@ def _import_scan_result(db: Session, obj, kind: str, application_name: str, appl
         critical_count=snapshot.critical_count, high_count=snapshot.high_count,
         medium_count=snapshot.medium_count, low_count=snapshot.low_count,
         total_count=snapshot.total_count, audit_url=snapshot.audit_url,
+        suppressed_critical_count=snapshot.suppressed_critical_count,
+        suppressed_high_count=snapshot.suppressed_high_count,
+        suppressed_medium_count=snapshot.suppressed_medium_count,
+        suppressed_low_count=snapshot.suppressed_low_count,
+        suppressed_total_count=snapshot.suppressed_total_count,
         filters_json=json.dumps(snapshot.filters), imported_by_id=current_user.id,
     )
     db.add(scan_result)

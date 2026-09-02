@@ -905,6 +905,11 @@ class SecurityScanResultOut(ORMModel):
     medium_count: int
     low_count: int
     total_count: int
+    suppressed_critical_count: int = 0
+    suppressed_high_count: int = 0
+    suppressed_medium_count: int = 0
+    suppressed_low_count: int = 0
+    suppressed_total_count: int = 0
     audit_url: Optional[str] = None
     filters: List[SecurityScanFilterOut] = []
     imported_by_id: Optional[int] = None

@@ -45,7 +45,9 @@ from .routers import (
 # startup (`uvicorn app.main:app`) has no second ASGI process, however, so it
 # embeds the same router by default. Set DOCUMENT_PORTAL_EMBEDDED=false only
 # when nginx routes Document Portal traffic to the dedicated service.
-DOCUMENT_PORTAL_EMBEDDED = os.getenv("DOCUMENT_PORTAL_EMBEDDED", "true").strip().lower() in {"1", "true", "yes", "on"}
+from .config import settings
+
+DOCUMENT_PORTAL_EMBEDDED = settings.document_portal_embedded
 if DOCUMENT_PORTAL_EMBEDDED:
     from .routers import document_portal
 
@@ -751,6 +753,7 @@ def health():
     cache_status = "connected" if cache.available() else ("disabled" if not cache.REDIS_URL else "unreachable")
     return {
         "status": "ok" if db_ok else "degraded",
+        "profile": settings.app_env,
         "database": "ok" if db_ok else "unreachable",
         "cache": cache_status,
         "database_pool": main_pool_metrics(),

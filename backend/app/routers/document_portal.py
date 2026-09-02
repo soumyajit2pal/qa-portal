@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .. import models
+from ..config import settings
 from ..deps import require_document_portal_contributor, require_document_portal_viewer
 
 
@@ -31,19 +32,19 @@ router = APIRouter(prefix="/api/document-portal", tags=["Document Portal"])
 logger = logging.getLogger("qa_portal.document_portal")
 
 _DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "uploads" / "document_portal"
-DOCUMENT_ROOT = Path(os.getenv("DOCUMENT_PORTAL_STORAGE_HOST_PATH", str(_DEFAULT_ROOT))).expanduser().resolve()
+DOCUMENT_ROOT = Path(settings.document_portal_storage_host_path or _DEFAULT_ROOT).expanduser().resolve()
 DOCUMENT_ROOT.mkdir(parents=True, exist_ok=True)
-MAX_FILE_SIZE = int(os.getenv("DOCUMENT_PORTAL_MAX_FILE_SIZE", str(500 * 1024 * 1024)))
-MINIMUM_FREE_BYTES = int(os.getenv("DOCUMENT_PORTAL_MINIMUM_FREE_BYTES", str(100 * 1024 * 1024)))
-UPLOAD_CHUNK_SIZE = int(os.getenv("DOCUMENT_PORTAL_UPLOAD_CHUNK_SIZE", str(1024 * 1024)))
+MAX_FILE_SIZE = settings.document_portal_max_file_size
+MINIMUM_FREE_BYTES = settings.document_portal_minimum_free_bytes
+UPLOAD_CHUNK_SIZE = settings.document_portal_upload_chunk_size
 BLOCKED_EXTENSIONS = frozenset(
     f".{value.strip().lower().lstrip('.')}"
-    for value in os.getenv("DOCUMENT_PORTAL_BLOCKED_EXTENSIONS", ".exe,.bat,.cmd,.sh,.ps1,.dll,.com,.msi,.scr").split(",")
+    for value in settings.document_portal_blocked_extensions.split(",")
     if value.strip()
 )
 ALLOWED_EXTENSIONS = frozenset(
     f".{value.strip().lower().lstrip('.')}"
-    for value in os.getenv("DOCUMENT_PORTAL_ALLOWED_EXTENSIONS", "").split(",")
+    for value in settings.document_portal_allowed_extensions.split(",")
     if value.strip()
 )
 WINDOWS_RESERVED = {

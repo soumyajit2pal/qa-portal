@@ -6,6 +6,7 @@ services:
       dockerfile: Dockerfile
     command: ["alembic", "upgrade", "head"]
     environment:
+      APP_ENV: ${APP_ENV:-dev}
       DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:Oracle123@host.docker.internal:1521/?service_name=FREEPDB1}
     restart: "no"
     extra_hosts:
@@ -19,6 +20,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      APP_ENV: ${APP_ENV:-dev}
       DATABASE_URL: ${DATABASE_URL:-oracle+oracledb://qa_portal:Oracle123@host.docker.internal:1521/?service_name=FREEPDB1}
 
       SECRET_KEY: ${SECRET_KEY:-fYjtWV4VO80trvAPaSSg9gY3am9A2DdfShH1myihTUU}

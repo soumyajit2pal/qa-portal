@@ -871,12 +871,26 @@ function SuppressionTab({ range }: { range: RaisedRange }) {
   if (!data) return <DashboardLoadingSkeleton variant="insights" />
   return (
     <div>
-      <div className="grid grid-4">
-        <MetricCard label="Open Suppressions" value={data.open_suppressions} hint="Suppression requests not yet Done, Rejected, or otherwise closed out." />
-        <MetricCard label="Critical/High Risk Exceptions" value={data.critical_high_risk_exceptions}
-                    hint="Of those open suppressions, how many cover at least one Critical or High severity finding." />
+      <div className="grid grid-2">
+        <MetricCard
+          label="Open QualityOps Suppression Requests"
+          value={data.open_qualityops_suppression_requests}
+          hint="QualityOps approval requests not yet Done, Rejected, or otherwise closed out."
+        />
+        <MetricCard
+          label="Fortify Suppressed Findings"
+          value={data.fortify_suppressed_findings}
+          hint="Suppressed findings in the latest Fortify SSC Security Auditor View for in-scope SAST and DAST requests."
+        />
       </div>
-      <Card title="Status Breakdown" style={{ marginTop: 16 }}><BarChart data={data.status_breakdown} /></Card>
+      <div className="grid grid-2" style={{ marginTop: 16 }}>
+        <Card title="Fortify Suppressed Findings by Severity" subtitle="Latest SSC snapshot · Critical, High, Medium, and Low">
+          <BarChart data={data.fortify_suppressed_severity_distribution} />
+        </Card>
+        <Card title="QualityOps Suppression Status" subtitle="Approval requests by workflow state">
+          <BarChart data={data.status_breakdown} />
+        </Card>
+      </div>
     </div>
   )
 }

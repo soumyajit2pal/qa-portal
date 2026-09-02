@@ -7,12 +7,14 @@ declared in Compose. It is not configurable through the UI or database.
 import os
 import tempfile
 
+from .config import settings
+
 
 # Containers set this to their durable volume mount. Local development keeps
 # the historical app/uploads directory unless the environment overrides it.
 DEFAULT_UPLOAD_ROOT = os.path.abspath(os.getenv(
     "UPLOAD_STORAGE_ROOT",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads"),
+    settings.upload_storage_root or os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads"),
 ))
 
 

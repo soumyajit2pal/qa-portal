@@ -18,6 +18,7 @@ from sqlalchemy.exc import DBAPIError, TimeoutError as SQLAlchemyTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .database import main_pool_metrics
+from .config import settings
 from .logging_config import bind_request_id, configure_logging, reset_request_id
 from .resilience import CircuitOpenError, database_circuit, is_transient_database_error, snapshot as resilience_snapshot
 
@@ -158,7 +159,12 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "document-portal", "circuits": resilience_snapshot()}
+    return {
+        "status": "ok",
+        "service": "document-portal",
+        "profile": settings.app_env,
+        "circuits": resilience_snapshot(),
+    }
 
 
 app.include_router(document_portal.router)

@@ -39,6 +39,11 @@ class FortifyScanSnapshot:
     medium_count: int
     low_count: int
     total_count: int
+    suppressed_critical_count: int
+    suppressed_high_count: int
+    suppressed_medium_count: int
+    suppressed_low_count: int
+    suppressed_total_count: int
     audit_url: str
     filters: list[dict]
 
@@ -156,10 +161,7 @@ class FortifySSCClient:
                 "showshortfilenames": "true", "groupingtype": "FOLDER",
             })
             result = self._get(f"projectVersions/{version_id}/issueGroups?{query}")
-            severity_counts = {
-                severity: next((int(item.get("totalCount") or 0) for item in result.get("data", []) if item.get("id") == severity), 0)
-                for severity in ("Critical", "High", "Medium", "Low")
-            }
+            severity_counts = self._severity_counts(result)
             filter_results.append({
                 "title": str(filter_set.get("title") or "Unnamed filter"),
                 "guid": guid,
@@ -182,11 +184,44 @@ class FortifySSCClient:
             (f for f in filter_results if "security auditor view" in f["title"].strip().casefold()),
             filter_results[0],
         )
+        # SSC's ordinary issue totals deliberately exclude suppressed issues.
+        # `showsuppressed=true` includes them alongside the active findings,
+        # so the per-severity delta is the suppressed-only count. Query only
+        # the primary Security Auditor View: filter sets overlap and adding
+        # their deltas would count the same Fortify issue several times.
+        suppressed_query = urllib.parse.urlencode({
+            "qm": "issues", "filterset": primary["guid"], "showhidden": "false",
+            "showremoved": "false", "showsuppressed": "true",
+            "showshortfilenames": "true", "groupingtype": "FOLDER",
+        })
+        inclusive_counts = self._severity_counts(
+            self._get(f"projectVersions/{version_id}/issueGroups?{suppressed_query}")
+        )
+        suppressed_counts = {
+            severity: max(inclusive_counts[severity] - primary[f"{severity.lower()}_count"], 0)
+            for severity in ("Critical", "High", "Medium", "Low")
+        }
         return FortifyScanSnapshot(
             application_name=application_name, application_version=application_version,
             project_version_id=version_id,
             critical_count=primary["critical_count"], high_count=primary["high_count"],
             medium_count=primary["medium_count"], low_count=primary["low_count"], total_count=primary["total_count"],
+            suppressed_critical_count=suppressed_counts["Critical"],
+            suppressed_high_count=suppressed_counts["High"],
+            suppressed_medium_count=suppressed_counts["Medium"],
+            suppressed_low_count=suppressed_counts["Low"],
+            suppressed_total_count=sum(suppressed_counts.values()),
             audit_url=f"{self.base_url}/html/ssc/version/{version_id}/audit",
             filters=filter_results,
         )
+
+    @staticmethod
+    def _severity_counts(result: dict) -> dict[str, int]:
+        return {
+            severity: next((
+                int(item.get("totalCount") or 0)
+                for item in result.get("data", [])
+                if item.get("id") == severity
+            ), 0)
+            for severity in ("Critical", "High", "Medium", "Low")
+        }

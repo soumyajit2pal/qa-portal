@@ -462,6 +462,11 @@ export interface SecurityScanResultOut {
   medium_count: number
   low_count: number
   total_count: number
+  suppressed_critical_count: number
+  suppressed_high_count: number
+  suppressed_medium_count: number
+  suppressed_low_count: number
+  suppressed_total_count: number
   audit_url?: string | null
   filters: SecurityScanFilterOut[]
   imported_by_id?: number | null
@@ -959,8 +964,11 @@ export interface SecurityDastDashboard {
 }
 
 export interface SuppressionDashboard {
+  open_qualityops_suppression_requests: number
   open_suppressions: number
   critical_high_risk_exceptions: number
+  fortify_suppressed_findings: number
+  fortify_suppressed_severity_distribution: Record<string, number>
   status_breakdown: Record<string, number>
 }
 

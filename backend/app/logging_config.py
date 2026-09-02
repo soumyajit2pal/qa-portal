@@ -17,13 +17,13 @@ import logging.handlers
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from .config import load_environment
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 # main.py configures logging before database.py is imported, so logging must
-# load the backend .env itself or DEEP_LOGGING in that file would be ignored.
-load_dotenv(BACKEND_DIR / ".env")
+# load the backend profile itself or profile logging values would be ignored.
+load_environment()
 
 _configured_log_dir = Path(os.getenv("LOG_DIR", str(BACKEND_DIR / "logs")))
 LOG_DIR = str(_configured_log_dir if _configured_log_dir.is_absolute() else BACKEND_DIR / _configured_log_dir)

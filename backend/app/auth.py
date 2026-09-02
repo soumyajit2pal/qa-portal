@@ -7,9 +7,12 @@ from jose import jwt
 from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE
 from ldap3.core.exceptions import LDAPException
 
-SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-in-production-please")
+from .config import settings
+
+
+SECRET_KEY = settings.secret_key
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
 
 # Hashing goes straight through the `bcrypt` package rather than passlib's
 # CryptContext wrapper: passlib 1.7.4 (its last release) runs an internal

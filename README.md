@@ -177,7 +177,9 @@ python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env            # edit DATABASE_URL / SECRET_KEY
+cp .env.example .env            # shared local settings; edit DATABASE_URL / SECRET_KEY
+cp .env.dev.example .env.dev    # optional development-profile overrides
+export APP_ENV=dev              # selects backend/.env.dev
 
 python -m app.seed              # first empty DB only: creates tables + seeds demo data
 alembic stamp head              # first empty DB only: records the Alembic baseline
@@ -187,6 +189,28 @@ uvicorn app.main:app --reload --port 8000
 
 The API is now at `http://localhost:8000`, with interactive docs at
 `http://localhost:8000/docs`.
+
+### Configuration profiles
+
+The backend supports Spring-style configuration profiles through `APP_ENV`.
+For direct Uvicorn, seed, and Alembic runs, configuration is loaded in this
+order (highest precedence first): process environment,
+`backend/.env.<APP_ENV>`, `backend/.env`, then typed application defaults. If
+the backend-specific profile does not exist, the matching repository-root
+`.env.<APP_ENV>` file is used, allowing the same complete UAT profile to run
+under Compose or direct Uvicorn. The unprofiled root `.env` is deliberately
+not loaded by direct host runs because it may contain container-only paths.
+Profile names may contain letters, numbers, underscores, and hyphens.
+
+```bash
+cd backend
+cp .env.uat.example .env.uat
+APP_ENV=uat uvicorn app.main:app --port 8000
+APP_ENV=uat alembic upgrade head
+```
+
+The active profile is included as `profile` in `/api/health` without exposing
+any configuration values or secrets.
 
 ### Logging modes
 
@@ -283,10 +307,24 @@ direct API URL instead.
 ### Running everything together (docker-compose)
 
 ```bash
+# Existing/default environment
 docker compose up --build
+
+# Profile-specific deployment
+cp .env .env.uat
+# Set APP_ENV=uat and APP_ENV_FILE=.env.uat, then apply the safe values shown
+# in .env.uat.example and replace every UAT secret/connection value.
+docker compose --env-file .env.uat up --build -d
 # App:  http://localhost:8080
 # API:  http://localhost:8000
 ```
+
+Each root profile file is a complete Compose environment and includes both
+`APP_ENV=uat` and `APP_ENV_FILE=.env.uat` (using the matching profile name).
+Compose uses `APP_ENV_FILE` as each Python service's `env_file`; variables set
+directly by the deployment environment continue to take precedence. Use
+`.env.dev.example`, `.env.uat.example`, and `.env.prod.example` as safe
+templates, and do not commit populated profile files containing secrets.
 
 Point `DATABASE_URL` at your Oracle instance via an env var or `.env` file next to
 `docker-compose.yml` (defaults to `host.docker.internal`, which reaches an Oracle container or

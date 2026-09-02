@@ -16,20 +16,19 @@ other fallback.
 """
 import logging
 import os
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
+from .config import settings
 from .db_base import Base
 from .logging_config import configure_logging, mask_database_url
 
-load_dotenv()  # loads backend/.env if present; real env vars still take precedence
 configure_logging()  # first import in the chain (main.py imports this module
                       # before anything else that might log) -- see
                       # logging_config.py's own docstring for why this exists.
 logger = logging.getLogger("qa_portal.database")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = settings.database_url
 # Was a bare print() of the RAW connection string (username:password@host) --
 # harmless when it only ever went to an ephemeral terminal, but now that
 # logger output is persisted to a rotating file on disk, the password must

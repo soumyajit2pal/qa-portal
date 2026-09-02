@@ -1758,9 +1758,39 @@ def suppression_dashboard(date_from: str | None = Query(None), date_to: str | No
     # A suppression request can cover several findings (models.SuppressionItem)
     # -- count it as critical/high risk if ANY of its findings are.
     critical_high = [s for s in open_sups if any(i.severity in ("Critical", "High") for i in s.items)]
+
+    # Fortify suppression is a finding state, distinct from the QualityOps
+    # approval workflow above. Aggregate the suppressed-only severity fields
+    # from each in-scope request's latest immutable SSC snapshot. As with the
+    # SAST/DAST dashboards, the selected period scopes when the request was
+    # raised; only its latest imported scan represents its current state.
+    sast_reqs = _join_qa_department(
+        _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
+        models.SASTRequest,
+        scope,
+    ).all()
+    dast_reqs = _join_qa_department(
+        _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
+        models.DASTRequest,
+        scope,
+    ).all()
+    latest_fortify_scans = [
+        *_latest_scan_by_request(db, "SAST", [r.id for r in sast_reqs]).values(),
+        *_latest_scan_by_request(db, "DAST", [r.id for r in dast_reqs]).values(),
+    ]
+    fortify_suppressed_severity = Counter()
+    for scan in latest_fortify_scans:
+        fortify_suppressed_severity["Critical"] += int(scan.suppressed_critical_count or 0)
+        fortify_suppressed_severity["High"] += int(scan.suppressed_high_count or 0)
+        fortify_suppressed_severity["Medium"] += int(scan.suppressed_medium_count or 0)
+        fortify_suppressed_severity["Low"] += int(scan.suppressed_low_count or 0)
     return {
+        "open_qualityops_suppression_requests": len(open_sups),
+        # Kept for API compatibility with older frontend deployments.
         "open_suppressions": len(open_sups),
         "critical_high_risk_exceptions": len(critical_high),
+        "fortify_suppressed_findings": sum(fortify_suppressed_severity.values()),
+        "fortify_suppressed_severity_distribution": fortify_suppressed_severity,
         "status_breakdown": Counter(s.status for s in sups),
     }
 

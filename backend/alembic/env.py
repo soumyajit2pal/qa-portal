@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, pool
 
 
@@ -16,13 +14,13 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-load_dotenv(BACKEND_DIR / ".env")
+from app.config import settings  # noqa: E402
 
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
 
-database_url = os.getenv("DATABASE_URL", "").strip()
+database_url = (settings.database_url or "").strip()
 if not database_url:
     raise RuntimeError(
         "DATABASE_URL is required for Alembic. Set the same "
