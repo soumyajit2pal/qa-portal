@@ -386,6 +386,9 @@ interface ModalProps {
   // A brief shake on the panel gives feedback that the click did register,
   // rather than the modal just feeling unresponsive.
   preventBackdropClose?: boolean;
+  // Prevent an explicit header close while a non-interruptible operation is
+  // running. The disabled control makes the lock visible and accessible.
+  closeDisabled?: boolean;
 }
 
 export function Modal({
@@ -396,6 +399,7 @@ export function Modal({
   compact,
   variant = "drawer",
   preventBackdropClose,
+  closeDisabled,
 }: ModalProps) {
   const [shake, setShake] = useState(false);
   // Record drawers open in the spacious centered view by default. Users can
@@ -403,6 +407,7 @@ export function Modal({
   const [expanded, setExpanded] = useState(variant === "drawer");
 
   function handleExplicitClose() {
+    if (closeDisabled) return;
     onClose();
     // Pending Approvals opens a child module only as a host for its detail
     // drawer. Closing that drawer should return to the queue, not strand the
@@ -416,7 +421,7 @@ export function Modal({
     // Drawers hold record details and forms, so an outside click must never
     // dismiss them. They stay open until the user deliberately uses Close.
     // Centered dialogs retain their existing opt-in backdrop behaviour.
-    if (variant === "dialog" && !preventBackdropClose) {
+    if (variant === "dialog" && !preventBackdropClose && !closeDisabled) {
       onClose();
       return;
     }
@@ -438,7 +443,14 @@ export function Modal({
         >
           <div className="drawer-header">
             <h3>{title}</h3>
-            <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close" title="Close">
+            <button
+              type="button"
+              className="modal-close-btn"
+              onClick={handleExplicitClose}
+              aria-label={closeDisabled ? "Close unavailable while upload is in progress" : "Close"}
+              title={closeDisabled ? "Upload in progress" : "Close"}
+              disabled={closeDisabled}
+            >
               ×
             </button>
           </div>
@@ -474,7 +486,14 @@ export function Modal({
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 21h5v-5M3 8l6-5M21 16l-6 5" /></svg>
               )}
             </button>
-            <button type="button" className="modal-close-btn" onClick={handleExplicitClose} aria-label="Close" title="Close">
+            <button
+              type="button"
+              className="modal-close-btn"
+              onClick={handleExplicitClose}
+              aria-label={closeDisabled ? "Close unavailable while an operation is in progress" : "Close"}
+              title={closeDisabled ? "Operation in progress" : "Close"}
+              disabled={closeDisabled}
+            >
               ×
             </button>
           </div>

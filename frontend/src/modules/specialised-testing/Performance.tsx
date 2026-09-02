@@ -61,8 +61,9 @@ function PerformanceFormModal({ onClose, onSaved, editing, documentsByItem, relo
   // Same identity check as the detail view's isRequester/canSMDecide/
   // canDeptHeadDecide -- this modal only opens via canEditDetails, but the
   // checklist evidence controls inside it need their own explicit check.
-  const isActiveDelegateModal = editing.active_delegation?.status === 'ACTIVE' && editing.active_delegation.assigned_to_id === user?.id
-  const isRequesterModal = isActiveDelegateModal || isAdmin || (editing.requester_id === user?.id && !editing.active_delegation)
+  const viewOnlyModal = !!user?.roles?.includes('VIEW_ONLY')
+  const isActiveDelegateModal = !viewOnlyModal && editing.active_delegation?.status === 'ACTIVE' && editing.active_delegation.assigned_to_id === user?.id
+  const isRequesterModal = isActiveDelegateModal || isAdmin || (!viewOnlyModal && editing.requester_id === user?.id && !editing.active_delegation)
   const sameDeptModal = hasDepartment(user, editing.department)
   const canSMDecideModal = hasRole(user, 'SM') && editing.status === 'SM_APPROVAL_PENDING' && sameDeptModal
   const canDeptHeadDecideModal = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && editing.status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && sameDeptModal
@@ -345,7 +346,8 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
     } catch (err) { setError(err) }
   }
 
-  const isRequester = req.requester_id === user?.id || hasRole(user, 'ADMIN')
+  const viewOnly = !!user?.roles?.includes('VIEW_ONLY')
+  const isRequester = (!viewOnly && req.requester_id === user?.id) || hasRole(user, 'ADMIN')
   const status = req.status
   const sameDept = hasDepartment(user, req.department)
   const isAdmin = hasRole(user, 'ADMIN')
@@ -365,7 +367,7 @@ function PerformanceDetail({ req, onClose, onChanged, users }: {
   // SM_REJECTED included alongside the RETURNED_BY_* statuses -- reported
   // directly, a rejected request is now reopenable (edit + resubmit)
   // instead of a dead end.
-  const isActiveDelegate = req.active_delegation?.status === 'ACTIVE' && req.active_delegation.assigned_to_id === user?.id
+  const isActiveDelegate = !viewOnly && req.active_delegation?.status === 'ACTIVE' && req.active_delegation.assigned_to_id === user?.id
   const requesterInputEditor = isActiveDelegate || isAdmin || (isRequester && !req.active_delegation)
   const canEditDetails = hasRole(user, 'ADMIN')
     || (requesterInputEditor && ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_ENGINEER'].includes(status))

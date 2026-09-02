@@ -18,6 +18,16 @@ export function mutationSuccessCopy({ path, method }: ApiMutationEvent): Mutatio
   // during navigation. All authenticated business mutations are covered.
   if (value === '/api/auth/login' || value === '/api/auth/logout') return null
 
+  // Document Portal uploads are a batch operation in the UI even though the
+  // browser sends one request per file. The upload dialog already owns the
+  // per-file progress and displays one consolidated success/failure summary;
+  // emitting a global toast for each request floods the screen during folder
+  // uploads. The validation request is silent for the same reason.
+  if (
+    value === '/api/document-portal/upload' ||
+    value === '/api/document-portal/upload/validate'
+  ) return null
+
   if (method === 'POST' && (/\/delegations$/.test(value) || /\/child-delegations\/[^/]+\/\d+$/.test(value))) {
     return { title: 'Input delegated', message: 'The selected user can now provide input on this request.' }
   }

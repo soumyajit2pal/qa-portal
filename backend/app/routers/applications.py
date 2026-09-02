@@ -276,7 +276,7 @@ def list_pending_app_owner_names(db: Session = Depends(get_db),
     department's pending names; an Application Owner only sees their own
     department's."""
     q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
-    if not current_user.has_role(Role.ADMIN):
+    if not current_user.has_role(Role.ADMIN, Role.VIEW_ONLY):
         q = q.filter(models.ApplicationMaster.department.in_(current_user.departments))
     return q.order_by(models.ApplicationMaster.created_at).all()
 
@@ -294,7 +294,7 @@ def list_pending_application_names(db: Session = Depends(get_db),
     (same require_same_department scoping as the decision endpoint below,
     applied here as a filter instead of a hard error)."""
     q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_SM")
-    if not current_user.has_role(Role.ADMIN):
+    if not current_user.has_role(Role.ADMIN, Role.VIEW_ONLY):
         q = q.filter(models.ApplicationMaster.department.in_(current_user.departments))
     return q.order_by(models.ApplicationMaster.created_at).all()
 

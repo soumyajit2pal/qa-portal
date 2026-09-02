@@ -47,6 +47,18 @@ Field = Tuple[str, object]
 Section = Tuple[str, Sequence[Field]]
 HistoryRow = Tuple[str, str, str, str, str, str]
 
+# Standard wording used by every exported QA Clearance signature. Keeping it
+# here (next to the shared signature renderer) prevents the certificate PDF
+# and Report & Export Centre outputs from drifting into different labels.
+QA_CLEARANCE_SIGNED_TYPE = "QA Clearance Signed"
+DIGITAL_SIGNATURE_METHOD = "Digitally authenticated through QualityOps"
+DIGITAL_SIGNATURE_NOTICE = "This document does not require a physical signature."
+
+
+def qa_clearance_export_status(status: Optional[str]) -> Optional[str]:
+    """Turn the internal terminal state into audit-friendly export wording."""
+    return QA_CLEARANCE_SIGNED_TYPE if status == "ISSUED" else status
+
 
 @dataclass(frozen=True)
 class RichTextValue:
@@ -63,6 +75,8 @@ class SignatureValue:
     intent: str
     stage: str
     style: str = "professional"
+    signature_type: str = "Digitally Signed Approval"
+    notice: str = DIGITAL_SIGNATURE_NOTICE
 
 
 _ELECTRONIC_SIGNATURE = re.compile(
@@ -73,7 +87,10 @@ _ELECTRONIC_SIGNATURE = re.compile(
 )
 
 
-def parse_electronic_signature(value: Optional[str], *, stage: str = "Approval") -> Optional[SignatureValue]:
+def parse_electronic_signature(
+    value: Optional[str], *, stage: str = "Approval",
+    signature_type: str = "Digitally Signed Approval",
+) -> Optional[SignatureValue]:
     """Read signature evidence written by the shared frontend approval flow."""
     match = _ELECTRONIC_SIGNATURE.search(value or "")
     if not match:
@@ -83,7 +100,7 @@ def parse_electronic_signature(value: Optional[str], *, stage: str = "Approval")
         for key, item in match.groupdict().items()
     }
     values["style"] = values.get("style") or "professional"
-    return SignatureValue(stage=stage, **values)
+    return SignatureValue(stage=stage, signature_type=signature_type, **values)
 
 
 def _fmt(value: object) -> str:
@@ -404,6 +421,10 @@ def _signature_block(label: str, value: SignatureValue, available_width: float) 
         "SignatureId", parent=signature_meta_style, fontName="Courier-Bold",
         fontSize=7.5, splitLongWords=True,
     )
+    signature_notice_style = ParagraphStyle(
+        "SignatureNotice", parent=signature_meta_style, fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#245b3d"),
+    )
     # Keep this as one flat table. ReportLab 4.2.5 raises AttributeError
     # while page-splitting a Table nested inside another Table cell because
     # the child table has no computed ``height`` yet (the production
@@ -413,7 +434,8 @@ def _signature_block(label: str, value: SignatureValue, available_width: float) 
     widths = [available_width * .27, available_width * .27, available_width * .23, available_width * .23]
     block = Table([
         [Paragraph(_safe_text(label), _label_style), "", "", ""],
-        [Paragraph("ELECTRONICALLY SIGNED BY", signature_meta_style), "",
+        [Paragraph(_safe_text(value.signature_type.upper()), signature_notice_style), "", "", ""],
+        [Paragraph("DIGITALLY SIGNED BY", signature_meta_style), "",
          Paragraph("SIGNATURE ID", signature_meta_style), ""],
         [Paragraph(_safe_text(value.signer), signature_name_style), "",
          Paragraph(_safe_text(value.signature_id), signature_id_style), ""],
@@ -423,13 +445,14 @@ def _signature_block(label: str, value: SignatureValue, available_width: float) 
     ], colWidths=widths, splitByRow=1, splitInRow=0, hAlign="LEFT")
     block.setStyle(TableStyle([
         ("SPAN", (0, 0), (-1, 0)),
-        ("SPAN", (0, 1), (1, 1)), ("SPAN", (2, 1), (3, 1)),
+        ("SPAN", (0, 1), (-1, 1)),
         ("SPAN", (0, 2), (1, 2)), ("SPAN", (2, 2), (3, 2)),
-        ("SPAN", (2, 3), (3, 3)),
-        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#eaf5ef")),
+        ("SPAN", (0, 3), (1, 3)), ("SPAN", (2, 3), (3, 3)),
+        ("SPAN", (2, 4), (3, 4)),
+        ("BACKGROUND", (0, 0), (-1, 1), colors.HexColor("#eaf5ef")),
         ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#83b99a")),
         ("LINEBELOW", (0, 0), (0, 0), .5, colors.HexColor("#a8cdb5")),
-        ("LINEABOVE", (0, 3), (-1, 3), .35, colors.HexColor("#c9dadd")),
+        ("LINEABOVE", (0, 4), (-1, 4), .35, colors.HexColor("#c9dadd")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 7),
         ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
@@ -438,7 +461,32 @@ def _signature_block(label: str, value: SignatureValue, available_width: float) 
     # before rendering it so the stage/timestamp/intent cannot be orphaned on
     # the next page. CondPageBreak avoids ReportLab 4.2.5's KeepTogether/Table
     # pagination loop.
-    return [CondPageBreak(48 * mm), block]
+    return [CondPageBreak(50 * mm), block]
+
+
+def _signature_notice_block(available_width: float) -> Table:
+    """One document-level digital-signature notice, never one per signer."""
+    notice_style = ParagraphStyle(
+        "DocumentSignatureNotice", parent=_body_style,
+        fontName="Helvetica-Bold", fontSize=8.5, leading=11,
+        textColor=colors.HexColor("#245b3d"),
+    )
+    block = Table(
+        [[Paragraph(
+            _safe_text(f"{DIGITAL_SIGNATURE_METHOD}. {DIGITAL_SIGNATURE_NOTICE}"),
+            notice_style,
+        )]],
+        colWidths=[available_width], hAlign="LEFT",
+    )
+    block.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f3faf6")),
+        ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#83b99a")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    return block
 
 
 def _page_footer(canvas, doc) -> None:
@@ -457,8 +505,38 @@ def build_request_detail_pdf(
     *, title: str, subtitle: str, sections: Iterable[Section],
     history: Sequence[HistoryRow], generated_by: str, generated_at: str,
     history_note: Optional[str] = None,
-    history_title: Optional[str] = "Workflow / Approval History — Who Signed",
+    history_title: Optional[str] = "Workflow / Approval History",
 ) -> io.BytesIO:
+    sections = list(sections)
+    # ApprovalDecisionButtons is shared by Functional, SAST, DAST,
+    # Performance, Suppression and QA Clearance. Their detail exports all use
+    # this builder, so surface the latest electronic signature per workflow
+    # stage as a proper signed card instead of leaving the encoded marker only
+    # inside the Comments column. QA Clearance supplies its own specialized
+    # cards below and is detected here to avoid duplicates.
+    existing_signature_ids = {
+        value.signature_id
+        for _, fields in sections
+        for _, value in fields
+        if isinstance(value, SignatureValue)
+    }
+    signatures_by_stage: dict[str, SignatureValue] = {}
+    for row in history:
+        signature = parse_electronic_signature(str(row[4] or ""), stage=str(row[0] or "Approval"))
+        if signature and signature.signature_id not in existing_signature_ids:
+            signatures_by_stage[signature.stage] = signature
+    if signatures_by_stage:
+        sections.append(("Digital Approval Signatures", [
+            (f"{signature.stage} — Digital Signature", signature)
+            for signature in signatures_by_stage.values()
+        ]))
+
+    has_digital_signatures = any(
+        isinstance(value, SignatureValue)
+        for _, fields in sections
+        for _, value in fields
+    )
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4, topMargin=_PAGE_MARGIN, bottomMargin=18 * mm, leftMargin=_PAGE_MARGIN, rightMargin=_PAGE_MARGIN,
@@ -521,6 +599,16 @@ def build_request_detail_pdf(
             elements.append(t)
         else:
             elements.append(Paragraph("No workflow history recorded yet.", _styles["Normal"]))
+
+    if has_digital_signatures:
+        # One consolidated statement at the bottom of the exported document.
+        # The evidence cards above stay focused on each signer/stage without
+        # repeating identical legal copy after every signature.
+        elements.extend([
+            Spacer(1, 12),
+            CondPageBreak(18 * mm),
+            _signature_notice_block(doc.width),
+        ])
 
     doc.build(elements, onFirstPage=_page_footer, onLaterPages=_page_footer)
     buf.seek(0)

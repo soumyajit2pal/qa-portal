@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -54,6 +55,13 @@ class ExplicitRoleAssignmentTests(unittest.TestCase):
             request=None, db=self.db, current_user=self.admin,
         )
         self.assertEqual(updated.roles, [Role.AGM_QA])
+
+    def test_view_only_only_allows_document_portal_companion_roles(self):
+        auth_router._validate_roles([Role.VIEW_ONLY])
+        auth_router._validate_roles([Role.VIEW_ONLY, Role.DOCUMENT_PORTAL_VIEWER])
+        with self.assertRaises(HTTPException) as raised:
+            auth_router._validate_roles([Role.VIEW_ONLY, Role.REQUESTER])
+        self.assertEqual(raised.exception.status_code, 400)
 
 
 if __name__ == "__main__":

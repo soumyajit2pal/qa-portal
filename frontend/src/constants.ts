@@ -38,6 +38,9 @@ export const ROLE_LABELS: Record<string, string> = {
   // _redact_confidential_roles), so this label being present here doesn't by
   // itself expose anything to anyone who isn't already an Admin.
   SCALE_6_PLUS: 'Scale 6+',
+  // System-Admin-only cross-department read profile. The backend enforces
+  // this as an exclusive role and rejects all business-data mutations.
+  VIEW_ONLY: 'View Only',
   DOCUMENT_PORTAL_VIEWER: 'Document Portal Viewer',
   DOCUMENT_PORTAL_CONTRIBUTOR: 'Document Portal Contributor',
   DOCUMENT_PORTAL_MANAGER: 'Document Portal Manager',
@@ -95,7 +98,12 @@ export const DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES: string[] = [
   'QA_LEAD', 'QA_ENGINEER', 'SECURITY_ANALYST',
   'CHIEF_MANAGER_QA', 'AGM_QA',
   'SCALE_6_PLUS',
+  'VIEW_ONLY',
 ]
+
+export function isViewOnly(user?: { roles?: string[] | null } | null): boolean {
+  return !!user?.roles?.includes('VIEW_ONLY')
+}
 
 // 2026-08 "one user can be on multiple departments" CR -- mirrors backend
 // models.py's User.departments/has_department: a user's full department set

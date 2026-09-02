@@ -16,6 +16,7 @@ from ..deps import get_current_user, require_roles
 from ..constants import (
     Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES,
     DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES, CONFIDENTIAL_ROLES,
+    DOCUMENT_PORTAL_ROLES,
     QA_DEPARTMENT, OTHER_DEPARTMENT,
 )
 
@@ -359,6 +360,12 @@ def _validate_roles(roles: list):
     invalid = [r for r in roles if r not in ALL_ROLES]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Invalid role(s): {invalid}")
+    incompatible_with_view_only = set(roles) - ({Role.VIEW_ONLY} | DOCUMENT_PORTAL_ROLES)
+    if Role.VIEW_ONLY in roles and incompatible_with_view_only:
+        raise HTTPException(
+            status_code=400,
+            detail="View Only can only be combined with dedicated Document Portal roles.",
+        )
 
 
 def _dedupe_roles(roles: list) -> list:

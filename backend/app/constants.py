@@ -26,6 +26,7 @@ class Role:
     ADMIN = "ADMIN"                             # Configuration & Access
     SM = "SM"
     SCALE_6_PLUS = "SCALE_6_PLUS"
+    VIEW_ONLY = "VIEW_ONLY"                       # Organisation-wide business-data visibility; no mutations
     DOCUMENT_PORTAL_VIEWER = "DOCUMENT_PORTAL_VIEWER"
     DOCUMENT_PORTAL_CONTRIBUTOR = "DOCUMENT_PORTAL_CONTRIBUTOR"
     DOCUMENT_PORTAL_MANAGER = "DOCUMENT_PORTAL_MANAGER"
@@ -34,11 +35,14 @@ ALL_ROLES = [
     Role.REQUESTER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD,
     Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.SECURITY_ANALYST,
     Role.APPLICATION_OWNER, Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM, Role.SM, Role.ADMIN,
-    Role.SCALE_6_PLUS,
+    Role.SCALE_6_PLUS, Role.VIEW_ONLY,
     Role.DOCUMENT_PORTAL_VIEWER, Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER,
 ]
 
-CONFIDENTIAL_ROLES = {Role.SCALE_6_PLUS}
+# Both roles grant organisation-wide visibility and may only be assigned or
+# managed by a System Administrator. Department Coordinators must not see or
+# alter these accounts through their local roster.
+CONFIDENTIAL_ROLES = {Role.SCALE_6_PLUS, Role.VIEW_ONLY}
 DOCUMENT_PORTAL_ROLES = {
     Role.DOCUMENT_PORTAL_VIEWER,
     Role.DOCUMENT_PORTAL_CONTRIBUTOR,
@@ -115,6 +119,7 @@ ROLE_LABELS = {
     Role.SM: "SM",
     Role.ADMIN: "Administrator",
     Role.SCALE_6_PLUS: "Scale 6+",
+    Role.VIEW_ONLY: "View Only",
     Role.DOCUMENT_PORTAL_VIEWER: "Document Portal Viewer",
     Role.DOCUMENT_PORTAL_CONTRIBUTOR: "Document Portal Contributor",
     Role.DOCUMENT_PORTAL_MANAGER: "Document Portal Manager",

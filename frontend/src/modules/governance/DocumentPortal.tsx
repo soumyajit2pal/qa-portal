@@ -30,7 +30,7 @@ type Browse = {
   folders: Folder[];
   breadcrumbs: { name: string; path: string }[];
   stats: { folders: number; files: number; used: number; free: number } | null;
-  max_file_size: number;
+  upload_capacity: number;
   repository_path: string;
 };
 type UploadState = "ready" | "uploading" | "success" | "error";
@@ -49,7 +49,8 @@ const CONTRIBUTOR_ROLES = [
   "DOCUMENT_PORTAL_MANAGER",
 ];
 const bytes = (value: number) => {
-  if (!value) return "—";
+  if (!Number.isFinite(value) || value < 0) return "—";
+  if (value === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
   const index = Math.min(
     Math.floor(Math.log(value) / Math.log(1024)),
@@ -275,6 +276,8 @@ export default function DocumentPortal() {
     failed: number;
   } | null>(null);
   const [confirmUpload, setConfirmUpload] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<unknown>(null);
   const [showFolderGuide, setShowFolderGuide] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(true);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -284,6 +287,57 @@ export default function DocumentPortal() {
     folderInput.current?.setAttribute("webkitdirectory", "");
     folderInput.current?.setAttribute("directory", "");
   }, [dialog]);
+  useEffect(() => {
+    if (!isUploading) return;
+    const lockedUrl = window.location.href;
+    const guardId = `document-upload-${Date.now()}`;
+    const guardState = {
+      ...(window.history.state || {}),
+      documentPortalUploadGuard: guardId,
+    };
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const blockHistoryNavigation = () => {
+      // A same-URL sentinel means Back first lands on the entry immediately
+      // beneath this one, without leaving the route. Re-install it so Back
+      // and Forward remain unavailable until the batch finishes.
+      window.history.pushState(guardState, "", lockedUrl);
+    };
+    const blockAppNavigation = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest("a[href]")) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
+    const blockRefreshShortcut = (event: KeyboardEvent) => {
+      const refreshKey = event.key === "F5" ||
+        ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "r");
+      if (refreshKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
+
+    window.history.pushState(guardState, "", lockedUrl);
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    window.addEventListener("popstate", blockHistoryNavigation);
+    document.addEventListener("click", blockAppNavigation, true);
+    document.addEventListener("keydown", blockRefreshShortcut, true);
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeLeaving);
+      window.removeEventListener("popstate", blockHistoryNavigation);
+      document.removeEventListener("click", blockAppNavigation, true);
+      document.removeEventListener("keydown", blockRefreshShortcut, true);
+      // Remove the same-URL sentinel after the upload completes so it does
+      // not add a redundant Back step to the user's later navigation.
+      if (window.history.state?.documentPortalUploadGuard === guardId) {
+        window.history.back();
+      }
+    };
+  }, [isUploading]);
   useEffect(() => {
     if (!isFullscreen) return;
     const previousOverflow = document.body.style.overflow;
@@ -299,13 +353,19 @@ export default function DocumentPortal() {
     };
   }, [isFullscreen, dialog, showFolderGuide]);
   const load = useCallback(
-    async (nextPath = path, nextSort = sort, nextOrder = order) => {
+    async (
+      nextPath = path,
+      nextSort = sort,
+      nextOrder = order,
+      showGlobalActivity = true,
+    ) => {
       setBusy("Loading documents…");
       setError(null);
       try {
-        const response = await api.get<Browse>(
-          `/api/document-portal?${new URLSearchParams({ path: nextPath, sort: nextSort, order: nextOrder })}`,
-        );
+        const requestPath = `/api/document-portal?${new URLSearchParams({ path: nextPath, sort: nextSort, order: nextOrder })}`;
+        const response = showGlobalActivity
+          ? await api.get<Browse>(requestPath)
+          : await api.getWithoutActivity<Browse>(requestPath);
         setData(response);
         setPath(response.path);
         setSelected(new Set());
@@ -343,6 +403,7 @@ export default function DocumentPortal() {
       return next;
     });
   const closeDialog = () => {
+    if (isUploading) return;
     setConfirmUpload(false);
     setDialog(null);
     setActiveItem(null);
@@ -351,6 +412,7 @@ export default function DocumentPortal() {
     setDestination("");
     setUploads([]);
     setUploadSummary(null);
+    setUploadError(null);
   };
 
   async function search(event?: React.FormEvent) {
@@ -392,6 +454,7 @@ export default function DocumentPortal() {
   }
   const addFiles = (files: File[], paths?: string[]) => {
     setUploadSummary(null);
+    setUploadError(null);
     setUploads((current) => [
       ...current,
       ...files.map((file, index) => ({
@@ -408,6 +471,7 @@ export default function DocumentPortal() {
   };
   const removeUpload = (id: string) => {
     setUploadSummary(null);
+    setUploadError(null);
     setUploads((current) =>
       current.filter(
         (upload) =>
@@ -471,71 +535,130 @@ export default function DocumentPortal() {
   }
   async function uploadDocuments() {
     const queue = uploads.filter((upload) => upload.state !== "success");
-    let success = 0;
-    let failed = 0;
-    for (const upload of queue) {
-      setUploads((current) =>
-        current.map((row) =>
-          row.id === upload.id
-            ? { ...row, state: "uploading", message: "Uploading…", loaded: 0 }
-            : row,
+    if (!queue.length || isUploading) return;
+    const requestedBytes = queue.reduce(
+      (total, upload) => total + upload.file.size,
+      0,
+    );
+    if (!data || requestedBytes > data.upload_capacity) {
+      setUploadError(
+        new Error(
+          `The selected content requires ${bytes(requestedBytes)}, but only ${bytes(data?.upload_capacity || 0)} is available for uploads. Remove files or free repository storage, then try again.`,
         ),
       );
-      try {
-        await api.uploadFormWithProgress(
-          "/api/document-portal/upload",
-          {
-            path,
-            relative_path: upload.relativePath,
-            duplicate,
-            file: upload.file,
-          },
-          (loaded, total) =>
-            setUploads((current) =>
-              current.map((row) =>
-                row.id === upload.id
-                  ? {
-                      ...row,
-                      loaded: total
-                        ? Math.round((loaded / total) * row.file.size)
-                        : loaded,
-                    }
-                  : row,
-              ),
-            ),
-        );
-        success += 1;
-        setUploads((current) =>
-          current.map((row) =>
-            row.id === upload.id
-              ? {
-                  ...row,
-                  state: "success",
-                  message: "Uploaded",
-                  loaded: row.file.size,
-                }
-              : row,
-          ),
-        );
-      } catch (caught) {
-        failed += 1;
-        setUploads((current) =>
-          current.map((row) =>
-            row.id === upload.id
-              ? {
-                  ...row,
-                  state: "error",
-                  message:
-                    caught instanceof Error ? caught.message : "Upload failed",
-                  loaded: row.file.size,
-                }
-              : row,
-          ),
-        );
-      }
+      return;
     }
-    setUploadSummary({ success, failed });
-    if (success) await load(path);
+    setUploadError(null);
+    try {
+      await api.postWithoutActivity(
+        `/api/document-portal/upload/validate?path=${encodeURIComponent(path)}`,
+        { total_size: requestedBytes, file_count: queue.length },
+      );
+    } catch (caught) {
+      setUploadError(caught);
+      return;
+    }
+
+    setIsUploading(true);
+    let success = 0;
+    let failed = 0;
+    const outcomes = new Map<
+      string,
+      { state: "success" | "error"; message: string }
+    >();
+    try {
+      for (const upload of queue) {
+        setUploads((current) =>
+          current.map((row) =>
+            row.id === upload.id
+              ? { ...row, state: "uploading", message: "Uploading…", loaded: 0 }
+              : row,
+          ),
+        );
+        try {
+          await api.uploadFormWithProgress(
+            "/api/document-portal/upload",
+            {
+              path,
+              relative_path: upload.relativePath,
+              duplicate,
+              file: upload.file,
+            },
+            (loaded, total) =>
+              setUploads((current) =>
+                current.map((row) =>
+                  row.id === upload.id
+                    ? {
+                        ...row,
+                        loaded: total
+                          ? Math.round((loaded / total) * row.file.size)
+                          : loaded,
+                      }
+                    : row,
+                ),
+              ),
+          );
+          success += 1;
+          outcomes.set(upload.id, { state: "success", message: "Uploaded" });
+          setUploads((current) =>
+            current.map((row) =>
+              row.id === upload.id
+                ? {
+                    ...row,
+                    state: "success",
+                    message: "Uploaded",
+                    loaded: row.file.size,
+                  }
+                : row,
+            ),
+          );
+        } catch (caught) {
+          failed += 1;
+          const failureMessage =
+            caught instanceof Error ? caught.message : "Upload failed";
+          outcomes.set(upload.id, {
+            state: "error",
+            message: failureMessage,
+          });
+          setUploads((current) =>
+            current.map((row) =>
+              row.id === upload.id
+                ? {
+                    ...row,
+                    state: "error",
+                    message: failureMessage,
+                    // xhr upload progress can reach 100% before the server
+                    // rejects the file. A failed row must not retain that
+                    // transfer percentage as if it had been accepted.
+                    loaded: 0,
+                  }
+                : row,
+            ),
+          );
+        }
+      }
+      // Keep the modal's upload status as the only progress UI while the
+      // refreshed repository contents are fetched after the batch.
+      if (success) await load(path, sort, order, false);
+      // Final reconciliation keeps the visible row state and the summary in
+      // lockstep even when several quick XHR callbacks were React-batched.
+      setUploads((current) =>
+        current.map((row) => {
+          const outcome = outcomes.get(row.id);
+          return outcome
+            ? {
+                ...row,
+                state: outcome.state,
+                message: outcome.message,
+                loaded: outcome.state === "success" ? row.file.size : 0,
+              }
+            : row;
+        }),
+      );
+      setUploadSummary({ success, failed });
+    } finally {
+      setIsUploading(false);
+    }
   }
   async function rename() {
     if (!activeItem || !newName.trim()) return;
@@ -587,13 +710,19 @@ export default function DocumentPortal() {
   const isSearching = searchItems !== null;
   const allSelected = visible.length > 0 && selected.size === visible.length;
   const uploadTotal = uploads.reduce((sum, item) => sum + item.file.size, 0);
-  const uploadLoaded = uploads.reduce(
-    (sum, item) => sum + Math.min(item.loaded, item.file.size),
-    0,
-  );
+  const uploadLoaded = uploads.reduce((sum, item) => {
+    if (item.state === "success") return sum + item.file.size;
+    if (item.state === "uploading")
+      return sum + Math.min(item.loaded, item.file.size);
+    return sum;
+  }, 0);
   const uploadPercent = uploadTotal
     ? Math.round((uploadLoaded / uploadTotal) * 100)
     : 0;
+  const pendingUploadTotal = uploads
+    .filter((upload) => upload.state !== "success")
+    .reduce((sum, upload) => sum + upload.file.size, 0);
+  const uploadExceedsCapacity = !!data && pendingUploadTotal > data.upload_capacity;
   const toggleSelect = (value: string) =>
     setSelected((current) => {
       const next = new Set(current);
@@ -810,9 +939,6 @@ export default function DocumentPortal() {
             <span>
               <strong>{bytes(data.stats.free)}</strong> available
             </span>
-            <span>
-              Max per file <strong>{bytes(data.max_file_size)}</strong>
-            </span>
           </div>
         )}
         <div className="document-explorer-layout">
@@ -1011,19 +1137,38 @@ export default function DocumentPortal() {
           onClose={closeDialog}
           variant="dialog"
           wide
+          preventBackdropClose={isUploading}
+          closeDisabled={isUploading}
         >
           <div className="document-dialog">
+            {isUploading && (
+              <div className="document-upload-active" role="status" aria-live="assertive">
+                <span className="document-upload-spinner" aria-hidden="true" />
+                <div>
+                  <strong>Upload in progress — please wait</strong>
+                  <span>Do not close or refresh this page until every file has finished uploading.</span>
+                </div>
+              </div>
+            )}
             <p className="muted">
               Drag files or folders here, or choose them below. Folder hierarchy
-              is preserved and each file is validated separately.
+              is preserved. The complete selection is checked against available
+              repository storage before uploading begins.
             </p>
             <div
-              className="document-drop-zone"
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => void addDropped(event)}
-              onClick={() => fileInput.current?.click()}
+              className={`document-drop-zone${isUploading ? " disabled" : ""}`}
+              onDragOver={(event) => {
+                event.preventDefault();
+                if (isUploading) event.dataTransfer.dropEffect = "none";
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (!isUploading) void addDropped(event);
+              }}
+              onClick={() => !isUploading && fileInput.current?.click()}
               role="button"
               tabIndex={0}
+              aria-disabled={isUploading}
             >
               <strong>⇧ Drop files or folders here</strong>
               <span>or select from your device</span>
@@ -1036,6 +1181,7 @@ export default function DocumentPortal() {
                   type="file"
                   multiple
                   hidden
+                  disabled={isUploading}
                   onChange={(event: ChangeEvent<HTMLInputElement>) => {
                     addFiles(Array.from(event.target.files || []));
                     event.currentTarget.value = "";
@@ -1049,6 +1195,7 @@ export default function DocumentPortal() {
                   type="file"
                   multiple
                   hidden
+                  disabled={isUploading}
                   onChange={(event: ChangeEvent<HTMLInputElement>) => {
                     addFiles(Array.from(event.target.files || []));
                     event.currentTarget.value = "";
@@ -1059,6 +1206,7 @@ export default function DocumentPortal() {
                 Duplicates{" "}
                 <select
                   value={duplicate}
+                  disabled={isUploading}
                   onChange={(event) =>
                     setDuplicate(event.target.value as typeof duplicate)
                   }
@@ -1071,15 +1219,35 @@ export default function DocumentPortal() {
             </div>
             {uploads.length > 0 && (
               <>
+                <div className={`document-upload-capacity${uploadExceedsCapacity ? " error" : ""}`}>
+                  <span>Selected content <strong>{bytes(pendingUploadTotal)}</strong></span>
+                  <span>Available for upload <strong>{bytes(data?.upload_capacity || 0)}</strong></span>
+                </div>
+                {uploadExceedsCapacity && (
+                  <p className="document-upload-capacity-message" role="alert">
+                    The selected content is larger than the available repository storage. Remove files or free storage before uploading.
+                  </p>
+                )}
                 <div className="document-upload-progress">
                   <div>
-                    <strong>Upload progress</strong>
+                    <strong>
+                      {uploadSummary
+                        ? uploadSummary.failed
+                          ? "Upload result"
+                          : "Upload completed"
+                        : "Upload progress"}
+                    </strong>
                     <span>
                       {uploadPercent}% · {bytes(uploadLoaded)} of{" "}
                       {bytes(uploadTotal)}
                     </span>
                   </div>
                   <progress value={uploadPercent} max="100" />
+                  {uploadSummary?.failed ? (
+                    <small className="document-upload-progress-note">
+                      The percentage includes only files accepted by the server; failed files are not counted as uploaded.
+                    </small>
+                  ) : null}
                 </div>
                 <div className="document-upload-list">
                   {uploads.map((upload) => (
@@ -1152,13 +1320,16 @@ export default function DocumentPortal() {
                 </span>
               </div>
             )}
+            {uploadError ? <ErrorText error={uploadError} title="Upload cannot start" /> : null}
             <div className="modal-actions">
-              <button className="btn" onClick={closeDialog}>
-                Cancel
+              <button className="btn" disabled={isUploading} onClick={closeDialog}>
+                {isUploading ? "Uploading…" : "Cancel"}
               </button>
               <button
                 className="btn btn-primary"
                 disabled={
+                  isUploading ||
+                  uploadExceedsCapacity ||
                   !uploads.some(
                     (upload) =>
                       upload.state === "ready" || upload.state === "error",
@@ -1188,6 +1359,10 @@ export default function DocumentPortal() {
                 <div>
                   <dt>Total size</dt>
                   <dd>{bytes(uploads.filter((upload) => upload.state !== "success").reduce((total, upload) => total + upload.file.size, 0))}</dd>
+                </div>
+                <div>
+                  <dt>Available</dt>
+                  <dd>{bytes(data?.upload_capacity || 0)}</dd>
                 </div>
                 <div>
                   <dt>Duplicates</dt>

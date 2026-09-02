@@ -26,6 +26,18 @@ const EMPTY_FORM = {
   roles: ['REQUESTER'] as string[], login_type: 'STANDARD', password: '',
 }
 type CreateUserForm = typeof EMPTY_FORM
+const DOCUMENT_PORTAL_ROLE_CODES = new Set([
+  'DOCUMENT_PORTAL_VIEWER', 'DOCUMENT_PORTAL_CONTRIBUTOR', 'DOCUMENT_PORTAL_MANAGER',
+])
+
+function rolesAfterToggle(values: string[], role: string): string[] {
+  if (values.includes(role)) return values.filter((value) => value !== role)
+  if (role === 'VIEW_ONLY') {
+    return ['VIEW_ONLY', ...values.filter((value) => DOCUMENT_PORTAL_ROLE_CODES.has(value))]
+  }
+  if (DOCUMENT_PORTAL_ROLE_CODES.has(role)) return [...values, role]
+  return [...values.filter((value) => value !== 'VIEW_ONLY'), role]
+}
 
 // `roles` defaults to every assignable role (ALL_ROLES) -- exported with that
 // default so DepartmentAdmin.tsx can reuse this same chip-select, just
@@ -37,8 +49,7 @@ export function RoleChipSelect({ value, onChange, disabled, disabledRoles = [], 
 }) {
   function toggle(role: string) {
     if (disabled || disabledRoles.includes(role)) return
-    const has = value.includes(role)
-    onChange(has ? value.filter((r) => r !== role) : [...value, role])
+    onChange(rolesAfterToggle(value, role))
   }
   return (
     <div className="chip-select">
@@ -132,6 +143,7 @@ function CreateUserModal({ onClose, onCreated, departmentOptions }: {
         <Field label="Role(s) * — a user may hold more than one">
           <RoleChipSelect value={form.roles} onChange={(v) => set('roles', v)} />
         </Field>
+        <p className="muted small">View Only grants organisation-wide read access. Document Portal remains separate and appears only when a Document Portal role is also assigned.</p>
         <div className="form-row" style={{ marginTop: 12 }}>
           <Field label="Login Type">
             <select value={form.login_type} onChange={(e) => set('login_type', e.target.value)}>
@@ -225,8 +237,10 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
   }
 
   function toggleRole(role: string) {
-    if (isOwnAdminAccount && role === 'ADMIN') return
-    setRoles((values) => values.includes(role) ? values.filter((value) => value !== role) : [...values, role])
+    if (isOwnAdminAccount && (role === 'ADMIN' || role === 'VIEW_ONLY')) return
+    setRoles((values) => {
+      return rolesAfterToggle(values, role)
+    })
   }
 
   const visibleDepartments = departmentOptions.filter((department) => department.toLowerCase().includes(departmentSearch.trim().toLowerCase()))
@@ -254,9 +268,10 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
       <section className="access-picker-panel">
         <header><div><small>02 · Permission profile</small><h3>Roles</h3><p>Assign the responsibilities this user can perform.</p></div><strong>{roles.length} selected</strong></header>
         {isOwnAdminAccount && <p className="muted small">Your own Administrator access is protected. Only another Administrator can remove it or deactivate this account.</p>}
+        <p className="muted small">View Only provides organisation-wide request visibility without workflow changes. Assign a dedicated Document Portal role separately if repository access is required.</p>
         <div className="access-role-options">{ALL_ROLES.map((role) => {
-          const protectedSelfAdminRole = isOwnAdminAccount && role === 'ADMIN'
-          return <label className={`${roles.includes(role) ? 'selected' : ''} ${protectedSelfAdminRole ? 'disabled' : ''}`} key={role} title={protectedSelfAdminRole ? 'Another Administrator must remove your Administrator access.' : undefined}><input type="checkbox" checked={roles.includes(role)} disabled={busy || protectedSelfAdminRole} onChange={() => toggleRole(role)} /><span>{ROLE_LABELS[role] || role}</span></label>
+          const protectedSelfRole = isOwnAdminAccount && (role === 'ADMIN' || role === 'VIEW_ONLY')
+          return <label className={`${roles.includes(role) ? 'selected' : ''} ${protectedSelfRole ? 'disabled' : ''}`} key={role} title={protectedSelfRole ? 'Another Administrator must change your Administrator access.' : undefined}><input type="checkbox" checked={roles.includes(role)} disabled={busy || protectedSelfRole} onChange={() => toggleRole(role)} /><span>{ROLE_LABELS[role] || role}</span></label>
         })}</div>
       </section>
       <div className="access-manage-controls">

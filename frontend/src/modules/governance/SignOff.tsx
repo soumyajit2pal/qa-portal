@@ -560,7 +560,8 @@ function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; 
     } catch (err) { setError(err) } finally { setBusyAction(null) }
   }
 
-  const isRequester = item.requester_id === user?.id || hasRole(user, 'ADMIN')
+  const viewOnly = !!user?.roles?.includes('VIEW_ONLY')
+  const isRequester = (!viewOnly && item.requester_id === user?.id) || hasRole(user, 'ADMIN')
   const status = item.status
   const isAdmin = hasRole(user, 'ADMIN')
   const isQADepartment = hasDepartment(user, QA_DEPARTMENT) || isAdmin

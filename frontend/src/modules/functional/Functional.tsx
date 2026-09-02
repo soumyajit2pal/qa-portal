@@ -125,9 +125,10 @@ function FunctionalFormModal({
   // inside it need their own explicit identity+status check (see
   // canManageReadinessEvidence's isOwner param) rather than assuming the
   // status alone means this particular viewer may attach/remove evidence.
-  const isActiveDelegateModal = editing.active_delegation?.status === "ACTIVE" && editing.active_delegation.assigned_to_id === user?.id;
+  const viewOnlyModal = !!user?.roles?.includes("VIEW_ONLY");
+  const isActiveDelegateModal = !viewOnlyModal && editing.active_delegation?.status === "ACTIVE" && editing.active_delegation.assigned_to_id === user?.id;
   const isRequesterModal = isActiveDelegateModal || isAdmin || (
-    editing.requester_id === user?.id && !editing.active_delegation
+    !viewOnlyModal && editing.requester_id === user?.id && !editing.active_delegation
   );
   const sameDeptModal = hasDepartment(user, editing.department);
   const canSMDecideModal = hasRole(user, "SM") && editing.status === "SM_APPROVAL_PENDING" && sameDeptModal;
@@ -865,8 +866,9 @@ function FunctionalDetail({
   );
 
   const isAdmin = hasRole(user, "ADMIN");
-  const isRequester = req.requester_id === user?.id || isAdmin;
-  const isActiveDelegate = req.active_delegation?.status === "ACTIVE" && req.active_delegation.assigned_to_id === user?.id;
+  const viewOnly = !!user?.roles?.includes("VIEW_ONLY");
+  const isRequester = (!viewOnly && req.requester_id === user?.id) || isAdmin;
+  const isActiveDelegate = !viewOnly && req.active_delegation?.status === "ACTIVE" && req.active_delegation.assigned_to_id === user?.id;
   const requesterInputEditor = isActiveDelegate || isAdmin || (isRequester && !req.active_delegation);
   const isRequesterVerifier = isRequester || hasRole(user, "APPLICATION_OWNER");
 

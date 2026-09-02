@@ -1,5 +1,6 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .. import cache, models, schemas
@@ -82,8 +83,16 @@ def create_item(module: str, payload: schemas.ChecklistTemplateItemCreate, db: S
     get_template_items(db, module, only_active=False)
     sort_order = payload.sort_order
     if sort_order is None:
-        max_order = db.query(models.ChecklistTemplateItem).filter_by(module=module).count()
-        sort_order = max_order
+        # count() is not a safe append position after a row has been deleted:
+        # for orders [0, 1, 3], count() returns 3 and creates a duplicate. A
+        # duplicate makes the UI's next up/down move ambiguous. Append after
+        # the actual highest position instead.
+        max_order = (
+            db.query(func.max(models.ChecklistTemplateItem.sort_order))
+            .filter(models.ChecklistTemplateItem.module == module)
+            .scalar()
+        )
+        sort_order = (max_order + 1) if max_order is not None else 0
     obj = models.ChecklistTemplateItem(
         module=module, item=item_text, detail=payload.detail, is_mandatory=payload.is_mandatory,
         sort_order=sort_order, active=True,
@@ -93,6 +102,34 @@ def create_item(module: str, payload: schemas.ChecklistTemplateItemCreate, db: S
     db.refresh(obj)
     _invalidate_active_items_cache(module)
     return obj
+
+
+@router.put("/{module}/order", response_model=List[schemas.ChecklistTemplateItemOut])
+def reorder_items(module: str, payload: schemas.ChecklistTemplateOrderUpdate,
+                  db: Session = Depends(get_db),
+                  current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    """Persist the complete checklist order atomically and make it contiguous.
+
+    The previous UI swapped two rows with concurrent PATCH requests. If one
+    request failed (or both rows already shared a sort_order), the stored list
+    could be only half-swapped. One transaction removes that failure mode and
+    also repairs historical gaps/duplicates whenever an Admin moves a row.
+    """
+    module = _check_module(module)
+    rows = get_template_items(db, module, only_active=False)
+    existing_ids = [row.id for row in rows]
+    ordered_ids = payload.ordered_ids
+    if len(ordered_ids) != len(set(ordered_ids)):
+        raise HTTPException(400, "Checklist order contains duplicate item ids")
+    if set(ordered_ids) != set(existing_ids):
+        raise HTTPException(409, "Checklist changed while it was being reordered; refresh and try again")
+
+    rows_by_id = {row.id: row for row in rows}
+    for position, item_id in enumerate(ordered_ids):
+        rows_by_id[item_id].sort_order = position
+    db.commit()
+    _invalidate_active_items_cache(module)
+    return get_template_items(db, module, only_active=False)
 
 
 @router.patch("/{module}/{item_id}", response_model=schemas.ChecklistTemplateItemOut)

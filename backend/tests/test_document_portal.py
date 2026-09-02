@@ -4,6 +4,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
@@ -75,6 +76,40 @@ class DocumentPortalTests(unittest.TestCase):
         self.assertEqual(first["item"]["path"], "Evidence/Release/checklist.txt")
         self.assertEqual(second["item"]["path"], "Evidence/Release/checklist (1).txt")
         self.assertEqual((self.root / "Evidence/Release/checklist.txt").read_bytes(), b"first")
+
+    def test_upload_capacity_rejects_entire_queue_before_transfer(self):
+        user = SimpleNamespace()
+        with patch.object(
+            document_portal,
+            "_upload_capacity",
+            return_value={"free_bytes": 500, "reserved_bytes": 100, "available_bytes": 400},
+        ):
+            with self.assertRaises(HTTPException) as error:
+                document_portal.validate_upload_capacity(
+                    document_portal.UploadCapacityCheck(total_size=401, file_count=2),
+                    path="",
+                    _=user,
+                )
+
+        self.assertEqual(error.exception.status_code, 507)
+        self.assertIn("401 B", error.exception.detail)
+        self.assertFalse(any(self.root.iterdir()))
+
+    def test_upload_capacity_accepts_queue_within_available_storage(self):
+        user = SimpleNamespace()
+        with patch.object(
+            document_portal,
+            "_upload_capacity",
+            return_value={"free_bytes": 500, "reserved_bytes": 100, "available_bytes": 400},
+        ):
+            result = document_portal.validate_upload_capacity(
+                document_portal.UploadCapacityCheck(total_size=400, file_count=2),
+                path="",
+                _=user,
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["requested_bytes"], 400)
 
 
 if __name__ == "__main__":

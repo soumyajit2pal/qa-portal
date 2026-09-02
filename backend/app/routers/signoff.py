@@ -9,7 +9,14 @@ from .. import models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles, require_not_requester, dashboard_department_scope
 from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, QA_DEPARTMENT, validate_environment_promotion
-from ..pdf_export import RichTextValue, build_request_detail_pdf, parse_electronic_signature
+from ..pdf_export import (
+    DIGITAL_SIGNATURE_METHOD,
+    QA_CLEARANCE_SIGNED_TYPE,
+    RichTextValue,
+    build_request_detail_pdf,
+    parse_electronic_signature,
+    qa_clearance_export_status,
+)
 from .. import documents as doc_store
 
 router = APIRouter(prefix="/api/signoffs", tags=["signoff"])
@@ -391,12 +398,33 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         u = db.query(models.User).get(uid)
         return u.full_name if u else None
 
+    history_rows = (db.query(models.ApprovalAction)
+                     .filter_by(entity_type="SIGNOFF", entity_id=signoff_id)
+                     .order_by(models.ApprovalAction.created_at).all())
+    # Keep only the latest recorded signature for each approval stage after a
+    # return/resubmit cycle. These are the authoritative audit entries used by
+    # both the UI and the exported certificate.
+    signatures_by_stage: dict = {}
+    for row in history_rows:
+        signature = parse_electronic_signature(
+            row.comments,
+            stage=row.step_name or "Approval",
+            signature_type=QA_CLEARANCE_SIGNED_TYPE,
+        )
+        if signature:
+            signatures_by_stage[signature.stage] = signature
+    signatures = list(signatures_by_stage.values())
+    digitally_signed = bool(signatures) and obj.status == "ISSUED"
+
     sections = [
         ("Status", [
-            ("Status", obj.status),
+            ("Status", qa_clearance_export_status(obj.status)),
+            ("Workflow Status", obj.status),
             ("Certificate Type", obj.certificate_type),
             ("Testing Type", obj.testing_type),
             ("Certificate Date", obj.certificate_date),
+            ("Clearance Signature Type", QA_CLEARANCE_SIGNED_TYPE if digitally_signed else "Not digitally signed"),
+            ("Signature Method", DIGITAL_SIGNATURE_METHOD if digitally_signed else "—"),
         ]),
         ("Application & Change", [
             ("Application Name", obj.application_name),
@@ -430,9 +458,6 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
         ]),
     ]
 
-    history_rows = (db.query(models.ApprovalAction)
-                     .filter_by(entity_type="SIGNOFF", entity_id=signoff_id)
-                     .order_by(models.ApprovalAction.created_at).all())
     # Reported directly: "multiple signatures are coming, instead of this
     # what ever latest show and in download pdf as well" -- a certificate
     # signed more than once at the same checkpoint (e.g. re-signed by QA
@@ -441,16 +466,10 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     # a dict keyed by stage and letting later rows overwrite earlier ones
     # keeps only the most recent signature per stage -- same fix as
     # SignOff.tsx's own `signatures` (the modal view this PDF mirrors).
-    signatures_by_stage: dict = {}
-    for row in history_rows:
-        signature = parse_electronic_signature(row.comments, stage=row.step_name or "Approval")
-        if signature:
-            signatures_by_stage[signature.stage] = signature
-    signatures = list(signatures_by_stage.values())
     if signatures:
-        sections.append(("Electronic Signatures", [
-            (f"{signature.stage} - Signature {index}", signature)
-            for index, signature in enumerate(signatures, start=1)
+        sections.append(("QA Clearance Digital Signatures", [
+            (f"{signature.stage} — Digital Signature", signature)
+            for signature in signatures
         ]))
     history = []
     for h in history_rows:

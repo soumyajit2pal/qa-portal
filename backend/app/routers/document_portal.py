@@ -34,7 +34,6 @@ logger = logging.getLogger("qa_portal.document_portal")
 _DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "uploads" / "document_portal"
 DOCUMENT_ROOT = Path(settings.document_portal_storage_host_path or _DEFAULT_ROOT).expanduser().resolve()
 DOCUMENT_ROOT.mkdir(parents=True, exist_ok=True)
-MAX_FILE_SIZE = settings.document_portal_max_file_size
 MINIMUM_FREE_BYTES = settings.document_portal_minimum_free_bytes
 UPLOAD_CHUNK_SIZE = settings.document_portal_upload_chunk_size
 BLOCKED_EXTENSIONS = frozenset(
@@ -75,6 +74,11 @@ class MoveItem(BaseModel):
 class DownloadSelection(BaseModel):
     current_path: str = ""
     paths: list[str] = Field(min_length=1, max_length=200)
+
+
+class UploadCapacityCheck(BaseModel):
+    total_size: int = Field(ge=0)
+    file_count: int = Field(ge=1)
 
 
 def _http_error(message: str, status_code: int = 400) -> HTTPException:
@@ -171,6 +175,27 @@ def _stats() -> dict:
     return {"folders": folders, "files": files, "used": used, "free": shutil.disk_usage(DOCUMENT_ROOT.resolve()).free}
 
 
+def _upload_capacity(folder: Path | None = None) -> dict:
+    """Storage that a new upload may consume while preserving the reserve."""
+    free = shutil.disk_usage((folder or DOCUMENT_ROOT).resolve()).free
+    return {
+        "free_bytes": free,
+        "reserved_bytes": MINIMUM_FREE_BYTES,
+        "available_bytes": max(0, free - MINIMUM_FREE_BYTES),
+    }
+
+
+def _format_bytes(value: int) -> str:
+    size = float(max(0, value))
+    units = ("B", "KB", "MB", "GB", "TB")
+    unit = units[0]
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            break
+        size /= 1024
+    return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+
+
 def _next_available(folder: Path, filename: str) -> Path:
     candidate = folder / filename
     if not candidate.exists():
@@ -201,8 +226,6 @@ async def _store_file(folder: Path, upload: UploadFile, filename: str, duplicate
         with temporary.open("wb") as output:
             while chunk := await upload.read(UPLOAD_CHUNK_SIZE):
                 size += len(chunk)
-                if size > MAX_FILE_SIZE:
-                    raise _http_error(f'"{filename}" exceeds the configured upload-size limit.', 413)
                 if free - size < MINIMUM_FREE_BYTES:
                     raise _http_error("Insufficient server storage available.", 507)
                 output.write(chunk)
@@ -287,12 +310,37 @@ def browse(
         "folders": _all_folders(),
         "breadcrumbs": breadcrumbs,
         "stats": _stats() if not relative else None,
-        "max_file_size": MAX_FILE_SIZE,
+        "upload_capacity": _upload_capacity(folder)["available_bytes"],
         # This is shown only inside the authenticated Document Portal. It
         # helps authorised operational users verify which configured shared
         # mount they are working in, matching the supplied portal's mounted
         # home indicator without creating a separate anonymous service.
         "repository_path": str(DOCUMENT_ROOT),
+    }
+
+
+@router.post("/upload/validate")
+def validate_upload_capacity(
+    payload: UploadCapacityCheck,
+    path: str = Query(""),
+    _: models.User = Depends(require_document_portal_contributor),
+):
+    """Reject an entire upload queue before the first file is transferred."""
+    _, folder = _path(path, must_exist=True)
+    if not folder.is_dir():
+        raise _http_error("The upload destination is not a folder.")
+    capacity = _upload_capacity(folder)
+    if payload.total_size > capacity["available_bytes"]:
+        raise _http_error(
+            f"The selected {payload.file_count} file(s) require {_format_bytes(payload.total_size)}, "
+            f"but only {_format_bytes(capacity['available_bytes'])} is available for uploads. "
+            "Remove files from the queue or free repository storage, then try again.",
+            507,
+        )
+    return {
+        "allowed": True,
+        "requested_bytes": payload.total_size,
+        **capacity,
     }
 
 

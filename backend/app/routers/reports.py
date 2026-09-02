@@ -11,6 +11,12 @@ from ..deps import (
     viewable_project_ids,
 )
 from ..constants import QAStatus, GatewayStatus, REQUEST_TYPES, Role
+from ..pdf_export import (
+    DIGITAL_SIGNATURE_METHOD,
+    QA_CLEARANCE_SIGNED_TYPE,
+    parse_electronic_signature,
+    qa_clearance_export_status,
+)
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -689,7 +695,10 @@ def qa_signoff_register(date_from: str | None = None, date_to: str | None = None
         "Environment Tested": item.environment_tested,
         "Target Promotion Environment": item.target_promotion_environment,
         "Risk Tier": item.risk_tier,
-        "Status": item.status,
+        "Status": qa_clearance_export_status(item.status),
+        "Workflow Status": item.status,
+        "Clearance Signature Type": QA_CLEARANCE_SIGNED_TYPE if item.status == "ISSUED" else "",
+        "Signature Method": DIGITAL_SIGNATURE_METHOD if item.status == "ISSUED" else "",
         "Requested By": names.get(item.requester_id),
         "QA Lead Approver": names.get(item.reviewed_by_id),
         "Executive Approver": names.get(item.approved_by_id),
@@ -712,9 +721,18 @@ def audit_evidence(date_from: str | None = None, date_to: str | None = None, db:
     names = _user_name_map(db, [row.actor_id for row in rows])
     out = []
     for a in rows:
+        signature = parse_electronic_signature(a.comments, stage=a.step_name or "Approval")
+        signature_type = (
+            QA_CLEARANCE_SIGNED_TYPE if signature and a.entity_type == "SIGNOFF"
+            else "Digitally Signed Approval" if signature
+            else ""
+        )
         out.append({
             "Entity Type": a.entity_type, "Entity ID": a.entity_id, "Step": a.step_name,
             "Decision": a.decision, "Actor": names.get(a.actor_id), "Role": a.actor_role,
+            "Signature Type": signature_type,
+            "Signature ID": signature.signature_id if signature else "",
+            "Signature Method": DIGITAL_SIGNATURE_METHOD if signature else "",
             "Comments": a.comments, "Timestamp": a.created_at,
         })
     return out

@@ -8,6 +8,7 @@ from .. import models
 from ..database import get_db
 from ..deps import get_current_user
 from .reports import REPORT_REGISTRY
+from ..pdf_export import DIGITAL_SIGNATURE_METHOD, DIGITAL_SIGNATURE_NOTICE
 
 router = APIRouter(prefix="/api/export", tags=["download-export-centre"])
 
@@ -38,6 +39,9 @@ def _rows_to_xlsx(rows, meta: dict) -> io.BytesIO:
             ws.append([str(row.get(h, "")) if row.get(h) is not None else "" for h in headers])
     else:
         ws.append(["No records found"])
+    if meta.get("signature_notice"):
+        ws.append([])
+        ws.append(["Digital Signature Notice", meta["signature_notice"]])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -62,6 +66,9 @@ def _rows_to_csv(rows, meta: dict) -> io.StringIO:
             writer.writerow([row.get(h, "") for h in headers])
     else:
         writer.writerow(["No records found"])
+    if meta.get("signature_notice"):
+        writer.writerow([])
+        writer.writerow(["Digital Signature Notice", meta["signature_notice"]])
     buf.seek(0)
     return buf
 
@@ -168,6 +175,27 @@ def _rows_to_pdf(rows, meta: dict) -> io.BytesIO:
         elements.append(table)
     else:
         elements.append(Paragraph("No records found", styles["Normal"]))
+    if meta.get("signature_notice"):
+        signature_notice_style = ParagraphStyle(
+            "ExportSignatureNotice", parent=styles["Normal"],
+            fontName="Helvetica-Bold", fontSize=8, leading=10,
+            textColor=colors.HexColor("#245b3d"),
+        )
+        elements.extend([
+            Spacer(1, 12),
+            Table(
+                [[Paragraph(escape(meta["signature_notice"]), signature_notice_style)]],
+                colWidths=[available_width], hAlign="LEFT",
+                style=TableStyle([
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f3faf6")),
+                    ("BOX", (0, 0), (-1, -1), .7, colors.HexColor("#83b99a")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 7),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ]),
+            ),
+        ])
     def page_footer(canvas, document):
         canvas.saveState()
         page_width = landscape(A4)[0]
@@ -218,6 +246,11 @@ def export_report(report_key: str, format: str = Query("xlsx", pattern="^(xlsx|p
         "generated_by": current_user.full_name,
         "filters": applied_filters,
         "total_records": len(rows),
+        "signature_notice": (
+            f"{DIGITAL_SIGNATURE_METHOD}. {DIGITAL_SIGNATURE_NOTICE}"
+            if any(row.get("Signature Method") for row in rows)
+            else ""
+        ),
     }
 
     filename_base = f"{report_key}_{models.today_ist().isoformat()}"

@@ -9,6 +9,10 @@ interface RequestOptions {
   body?: unknown
   formEncoded?: boolean
   isBlob?: boolean
+  // Some operations expose their own, more useful progress UI. Excluding
+  // those requests prevents the generic page-loading indicator from
+  // competing with that operation-specific status.
+  trackActivity?: boolean
   // Reported directly: "while uploading testcase from excel, though it's
   // saying api timeout 30 sec, but actually upload completed, still showing
   // error." The flat 30s abort below was applied to every request
@@ -233,7 +237,8 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
 
   let operation!: Promise<T>
   operation = (async () => {
-    updateActivity(1)
+    const trackActivity = opts.trackActivity !== false
+    if (trackActivity) updateActivity(1)
     try {
       try {
         const result = await executeRequest<T>(path, opts)
@@ -257,7 +262,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
         return result
       }
     } finally {
-      updateActivity(-1)
+      if (trackActivity) updateActivity(-1)
       // Do not let an older request remove a newer request stored under the
       // same key after a mutation invalidated the in-flight map.
       if (key && inFlightGets.get(key) === operation) inFlightGets.delete(key)
@@ -283,6 +288,8 @@ function triggerDownload(blob: Blob, filename: string) {
 
 export const api = {
   get: <T = any>(path: string): Promise<T> => request<T>(path),
+  getWithoutActivity: <T = any>(path: string): Promise<T> =>
+    request<T>(path, { trackActivity: false }),
   // `timeoutMs` (optional, third arg) lets a caller whose POST triggers slow
   // server-side bulk work (e.g. adding a few thousand testcases to a Test
   // Cycle at once) raise the default 30s budget instead of racing it -- see
@@ -290,6 +297,10 @@ export const api = {
   // pattern.
   post: <T = any>(path: string, body?: unknown, timeoutMs?: number): Promise<T> =>
     request<T>(path, { method: 'POST', body, timeoutMs }),
+  // For a mutation embedded in a component that already presents a blocking
+  // progress state (for example Document Portal upload validation).
+  postWithoutActivity: <T = any>(path: string, body?: unknown, timeoutMs?: number): Promise<T> =>
+    request<T>(path, { method: 'POST', body, timeoutMs, trackActivity: false }),
   put: <T = any>(path: string, body?: unknown): Promise<T> => request<T>(path, { method: 'PUT', body }),
   patch: <T = any>(path: string, body?: unknown): Promise<T> => request<T>(path, { method: 'PATCH', body }),
   del: <T = any>(path: string): Promise<T> => request<T>(path, { method: 'DELETE' }),
@@ -367,7 +378,11 @@ export const api = {
     path: string,
     fields: Record<string, string | Blob | undefined | null>,
     onProgress: (loaded: number, total: number) => void,
-    timeoutMs: number = 5 * 60_000,
+    // Repository uploads are capacity-based rather than size-based. A large
+    // valid file on a slower internal network must not fail merely because a
+    // fixed five-minute client timer elapsed. XMLHttpRequest timeout=0 keeps
+    // it active until the server responds or the connection actually fails.
+    timeoutMs: number = 0,
   ): Promise<T> => new Promise((resolve, reject) => {
     const form = new FormData()
     Object.entries(fields).forEach(([key, value]) => {
@@ -396,8 +411,8 @@ export const api = {
       }
       reject(new HttpError(formatBackendReason(payload?.detail ?? payload) || statusMessage(xhr.status, xhr.statusText), xhr.status))
     }
-    updateActivity(1)
-    xhr.onloadend = () => updateActivity(-1)
+    // This helper is only used when the caller renders granular upload
+    // progress, so do not also show the global "loading data" indicator.
     xhr.send(form)
   }),
 

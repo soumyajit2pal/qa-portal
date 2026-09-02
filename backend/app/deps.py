@@ -13,6 +13,62 @@ from .constants import Role
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
+_SAFE_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+_VIEW_ONLY_SELF_SERVICE_PATHS = {"/api/auth/logout", "/api/auth/me/email"}
+_VIEW_ONLY_READ_OPERATION_POST_PATHS = {"/api/document-portal/download-selection"}
+_VIEW_ONLY_ROLE_GATED_READ_PREFIXES = (
+    "/api/qa-requests",
+    "/api/functional-requests",
+    "/api/sast-requests",
+    "/api/dast-requests",
+    "/api/performance-requests",
+    "/api/suppressions",
+    "/api/signoffs",
+    "/api/approvals",
+    "/api/dashboard",
+    "/api/export",
+    "/api/test-projects",
+    "/api/test-repository",
+    "/api/test-execution",
+    "/api/test-reports",
+    "/api/defects",
+    "/api/application-names",
+)
+
+
+def _enforce_view_only_request(request: Request, user: models.User) -> None:
+    """Fail closed for the organisation-wide View Only permission profile.
+
+    Endpoint role checks remain the source of truth for operational roles;
+    this additional boundary guarantees that a View Only account cannot
+    mutate business data through a direct API call or a stale browser page.
+    Logout and completion of the user's own required LDAP email are the only
+    non-read self-service operations allowed.
+    """
+    if Role.VIEW_ONLY not in user.roles:
+        return
+    if request.method.upper() in _SAFE_READ_METHODS:
+        return
+    if request.url.path in _VIEW_ONLY_SELF_SERVICE_PATHS:
+        return
+    # Document Portal has its own independent permission profile. Combining
+    # VIEW_ONLY with Contributor/Manager keeps core workflow data read-only
+    # while still honoring the explicitly assigned document capability.
+    if (
+        request.url.path.startswith("/api/document-portal")
+        and user.has_role(Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER)
+    ):
+        return
+    if (
+        request.url.path in _VIEW_ONLY_READ_OPERATION_POST_PATHS
+        or request.url.path.endswith("/export-xlsx/jobs")
+    ):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Your View Only role does not permit creating, changing, approving, uploading, or deleting data.",
+    )
+
 
 def _resolve_current_user(request: Request, token: str, db: Session) -> models.User:
     """Resolve an authenticated user while the supplied session is open."""
@@ -44,6 +100,7 @@ def _resolve_current_user(request: Request, token: str, db: Session) -> models.U
     )
     if user is None or not user.is_active:
         raise credentials_exception
+    _enforce_view_only_request(request, user)
     # AUD-008 -- stash the already-resolved user on the request so
     # main.py's _write_request_audit (which runs after the response, as a
     # BackgroundTask on this same request object) can reuse it instead of
@@ -104,7 +161,15 @@ def require_roles(*roles):
     of the given roles (ADMIN always allowed). A user may hold several roles
     at once -- all are active simultaneously, so this passes if ANY assigned
     role qualifies."""
-    def checker(current_user: models.User = Depends(get_current_user)) -> models.User:
+    def checker(request: Request, current_user: models.User = Depends(get_current_user)) -> models.User:
+        view_only_read = request.method.upper() in _SAFE_READ_METHODS
+        view_only_export_job = request.url.path.endswith("/export-xlsx/jobs")
+        if (
+            Role.VIEW_ONLY in current_user.roles
+            and (view_only_read or view_only_export_job)
+            and request.url.path.startswith(_VIEW_ONLY_ROLE_GATED_READ_PREFIXES)
+        ):
+            return current_user
         if not current_user.has_role(*roles):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -208,7 +273,7 @@ def require_same_department(current_user: models.User, entity_department) -> Non
 DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES = {
     Role.QA_LEAD, Role.QA_ENGINEER, Role.SECURITY_ANALYST,
     Role.CHIEF_MANAGER_QA, Role.AGM_QA,
-    Role.SCALE_6_PLUS,
+    Role.SCALE_6_PLUS, Role.VIEW_ONLY,
 }
 
 
@@ -657,7 +722,7 @@ def can_view_cycle_folder(folder: models.TestCycleFolder, current_user: models.U
     since list_cycles/get_cycle carry no role gate of their own) -- every
     QA_ENGINEER/QA_LEAD/CHIEF_MANAGER_QA/AGM_QA account sees every folder
     regardless of grants."""
-    if current_user.has_role(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+    if current_user.has_role(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.VIEW_ONLY):
         return True
     if folder.project and folder.project.owner_id == current_user.id:
         return True

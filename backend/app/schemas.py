@@ -1884,6 +1884,16 @@ class ChecklistTemplateItemUpdate(BaseModel):
     active: Optional[bool] = None
 
 
+class ChecklistTemplateOrderUpdate(BaseModel):
+    """Complete ordered id list for one checklist module.
+
+    Sending the whole list lets the backend persist a move as one transaction
+    instead of relying on two independent row updates that can leave duplicate
+    or partially-swapped sort positions.
+    """
+    ordered_ids: List[int]
+
+
 # ---------------- Module 10: Application Name Master ----------------
 class ApplicationMasterOut(ORMModel):
     id: int

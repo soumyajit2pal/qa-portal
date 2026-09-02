@@ -62,7 +62,7 @@ export function requestDelegationCapabilities(
 ) {
   const parentId = targetType === 'QA_REQUEST' ? request.id : request.qa_request?.id
   const active = request.active_delegation?.status === 'ACTIVE' ? request.active_delegation : null
-  const canManage = request.requester_id === user?.id || hasRole(user, 'ADMIN')
+  const canManage = (!user?.roles?.includes('VIEW_ONLY') && request.requester_id === user?.id) || hasRole(user, 'ADMIN')
   return {
     parentId,
     active,

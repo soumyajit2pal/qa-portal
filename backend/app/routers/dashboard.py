@@ -653,7 +653,7 @@ def _occupancy_band(percent: int) -> str:
 
 _QA_DASHBOARD_ROLES = {
     Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
-    Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+    Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.VIEW_ONLY,
 }
 
 
@@ -822,9 +822,11 @@ def _add_contribution_metrics(db: Session, rows: dict[int, dict],
 def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None = Query(None),
                        db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
-    """QA-team-only capacity view. Work is converted to weighted concurrent
+    """Read-authorized QA capacity view. Work is converted to weighted concurrent
     assignment points so a QA Lead can see who is available, balanced, full,
-    or overloaded. Shared requests divide their load across assigned testers."""
+    or overloaded. Organisation-wide View Only accounts may inspect the same
+    data but remain blocked from mutations by the shared request guard. Shared
+    requests divide their load across assigned testers."""
     _require_qa_dashboard_access(current_user)
     qa_testers = (db.query(models.User)
                   .join(models.UserRole, models.UserRole.user_id == models.User.id)

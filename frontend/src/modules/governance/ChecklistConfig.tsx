@@ -76,7 +76,7 @@ function AddItemForm({ module, detailLabel, onAdded }: {
   )
 }
 
-function ChecklistItemRow({ item, detailLabel, isFirst, isLast, onSaved, onDeleted, onMove }: {
+function ChecklistItemRow({ item, detailLabel, isFirst, isLast, onSaved, onDeleted, onMove, moveBusy = false }: {
   item: ChecklistTemplateItemOut
   detailLabel: string
   isFirst: boolean
@@ -84,6 +84,7 @@ function ChecklistItemRow({ item, detailLabel, isFirst, isLast, onSaved, onDelet
   onSaved: (updated: ChecklistTemplateItemOut) => void
   onDeleted: (id: number) => void
   onMove: (item: ChecklistTemplateItemOut, direction: 'up' | 'down') => void
+  moveBusy?: boolean
 }) {
   const [itemText, setItemText] = useState(item.item)
   const [detail, setDetail] = useState(item.detail || '')
@@ -134,8 +135,8 @@ function ChecklistItemRow({ item, detailLabel, isFirst, isLast, onSaved, onDelet
   return (
     <tr style={{ opacity: item.active ? 1 : 0.55 }}>
       <td style={{ whiteSpace: 'nowrap' }}>
-        <button type="button" className="btn btn-sm" disabled={busy || isFirst} onClick={() => onMove(item, 'up')} title="Move up">&uarr;</button>{' '}
-        <button type="button" className="btn btn-sm" disabled={busy || isLast} onClick={() => onMove(item, 'down')} title="Move down">&darr;</button>
+        <button type="button" className="btn btn-sm" disabled={busy || moveBusy || isFirst} onClick={() => onMove(item, 'up')} title="Move up">&uarr;</button>{' '}
+        <button type="button" className="btn btn-sm" disabled={busy || moveBusy || isLast} onClick={() => onMove(item, 'down')} title="Move down">&darr;</button>
       </td>
       <td style={{ minWidth: 260 }}>
         <input
@@ -209,6 +210,7 @@ function ChecklistModulePanel({ module, detailLabel }: { module: string; detailL
   const [error, setError] = useState<unknown>(null)
   const [confirmRestore, setConfirmRestore] = useState(false)
   const [restoring, setRestoring] = useState(false)
+  const [reordering, setReordering] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -234,18 +236,22 @@ function ChecklistModulePanel({ module, detailLabel }: { module: string; detailL
     const idx = sorted.findIndex((x) => x.id === item.id)
     const swapIdx = direction === 'up' ? idx - 1 : idx + 1
     if (idx < 0 || swapIdx < 0 || swapIdx >= sorted.length) return
-    const other = sorted[swapIdx]
+    const reordered = [...sorted]
+    const target = reordered[swapIdx]
+    reordered[swapIdx] = reordered[idx]
+    reordered[idx] = target
+    setReordering(true)
+    setError(null)
     try {
-      const [a, b] = await Promise.all([
-        api.patch<ChecklistTemplateItemOut>(`/api/checklist-config/${module}/${item.id}`, { sort_order: other.sort_order }),
-        api.patch<ChecklistTemplateItemOut>(`/api/checklist-config/${module}/${other.id}`, { sort_order: item.sort_order }),
-      ])
-      setItems((prev) => {
-        const next = prev.map((x) => (x.id === a.id ? a : x.id === b.id ? b : x))
-        return next.sort((x, y) => x.sort_order - y.sort_order)
-      })
+      const rows = await api.put<ChecklistTemplateItemOut[]>(
+        `/api/checklist-config/${module}/order`,
+        { ordered_ids: reordered.map((row) => row.id) },
+      )
+      setItems(rows)
     } catch (err) {
       setError(err)
+    } finally {
+      setReordering(false)
     }
   }
 
@@ -296,6 +302,7 @@ function ChecklistModulePanel({ module, detailLabel }: { module: string; detailL
                 detailLabel={detailLabel}
                 isFirst={i === 0}
                 isLast={i === sorted.length - 1}
+                moveBusy={reordering}
                 onSaved={replaceItem}
                 onDeleted={(id) => setItems((prev) => prev.filter((x) => x.id !== id))}
                 onMove={moveItem}

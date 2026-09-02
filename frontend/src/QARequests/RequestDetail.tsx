@@ -224,11 +224,12 @@ export function RequestDetail({
   }
 
   const isAdmin = hasRole(user, "ADMIN");
-  const ownsRequest = req.requester_id === user?.id;
+  const viewOnly = !!user?.roles?.includes("VIEW_ONLY");
+  const ownsRequest = !viewOnly && req.requester_id === user?.id;
   const isRequester = ownsRequest || isAdmin;
   const activeDelegation = req.active_delegation;
   const hasActiveDelegation = activeDelegation?.status === "ACTIVE";
-  const isActiveDelegate = hasActiveDelegation && activeDelegation?.assigned_to_id === user?.id;
+  const isActiveDelegate = !viewOnly && hasActiveDelegation && activeDelegation?.assigned_to_id === user?.id;
   const status = req.status;
   // Reported directly: "Request Raised with new application name... it must
   // be at master request level, not on individual request level of childs."

@@ -602,11 +602,12 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     anchor.href = url; anchor.download = document.file_name; anchor.click(); URL.revokeObjectURL(url)
   }
   const roles = user?.roles || []
+  const viewOnly = roles.includes('VIEW_ONLY')
   const manager = roles.some((role) => ['ADMIN', 'QA_LEAD', 'CHIEF_MANAGER_QA'].includes(role)) || !!access?.can_give_final_approval
   const canAssign = manager || roles.includes('QA_ENGINEER')
   const applicationOwner = roles.includes('APPLICATION_OWNER')
-  const assignee = defect.assignee_id === user?.id
-  const tester = defect.retest_tester_id === user?.id || defect.reporter_id === user?.id
+  const assignee = !viewOnly && defect.assignee_id === user?.id
+  const tester = !viewOnly && (defect.retest_tester_id === user?.id || defect.reporter_id === user?.id)
   // 2026-08 Reassignment Requirement -- "Assigned" (above) is only reachable
   // from New/Reopened/Deferred, so this is the only way to change the
   // assignee once work is already under way. Eligible to the current
@@ -614,14 +615,14 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   // (looked up from `users`, since a defect's assigned_team can be routed to
   // any active department, not just QA), or Admin.
   const currentAssigneeUser = users.find((u) => u.id === defect.assignee_id)
-  const canReassignDefect = !!defect.assignee_id
+  const canReassignDefect = !viewOnly && !!defect.assignee_id
     && DEFECT_REASSIGNABLE_STATUSES.includes(defect.status)
     && canReassign(user, defect.assignee_id, currentAssigneeUser?.departments && currentAssigneeUser.departments.length
       ? currentAssigneeUser.departments : currentAssigneeUser?.department)
   const assigneeOrDepartmentHead = !!defect.assignee_id
     && canReassign(user, defect.assignee_id, currentAssigneeUser?.departments && currentAssigneeUser.departments.length
       ? currentAssigneeUser.departments : (currentAssigneeUser?.department || defect.assigned_team))
-  const allowedTransitions = (TRANSITIONS[defect.status] || []).filter((target) => {
+  const allowedTransitions = viewOnly ? [] : (TRANSITIONS[defect.status] || []).filter((target) => {
     // Same actor set already trusted to reject/duplicate a defect -- see
     // routers/defects.py's matching comment on why the Dev Department Head
     // isn't included here (no assignee exists yet at triage time).
@@ -649,7 +650,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} wide>
       <div className="defect-detail-hero">
         <div className="defect-detail-summary"><span className="defect-detail-kicker">{defect.application_name} · {defect.module_feature}</span><div><Badge status={defect.status} /><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><span className="defect-priority-pill">{defect.priority}</span>{!defect.execution_id && <span className="badge badge-yellow">Traceability incomplete</span>}</div></div>
-        <div className="defect-actions">{defect.status === 'New' && (manager || defect.reporter_id === user?.id) && <button className="btn btn-sm" onClick={() => setEditMode(true)}>Edit</button>}{!defect.execution_id && <button className="btn btn-sm btn-primary" disabled={!contexts.length} onClick={() => setShowLinkExecution(true)}>Link to execution</button>}{canReassignDefect && <button className="btn btn-sm" onClick={() => setShowReassign(true)}>Reassign</button>}{allowedTransitions.map((status) => <button key={status} className={`btn btn-sm ${status === 'Rejected' ? 'btn-danger' : status === 'Closed' ? 'btn-primary' : ''}`} onClick={() => setTransition(status)}>{status}</button>)}</div>
+        {!viewOnly && <div className="defect-actions">{defect.status === 'New' && (manager || defect.reporter_id === user?.id) && <button className="btn btn-sm" onClick={() => setEditMode(true)}>Edit</button>}{!defect.execution_id && <button className="btn btn-sm btn-primary" disabled={!contexts.length} onClick={() => setShowLinkExecution(true)}>Link to execution</button>}{canReassignDefect && <button className="btn btn-sm" onClick={() => setShowReassign(true)}>Reassign</button>}{allowedTransitions.map((status) => <button key={status} className={`btn btn-sm ${status === 'Rejected' ? 'btn-danger' : status === 'Closed' ? 'btn-primary' : ''}`} onClick={() => setTransition(status)}>{status}</button>)}</div>}
       </div>
       <div className="defect-lifecycle">
         {lifecycle.map((stage, index) => <div key={stage} className={`${index === lifecycleIndex ? 'current' : ''} ${lifecycleIndex >= 0 && index < lifecycleIndex ? 'complete' : ''}`}><i>{index < lifecycleIndex ? '✓' : index + 1}</i><span>{stage}</span></div>)}
@@ -706,7 +707,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
         {defect.rejection_reason && <div className="defect-workflow-item"><strong>Rejected</strong><AuthenticatedMarkdown value={defect.rejection_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
         {defect.not_a_defect_reason && <div className="defect-workflow-item"><strong>Not a Defect</strong><AuthenticatedMarkdown value={defect.not_a_defect_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div>}
       </section>}
-      <section className="defect-evidence"><div><h4>Evidence & Attachments <span>{documents.length}</span></h4><label className="btn btn-sm">{uploading ? 'Uploading…' : '+ Add evidence'}<input type="file" multiple hidden disabled={uploading} onChange={(e) => upload(e.target.files)} /></label></div>{documents.length ? <div className="defect-files">{documents.map((document) => <button key={document.id} onClick={() => download(document)}>{document.file_name}</button>)}</div> : <p className="muted small">No supporting evidence attached.</p>}<ErrorText error={error} /></section>
+      <section className="defect-evidence"><div><h4>Evidence & Attachments <span>{documents.length}</span></h4>{!viewOnly && <label className="btn btn-sm">{uploading ? 'Uploading…' : '+ Add evidence'}<input type="file" multiple hidden disabled={uploading} onChange={(e) => upload(e.target.files)} /></label>}</div>{documents.length ? <div className="defect-files">{documents.map((document) => <button key={document.id} onClick={() => download(document)}>{document.file_name}</button>)}</div> : <p className="muted small">No supporting evidence attached.</p>}<ErrorText error={error} /></section>
       <JiraActivity entityType="DEFECT" entityId={defect.id} items={activity} onPosted={(item) => setActivity((current) => [...current, item])} />
     </Modal>
     {transition && <TransitionModal defect={defect} target={transition} users={users} departments={departments} requestDepartment={requestDepartment} defects={defects} hasEvidence={documents.length > 0} onClose={() => setTransition('')} onChanged={(saved) => { setTransition(''); onChanged(saved) }} />}

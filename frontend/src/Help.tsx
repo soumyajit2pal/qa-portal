@@ -103,6 +103,7 @@ const ROLE_ROWS = [
   ['QA Lead', 'Verify readiness, assign QA/Security work, review test cases, manage testing, and approve QA Clearance.', 'Cross-department QA delivery role.'],
   ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'COE - Quality Assurance security delivery role.'],
   ['Chief Manager / AGM – COE', 'Approve QA Clearance and coordinate QA-team working roles.', 'COE - Quality Assurance governance role; Department Coordinator access.'],
+  ['View Only', 'Browse organisation-wide requests, testing records, dashboards, and reports without changing workflow data.', 'Cross-department read access; Document Portal requires a separate Document Portal role.'],
   ['Document Portal Viewer', 'Browse, search, and download files or folder/selection ZIP files.', 'Document Portal only when this is the account’s only role.'],
   ['Document Portal Contributor', 'Viewer capabilities plus create folders, upload, rename, and move documents.', 'Document Portal only when this is the account’s only role; deletion is disabled.'],
   ['Document Portal Manager', 'Same controlled repository capabilities as Contributor in the current portal.', 'Document Portal only when this is the account’s only role; deletion is disabled.'],

@@ -449,7 +449,8 @@ function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Suppressio
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
-  const isRequester = sup.created_by_id === user?.id || hasRole(user, 'ADMIN')
+  const viewOnly = !!user?.roles?.includes('VIEW_ONLY')
+  const isRequester = (!viewOnly && sup.created_by_id === user?.id) || hasRole(user, 'ADMIN')
   const status = sup.status
   // SM/Department Head approvals are department-scoped -- see the comment in
   // QARequests.tsx. Security Team verification is NOT department-scoped

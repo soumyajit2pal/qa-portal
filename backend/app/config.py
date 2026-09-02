@@ -88,7 +88,6 @@ class Settings(BaseSettings):
     upload_storage_root: str | None = None
     document_portal_storage_host_path: str | None = None
     document_portal_embedded: bool = True
-    document_portal_max_file_size: int = 500 * 1024 * 1024
     document_portal_minimum_free_bytes: int = 100 * 1024 * 1024
     document_portal_upload_chunk_size: int = 1024 * 1024
     document_portal_allowed_extensions: str = ""

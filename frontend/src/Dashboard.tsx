@@ -67,6 +67,14 @@ const TYPE_TO_PATH: Record<string, string> = {
 }
 
 const DONUT_COLORS = ['#4f46e5', '#16a34a', '#d97706', '#dc2626', '#7c3aed']
+const AGEING_BUCKET_ORDER = ['0-3 days', '4-7 days', '8-15 days', '16-30 days', '30+ days']
+const AGEING_BUCKET_COLORS: Record<string, string> = {
+  '0-3 days': '#60a5fa',
+  '4-7 days': '#2563eb',
+  '8-15 days': '#d97706',
+  '16-30 days': '#dc2626',
+  '30+ days': '#991b1b',
+}
 
 // "Raised" date-range filter -- reported directly ("add filter like within 1
 // hr raised, 1 month, from date to to date"). Applies to whatever on-screen
@@ -300,14 +308,22 @@ function StatCard({ icon: Icon, iconClass, tag, value, label, hint, footline, sp
 }
 
 function Donut({ data, size = 128 }: { data?: Record<string, number> | null; size?: number }) {
-  const entries = Object.entries(data || {}).filter(([, v]) => v > 0)
+  const entries = Object.entries(data || {})
+    .filter(([, v]) => v > 0)
+    .sort(([left], [right]) => {
+      const leftIndex = AGEING_BUCKET_ORDER.indexOf(left)
+      const rightIndex = AGEING_BUCKET_ORDER.indexOf(right)
+      if (leftIndex === -1 || rightIndex === -1) return left.localeCompare(right)
+      return leftIndex - rightIndex
+    })
   const total = entries.reduce((s, [, v]) => s + v, 0)
   let acc = 0
-  const stops = entries.map(([, v], i) => {
+  const colorFor = (label: string, index: number) => AGEING_BUCKET_COLORS[label] || DONUT_COLORS[index % DONUT_COLORS.length]
+  const stops = entries.map(([label, v], i) => {
     const start = (acc / (total || 1)) * 360
     acc += v
     const end = (acc / (total || 1)) * 360
-    return `${DONUT_COLORS[i % DONUT_COLORS.length]} ${start}deg ${end}deg`
+    return `${colorFor(label, i)} ${start}deg ${end}deg`
   })
   const bg = total > 0 ? `conic-gradient(${stops.join(', ')})` : '#eef0f3'
   return (
@@ -321,7 +337,7 @@ function Donut({ data, size = 128 }: { data?: Record<string, number> | null; siz
       <div className="donut-legend">
         {entries.map(([label, v], i) => (
           <div className="row" key={label}>
-            <span><span className="dot" style={{ background: DONUT_COLORS[i % DONUT_COLORS.length] }} />{label}</span>
+            <span><span className="dot" style={{ background: colorFor(label, i) }} />{label}</span>
             <strong>{v}</strong>
           </div>
         ))}
@@ -1633,6 +1649,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
 // always sees everything" elsewhere in the app.
 const REQUESTS_TAB_HIDDEN_ROLES = [
   'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA',
+  'VIEW_ONLY',
 ]
 
 export default function Dashboard() {
@@ -1647,7 +1664,7 @@ export default function Dashboard() {
   // a direct role check (not hasRole's Admin bypass): Admin-only accounts are
   // not QA team members and therefore must not see this restricted view.
   const showTesterOverviewTab = !!user?.roles?.some((role) => (
-    ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA'].includes(role)
+    ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA', 'VIEW_ONLY'].includes(role)
   ))
 
   const tabs = [
