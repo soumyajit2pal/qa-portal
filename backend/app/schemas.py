@@ -1854,6 +1854,18 @@ class DepartmentUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+# ---------------- Request Type Configuration (Admin) ----------------
+class RequestTypeConfigOut(ORMModel):
+    id: int
+    request_type: str
+    sort_order: int
+    is_active: bool
+
+
+class RequestTypeConfigUpdate(BaseModel):
+    is_active: bool
+
+
 # ---------------- Configurable Readiness Checklists ----------------
 # See models.ChecklistTemplateItem / checklist_config.py / routers/
 # checklist_config.py for the full reasoning.
@@ -1863,6 +1875,7 @@ class ChecklistTemplateItemOut(ORMModel):
     item: str
     detail: Optional[str] = None
     is_mandatory: bool
+    mandatory_departments: List[str] = []
     sort_order: int
     active: bool
 
@@ -1871,6 +1884,7 @@ class ChecklistTemplateItemCreate(BaseModel):
     item: str
     detail: Optional[str] = None
     is_mandatory: bool = False
+    mandatory_departments: Optional[List[str]] = None
     # Appended to the end of the module's own list if left unset (see
     # routers/checklist_config.py::create_item).
     sort_order: Optional[int] = None
@@ -1880,6 +1894,7 @@ class ChecklistTemplateItemUpdate(BaseModel):
     item: Optional[str] = None
     detail: Optional[str] = None
     is_mandatory: Optional[bool] = None
+    mandatory_departments: Optional[List[str]] = None
     sort_order: Optional[int] = None
     active: Optional[bool] = None
 

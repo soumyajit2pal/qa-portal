@@ -22,6 +22,7 @@ interface Props {
   savedEvidenceFor: (kind: EvidenceKind, itemIndex: number) => DraftChecklistEvidenceOut[]
   onEvidenceChanged: () => void
   focusEvidenceItem?: string
+  department?: string | null
 }
 
 /** Shared, aligned self-declaration table used by every testing discipline. */
@@ -41,8 +42,9 @@ export function ReadinessChecklistSection({
   savedEvidenceFor,
   onEvidenceChanged,
   focusEvidenceItem,
+  department,
 }: Props) {
-  const { items, loading, error } = useChecklistTemplate(module)
+  const { items, loading, error } = useChecklistTemplate(module, department)
   const focusRow = useRef<HTMLDivElement>(null)
 
   useEffect(() => {

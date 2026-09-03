@@ -90,6 +90,20 @@ def reseed_defaults(db: Session, module: str) -> None:
     _seed_defaults(db, module)
 
 
+def is_mandatory_for_department(item: "models.ChecklistTemplateItem", department: str | None) -> bool:
+    """Resolve the template's mandatory flag for one request department.
+
+    A NULL scope is an untouched legacy/global row. Once an Administrator
+    saves the department picker, the JSON array is authoritative; an empty
+    array means optional for every department.
+    """
+    if not item.is_mandatory:
+        return False
+    if getattr(item, "mandatory_departments_json", None) is None:
+        return True
+    return bool(department and department in getattr(item, "mandatory_departments", []))
+
+
 def get_template_items(db: Session, module: str, only_active: bool = True) -> List["models.ChecklistTemplateItem"]:
     """This module's configured checklist items, ordered by sort_order --
     lazily bootstrapping the table from this module's shipped defaults

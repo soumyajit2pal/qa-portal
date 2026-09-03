@@ -35,7 +35,7 @@ from .routers import (
     auth, qa_requests, functional,
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
-    test_projects, test_repository, test_execution, test_reports, audit, checklist_config,
+    test_projects, test_repository, test_execution, test_reports, audit, checklist_config, request_type_config,
     pending_approvals, defects, jobs,
 )
 
@@ -230,6 +230,7 @@ _MODULE_PATH_PREFIXES = [
     ("/api/defects", "DEFECT"),
     ("/api/audit", "AUDIT"),
     ("/api/checklist-config", "CHECKLIST_CONFIG"),
+    ("/api/request-type-config", "REQUEST_TYPE_CONFIG"),
     ("/api/pending-approvals", "PENDING_APPROVAL"),
     ("/api/document-portal", "DOCUMENT_PORTAL"),
     ("/api/system-settings", "SYSTEM_SETTING"),
@@ -721,6 +722,7 @@ app.include_router(test_reports.router)
 app.include_router(defects.router)
 app.include_router(audit.router)
 app.include_router(checklist_config.router)
+app.include_router(request_type_config.router)
 app.include_router(pending_approvals.router)
 app.include_router(jobs.router)
 if DOCUMENT_PORTAL_EMBEDDED:

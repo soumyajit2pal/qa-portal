@@ -113,6 +113,13 @@ export interface DepartmentOut {
   is_active: boolean
 }
 
+export interface RequestTypeConfigOut {
+  id: number
+  request_type: string
+  sort_order: number
+  is_active: boolean
+}
+
 // ---------------- Configurable Readiness Checklists ----------------
 // See backend models.ChecklistTemplateItem / checklist_config.py.
 export interface ChecklistTemplateItemOut {
@@ -121,6 +128,7 @@ export interface ChecklistTemplateItemOut {
   item: string
   detail?: string | null
   is_mandatory: boolean
+  mandatory_departments: string[]
   sort_order: number
   active: boolean
 }

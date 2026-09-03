@@ -3,7 +3,8 @@ import { api } from '../../api'
 import { PageHeader, Card, ErrorText } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import { IconPlus } from '../../components/Icons'
-import { ChecklistTemplateItemOut } from '../../types'
+import MultiSelect from '../../components/MultiSelect'
+import { ChecklistTemplateItemOut, DepartmentOut } from '../../types'
 
 // Admin > Readiness Checklist Configuration -- reported directly: "I want to
 // make configurable readiness checklist, whatever I mention on that
@@ -22,12 +23,12 @@ const MODULES: { key: string; label: string; detailLabel: string }[] = [
   { key: 'PERFORMANCE', label: 'Performance Testing', detailLabel: 'Data Required from Department' },
 ]
 
-function AddItemForm({ module, detailLabel, onAdded }: {
-  module: string; detailLabel: string; onAdded: (item: ChecklistTemplateItemOut) => void
+function AddItemForm({ module, detailLabel, departments, onAdded }: {
+  module: string; detailLabel: string; departments: string[]; onAdded: (item: ChecklistTemplateItemOut) => void
 }) {
   const [item, setItem] = useState('')
   const [detail, setDetail] = useState('')
-  const [mandatory, setMandatory] = useState(false)
+  const [mandatoryDepartments, setMandatoryDepartments] = useState<string[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
@@ -39,9 +40,9 @@ function AddItemForm({ module, detailLabel, onAdded }: {
     setError(null)
     try {
       const created = await api.post<ChecklistTemplateItemOut>(`/api/checklist-config/${module}`, {
-        item: text, detail: detail.trim() || null, is_mandatory: mandatory,
+        item: text, detail: detail.trim() || null, mandatory_departments: mandatoryDepartments,
       })
-      setItem(''); setDetail(''); setMandatory(false)
+      setItem(''); setDetail(''); setMandatoryDepartments([])
       onAdded(created)
     } catch (err) {
       setError(err)
@@ -64,10 +65,7 @@ function AddItemForm({ module, detailLabel, onAdded }: {
         value={detail}
         onChange={(e) => setDetail(e.target.value)}
       />
-      <label style={{ display: 'flex', gap: 6, alignItems: 'center', flex: '0 0 auto' }}>
-        <input type="checkbox" checked={mandatory} onChange={(e) => setMandatory(e.target.checked)} />
-        <span className="small">Mandatory</span>
-      </label>
+      <MultiSelect value={mandatoryDepartments} options={departments} disabled={busy} onChange={setMandatoryDepartments} placeholder="Optional for all" itemName="department" searchPlaceholder="Search departments..." style={{ minWidth: 190 }} />
       <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !item.trim()}>
         <IconPlus width={13} height={13} /> Add
       </button>
@@ -76,9 +74,10 @@ function AddItemForm({ module, detailLabel, onAdded }: {
   )
 }
 
-function ChecklistItemRow({ item, detailLabel, isFirst, isLast, onSaved, onDeleted, onMove, moveBusy = false }: {
+function ChecklistItemRow({ item, detailLabel, departments, isFirst, isLast, onSaved, onDeleted, onMove, moveBusy = false }: {
   item: ChecklistTemplateItemOut
   detailLabel: string
+  departments: string[]
   isFirst: boolean
   isLast: boolean
   onSaved: (updated: ChecklistTemplateItemOut) => void
@@ -91,6 +90,9 @@ function ChecklistItemRow({ item, detailLabel, isFirst, isLast, onSaved, onDelet
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const selectedDepartments = item.mandatory_departments.length > 0
+    ? item.mandatory_departments
+    : item.is_mandatory ? departments : []
 
   // Keep local edit state in sync if the underlying item changes from
   // outside (e.g. Restore Defaults resets the whole list).
@@ -158,14 +160,16 @@ function ChecklistItemRow({ item, detailLabel, isFirst, isLast, onSaved, onDelet
         />
       </td>
       <td>
-        <label style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center' }}>
-          <input
-            type="checkbox"
-            checked={item.is_mandatory}
-            disabled={busy}
-            onChange={(e) => patch({ is_mandatory: e.target.checked })}
-          />
-        </label>
+        <MultiSelect
+          value={selectedDepartments}
+          options={departments}
+          disabled={busy}
+          onChange={(mandatory_departments) => patch({ mandatory_departments })}
+          placeholder="Optional for all"
+          itemName="department"
+          searchPlaceholder="Search departments..."
+          style={{ minWidth: 190 }}
+        />
       </td>
       <td>
         <button
@@ -204,7 +208,7 @@ function ChecklistItemRow({ item, detailLabel, isFirst, isLast, onSaved, onDelet
   )
 }
 
-function ChecklistModulePanel({ module, detailLabel }: { module: string; detailLabel: string }) {
+function ChecklistModulePanel({ module, detailLabel, departments }: { module: string; detailLabel: string; departments: string[] }) {
   const [items, setItems] = useState<ChecklistTemplateItemOut[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
@@ -274,11 +278,12 @@ function ChecklistModulePanel({ module, detailLabel }: { module: string; detailL
   return (
     <Card title={`${MODULES.find((m) => m.key === module)?.label} Checklist`}>
       <p className="muted small" style={{ marginTop: -4, marginBottom: 12 }}>
-        Seeded onto every new request's own checklist from here at raise time. Mandatory items must be
+        Seeded onto every new request's own checklist from here at raise time. Choose the departments
+        where each item is mandatory; it remains optional for every unselected department. Mandatory items must be
         self-declared ready by the requester before the QA Request can be raised. Changing this list
         never affects a request already in progress -- only what gets seeded going forward.
       </p>
-      <AddItemForm module={module} detailLabel={detailLabel} onAdded={(created) => setItems((prev) => [...prev, created])} />
+      <AddItemForm module={module} detailLabel={detailLabel} departments={departments} onAdded={(created) => setItems((prev) => [...prev, created])} />
       <ErrorText error={error} />
       {loading ? (
         <p className="muted small">Loading...</p>
@@ -289,7 +294,7 @@ function ChecklistModulePanel({ module, detailLabel }: { module: string; detailL
               <th>Order</th>
               <th>Item</th>
               <th>{detailLabel}</th>
-              <th>Mandatory</th>
+              <th>Mandatory for departments</th>
               <th>Status</th>
               <th></th>
             </tr>
@@ -300,6 +305,7 @@ function ChecklistModulePanel({ module, detailLabel }: { module: string; detailL
                 key={item.id}
                 item={item}
                 detailLabel={detailLabel}
+                departments={departments}
                 isFirst={i === 0}
                 isLast={i === sorted.length - 1}
                 moveBusy={reordering}
@@ -338,13 +344,20 @@ function ChecklistModulePanel({ module, detailLabel }: { module: string; detailL
 
 export default function ChecklistConfig() {
   const [activeModule, setActiveModule] = useState(MODULES[0].key)
+  const [departments, setDepartments] = useState<string[]>([])
   const active = MODULES.find((m) => m.key === activeModule) || MODULES[0]
+
+  useEffect(() => {
+    api.get<DepartmentOut[]>('/api/departments')
+      .then((rows) => setDepartments(rows.map((row) => row.name)))
+      .catch(() => setDepartments([]))
+  }, [])
 
   return (
     <div>
       <PageHeader
         title="Readiness Checklist Configuration"
-        subtitle="Configure every self-declaration checklist used across the QA Request wizard -- add, remove, reorder, or reword an item, and flip Mandatory on/off. Takes effect on the next request raised for that module."
+        subtitle="Configure every self-declaration checklist used across the QA Request wizard — including which departments must complete each item. Changes apply to new requests only."
       />
       <div className="wizard-steps" style={{ marginBottom: 16 }}>
         {MODULES.map((m) => (
@@ -358,7 +371,7 @@ export default function ChecklistConfig() {
           </button>
         ))}
       </div>
-      <ChecklistModulePanel module={active.key} detailLabel={active.detailLabel} />
+      <ChecklistModulePanel module={active.key} detailLabel={active.detailLabel} departments={departments} />
     </div>
   )
 }

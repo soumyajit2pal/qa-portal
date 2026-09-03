@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext'
 import { Modal, ErrorText } from '../components/Common'
 import ConfirmModal from '../components/ConfirmModal'
 import { IconCheckCircle } from '../components/Icons'
-import { QARequestOut, DraftChecklistEvidenceOut } from '../types'
+import { QARequestOut, DraftChecklistEvidenceOut, RequestTypeConfigOut } from '../types'
 import { EMPTY_FORM, QARequestForm, blankSastComponent, blankDastComponent } from './types'
 import { buildSteps } from './buildSteps'
 import { detailsStepError, typeStepError, sastStepError, dastStepError } from './validation'
@@ -17,7 +17,7 @@ import { DastStep } from './steps/DastStep'
 import { PerformanceStep } from './steps/PerformanceStep'
 import { DocumentsStep } from './steps/DocumentsStep'
 import { EvidenceKind, evidenceKey } from './steps/ChecklistEvidencePicker'
-import { POST_SIT_ENVIRONMENTS, userDepartments } from '../constants'
+import { POST_SIT_ENVIRONMENTS, REQUEST_TYPES, userDepartments } from '../constants'
 
 interface NewRequestModalProps {
   onClose: () => void
@@ -138,6 +138,22 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
   const departmentOptions = userDepartments(user)
   const primaryDepartment = departmentOptions[0] || ''
   const [form, setForm] = useState<QARequestForm>(() => buildInitialForm(editing, primaryDepartment))
+  const [requestTypes, setRequestTypes] = useState<RequestTypeConfigOut[]>(() => REQUEST_TYPES.map((request_type, sort_order) => ({
+    id: sort_order + 1, request_type, sort_order, is_active: true,
+  })))
+  useEffect(() => {
+    let mounted = true
+    api.get<RequestTypeConfigOut[]>('/api/request-type-config').then((rows) => {
+      if (!mounted) return
+      setRequestTypes(rows)
+      const active = new Set(rows.filter((row) => row.is_active).map((row) => row.request_type))
+      setForm((current) => ({
+        ...current,
+        request_types: current.request_types.filter((requestType) => active.has(requestType)),
+      }))
+    }).catch(() => {})
+    return () => { mounted = false }
+  }, [])
   // Once the linked SAST/DAST/Performance request already exists
   // (created on an earlier save), further edits to its details happen on
   // that request's own page -- the wizard step below only collects them up
@@ -407,7 +423,7 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
         <form onSubmit={submit}>
           {step.key === 'details' && <DetailsStep form={form} set={set} departmentOptions={departmentOptions} departmentLocked={delegatedEditing} />}
           {step.key === 'functional' && <FunctionalStep form={form} set={set} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
-          {step.key === 'type' && <TypeStep form={form} set={set} />}
+          {step.key === 'type' && <TypeStep form={form} set={set} requestTypes={requestTypes} />}
           {step.key === 'sast' && <SastStep form={form} set={set} existingSast={existingSast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
           {step.key === 'dast' && <DastStep form={form} set={set} existingDast={existingDast} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}
           {step.key === 'performance' && <PerformanceStep form={form} set={set} existingPerformance={existingPerformance} draftRequestId={editing?.id} evidenceFiles={evidenceFiles} setEvidenceFiles={setEvidenceFiles} savedEvidenceFor={savedEvidenceFor} onEvidenceChanged={loadSavedEvidence} focusEvidenceItem={initialEvidenceItem} />}

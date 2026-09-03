@@ -100,6 +100,7 @@ export function PerformanceStep({ form, set, existingPerformance, draftRequestId
           </section>
 
           <ReadinessChecklistSection
+            department={form.department}
             module="PERFORMANCE" kind="performance" sectionNumber="03"
             heading="L1 pre-testing readiness — self-declaration"
             description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. QA will verify every declaration independently."

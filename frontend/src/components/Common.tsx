@@ -16,7 +16,7 @@ import {
   PERFORMANCE_STATUS_LABELS,
 } from "../constants";
 import { IconFolder, IconFilter, IconEdit } from "./Icons";
-import SearchableSelect from "./SearchableSelect";
+import MultiSelect from "./MultiSelect";
 import { api, HttpError } from "../api";
 import { useAuth } from "../context/AuthContext";
 import type { RequestDocumentOut, ChecklistItemDocumentOut } from "../types";
@@ -1222,12 +1222,14 @@ export function Table<T extends Record<string, any>>({
   tableId,
   server,
 }: TableProps<T>) {
-  const [filters, setFilters] = useState<Record<string, string>>({});
+  // Each column can hold several exact values. Different columns are still
+  // combined with AND, while values selected inside one column use OR.
+  const [filters, setFilters] = useState<Record<string, string[]>>({});
   const [page, setPage] = useState(1);
   // Which column's filter popover is currently open -- at most one at a
   // time, closed by clicking its icon again, pressing Escape, or clicking
   // anywhere outside the popover (see the document listener below). Having a
-  // value typed in a column's filter and the popover being closed are
+  // values selected in a column's filter and the popover being closed are
   // independent: closing the popover doesn't clear that column's filter, it
   // just hides the input (the icon itself gets a filled/active style so it's
   // still obvious a filter is applied).
@@ -1399,7 +1401,7 @@ export function Table<T extends Record<string, any>>({
     const viewportGap = 10;
     const popoverGap = 6;
     const width = Math.min(300, window.innerWidth - viewportGap * 2);
-    const estimatedHeight = 54;
+    const estimatedHeight = 280;
     const left = Math.min(
       Math.max(viewportGap, rect.left),
       window.innerWidth - width - viewportGap
@@ -1426,17 +1428,16 @@ export function Table<T extends Record<string, any>>({
     return String(v);
   }
 
-  const activeFilters = Object.entries(filters).filter(
-    ([, v]) => v.trim() !== ""
-  );
+  const activeFilters = Object.entries(filters).filter(([, values]) => values.length > 0);
 
   const filteredRows = useMemo(() => {
     if (activeFilters.length === 0) return rows;
     return rows.filter((row) =>
-      activeFilters.every(([key, value]) => {
+      activeFilters.every(([key, values]) => {
         const col = availableColumns.find((c) => c.key === key);
         if (!col) return true;
-        return textFor(col, row).trim().toLowerCase() === value.trim().toLowerCase();
+        const rowValue = textFor(col, row).trim().toLowerCase();
+        return values.some((value) => rowValue === value.trim().toLowerCase());
       })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1552,7 +1553,7 @@ export function Table<T extends Record<string, any>>({
                     <button
                       type="button"
                       className={`th-filter-btn ${
-                        filters[c.key] ? "active" : ""
+                        filters[c.key]?.length ? "active" : ""
                       }`}
                       title={`Filter ${columnLabel(c)}`}
                       aria-label={`Filter ${columnLabel(c)}`}
@@ -1708,30 +1709,19 @@ export function Table<T extends Record<string, any>>({
           ).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
           return (
             <div
-              className="th-filter-popover"
+              className="th-filter-popover th-filter-popover-multi"
               ref={popoverRef}
               style={{ top: popoverPos.top, left: popoverPos.left, width: popoverPos.width }}
               onClick={(e) => e.stopPropagation()}
             >
-              <SearchableSelect
-                autoOpen
-                value={filters[col.key] || ""}
+              <MultiSelect
+                inline
+                value={filters[col.key] || []}
                 onChange={(value) => setFilters((f) => ({ ...f, [col.key]: value }))}
                 placeholder="All values"
-                options={[
-                  { value: "", label: "All values" },
-                  ...values.map((value) => ({ value, label: value })),
-                ]}
+                itemName="value"
+                options={values}
               />
-              {filters[col.key] && (
-                <button
-                  type="button"
-                  className="th-filter-popover-clear"
-                  onClick={() => setFilters((f) => ({ ...f, [col.key]: "" }))}
-                >
-                  Clear
-                </button>
-              )}
             </div>
           );
         })()}

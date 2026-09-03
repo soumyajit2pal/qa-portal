@@ -16,7 +16,7 @@ import { ChecklistTemplateItemOut } from '../../types'
 // which must line up with the order the backend actually seeds the real
 // checklist rows in at Submit time -- both this hook and the backend read
 // the same DB rows ordered by sort_order, so they always agree.
-export function useChecklistTemplate(module: 'FUNCTIONAL' | 'SAST' | 'DAST' | 'PERFORMANCE') {
+export function useChecklistTemplate(module: 'FUNCTIONAL' | 'SAST' | 'DAST' | 'PERFORMANCE', department?: string | null) {
   const [items, setItems] = useState<ChecklistTemplateItemOut[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
@@ -24,12 +24,13 @@ export function useChecklistTemplate(module: 'FUNCTIONAL' | 'SAST' | 'DAST' | 'P
   useEffect(() => {
     let active = true
     setLoading(true)
-    api.get<ChecklistTemplateItemOut[]>(`/api/checklist-config/${module}`)
+    const query = department ? `?department=${encodeURIComponent(department)}` : ''
+    api.get<ChecklistTemplateItemOut[]>(`/api/checklist-config/${module}${query}`)
       .then((r) => { if (active) setItems(r) })
       .catch((err) => { if (active) setError(err) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [module])
+  }, [module, department])
 
   return { items, loading, error }
 }

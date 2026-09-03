@@ -319,6 +319,16 @@ class Department(Base):
     created_at = Column(DateTime, default=now)
 
 
+class RequestTypeConfig(Base):
+    """Admin-managed availability for the gateway's fixed request types."""
+    __tablename__ = "qap_request_type_config"
+    id = pk_column()
+    request_type = Column(String(80), unique=True, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+
 class SystemSetting(Base):
     """Admin-managed server settings that must persist across deployments."""
     __tablename__ = "qap_system_settings"
@@ -1536,6 +1546,11 @@ class ChecklistTemplateItem(Base):
     # nullable columns for what is, functionally, the same "extra context per
     # row" field.
     detail = Column(String(255))
+    # JSON array of department names for which this definition is mandatory.
+    # NULL deliberately means the legacy/global behaviour: an existing
+    # is_mandatory=True row remains mandatory for every department until an
+    # Administrator explicitly saves a scoped selection.
+    mandatory_departments_json = Column("mandatory_departments", Text, nullable=True)
     is_mandatory = Column(Boolean, default=False)
     sort_order = Column(Integer, default=0)
     # Soft-disable rather than hard delete -- keeps this row's history (and
@@ -1544,6 +1559,21 @@ class ChecklistTemplateItem(Base):
     active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
+
+    @property
+    def mandatory_departments(self) -> List[str]:
+        if not self.mandatory_departments_json:
+            return []
+        try:
+            value = json.loads(self.mandatory_departments_json)
+        except (TypeError, ValueError):
+            return []
+        return [str(department) for department in value if department]
+
+    def set_mandatory_departments(self, departments: List[str]) -> None:
+        cleaned = list(dict.fromkeys(department.strip() for department in departments if department and department.strip()))
+        self.mandatory_departments_json = json.dumps(cleaned)
+        self.is_mandatory = bool(cleaned)
 
 
 # ---------------------------------------------------------------------------

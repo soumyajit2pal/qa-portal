@@ -24,7 +24,8 @@ from ..constants import (
 # Every Functional/SAST/DAST/Performance checklist is Admin-configurable now
 # (see checklist_config.py) -- nothing in this file reads the old hardcoded
 # constants.DEFAULT_*_CHECKLIST_ITEMS lists directly any more.
-from ..checklist_config import get_template_items
+from ..checklist_config import get_template_items, is_mandatory_for_department
+from ..request_type_config import inactive_request_types
 from ..pdf_export import build_request_detail_pdf
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
@@ -139,10 +140,13 @@ def _can_edit_draft(obj: "models.QARequest", user: models.User) -> bool:
     return obj.requester_id == user.id
 
 
-def _validate_request_types(request_types: list[str]) -> None:
+def _validate_request_types(db: Session, request_types: list[str]) -> None:
     unknown = sorted({value for value in request_types if value not in REQUEST_TYPES})
     if unknown:
         raise HTTPException(400, f"Unsupported Request Type(s): {', '.join(unknown)}")
+    inactive = inactive_request_types(db, request_types)
+    if inactive:
+        raise HTTPException(400, f"Disabled Request Type(s) cannot be selected: {', '.join(inactive)}")
 
 
 def _validated_bug_fix_source(db: Session, source_request_id: Optional[str], change_type: Optional[str],
@@ -262,7 +266,7 @@ def _missing_mandatory_draft_evidence(db: Session, qa_request: "models.QARequest
     required = []
     for kind, module in selected_modules:
         for item_index, template in enumerate(get_template_items(db, module)):
-            if template.is_mandatory:
+            if is_mandatory_for_department(template, getattr(qa_request, "department", None)):
                 required.append((_draft_evidence_module(db, kind, item_index), template.item))
     if not required:
         return []
@@ -988,7 +992,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         for template in get_template_items(db, "FUNCTIONAL"):
             db.add(models.ReadinessChecklistItem(
                 functional_request_id=functional.id, item=template.item, owner=template.detail,
-                is_mandatory=template.is_mandatory,
+                is_mandatory=is_mandatory_for_department(template, qa_request.department),
                 requester_checked=template.item in checked_set,
             ))
         _raise_child_to_sm(db, functional, "FUNCTIONAL_REQUEST", qa_request, current_user)
@@ -1037,7 +1041,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         for template in get_template_items(db, "SAST"):
             db.add(models.SASTChecklistItem(
                 sast_request_id=sast.id, item=template.item, owner=template.detail,
-                is_mandatory=template.is_mandatory,
+                is_mandatory=is_mandatory_for_department(template, qa_request.department),
                 requester_checked=template.item in sast_checked_set,
             ))
         _raise_child_to_sm(db, sast, "SAST", qa_request, current_user)
@@ -1081,7 +1085,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         for template in get_template_items(db, "DAST"):
             db.add(models.DASTChecklistItem(
                 dast_request_id=dast.id, item=template.item, owner=template.detail,
-                is_mandatory=template.is_mandatory,
+                is_mandatory=is_mandatory_for_department(template, qa_request.department),
                 requester_checked=template.item in dast_checked_set,
             ))
         _raise_child_to_sm(db, dast, "DAST", qa_request, current_user)
@@ -1155,7 +1159,7 @@ def _sync_linked_child_requests(db: Session, qa_request: "models.QARequest", req
         for template in get_template_items(db, "PERFORMANCE"):
             db.add(models.PerformanceChecklistItem(
                 performance_request_id=performance.id, item=template.item, data_required=template.detail,
-                is_mandatory=template.is_mandatory,
+                is_mandatory=is_mandatory_for_department(template, qa_request.department),
                 requester_checked=template.item in performance_checked_set,
             ))
         _raise_child_to_sm(db, performance, "PERFORMANCE", qa_request, current_user)
@@ -1198,7 +1202,7 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # primary (first-assigned) one when the client doesn't send a choice.
     data["department"] = _resolve_requester_department(current_user, payload.department)
     request_types = data.pop("request_types", [])
-    _validate_request_types(request_types)
+    _validate_request_types(db, request_types)
     checked_items = set(data.pop("checked_items", []) or [])
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself
     # -- they're stashed (see draft_child_details) until submit time, when
@@ -1310,7 +1314,7 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
             data["department"] = _resolve_requester_department(current_user, data["department"])
     request_types = data.pop("request_types", None)
     if request_types is not None:
-        _validate_request_types(request_types)
+        _validate_request_types(db, request_types)
     checked_items = data.pop("checked_items", None)
     # SAST/DAST/Performance detail fields aren't columns on QARequest itself
     # -- merge them into the stashed draft_child_details below instead of
@@ -1512,7 +1516,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
             "and choose a different Application Name before raising.",
         )
     request_types = obj.request_types.split(",") if obj.request_types else []
-    _validate_request_types(request_types)
+    _validate_request_types(db, request_types)
     obj.bug_fix_source_request_id = _validated_bug_fix_source(
         db,
         obj.bug_fix_source_request_id,
@@ -1556,25 +1560,25 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
         functional_checked_set = set(checked_items)
         pending_checklist_items += [
             template.item for template in get_template_items(db, "FUNCTIONAL")
-            if template.is_mandatory and template.item not in functional_checked_set
+            if is_mandatory_for_department(template, obj.department) and template.item not in functional_checked_set
         ]
     if "SAST" in request_types:
         sast_checked_set = set(sast_checked_items)
         pending_checklist_items += [
             template.item for template in get_template_items(db, "SAST")
-            if template.is_mandatory and template.item not in sast_checked_set
+            if is_mandatory_for_department(template, obj.department) and template.item not in sast_checked_set
         ]
     if "DAST" in request_types:
         dast_checked_set = set(dast_checked_items)
         pending_checklist_items += [
             template.item for template in get_template_items(db, "DAST")
-            if template.is_mandatory and template.item not in dast_checked_set
+            if is_mandatory_for_department(template, obj.department) and template.item not in dast_checked_set
         ]
     if "Performance Testing" in request_types:
         performance_checked_set = set(performance_checked_items)
         pending_checklist_items += [
             template.item for template in get_template_items(db, "PERFORMANCE")
-            if template.is_mandatory and template.item not in performance_checked_set
+            if is_mandatory_for_department(template, obj.department) and template.item not in performance_checked_set
         ]
     if pending_checklist_items:
         raise HTTPException(

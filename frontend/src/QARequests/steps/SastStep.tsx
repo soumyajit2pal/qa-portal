@@ -75,6 +75,7 @@ export function SastStep({ form, set, existingSast, draftRequestId, evidenceFile
           />
 
           <ReadinessChecklistSection
+            department={form.department}
             module="SAST" kind="sast" sectionNumber="03"
             heading="Security readiness self-declaration"
             description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. The Security Analyst will verify every declaration independently."

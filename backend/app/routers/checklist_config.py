@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -7,7 +7,10 @@ from .. import cache, models, schemas
 from ..database import get_db
 from ..deps import get_current_user, require_roles
 from ..constants import Role
-from ..checklist_config import CHECKLIST_MODULES, DETAIL_COLUMN_LABELS, get_template_items, reseed_defaults
+from ..checklist_config import (
+    CHECKLIST_MODULES, DETAIL_COLUMN_LABELS, get_template_items,
+    is_mandatory_for_department, reseed_defaults,
+)
 
 router = APIRouter(prefix="/api/checklist-config", tags=["checklist-config"])
 
@@ -19,12 +22,33 @@ router = APIRouter(prefix="/api/checklist-config", tags=["checklist-config"])
 _ACTIVE_ITEMS_CACHE_TTL = 300
 
 
-def _active_items_cache_key(module: str) -> str:
-    return f"refdata:checklist-items:active:v1:{module}"
+def _active_items_cache_key(module: str, department: Optional[str]) -> str:
+    return f"refdata:checklist-items:active:v2:{module}:{department or '__none__'}"
 
 
 def _invalidate_active_items_cache(module: str) -> None:
-    cache.delete(_active_items_cache_key(module))
+    cache.delete_prefix(f"refdata:checklist-items:active:v2:{module}:")
+
+
+def _validate_mandatory_departments(db: Session, departments: List[str]) -> List[str]:
+    cleaned = list(dict.fromkeys(value.strip() for value in departments if value and value.strip()))
+    if not cleaned:
+        return []
+    known = {
+        row[0] for row in db.query(models.Department.name)
+        .filter(models.Department.name.in_(cleaned), models.Department.is_active == True).all()  # noqa: E712
+    }
+    unknown = [department for department in cleaned if department not in known]
+    if unknown:
+        raise HTTPException(400, f"Unknown or inactive department(s): {', '.join(unknown)}")
+    return cleaned
+
+
+def _item_out(row: models.ChecklistTemplateItem, department: Optional[str] = None) -> dict:
+    result = schemas.ChecklistTemplateItemOut.model_validate(row).model_dump(mode="json")
+    if department is not None:
+        result["is_mandatory"] = is_mandatory_for_department(row, department)
+    return result
 
 
 def _check_module(module: str) -> str:
@@ -43,19 +67,19 @@ def list_modules(current_user: models.User = Depends(get_current_user)):
 
 
 @router.get("/{module}", response_model=List[schemas.ChecklistTemplateItemOut])
-def list_active_items(module: str, db: Session = Depends(get_db),
+def list_active_items(module: str, department: Optional[str] = None, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
     """Active items only, ordered -- this is what the QA Request wizard's
     Functional/SAST/DAST/Performance steps render as the self-declaration
     checklist while raising a new request, so it's open to any authenticated
     user (not Admin-only), same as e.g. GET /api/departments."""
     module = _check_module(module)
-    cache_key = _active_items_cache_key(module)
+    cache_key = _active_items_cache_key(module, department)
     cached = cache.get_json(cache_key)
     if cached is not None:
         return cached
     rows = get_template_items(db, module, only_active=True)
-    result = [schemas.ChecklistTemplateItemOut.model_validate(row).model_dump(mode="json") for row in rows]
+    result = [_item_out(row, department) for row in rows]
     cache.set_json(cache_key, result, _ACTIVE_ITEMS_CACHE_TTL)
     return result
 
@@ -93,10 +117,13 @@ def create_item(module: str, payload: schemas.ChecklistTemplateItemCreate, db: S
             .scalar()
         )
         sort_order = (max_order + 1) if max_order is not None else 0
+    mandatory_departments = payload.mandatory_departments
     obj = models.ChecklistTemplateItem(
         module=module, item=item_text, detail=payload.detail, is_mandatory=payload.is_mandatory,
         sort_order=sort_order, active=True,
     )
+    if mandatory_departments is not None:
+        obj.set_mandatory_departments(_validate_mandatory_departments(db, mandatory_departments))
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -155,6 +182,8 @@ def update_item(module: str, item_id: int, payload: schemas.ChecklistTemplateIte
         obj.detail = data["detail"]
     if "is_mandatory" in data:
         obj.is_mandatory = data["is_mandatory"]
+    if "mandatory_departments" in data and data["mandatory_departments"] is not None:
+        obj.set_mandatory_departments(_validate_mandatory_departments(db, data["mandatory_departments"]))
     if "sort_order" in data and data["sort_order"] is not None:
         obj.sort_order = data["sort_order"]
     if "active" in data and data["active"] is not None:

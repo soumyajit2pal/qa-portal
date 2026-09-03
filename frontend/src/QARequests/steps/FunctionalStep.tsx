@@ -68,6 +68,7 @@ export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEv
       </section>
 
       <ReadinessChecklistSection
+        department={form.department}
         module="FUNCTIONAL" kind="functional" sectionNumber="02"
         heading="Readiness checklist — self-declaration"
         description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. The QA Lead will verify every declaration independently."

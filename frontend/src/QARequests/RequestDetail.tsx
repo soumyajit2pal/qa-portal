@@ -104,10 +104,10 @@ export function RequestDetail({
   // backend checklist_config.py) -- fetched live instead of the old
   // hardcoded constants.ts lists, same as the wizard steps themselves (see
   // steps/useChecklistTemplate.ts).
-  const { items: functionalChecklist } = useChecklistTemplate("FUNCTIONAL");
-  const { items: sastChecklist } = useChecklistTemplate("SAST");
-  const { items: dastChecklist } = useChecklistTemplate("DAST");
-  const { items: performanceChecklist } = useChecklistTemplate("PERFORMANCE");
+  const { items: functionalChecklist } = useChecklistTemplate("FUNCTIONAL", req.department);
+  const { items: sastChecklist } = useChecklistTemplate("SAST", req.department);
+  const { items: dastChecklist } = useChecklistTemplate("DAST", req.department);
+  const { items: performanceChecklist } = useChecklistTemplate("PERFORMANCE", req.department);
 
   const load = useCallback(async () => {
     try {

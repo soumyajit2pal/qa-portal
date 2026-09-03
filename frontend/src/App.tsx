@@ -44,6 +44,7 @@ const Admin = lazy(() => import('./modules/governance/Admin'))
 const DepartmentAdmin = lazy(() => import('./modules/governance/DepartmentAdmin'))
 const AuditLog = lazy(() => import('./modules/governance/AuditLog'))
 const ChecklistConfig = lazy(() => import('./modules/governance/ChecklistConfig'))
+const RequestTypeConfig = lazy(() => import('./modules/governance/RequestTypeConfig'))
 const DocumentPortal = lazy(() => import('./modules/governance/DocumentPortal'))
 
 const DOCUMENT_PORTAL_ROLES = new Set([
@@ -339,6 +340,7 @@ export default function App() {
           <Route path="/department-admin" element={<ModuleBoundary moduleName="Governance"><DepartmentAdmin /></ModuleBoundary>} />
           <Route path="/audit-log" element={<ModuleBoundary moduleName="Governance"><AuditLog /></ModuleBoundary>} />
           <Route path="/checklist-config" element={<ModuleBoundary moduleName="Governance"><ChecklistConfig /></ModuleBoundary>} />
+          <Route path="/request-type-config" element={<ModuleBoundary moduleName="Governance"><RequestTypeConfig /></ModuleBoundary>} />
           <Route path="/document-portal" element={<DocumentPortalOnly><ModuleBoundary moduleName="Document Portal"><DocumentPortal /></ModuleBoundary></DocumentPortalOnly>} />
 
           {/* Test Management module */}

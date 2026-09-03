@@ -155,6 +155,7 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
           </section>
 
           <ReadinessChecklistSection
+            department={form.department}
             module="DAST" kind="dast" sectionNumber="03"
             heading="Security readiness self-declaration"
             description="Confirm what is already in place and attach supporting evidence beside the relevant criterion. The Security Analyst will verify every declaration independently."

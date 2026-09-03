@@ -119,6 +119,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
   if (hasRole(user, 'ADMIN')) {
     adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers })
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
+    adminItems.push({ to: '/request-type-config', label: 'Request Type Config', icon: IconEdit })
   }
   // Do not show the narrower Department Coordinator workspace merely because
   // `hasRole` grants Administrators its usual superuser shortcut. System

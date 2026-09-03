@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.routers.qa_requests import _missing_mandatory_draft_evidence
+from app.checklist_config import is_mandatory_for_department
 
 
 class MandatoryChecklistEvidenceTests(unittest.TestCase):
@@ -42,6 +43,25 @@ class MandatoryChecklistEvidenceTests(unittest.TestCase):
         missing = _missing_mandatory_draft_evidence(self.db, self.request, ["Sanity Testing"])
 
         self.assertEqual(missing, ["Approved test data"])
+
+    def test_scoped_item_is_mandatory_only_for_selected_department(self):
+        template = SimpleNamespace(
+            is_mandatory=True,
+            mandatory_departments_json='["Finance"]',
+            mandatory_departments=["Finance"],
+        )
+
+        self.assertTrue(is_mandatory_for_department(template, "Finance"))
+        self.assertFalse(is_mandatory_for_department(template, "HR"))
+
+    def test_empty_department_scope_is_optional_for_everyone(self):
+        template = SimpleNamespace(
+            is_mandatory=False,
+            mandatory_departments_json="[]",
+            mandatory_departments=[],
+        )
+
+        self.assertFalse(is_mandatory_for_department(template, "Finance"))
 
 
 if __name__ == "__main__":
