@@ -1,17 +1,19 @@
-import React, { useEffect, useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useRequestNavigation } from './hooks/useRequestNavigation'
+import React, { useEffect, useState, useMemo, useRef } from 'react'
+
 import { api } from './api'
 import { formatDateIST, formatDateTimeIST } from './time'
 import { useAuth } from './context/AuthContext'
 import { Card, MetricCard, BarChart, Table, Badge, ErrorText, Modal, TableColumn } from './components/Common'
 import SearchableSelect from './components/SearchableSelect'
 import ClearableSearchInput from './components/ClearableSearchInput'
+import ActiveProjectsBrowser from './components/ActiveProjectsBrowser'
 import {
   IconGrid, IconWarning, IconApprove, IconWorkflow, IconCheckCircle,
 } from './components/Icons'
 import {
   ApprovalActionOut, ProjectWiseOut, ThreeWOut, ThreeWItem, ThreeWDetailOut, DashboardSummaryOut,
-  SecuritySastDashboard, SecurityDastDashboard, SuppressionDashboard,
+  SecuritySastDashboard, SecurityDastDashboard, SecurityInsightMetric, SecurityInsightDetail, SuppressionDashboard,
   DashboardAttentionMetric, DashboardAttentionOut, DashboardAttentionRow,
   FortifySuppressedSeverity, FortifySuppressionDetailOut, FortifySuppressionDetailRow,
 } from './types'
@@ -452,7 +454,7 @@ function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
 // Dashboard level and shared across tab switches, but only MyRequestsTab
 // needs them now (genuine row browsing, out of scope for this endpoint).
 function CommandCentre({ range }: { range: RaisedRange }) {
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [proj, setProj] = useState<ProjectWiseOut | null>(null)
   const [threeW, setThreeW] = useState<ThreeWOut | null>(null)
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
@@ -475,18 +477,23 @@ function CommandCentre({ range }: { range: RaisedRange }) {
   const [attentionLoading, setAttentionLoading] = useState(false)
   const [attentionError, setAttentionError] = useState<unknown>(null)
 
-  async function loadAttention(metric: DashboardAttentionMetric, page: number, pageSize: number) {
+  const attentionRequest = useRef(0)
+
+  async function loadAttention(metric: DashboardAttentionMetric, page: number, pageSize: number, search = '') {
+    const request = ++attentionRequest.current
     setAttentionError(null)
     setAttentionLoading(true)
     try {
       const query = new URLSearchParams(rangeQuery(range).replace(/^\?/, ''))
       query.set('page', String(page))
       query.set('page_size', String(pageSize))
-      setAttentionDetail(await api.get<DashboardAttentionOut>(`/api/dashboard/attention/${metric}?${query.toString()}`))
+      if (search) query.set('search', search)
+      const result = await api.get<DashboardAttentionOut>(`/api/dashboard/attention/${metric}?${query.toString()}`)
+      if (request === attentionRequest.current) setAttentionDetail(result)
     } catch (err) {
-      setAttentionError(err)
+      if (request === attentionRequest.current) setAttentionError(err)
     } finally {
-      setAttentionLoading(false)
+      if (request === attentionRequest.current) setAttentionLoading(false)
     }
   }
 
@@ -580,17 +587,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
     { key: 'priority', header: 'Priority', render: (r) => r.priority ? <Badge status={r.priority} /> : '—' },
   ]
 
-  const drilldownColumns: TableColumn<DashboardAttentionRow>[] = attentionMetric === 'active-projects'
-    ? [
-        { key: 'project_id', header: 'CR / EPIC' },
-        { key: 'application_name', header: 'Applications' },
-        { key: 'department', header: 'Department', render: (r) => r.department || '—' },
-        { key: 'request_count', header: 'Active requests' },
-        { key: 'request_ids', header: 'Linked request IDs' },
-        { key: 'status', header: 'Current stages' },
-        { key: 'updated_at', header: 'Last updated', render: (r) => r.updated_at ? timeAgo(r.updated_at) : '—' },
-      ]
-    : attentionMetric === 'security-findings'
+  const drilldownColumns: TableColumn<DashboardAttentionRow>[] = attentionMetric === 'security-findings'
     ? [
         { key: 'type', header: 'Scan type' },
         { key: 'request_id', header: 'Request ID' },
@@ -633,7 +630,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         </div>
       </div>
       <div className="grid grid-4 dashboard-metric-grid">
-        <StatCard icon={IconGrid} iconClass="blue" tag="Distinct CR / EPIC" value={m.active_projects} label="Active projects"
+        <StatCard icon={IconGrid} iconClass="blue" tag="Distinct CR / EPIC" value={m.active_projects} label="Active CRs / EPICs"
                   hint="Distinct CR/EPICs with at least one active Functional QA request."
                   footline="Source: active Functional QA requests"
                   loading={attentionLoading && attentionMetric === 'active-projects'}
@@ -659,12 +656,19 @@ function CommandCentre({ range }: { range: RaisedRange }) {
       {attentionMetric && (
         <Modal
           title={attentionDetail?.title || 'Consolidated dashboard data'}
-          onClose={() => { setAttentionMetric(null); setAttentionDetail(null); setAttentionError(null) }}
+          onClose={() => { attentionRequest.current++; setAttentionMetric(null); setAttentionDetail(null); setAttentionError(null); setAttentionLoading(false) }}
+          variant={attentionMetric === 'active-projects' ? 'dialog' : 'drawer'}
+          fitContent={attentionMetric === 'active-projects'}
+          preventBackdropClose
           wide
         >
-          {attentionLoading && <p className="muted">Loading the source records behind this total…</p>}
+          {attentionLoading && !attentionDetail && <p className="muted">Loading the source records behind this total…</p>}
           <ErrorText error={attentionError} />
-          {attentionDetail && (
+          {attentionDetail && (attentionMetric === 'active-projects' ? (
+            <ActiveProjectsBrowser data={attentionDetail} loading={attentionLoading}
+              onLoad={(page, pageSize, search) => loadAttention('active-projects', page, pageSize, search)}
+              onOpen={(route) => navigate(route)} formatUpdated={timeAgo} />
+          ) : (
             <>
               <div className="dashboard-drilldown-summary">
                 <div><strong>{attentionDetail.total}</strong><span>{attentionDetail.unit}</span></div>
@@ -692,7 +696,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
               />
               {attentionDetail.rows.length === 0 && <p className="muted small">No source records currently contribute to this metric.</p>}
             </>
-          )}
+          ))}
         </Modal>
       )}
 
@@ -840,48 +844,134 @@ function CommandCentre({ range }: { range: RaisedRange }) {
 }
 
 function SecurityTab({ range }: { range: RaisedRange }) {
+  const navigate = useRequestNavigation()
   const [sast, setSast] = useState<SecuritySastDashboard | null>(null)
   const [dast, setDast] = useState<SecurityDastDashboard | null>(null)
   const [error, setError] = useState<unknown>(null)
+  const [selection, setSelection] = useState<{ kind: 'sast' | 'dast'; metric: SecurityInsightMetric; value: string } | null>(null)
+  const [detail, setDetail] = useState<SecurityInsightDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<unknown>(null)
+  const detailRequest = useRef(0)
+
+  function closeDetails() {
+    detailRequest.current++
+    setSelection(null)
+    setDetail(null)
+    setDetailError(null)
+    setDetailLoading(false)
+  }
+
+  async function loadDetails(target: NonNullable<typeof selection>, page = 1, pageSize = 5) {
+    const request = ++detailRequest.current
+    setDetailLoading(true)
+    setDetailError(null)
+    try {
+      const query = new URLSearchParams(rangeQuery(range).replace(/^\?/, ''))
+      query.set('metric', target.metric)
+      if (target.value) query.set('value', target.value)
+      query.set('page', String(page))
+      query.set('page_size', String(pageSize))
+      const result = await api.get<SecurityInsightDetail>(`/api/dashboard/security/${target.kind}/details?${query}`)
+      if (request === detailRequest.current) setDetail(result)
+    } catch (err) {
+      if (request === detailRequest.current) setDetailError(err)
+    } finally {
+      if (request === detailRequest.current) setDetailLoading(false)
+    }
+  }
+
+  function openDetails(kind: 'sast' | 'dast', metric: SecurityInsightMetric, value = '') {
+    const target = { kind, metric, value }
+    setSelection(target)
+    setDetail(null)
+    void loadDetails(target)
+  }
+
   useEffect(() => {
+    let cancelled = false
+    closeDetails()
+    setError(null)
+    setSast(null)
+    setDast(null)
     const query = rangeQuery(range)
     Promise.all([api.get<SecuritySastDashboard>(`/api/dashboard/security/sast${query}`), api.get<SecurityDastDashboard>(`/api/dashboard/security/dast${query}`)])
-      .then(([s, d]) => { setSast(s); setDast(d) }).catch(setError)
+      .then(([s, d]) => { if (!cancelled) { setSast(s); setDast(d) } })
+      .catch((err) => { if (!cancelled) setError(err) })
+    return () => { cancelled = true; detailRequest.current++ }
   }, [range])
+
+  const columns: TableColumn<SecurityInsightDetail['rows'][number]>[] = [
+    { key: 'request_id', header: 'Request ID' },
+    { key: 'application_name', header: 'Application' },
+    ...(selection?.kind === 'dast' ? [{ key: 'application_url', header: 'Application URL' }] : []),
+    { key: 'department', header: 'Department', render: (row) => row.department || '—' },
+    { key: 'status', header: 'Current stage', render: (row) => <Badge status={row.status} /> },
+    ...(['vulnerabilities', 'severity', 'remediation'].includes(selection?.metric || '')
+      ? [{ key: 'value', header: selection?.metric === 'severity' ? `${selection.value} findings` : 'Open findings' }] : []),
+    { key: 'updated_at', header: 'Updated', render: (row) => row.updated_at ? timeAgo(row.updated_at) : '—' },
+  ]
+
   if (error) return <ErrorText error={error} />
   if (!sast || !dast) return <DashboardLoadingSkeleton variant="insights" />
   return (
     <div>
       <div className="section-title">SAST</div>
       <div className="grid grid-3">
-        <MetricCard label="SAST Requests Raised" value={sast.total_requests} hint="Every SAST request ever raised, in any status." />
-        <MetricCard label="Applications Scanned" value={sast.applications_scanned} hint="Distinct applications whose SAST request has reached Report Ready or Closed." />
-        <MetricCard label="Open Vulnerabilities" value={sast.open_vulnerabilities} hint="SAST findings still marked Open." />
+        <MetricCard label="SAST Requests Raised" value={sast.total_requests} hint="SAST requests in any status within the selected period and your visible scope."
+          onClick={() => openDetails('sast', 'requests')} />
+        <MetricCard label="Applications Scanned" value={sast.applications_scanned} hint="Distinct applications whose SAST request has reached Report Ready or Closed."
+          onClick={() => openDetails('sast', 'applications')} />
+        <MetricCard label="Open Vulnerabilities" value={sast.open_vulnerabilities} hint="Open findings in each request’s latest imported Fortify scan."
+          onClick={() => openDetails('sast', 'vulnerabilities')} />
       </div>
       <div className="section-title" style={{ marginTop: 16 }}>DAST</div>
       <div className="grid grid-2">
-        <MetricCard label="DAST Requests Raised" value={dast.total_requests} hint="Every DAST request ever raised, in any status." />
-        {/* Only counts requests that actually finished scanning
-            (REPORT_READY/CLOSED) -- see security_dast in dashboard.py --
-            not every DAST request ever raised, so a pile of Draft/pending
-            requests doesn't inflate this number. */}
+        <MetricCard label="DAST Requests Raised" value={dast.total_requests} hint="DAST requests in any status within the selected period and your visible scope."
+          onClick={() => openDetails('dast', 'requests')} />
         <MetricCard label="Scan Coverage (Scanned Applications)" value={dast.scan_coverage}
-                    hint="Distinct application URLs whose DAST request has reached Report Ready or Closed." />
+          hint="Distinct application URLs whose DAST request has reached Report Ready or Closed."
+          onClick={() => openDetails('dast', 'applications')} />
+      </div>
+      <p className="muted small">Select a card or a non-zero chart bar to view its source records.</p>
+      <div className="grid grid-2" style={{ marginTop: 16 }}>
+        <Card title="SAST Severity Distribution"><BarChart data={sast.severity_distribution} onBarClick={(severity) => openDetails('sast', 'severity', severity)} /></Card>
+        <Card title="DAST Vulnerability Trends"><BarChart data={dast.vulnerability_trends} onBarClick={(severity) => openDetails('dast', 'severity', severity)} /></Card>
       </div>
       <div className="grid grid-2" style={{ marginTop: 16 }}>
-        <Card title="SAST Severity Distribution"><BarChart data={sast.severity_distribution} /></Card>
-        <Card title="DAST Vulnerability Trends"><BarChart data={dast.vulnerability_trends} /></Card>
+        <Card title="SAST Remediation Status" subtitle="Scanned requests with remaining findings or zero open findings"><BarChart data={sast.remediation_status} onBarClick={(status) => openDetails('sast', 'remediation', status)} /></Card>
+        <Card title="DAST Compliance Status" subtitle="Requests by workflow and compliance state"><BarChart data={dast.compliance_status} onBarClick={(status) => openDetails('dast', 'compliance', status)} /></Card>
       </div>
-      <div className="grid grid-2" style={{ marginTop: 16 }}>
-        <Card title="SAST Remediation Status" subtitle="Current disposition of identified findings"><BarChart data={sast.remediation_status} /></Card>
-        <Card title="DAST Compliance Status" subtitle="Requests by workflow and compliance state"><BarChart data={dast.compliance_status} /></Card>
-      </div>
+      {selection && <Modal key={detail?.total_rows ? 'records' : 'summary'}
+        title={detail?.title || 'Security insight details'} onClose={closeDetails}
+        variant={detail?.total_rows ? 'drawer' : 'dialog'} compact={!detail?.total_rows} wide={!!detail?.total_rows}>
+        {detailLoading && !detail && <p role="status">Loading source records…</p>}
+        <ErrorText error={detailError} />
+        {!!detailError && <button className="btn" onClick={() => void loadDetails(selection, detail?.page || 1, detail?.page_size || 5)}>Retry</button>}
+        {detail && (detail.total_rows === 0 ? <div className="security-insight-empty" role="status">
+          <div className="security-insight-empty-count"><strong>{detail.total}</strong><span>{detail.unit}</span></div>
+          <h4>No matching records</h4>
+          <p>There are no records for this metric in the selected period and your visible scope.</p>
+          <p className="muted small">{detail.description}</p>
+          <button type="button" className="btn btn-primary" onClick={closeDetails}>Close</button>
+        </div> : <>
+          <div className="ap-overview"><div><strong>{detail.total}</strong><span>{detail.unit}</span></div><p>{detail.description}</p></div>
+          <Table
+            rowKey="key" columns={columns} rows={detail.rows}
+            onRowClick={(row) => { if (row.route) navigate(row.route) }}
+            server={{ page: detail.page, pageSize: detail.page_size, total: detail.total_rows,
+              totalPages: detail.total_pages, hasNext: detail.has_next, hasPrevious: detail.has_previous,
+              loading: detailLoading, onPageChange: (page) => loadDetails(selection, page, detail.page_size),
+              onPageSizeChange: (pageSize) => loadDetails(selection, 1, pageSize),
+            }} />
+        </>)}
+      </Modal>}
     </div>
   )
 }
 
 function SuppressionTab({ range }: { range: RaisedRange }) {
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [data, setData] = useState<SuppressionDashboard | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [severity, setSeverity] = useState<FortifySuppressedSeverity | null>(null)
@@ -1074,7 +1164,7 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
 // before the union, so the browser never has to load or filter five large
 // request lists locally.
 function MyRequestsTab({ range }: { range: RaisedRange }) {
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const { user } = useAuth()
   const [reqScope, setReqScope] = useState<'mine' | 'department'>('mine')
   const [requestPage, setRequestPage] = useState<DashboardRequestsPage | null>(null)
@@ -1159,7 +1249,7 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
         <div style={{ marginTop: 18 }}>
           <Table
             rowKey="uid"
-            onRowClick={(r) => navigate(TYPE_TO_PATH[r.type] || '/qa-requests')}
+            onRowClick={(r) => navigate(`${TYPE_TO_PATH[r.type] || '/qa-requests'}?openId=${r.id}`)}
             columns={[
               { key: 'type', header: 'Type' },
               { key: 'request_id', header: 'Request ID' },
@@ -1319,7 +1409,7 @@ type TesterContributionDetailView = 'Defects' | 'Retests' | 'Executions' | 'Proj
 // enforcement both live on /api/dashboard/qa-tester-workload; the client
 // gate below is for navigation clarity, not the sole security boundary.
 function TesterOverviewTab({ range }: { range: RaisedRange }) {
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [workload, setWorkload] = useState<TesterWorkloadOut | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [view, setView] = useState<'contribution' | 'capacity'>('contribution')
@@ -1618,7 +1708,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
             tableId="qa-tester-request-ledger"
             rowKey="request_id"
             rows={tester.assignments}
-            onRowClick={(assignment) => navigate(`${pathBySource[assignment.source]}?open=${assignment.request_pk}`)}
+            onRowClick={(assignment) => navigate(`${pathBySource[assignment.source]}?openId=${assignment.request_pk}`)}
             columns={[
               { key: 'request_id', header: 'Request ID', render: (item) => <strong>{item.request_id}</strong> },
               { key: 'source', header: 'Request Type' },

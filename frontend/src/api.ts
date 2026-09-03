@@ -1,3 +1,5 @@
+import { isQaEvidenceUpload, qaDocumentSizeError } from './qaDocumentUpload'
+
 const BASE_URL: string = (import.meta.env.VITE_API_BASE_URL as string) || ''
 
 function getToken(): string | null {
@@ -326,9 +328,13 @@ export const api = {
   // Uploads one or more files as multipart/form-data. `fileList` is a
   // FileList or array of File objects (e.g. from an <input type="file" multiple>).
   uploadFiles: <T = any>(path: string, fileList: FileList | File[]): Promise<T> => {
+    const files = Array.from(fileList)
+    const qaEvidenceUpload = isQaEvidenceUpload(path)
+    const sizeError = qaEvidenceUpload ? qaDocumentSizeError(files) : null
+    if (sizeError) return Promise.reject(new Error(sizeError))
     const form = new FormData()
-    Array.from(fileList).forEach((f) => form.append('files', f))
-    return request<T>(path, { method: 'POST', body: form, formEncoded: true })
+    files.forEach((f) => form.append('files', f))
+    return request<T>(path, { method: 'POST', body: form, formEncoded: true, timeoutMs: qaEvidenceUpload ? 600_000 : undefined })
   },
 
   downloadFile: async (path: string, filename: string): Promise<void> => {

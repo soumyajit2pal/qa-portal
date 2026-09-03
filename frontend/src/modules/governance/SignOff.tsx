@@ -520,7 +520,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
   )
 }
 
-function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; onClose: () => void; onChanged: (s: SignOffOut) => void; users: UserOut[] }) {
+export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; onClose: () => void; onChanged: (s: SignOffOut) => void; users: UserOut[] }) {
   const { user } = useAuth()
   const [error, setError] = useState<unknown>(null)
   const [busyAction, setBusyAction] = useState<string | null>(null)

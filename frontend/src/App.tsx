@@ -2,6 +2,7 @@ import React, { ReactNode, Suspense, lazy, useEffect, useState } from 'react'
 import { Routes, Route, Navigate, Link, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
+import RequestViewer from './components/RequestViewer'
 import DepartmentPrompt from './components/DepartmentPrompt'
 import EmailCompletionPrompt from './components/EmailCompletionPrompt'
 import PendingApprovalsNotice from './components/PendingApprovalsNotice'
@@ -144,6 +145,7 @@ const TestReports = lazy(() => import('./modules/test-management/TestReports'))
 // render identically without duplicating this logic.
 function AuthenticatedChrome({ user, children }: { user: UserOut; children: ReactNode }) {
   return (
+    <RequestViewer>
     <Layout>
       {children}
       {/* First-ever LDAP login: blocks interaction with the rest of the app
@@ -166,6 +168,7 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
           dismissed rather than being skipped entirely. */}
       {!user.needs_department_selection && !isAccessApprovalPending(user) && !isLdapEmailCompletionRequired(user) && <PendingApprovalsNotice />}
     </Layout>
+    </RequestViewer>
   )
 }
 

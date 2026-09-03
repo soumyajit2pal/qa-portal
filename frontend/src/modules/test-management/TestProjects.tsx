@@ -568,10 +568,10 @@ export default function TestProjects() {
       <ErrorText error={error} />
       <PageHeader
         eyebrow="Test Case Management · Design · Organize · Execute · Trace"
-        title="Projects" count={visibleProjects.length}
-        subtitle="Plan testing work, organize reusable test assets, and monitor execution from one project workspace."
+        title="Test Projects" count={visibleProjects.length}
+        subtitle="Workspaces for reusable test cases, test cycles, and execution results. Each test project can be linked to an application."
         actions={canManage && (
-          <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Project</button>
+          <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Test Project</button>
         )}
       />
       <div className="toolbar tm-project-toolbar" style={{ marginBottom: 14 }}>

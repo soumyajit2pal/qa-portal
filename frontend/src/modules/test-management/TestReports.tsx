@@ -228,8 +228,8 @@ function ProjectPortfolioPanel() {
     <div className="tm-report-panel">
       <PopulationNote text={data.population_note} />
       <div className="tm-report-stats-row">
-        <StatCard label="Active projects" value={data.active_project_count} />
-        <StatCard label="Inactive projects" value={data.inactive_project_count} />
+        <StatCard label="Active test projects" value={data.active_project_count} />
+        <StatCard label="Inactive test projects" value={data.inactive_project_count} />
         <StatCard label="Archived projects" value={data.archived_project_count} />
         <StatCard label="Cycles" value={data.cycle_count} />
       </div>

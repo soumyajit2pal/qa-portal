@@ -1,5 +1,6 @@
+import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
@@ -330,7 +331,7 @@ function assignedGroupFor(
   return null
 }
 
-function DASTDetail({ req, onClose, onChanged, users }: {
+export function DASTDetail({ req, onClose, onChanged, users }: {
   req: DASTOut; onClose: () => void; onChanged: (d: DASTOut) => void; users: UserOut[]
 }) {
   const { user } = useAuth()
@@ -356,7 +357,7 @@ function DASTDetail({ req, onClose, onChanged, users }: {
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>(req.checklist_items || [])
   useEffect(() => { setChecklist(req.checklist_items || []) }, [req])
   const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/dast-requests', req.id)
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [showStartScan, setShowStartScan] = useState(false)
   const [showRescan, setShowRescan] = useState(false)
   // Reported directly: "while clicking on Scan or Rescan, give warning

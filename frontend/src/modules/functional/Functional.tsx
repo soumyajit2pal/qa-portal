@@ -710,7 +710,7 @@ interface FunctionalDetailProps {
   users: UserOut[];
 }
 
-function FunctionalDetail({
+export function FunctionalDetail({
   req,
   onClose,
   onChanged,

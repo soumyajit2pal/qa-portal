@@ -880,6 +880,7 @@ export interface DashboardAttentionRow {
   type?: string
   request_id?: string
   request_ids?: string
+  linked_requests?: { id: number; request_id: string; status: string; route: string }[]
   project_id?: string
   application_name?: string
   department?: string | null
@@ -962,6 +963,12 @@ export interface SecuritySastDashboard {
   open_vulnerabilities: number
   severity_distribution: Record<string, number>
   remediation_status: Record<string, number>
+}
+
+export type SecurityInsightMetric = 'requests' | 'applications' | 'vulnerabilities' | 'severity' | 'remediation' | 'compliance'
+export type SecurityInsightDetail = Omit<DashboardAttentionOut, 'metric' | 'rows'> & {
+  metric: SecurityInsightMetric
+  rows: (DashboardAttentionRow & { application_url?: string | null })[]
 }
 
 export interface SecurityDastDashboard {

@@ -1,5 +1,6 @@
+import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback, useRef } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments } from '../../components/Common'
@@ -416,7 +417,7 @@ function RelinkSuppressionModal({ sup, onClose, onRelinked }: {
   )
 }
 
-function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: SuppressionOut; onClose: () => void; onChanged: (s: SuppressionOut) => void; users: UserOut[] }) {
+export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: SuppressionOut; onClose: () => void; onChanged: (s: SuppressionOut) => void; users: UserOut[] }) {
   const { user } = useAuth()
   const [tab, setTab] = useState<'overview' | 'documents' | 'history'>('overview')
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
@@ -651,7 +652,7 @@ function worstSeverity(items: { severity: string }[]): string | null {
 
 export default function Suppression() {
   const { user } = useAuth()
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [rows, setRows] = useState<SuppressionOut[]>([])
   const [showNew, setShowNew] = useState(false)
   const [selected, setSelected] = useState<SuppressionOut | null>(null)

@@ -63,7 +63,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'test-management', number: '08', title: 'Test case management',
-    summary: 'Projects, sharing, repository, testcase versions, cycles, folders, assignment, execution, defects, and export.',
+    summary: 'Test Projects, sharing, repository, testcase versions, cycles, folders, assignment, execution, defects, and export.',
     keywords: 'project shared with you view access view only repository folder tag testcase test case version major minor superseded compare details bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete my executions qa group runner assign reassign reason change attempt defect rejected duplicate not a defect blocked checkout checkin export actual result image test cycle folder department access restricted unfiled folder scoped stats summary cards',
   },
   {

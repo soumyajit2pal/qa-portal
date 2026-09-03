@@ -1,5 +1,6 @@
+import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+
 import { api, subscribeToApiMutations } from '../../api'
 import { formatDateIST, formatDateTimeIST } from '../../time'
 import { Card, Badge, ErrorText, PageHeader } from '../../components/Common'
@@ -26,7 +27,7 @@ interface Row extends PendingApprovalItem {
 // Owner/SM/Department Head/QA Lead/etc. banner or decision panel already
 // lives there, same as before this feed existed).
 export default function PendingApprovals() {
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [rows, setRows] = useState<Row[]>([])
   const [category, setCategory] = useState('')
   const [categoryCounts, setCategoryCounts] = useState<Record<string, number>>({})

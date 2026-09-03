@@ -18,6 +18,7 @@ import { PerformanceStep } from './steps/PerformanceStep'
 import { DocumentsStep } from './steps/DocumentsStep'
 import { EvidenceKind, evidenceKey } from './steps/ChecklistEvidencePicker'
 import { POST_SIT_ENVIRONMENTS, REQUEST_TYPES, userDepartments } from '../constants'
+import { qaDocumentSizeError } from '../qaDocumentUpload'
 
 interface NewRequestModalProps {
   onClose: () => void
@@ -274,6 +275,8 @@ export function NewRequestModal({ onClose, onCreated, editing, delegatedEditing 
     setBusy(true)
     setError(null)
     try {
+      const sizeError = qaDocumentSizeError(Object.values(checklistEvidence).flat())
+      if (sizeError) throw new Error(sizeError)
       const { performance_request_types, sast_components, dast_components, epic_number: _legacyEpicNumber, ...rest } = form
       const payload = {
         ...rest,

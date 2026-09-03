@@ -285,7 +285,7 @@ function assignedGroupFor(
   return null
 }
 
-function PerformanceDetail({ req, onClose, onChanged, users }: {
+export function PerformanceDetail({ req, onClose, onChanged, users }: {
   req: PerformanceOut; onClose: () => void; onChanged: (p: PerformanceOut) => void; users: UserOut[]
 }) {
   const { user } = useAuth()

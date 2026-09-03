@@ -1,5 +1,6 @@
+import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
@@ -298,7 +299,7 @@ function assignedGroupFor(
   return null
 }
 
-function SASTDetail({ req, onClose, onChanged, users }: {
+export function SASTDetail({ req, onClose, onChanged, users }: {
   req: SASTOut; onClose: () => void; onChanged: (s: SASTOut) => void; users: UserOut[]
 }) {
   const { user } = useAuth()
@@ -324,7 +325,7 @@ function SASTDetail({ req, onClose, onChanged, users }: {
   const [checklist, setChecklist] = useState<ChecklistItemOut[]>(req.checklist_items || [])
   useEffect(() => { setChecklist(req.checklist_items || []) }, [req])
   const { documentsByItem, reload: reloadEvidence } = useChecklistDocuments('/api/sast-requests', req.id)
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [showStartScan, setShowStartScan] = useState(false)
   // 2026-08 "Findings Validation" doc -- Rescan reuses SecurityScanDialog in
   // `mode="rescan"`; replaces the old scanConfirmAction/ConfirmModal pair

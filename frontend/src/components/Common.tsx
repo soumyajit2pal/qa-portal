@@ -293,6 +293,7 @@ export function MetricCard({
   label,
   value,
   hint,
+  onClick,
 }: {
   label: ReactNode;
   value: ReactNode;
@@ -304,12 +305,19 @@ export function MetricCard({
   // Available through the shared information control so metric cards keep
   // the same compact behaviour throughout the application.
   hint?: ReactNode;
+  onClick?: () => void;
 }) {
   return (
-    <div className="metric-card">
+    <div className={`metric-card${onClick ? ' metric-card-clickable' : ''}`}>
       {hint && <InfoTooltip content={hint} label={`About ${typeof label === "string" ? label : "this metric"}`} />}
       <div className="value">{value ?? 0}</div>
       <div className="label">{label}</div>
+      {onClick && <>
+        <span className="metric-card-view" aria-hidden="true">View details <span>→</span></span>
+        <button type="button" className="metric-card-hit-area" onClick={onClick}
+          aria-label={`View ${typeof label === 'string' ? label : 'metric'} details`}
+          title={`View ${typeof label === 'string' ? label : 'metric'} details`} />
+      </>}
     </div>
   );
 }
@@ -368,6 +376,8 @@ interface ModalProps {
   // Content-sized dialog for short forms and confirmations. This keeps a
   // one- or two-field task from inheriting the spacious record-detail size.
   compact?: boolean;
+  // Wide lists can grow with their contents without filling the viewport.
+  fitContent?: boolean;
   // 'drawer' (default): right-side slide-over -- gives most record detail
   // views (SAST/DAST, Suppression, Sign-off, Admin forms, etc.) room to
   // breathe and keeps the surrounding page visible/in context, matching the
@@ -397,6 +407,7 @@ export function Modal({
   children,
   wide,
   compact,
+  fitContent,
   variant = "drawer",
   preventBackdropClose,
   closeDisabled,
@@ -436,7 +447,7 @@ export function Modal({
         onClick={handleBackdropClick}
       >
         <div
-          className={`dialog ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${
+          className={`dialog ${wide ? "dialog-wide" : ""} ${compact ? "dialog-compact" : ""} ${fitContent ? "dialog-fit-content" : ""} ${
             shake ? "modal-shake" : ""
           }`}
           onClick={(e) => e.stopPropagation()}
@@ -1116,20 +1127,24 @@ export function ErrorText({ error, title = "Action could not be completed", guid
   if (!error || !visible) return null;
   const message = error instanceof Error ? error.message : String(error);
   const httpError = error instanceof HttpError ? error : null;
+  // Request IDs also accompany expected validation and workflow responses.
+  // Surface diagnostic details only for service, network, or timeout failures.
+  const systemFailure = httpError !== null &&
+    (httpError.status >= 500 || httpError.status === 0 || httpError.status === 408);
   return (
     <Modal title={title} onClose={() => setVisible(false)} variant="dialog" preventBackdropClose>
       <div className="action-error-dialog" role="alert">
         <div className="action-error-dialog-icon">!</div>
         <div>
           <strong>The requested action was stopped</strong>
-          <span>{httpError?.status ? `Reason · HTTP ${httpError.status}` : "Reason"}</span>
+          <span>{systemFailure && httpError.status ? `Reason · HTTP ${httpError.status}` : "Reason"}</span>
           <p>{message}</p>
-          {httpError?.reference && <small className="action-error-reference">Technical reference: {httpError.reference}</small>}
+          {systemFailure && httpError.reference && <small className="action-error-reference">Technical reference: {httpError.reference}</small>}
         </div>
       </div>
       <div className="action-error-guidance">
         <strong>What to do</strong>
-        <p>{guidance || correctiveGuidance(message)}</p>
+        <p>{systemFailure ? correctiveGuidance(message) : guidance || correctiveGuidance(message)}</p>
       </div>
       <button type="button" className="btn btn-primary" onClick={() => setVisible(false)}>Close</button>
     </Modal>

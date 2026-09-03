@@ -1,8 +1,9 @@
+import { useRequestNavigation } from '../hooks/useRequestNavigation'
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, HttpError } from "../api";
 import { formatDateTimeIST } from "../time";
 import { useAuth } from "../context/AuthContext";
-import { Link, useNavigate } from "react-router-dom";
+import {Link} from "react-router-dom"
 import {
   Badge,
   DetailField,
@@ -61,7 +62,7 @@ export function RequestDetail({
   users,
 }: RequestDetailProps) {
   const { user } = useAuth();
-  const navigate = useNavigate();
+  const navigate = useRequestNavigation();
   const [tab, setTab] = useState("overview");
   const [documents, setDocuments] = useState<QARequestDocumentOut[]>([]);
   const [history, setHistory] = useState<ApprovalActionOut[]>([]);
@@ -441,14 +442,10 @@ export function RequestDetail({
     req.linked_performance_requests?.length > 0 ||
     req.linked_signoffs?.length > 0;
 
-  // One row per linked request across all four request types, feeding the
-  // "Linked Requests" table below. `path` is that type's own module page --
-  // clicking a row closes this gateway modal and navigates there with
-  // `?open=<request_id>` so the module page can auto-open that specific
-  // request's own detail view (see Functional.tsx/SAST.tsx/DAST.tsx/
-  // Performance.tsx's matching `useSearchParams`-based deep-link effect).
+  // Linked request rows open the exact child in the shared request viewer.
   interface LinkedRow {
     key: string;
+    id: number;
     type: string;
     request_id: string;
     status?: string | null;
@@ -457,6 +454,7 @@ export function RequestDetail({
   const linkedRows: LinkedRow[] = [
     ...(req.linked_functional_requests || []).map((f) => ({
       key: `func-${f.id}`,
+      id: f.id,
       type: "Functional QA",
       request_id: f.request_id,
       status: f.status,
@@ -464,6 +462,7 @@ export function RequestDetail({
     })),
     ...(req.linked_sast_requests || []).map((s) => ({
       key: `sast-${s.id}`,
+      id: s.id,
       type: "SAST",
       request_id: s.request_id,
       status: s.status,
@@ -471,6 +470,7 @@ export function RequestDetail({
     })),
     ...(req.linked_dast_requests || []).map((d) => ({
       key: `dast-${d.id}`,
+      id: d.id,
       type: "DAST",
       request_id: d.request_id,
       status: d.status,
@@ -478,6 +478,7 @@ export function RequestDetail({
     })),
     ...(req.linked_performance_requests || []).map((p) => ({
       key: `perf-${p.id}`,
+      id: p.id,
       type: "Performance",
       request_id: p.request_id,
       status: p.status,
@@ -485,6 +486,7 @@ export function RequestDetail({
     })),
     ...(req.linked_signoffs || []).map((s) => ({
       key: `signoff-${s.id}`,
+      id: s.id,
       type: "Clearance",
       request_id: s.request_id,
       status: s.status,
@@ -494,7 +496,7 @@ export function RequestDetail({
 
   function openLinked(row: LinkedRow) {
     onClose();
-    navigate(`${row.path}?open=${encodeURIComponent(row.request_id)}`);
+    navigate(`${row.path}?openId=${row.id}`);
   }
 
   // request_id is only assigned once this gateway is actually raised (a

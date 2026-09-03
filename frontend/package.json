@@ -8,6 +8,8 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "test:request-navigation": "node --test tests/requestNavigation.test.mjs",
+    "test:qa-document-upload": "node --test tests/qaDocumentUpload.test.mjs",
     "preview": "vite preview --port 5173"
   },
   "dependencies": {

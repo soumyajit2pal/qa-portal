@@ -1,5 +1,6 @@
+import { useRequestNavigation } from '../hooks/useRequestNavigation'
 import React, { useEffect, useState, useRef, ReactNode } from 'react'
-import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import {NavLink, useLocation} from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { ROLE_LABELS, hasRole, hasDepartment, QA_DEPARTMENT } from '../constants'
 import { UserOut } from '../types'
@@ -63,7 +64,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
     {
       label: 'Test Case Management',
       items: [
-        { to: '/test-projects', label: 'Projects', icon: IconApps },
+        { to: '/test-projects', label: 'Test Projects', icon: IconApps },
         { to: '/test-repository', label: 'Test Repository', icon: IconFolder },
         { to: '/test-execution', label: 'Test Execution', icon: IconPlay },
         // 2026-08 -- was role-gated for a while (QA team plus whoever could
@@ -180,7 +181,7 @@ function initials(name?: string | null): string {
 export default function Layout({ children }: { children?: ReactNode }) {
   const { user, logout } = useAuth()
   const location = useLocation()
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [search, setSearch] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('qa_nav_collapsed') === 'true')

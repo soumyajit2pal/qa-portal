@@ -1,5 +1,6 @@
+import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useCallback, useEffect, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
 import { formatDateIST } from '../../time'
 import { Badge, Card, ErrorText, Field, Modal, Table } from '../../components/Common'
@@ -573,7 +574,7 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
 function DefectDetail({ defect, users, departments, requestDepartment, defects, contexts, access, onClose, onChanged }: {
   defect: DefectOut; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]; contexts: ExecutionContext[]; access?: TestProjectMyAccessOut; onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const { user } = useAuth()
   const [transition, setTransition] = useState('')
   const [showReassign, setShowReassign] = useState(false)
@@ -719,7 +720,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
 
 export default function Defects() {
   const { user } = useAuth()
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [searchParams, setSearchParams] = useSearchParams()
   const [dashboard, setDashboard] = useState<DefectDashboardOut | null>(null)
   const [requests, setRequests] = useState<QARequestListOut[]>([])

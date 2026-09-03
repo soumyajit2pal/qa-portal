@@ -1,5 +1,6 @@
+import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+
 import { api } from '../../api'
 import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
@@ -159,7 +160,7 @@ export function LinkSuppressionModal({ kind, requestId, requestLabel, onClose, o
   onLinked: (s: SuppressionOut) => void
 }) {
   const { user } = useAuth()
-  const navigate = useNavigate()
+  const navigate = useRequestNavigation()
   const [suppressions, setSuppressions] = useState<SuppressionOut[]>([])
   const [selectedId, setSelectedId] = useState<number | ''>('')
   const [error, setError] = useState<unknown>(null)

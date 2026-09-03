@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .. import models, schemas, pagination
 from .. import documents as doc_store
+from ..upload_limits import validate_qa_document_sizes
 from .. import application_names as app_names
 from ..database import get_db
 from ..deps import get_current_user, require_roles, dashboard_department_scope
@@ -1815,6 +1816,7 @@ def upload_draft_checklist_evidence(req_id: int, kind: str, item_index: int,
                                     current_user: models.User = Depends(get_current_user)):
     req = _draft_request_for_evidence(db, req_id, current_user, require_editable=True)
     module = _draft_evidence_module(db, kind, item_index)
+    validate_qa_document_sizes(files)
     return doc_store.save_documents(db, module, req_id,
                                     f"{_storage_key(req)}/{kind}-{item_index}", files, current_user.id)
 

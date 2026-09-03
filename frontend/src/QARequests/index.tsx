@@ -1,5 +1,6 @@
+import { useRequestNavigation } from '../hooks/useRequestNavigation'
 import React, { useCallback, useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import {useLocation} from "react-router-dom"
 import { api, HttpError, subscribeToApiMutations } from "../api";
 import { formatDateTimeIST } from "../time";
 import {
@@ -63,7 +64,7 @@ function linkedRequestsFor(row: QARequestListOut): LinkedRequestSearchResult[] {
 // the wizard itself is put together.
 export default function QARequests() {
   const location = useLocation();
-  const navigate = useNavigate();
+  const navigate = useRequestNavigation();
   const searchParams = new URLSearchParams(location.search);
   const [users, setUsers] = useState<UserOut[]>([]);
   const [assignedOnly, setAssignedOnly] = useState(false);
@@ -238,7 +239,7 @@ export default function QARequests() {
     // The surrounding table row opens the parent QA Request. A linked chip
     // is a more specific destination, so keep that row handler from firing.
     event.stopPropagation();
-    navigate(`${linked.path}?open=${encodeURIComponent(linked.request.request_id)}`);
+    navigate(`${linked.path}?openId=${linked.request.id}`);
   }
 
   return (

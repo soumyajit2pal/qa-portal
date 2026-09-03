@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react'
 import { api } from '../../api'
 import { ErrorText, ChecklistEvidenceFileRow, ChecklistEvidenceDeleteModal, SupportingEvidenceControl } from '../../components/Common'
 import { RequestDocumentOut } from '../../types'
+import { qaDocumentSizeError, QA_DOCUMENT_SIZE_HINT } from '../../qaDocumentUpload'
 
 export type EvidenceKind = 'functional' | 'sast' | 'dast' | 'performance'
 
@@ -86,7 +87,10 @@ export function ChecklistEvidencePicker({
         multiple
         hidden
         onChange={(e) => {
-          onFilesChange([...files, ...Array.from(e.target.files || [])])
+          const selected = Array.from(e.target.files || [])
+          const sizeError = qaDocumentSizeError(selected)
+          setError(sizeError ? new Error(sizeError) : null)
+          if (!sizeError) onFilesChange([...files, ...selected])
           e.target.value = ''
         }}
       />
@@ -97,6 +101,7 @@ export function ChecklistEvidencePicker({
         required={required}
         mandatory={mandatory}
       >
+          <p className="muted small">{QA_DOCUMENT_SIZE_HINT}</p>
           {savedFiles.map((document) => (
             <ChecklistEvidenceFileRow
               key={document.id}

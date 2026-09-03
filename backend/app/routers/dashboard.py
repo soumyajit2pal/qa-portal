@@ -1525,6 +1525,7 @@ def dashboard_attention_detail(
                 "project_id": project_id,
                 "type": "Functional QA",
                 "request_ids": [],
+                "linked_requests": [],
                 "application_names": set(),
                 "departments": set(),
                 "statuses": set(),
@@ -1533,6 +1534,12 @@ def dashboard_attention_detail(
                 "route": None,
             })
             entry["request_ids"].append(request.request_id)
+            entry["linked_requests"].append({
+                "id": request.id,
+                "request_id": request.request_id,
+                "status": request.status,
+                "route": f"/functional-requests?openId={request.id}",
+            })
             if request.application_name:
                 entry["application_names"].add(request.application_name)
             if request.department:
@@ -1542,9 +1549,11 @@ def dashboard_attention_detail(
             if not entry["updated_at"] or (request.updated_at and request.updated_at > entry["updated_at"]):
                 entry["updated_at"] = request.updated_at
             if entry["request_count"] == 1:
-                entry["route"] = f"/functional-requests?open={request.request_id}"
+                entry["route"] = f"/functional-requests?openId={request.id}"
             else:
-                entry["route"] = "/functional-requests"
+                # A project with multiple requests has no single destination.
+                # Each linked request carries its own exact detail route.
+                entry["route"] = None
         rows = []
         for entry in grouped.values():
             entry["request_ids"] = ", ".join(entry["request_ids"])
@@ -1553,10 +1562,17 @@ def dashboard_attention_detail(
             entry["status"] = ", ".join(sorted(entry.pop("statuses")))
             rows.append(entry)
         rows.sort(key=lambda row: row["updated_at"] or datetime.datetime.min, reverse=True)
+        project_total = len(rows)
+        search = (getattr(params, "search", None) or "").strip().replace("_", " ").casefold()
+        if search:
+            rows = [row for row in rows if search in " ".join(
+                str(row.get(field) or "") for field in
+                ("project_id", "application_name", "department", "request_ids", "status")
+            ).replace("_", " ").casefold()]
         return _attention_response(
-            metric, "Active projects",
+            metric, "Active CRs / EPICs",
             "One row per distinct CR/EPIC with at least one active Functional QA request. Multiple requests under the same CR/EPIC are consolidated.",
-            "projects", len(rows), rows, params,
+            "CRs / EPICs", project_total, rows, params,
         )
 
     if metric == "security-findings":
@@ -1742,6 +1758,78 @@ def security_dast(date_from: str | None = Query(None), date_to: str | None = Que
         # not DASTFinding, so it's untouched here.
         "compliance_status": Counter(r.status for r in reqs),
     }
+
+
+def _security_insight_detail(kind, metric, value, reqs, latest_scans, params):
+    """Use the same request scope and latest snapshots as the insight totals."""
+    selected = reqs
+    counts = {}
+    unit = "requests"
+    title = f"{kind} Requests Raised"
+    description = "Requests in the selected period and your visible department scope. Select a request to open its details."
+    if metric == "applications":
+        selected = [r for r in reqs if r.status in ("REPORT_READY", "CLOSED")]
+        if kind == "DAST":
+            selected = [r for r in selected if r.application_url]
+        applications = {r.application_name if kind == "SAST" else r.application_url for r in selected}
+        unit = "applications"
+        title = f"{kind} Applications Scanned"
+        description = "Distinct applications represented by the requests below in Report Ready or Closed. An application can have multiple requests."
+        total = len(applications)
+    elif metric in ("vulnerabilities", "severity"):
+        if metric == "severity" and value not in ("Critical", "High", "Medium", "Low"):
+            raise HTTPException(400, "Select a valid finding severity")
+        field = f"{value.lower()}_count" if metric == "severity" else "total_count"
+        counts = {r.id: getattr(latest_scans[r.id], field) for r in reqs if r.id in latest_scans}
+        selected = [r for r in reqs if counts.get(r.id, 0) > 0]
+        total = sum(counts.values())
+        unit = "findings"
+        title = f"{kind} {value if metric == 'severity' else 'Open'} Vulnerabilities"
+        description = "Findings grouped by request from its latest imported Fortify scan. Open a request to inspect its findings."
+    elif metric == "remediation":
+        if value not in ("Open", "Resolved"):
+            raise HTTPException(400, "Select Open or Resolved remediation status")
+        selected = [r for r in reqs if r.id in latest_scans and
+                    ("Resolved" if latest_scans[r.id].total_count == 0 else "Open") == value]
+        total = len(selected)
+        title = f"{kind} Remediation: {value}"
+        description = "Scanned requests with zero current findings are Resolved; those with remaining findings are Open. Requests without an imported scan are excluded."
+    elif metric == "compliance":
+        selected = [r for r in reqs if r.status == value]
+        total = len(selected)
+        title = f"{kind} Compliance: {value.replace('_', ' ').title()}"
+    else:
+        total = len(selected)
+
+    rows = []
+    for request in selected:
+        scan = latest_scans.get(request.id)
+        row = _attention_request_row(kind, request, f"/{kind.lower()}?openId={request.id}",
+                                     counts.get(request.id, scan.total_count if scan else 0))
+        row["application_url"] = getattr(request, "application_url", None)
+        rows.append(row)
+    rows.sort(key=lambda row: (row["updated_at"] or datetime.datetime.min, row["key"]), reverse=True)
+    return _attention_response(metric, title, description, unit, total, rows, params)
+
+
+@router.get("/security/{kind}/details")
+def security_insight_details(
+    kind: str, metric: str = Query(...), value: str = Query(""),
+    params: PageParams = Depends(), date_from: str | None = Query(None), date_to: str | None = Query(None),
+    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
+):
+    kind = kind.upper()
+    metrics = {"SAST": {"requests", "applications", "vulnerabilities", "severity", "remediation"},
+               "DAST": {"requests", "applications", "severity", "compliance"}}
+    if kind not in metrics or metric not in metrics[kind]:
+        raise HTTPException(404, "Unknown security insight")
+    model = models.SASTRequest if kind == "SAST" else models.DASTRequest
+    reqs = _join_qa_department(
+        _in_period(db.query(model), model.created_at, date_from, date_to),
+        model, dashboard_department_scope(current_user),
+    ).all()
+    scans = _latest_scan_by_request(db, kind, [r.id for r in reqs]) if metric in ("vulnerabilities", "severity", "remediation") else {}
+    return _security_insight_detail(kind, metric, value, reqs, scans, params)
 
 
 # ---------------- 4.9.7 Suppression Dashboard ----------------
