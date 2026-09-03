@@ -201,6 +201,12 @@ function ProtectedLayout() {
   )
 }
 
+function LoginRoute() {
+  const { user, loading } = useAuth()
+  if (loading) return <ModuleFallback />
+  return user ? <Navigate to="/" replace /> : <Login />
+}
+
 function QaGroupOnly({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   return hasDepartment(user, QA_DEPARTMENT) ? <>{children}</> : <Navigate to="/" replace />
@@ -305,7 +311,7 @@ export default function App() {
       <GlobalToastCenter />
       <Suspense fallback={<ModuleFallback />}>
         <Routes>
-        <Route path="/login" element={<Login />} />
+        <Route path="/login" element={<LoginRoute />} />
         <Route path="/help" element={<HelpRoute />} />
 
         {/* Every protected page below shares this one pathless layout route
