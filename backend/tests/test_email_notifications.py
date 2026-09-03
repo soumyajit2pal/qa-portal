@@ -25,6 +25,30 @@ class EmailNotificationTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("SMTP_HOST", reason)
 
+    def test_admin_test_email_uses_configured_smtp_transport(self):
+        settings = {
+            "SMTP_ENABLED": "true",
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_FROM_ADDRESS": "qa-portal@example.com",
+            "SMTP_FROM_NAME": "QA Portal",
+            "SMTP_STARTTLS": "true",
+            "SMTP_SSL": "false",
+            "PORTAL_BASE_URL": "https://qa.example.com",
+        }
+        with patch.dict(os.environ, settings, clear=False), patch.object(email_notifications, "_send_message") as send:
+            email_notifications.send_test_email("admin@example.com", "Portal Administrator")
+
+        message, smtp_settings = send.call_args.args
+        self.assertEqual(message["To"], "admin@example.com")
+        self.assertEqual(message["Subject"], "[QA Portal] SMTP test email")
+        self.assertEqual(smtp_settings["host"], "smtp.example.com")
+        self.assertIn("Portal Administrator", message.get_body(preferencelist=("plain",)).get_content())
+
+    def test_admin_test_email_requires_enabled_smtp(self):
+        with patch.dict(os.environ, {"SMTP_ENABLED": "false"}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "SMTP_ENABLED is false"):
+                email_notifications.send_test_email("admin@example.com", "Portal Administrator")
+
     def test_pending_status_targets_the_correct_approver_group(self):
         self.assertEqual(_next_approver_roles(SimpleNamespace(status="SM_APPROVAL_PENDING")), {Role.SM})
         self.assertEqual(

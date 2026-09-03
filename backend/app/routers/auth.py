@@ -23,6 +23,30 @@ from ..constants import (
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+@router.post("/admin/test-email", response_model=schemas.AdminTestEmailResult)
+def send_admin_test_email(payload: schemas.AdminTestEmailRequest, request: Request,
+                          db: Session = Depends(get_db),
+                          current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    recipient = str(payload.recipient).strip()
+    try:
+        email_notifications.send_test_email(recipient, current_user.full_name or current_user.username)
+    except Exception as exc:
+        write_audit(
+            db, event_type="SYSTEM_CONFIGURATION", action="SMTP_TEST_EMAIL",
+            outcome="FAILED", actor=current_user, request=request, status_code=502,
+            target_type="EMAIL", target_name=recipient,
+            details={"recipient": recipient, "error_type": type(exc).__name__},
+        )
+        raise HTTPException(502, f"Test email could not be sent: {exc}")
+    write_audit(
+        db, event_type="SYSTEM_CONFIGURATION", action="SMTP_TEST_EMAIL",
+        actor=current_user, request=request, status_code=200,
+        target_type="EMAIL", target_name=recipient,
+        details={"recipient": recipient},
+    )
+    return {"ok": True, "message": f"Test email sent successfully to {recipient}."}
+
+
 def _canonical_login_username(username: str) -> str:
     """Use one canonical, case-insensitive username form at sign-in.
 

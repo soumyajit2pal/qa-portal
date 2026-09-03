@@ -71,6 +71,22 @@ def smtp_readiness() -> tuple[bool, str | None]:
     return True, None
 
 
+def _send_message(message: EmailMessage, settings: dict) -> None:
+    """Send one prepared message through the configured SMTP transport."""
+    smtp_class = smtplib.SMTP_SSL if settings["ssl"] else smtplib.SMTP
+    try:
+        with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"]) as client:
+            if settings["starttls"]:
+                client.starttls()
+            if settings["username"]:
+                client.login(settings["username"], settings["password"])
+            client.send_message(message)
+    except Exception:
+        smtp_circuit.record_failure()
+        raise
+    smtp_circuit.record_success()
+
+
 def _html_email(title: str, subtitle: str, instruction: str, *,
                 status: str | None, panel_title: str, panel_html: str,
                 action_label: str, action_url: str,
@@ -104,6 +120,40 @@ def _html_email(title: str, subtitle: str, instruction: str, *,
   </div>
   <div style=\"padding:14px 30px;background:#f7fafb;color:#71858c;font-size:12px;line-height:1.3\">{escape(footer)}</div>
 </div></body></html>"""
+
+
+def send_test_email(recipient: str, requested_by: str) -> None:
+    """Synchronously verify SMTP configuration and delivery for an Admin."""
+    ready, reason = smtp_readiness()
+    if not ready:
+        raise RuntimeError(reason or "SMTP configuration is incomplete")
+    settings = _smtp_settings()
+    smtp_circuit.check()
+    portal_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/") or "/"
+    sent_at = models.now().strftime("%d %b %Y, %I:%M %p IST")
+    message = EmailMessage()
+    message["Subject"] = "[QA Portal] SMTP test email"
+    message["From"] = f'{settings["from_name"]} <{settings["from_address"]}>'
+    message["To"] = recipient.strip()
+    message.set_content(
+        "QA Portal SMTP test completed successfully.\n"
+        f"Requested by: {requested_by}\nSent at: {sent_at}"
+    )
+    message.add_alternative(_html_email(
+        "SMTP test successful",
+        "Administration · Email delivery check",
+        "This message confirms that QA Portal can connect to the configured SMTP service and deliver email.",
+        status="Delivered",
+        panel_title="Test details",
+        panel_html=(
+            f'<p style="margin:8px 0 0">Requested by: {escape(requested_by)}</p>'
+            f'<p style="margin:4px 0 0">Sent at: {escape(sent_at)}</p>'
+        ),
+        action_label="Open QA Portal",
+        action_url=portal_url,
+        footer="This test was initiated manually from QA Portal Administration.",
+    ), subtype="html")
+    _send_message(message, settings)
 
 
 def _legacy_html_email(notification: models.EmailNotification) -> str:
@@ -1137,18 +1187,7 @@ def _send(notification: models.EmailNotification) -> None:
             notification.id, notification.recipient_email, notification.approval_action_id,
         )
     message.add_alternative(html_body, subtype="html")
-    smtp_class = smtplib.SMTP_SSL if settings["ssl"] else smtplib.SMTP
-    try:
-        with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"]) as client:
-            if settings["starttls"]:
-                client.starttls()
-            if settings["username"]:
-                client.login(settings["username"], settings["password"])
-            client.send_message(message)
-    except Exception:
-        smtp_circuit.record_failure()
-        raise
-    smtp_circuit.record_success()
+    _send_message(message, settings)
 
 
 def _candidate_notification_ids(now: datetime.datetime, limit: int) -> list[int]:

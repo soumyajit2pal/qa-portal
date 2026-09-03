@@ -560,6 +560,53 @@ function ApplicationSeedCard({ departmentOptions, departments }: { departmentOpt
   )
 }
 
+function TestEmailCard({ defaultRecipient }: { defaultRecipient?: string | null }) {
+  const [recipient, setRecipient] = useState(defaultRecipient || '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [success, setSuccess] = useState('')
+
+  async function send(e: React.FormEvent) {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+    setSuccess('')
+    try {
+      const result = await api.post<{ ok: boolean; message: string }>('/api/auth/admin/test-email', { recipient })
+      setSuccess(result.message)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card title="Test Email Delivery">
+      <p className="muted small">
+        Send a real test message through the configured SMTP server. This verifies the relay connection,
+        authentication, sender address, TLS settings, and delivery to the entered mailbox.
+      </p>
+      <form onSubmit={send} style={{ maxWidth: 560, marginTop: 14 }}>
+        <Field label="Recipient email *">
+          <input
+            type="email"
+            required
+            value={recipient}
+            onChange={(event) => setRecipient(event.target.value)}
+            placeholder="name@example.com"
+          />
+        </Field>
+        <ErrorText error={error} title="Test email failed" />
+        {success && <div className="document-upload-summary" role="status"><strong>✓ {success}</strong></div>}
+        <button type="submit" className="btn btn-primary" disabled={busy || !recipient.trim()} style={{ marginTop: 12 }}>
+          {busy ? 'Sending test email…' : 'Send Test Email'}
+        </button>
+      </form>
+    </Card>
+  )
+}
+
 export default function Admin() {
   const { user } = useAuth()
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
@@ -572,7 +619,7 @@ export default function Admin() {
   const [userSearch, setUserSearch] = useState('')
   const [accountFilter, setAccountFilter] = useState<'ALL' | 'ACTIVE' | 'DISABLED' | 'REVIEW'>('ALL')
   const [loginFilter, setLoginFilter] = useState<'ALL' | 'STANDARD' | 'LDAP'>('ALL')
-  const [section, setSection] = useState<'users' | 'departments' | 'applications'>('users')
+  const [section, setSection] = useState<'users' | 'departments' | 'applications' | 'email'>('users')
 
   // SRS 7.2 pagination rollout -- the user directory is now server-paginated
   // and server-filtered (search/account status/login type all become query
@@ -667,6 +714,7 @@ export default function Admin() {
         <button type="button" className={section === 'users' ? 'active' : ''} onClick={() => setSection('users')}><IconLock /><span><strong>User Directory</strong><small>Accounts, roles and access</small></span><em>{summary?.total || 0}</em></button>
         <button type="button" className={section === 'departments' ? 'active' : ''} onClick={() => setSection('departments')}><IconPlus /><span><strong>Departments</strong><small>Organisation structure</small></span><em>{departments.length}</em></button>
         <button type="button" className={section === 'applications' ? 'active' : ''} onClick={() => setSection('applications')}><IconCheckCircle /><span><strong>Application Data</strong><small>Approved-name bulk setup</small></span></button>
+        <button type="button" className={section === 'email' ? 'active' : ''} onClick={() => setSection('email')}><IconCheckCircle /><span><strong>Email Test</strong><small>Verify SMTP delivery</small></span></button>
       </nav>
 
       {section === 'users' && <div className="access-workspace-panel">
@@ -758,6 +806,10 @@ export default function Admin() {
 
       {section === 'applications' && <div className="access-workspace-panel access-departments-section">
         <ApplicationSeedCard departmentOptions={departmentOptions} departments={departments} />
+      </div>}
+
+      {section === 'email' && <div className="access-workspace-panel access-departments-section">
+        <TestEmailCard defaultRecipient={user?.email} />
       </div>}
 
       {showCreate && (

@@ -181,6 +181,15 @@ class LdapEmailCompletion(BaseModel):
     email: EmailStr
 
 
+class AdminTestEmailRequest(BaseModel):
+    recipient: EmailStr
+
+
+class AdminTestEmailResult(BaseModel):
+    ok: bool
+    message: str
+
+
 class AuditLogOut(ORMModel):
     id: int
     event_type: str
