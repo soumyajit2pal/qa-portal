@@ -7,7 +7,7 @@ const source = await readFile(new URL('../src/requestNavigation.ts', import.meta
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext },
 })
-const { requestRoutes, requestTarget, resolveRequestId } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
+const { RequestLookupError, requestRoutes, requestTarget, resolveRequestId } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
 
 test('every request module opens the selected database ID without querying a list', async () => {
   for (const path of Object.keys(requestRoutes)) {
@@ -57,7 +57,7 @@ test('suppression and signoff links use their own business identifiers', async (
 test('missing or inaccessible requests report an error instead of opening a different request', async () => {
   await assert.rejects(resolveRequestId(requestTarget('/sast?open=SAST-12'), async () => ({
     items: [{ id: 120, request_id: 'SAST-120' }], has_next: false,
-  })), /not found or is no longer available/)
+  })), (error) => error instanceof RequestLookupError && error.identifier === 'SAST-12')
   const denied = new Error('Access denied')
   await assert.rejects(resolveRequestId(requestTarget('/dast?open=DAST-1'), async () => { throw denied }), (error) => error === denied)
 })

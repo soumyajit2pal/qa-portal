@@ -14,6 +14,13 @@ export interface RequestTarget {
   identifier: string
 }
 
+export class RequestLookupError extends Error {
+  constructor(readonly identifier: string) {
+    super(`Request ${identifier} was not found or is no longer available to you.`)
+    this.name = 'RequestLookupError'
+  }
+}
+
 export function requestTarget(to: string): RequestTarget | null {
   // Module navigation and creation/search flows continue to use the router.
   if (!to.startsWith('/') || to.startsWith('//')) return null
@@ -36,5 +43,5 @@ export async function resolveRequestId(target: RequestTarget, get: (url: string)
     if (match) return match.id
     if (Array.isArray(result) || !result.has_next) break
   }
-  throw new Error(`Request ${target.identifier} was not found or is no longer available to you.`)
+  throw new RequestLookupError(target.identifier)
 }

@@ -1,10 +1,10 @@
 import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { api } from '../api'
+import { api, HttpError } from '../api'
 import { RequestViewerContext } from '../hooks/useRequestNavigation'
-import { RequestTarget, requestRoutes, requestTarget, resolveRequestId } from '../requestNavigation'
+import { RequestLookupError, RequestTarget, requestRoutes, requestTarget, resolveRequestId } from '../requestNavigation'
 import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, SuppressionOut, SignOffOut, UserOut } from '../types'
-import { ErrorText, Modal } from './Common'
+import { Modal } from './Common'
 import ModuleBoundary from './ModuleBoundary'
 import { RequestDetail as QA } from '../QARequests/RequestDetail'
 
@@ -65,7 +65,17 @@ export default function RequestViewer({ children }: { children: React.ReactNode 
       case '/signoff': detail = <SignOff {...props} item={record as SignOffOut} />; break
     }
   }
-  const loading = <Modal title="Opening request…" onClose={close}><p role="status">Loading request details…</p></Modal>
+  const loading = <Modal title="Opening request…" onClose={close} variant="dialog" compact preventBackdropClose>
+    <div className="request-viewer-loading" role="status"><span aria-hidden="true" /><p>Loading request details…</p></div>
+  </Modal>
+  const missing = error instanceof RequestLookupError || (error instanceof HttpError && error.status === 404)
+  const httpError = error instanceof HttpError ? error : null
+  const systemFailure = httpError !== null && (httpError.status >= 500 || httpError.status === 0 || httpError.status === 408)
+  const errorMessage = error instanceof Error ? error.message : String(error || 'The request could not be opened.')
+  function tryAnotherId() {
+    close()
+    window.dispatchEvent(new Event('request-search-focus'))
+  }
   return <RequestViewerContext.Provider value={open}>
     <div style={{ display: 'contents' }} onClickCapture={(event) => {
       // Covers request <Link>s as well as the programmatic navigation hook.
@@ -79,8 +89,28 @@ export default function RequestViewer({ children }: { children: React.ReactNode 
       void open(destination)
     }}>
       {children}
-      {target && (error ? <Modal title="Unable to open request" onClose={close}>
-        <ErrorText error={error} /><button className="btn" onClick={() => void open(target)}>Retry</button>
+      {target && (error ? <Modal title={missing ? "Request not found" : "Unable to open request"} onClose={close} variant="dialog" compact preventBackdropClose>
+        <div className={`action-error-dialog ${missing ? 'request-viewer-not-found' : ''}`} role="alert">
+          <div className="action-error-dialog-icon">{missing ? '?' : '!'}</div>
+          <div>
+            <strong>{missing ? 'No matching request' : 'Request details could not be loaded'}</strong>
+            <span>{systemFailure && httpError.status ? `Service error · HTTP ${httpError.status}` : missing ? 'Search result' : 'Reason'}</span>
+            <p>{errorMessage}</p>
+            {systemFailure && httpError.reference && <small className="action-error-reference">Technical reference: {httpError.reference}</small>}
+          </div>
+        </div>
+        <div className="action-error-guidance">
+          <strong>What to do</strong>
+          <p>{missing
+            ? 'Check the complete request ID and search again. The ID must match exactly.'
+            : 'Try loading the request again. If the problem continues, close this message and contact the portal administrator.'}</p>
+        </div>
+        <div className="request-viewer-error-actions">
+          {missing
+            ? <button className="btn btn-primary" onClick={tryAnotherId}>Try another ID</button>
+            : <button className="btn btn-primary" onClick={() => void open(target)}>Retry</button>}
+          <button className="btn" onClick={close}>Close</button>
+        </div>
       </Modal> : <ModuleBoundary key={`${target.path}:${target.identifier}`} moduleName="Request details">
         <Suspense fallback={loading}>{detail || loading}</Suspense>
       </ModuleBoundary>)}

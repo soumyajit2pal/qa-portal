@@ -29,7 +29,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'getting-started', number: '01', title: 'Getting started',
     summary: 'Login, profile, navigation, dashboard, table controls, and your first request.',
-    keywords: 'login ldap standard profile department navigation dashboard insights columns table drawer pending approval request quick start pagination toast confirmation success message',
+    keywords: 'login ldap standard profile department navigation dashboard portfolio analytics columns table drawer pending approval request quick start pagination toast confirmation success message',
   },
   {
     id: 'roles', number: '02', title: 'Roles and access model',
@@ -79,7 +79,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'find-report', number: '11', title: 'Find, monitor, and report',
     summary: 'Global search, dashboard periods, tester tracking, occupancy, approval search, and exports.',
-    keywords: 'search id tqa tc dashboard insights columns date range last 7 days 30 days 3 months 6 months custom raised date historical completed requests closed history active pending qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals report export workflow log cr number epic number exact match',
+    keywords: 'search id tqa tc dashboard portfolio analytics columns date range last 7 days 30 days 3 months 6 months custom raised date historical completed requests closed history active pending qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals report export workflow log cr number epic number exact match',
   },
   {
     id: 'audit', number: '12', title: 'Audit and control',
@@ -275,7 +275,7 @@ export default function Help() {
                 <li><IconCheckCircle />Use the filter icon beside a column heading, type to search the suggested values, then select one; tables paginate automatically.</li>
                 <li><IconCheckCircle />Request drawers open expanded. They remain open until Close is selected; use the expand control to switch between expanded and standard width.</li>
                 <li><IconCheckCircle />QA Request lists refresh after an action in the same browser. While the tab is visible, the list also checks for another user’s change; an open request drawer refreshes the actual record status without a browser reload.</li>
-                <li><IconCheckCircle />Dashboard keeps operational items on the landing view. Open Insights for focused Security, Suppression, or 3W analysis.</li>
+                <li><IconCheckCircle />Dashboard keeps operational items on the landing view. Open Portfolio Analytics for focused SAST, DAST, Suppression, or cross-workflow 3W analysis.</li>
                 <li><IconCheckCircle />After a successful create, save, assignment, upload, workflow decision, or removal, a green toast confirms that the server accepted the action.</li>
                 <li><IconCheckCircle />Approval, return, rejection, reassignment, deletion, and other consequential actions use a confirmation or decision dialog before submission.</li>
               </ul>

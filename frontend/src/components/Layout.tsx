@@ -258,6 +258,17 @@ export default function Layout({ children }: { children?: ReactNode }) {
     return () => window.removeEventListener('keydown', focusGlobalSearch)
   }, [])
 
+  useEffect(() => {
+    function focusRequestSearch() {
+      window.requestAnimationFrame(() => {
+        searchInputRef.current?.focus()
+        searchInputRef.current?.select()
+      })
+    }
+    window.addEventListener('request-search-focus', focusRequestSearch)
+    return () => window.removeEventListener('request-search-focus', focusRequestSearch)
+  }, [])
+
   function toggleSidebarSize() {
     setSidebarCollapsed((previous) => {
       const next = !previous

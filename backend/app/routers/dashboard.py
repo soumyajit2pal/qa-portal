@@ -1822,7 +1822,7 @@ def security_insight_details(
     metrics = {"SAST": {"requests", "applications", "vulnerabilities", "severity", "remediation"},
                "DAST": {"requests", "applications", "severity", "compliance"}}
     if kind not in metrics or metric not in metrics[kind]:
-        raise HTTPException(404, "Unknown security insight")
+        raise HTTPException(404, "Unknown security analytics metric")
     model = models.SASTRequest if kind == "SAST" else models.DASTRequest
     reqs = _join_qa_department(
         _in_period(db.query(model), model.created_at, date_from, date_to),

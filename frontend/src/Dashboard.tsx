@@ -943,7 +943,7 @@ function SecurityTab({ range }: { range: RaisedRange }) {
         <Card title="DAST Compliance Status" subtitle="Requests by workflow and compliance state"><BarChart data={dast.compliance_status} onBarClick={(status) => openDetails('dast', 'compliance', status)} /></Card>
       </div>
       {selection && <Modal key={detail?.total_rows ? 'records' : 'summary'}
-        title={detail?.title || 'Security insight details'} onClose={closeDetails}
+        title={detail?.title || 'Security analytics details'} onClose={closeDetails}
         variant={detail?.total_rows ? 'drawer' : 'dialog'} compact={!detail?.total_rows} wide={!!detail?.total_rows}>
         {detailLoading && !detail && <p role="status">Loading source records…</p>}
         <ErrorText error={detailError} />
@@ -1225,9 +1225,6 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
 
   return (
     <div>
-      <p className="muted small">
-        Results are filtered by the reporting period in Oracle and paged across every request type — QA Request, Functional QA, SAST, DAST and Performance.
-      </p>
       <Card
         right={(
           <div className="pill-tabs">
@@ -1760,7 +1757,7 @@ export default function Dashboard() {
   const tabs = [
     { key: 'command', label: 'Dashboard' },
     ...(hideRequestsTab ? [] : [{ key: 'my-requests', label: 'Requests' }]),
-    { key: 'insights', label: 'Insights' },
+    { key: 'insights', label: 'Portfolio Analytics' },
     ...(showTesterOverviewTab ? [{ key: 'tester-overview', label: 'QA Tester Overview' }] : []),
   ]
 
@@ -1775,7 +1772,7 @@ export default function Dashboard() {
         <div className="dashboard-header-status"><i /><span><strong>Systems operational</strong><small>Live portal data</small></span></div>
       </div>
       <div className="tester-period-filter" role="group" aria-label="Dashboard filters">
-        <div><strong>Reporting period</strong><span>All dates use India Standard Time (IST). Dashboard metrics, activity, insights, and requests use this created/raised-date range.</span></div>
+        <div><strong>Reporting period</strong><span>All dates use India Standard Time (IST). Dashboard metrics, activity, portfolio analytics, and requests use this created/raised-date range.</span></div>
         <div className="tester-period-presets">
           {([
             ['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['3m', 'Last 3 months'], ['6m', 'Last 6 months'], ['custom', 'Custom dates'],
@@ -1805,7 +1802,7 @@ export default function Dashboard() {
       {tab === 'insights' && (
         <div className="dashboard-insights">
           <div className="dashboard-insights-head">
-            <div><span>Detailed analytics</span><h2>Insights</h2><p>Open a focused view only when deeper analysis is needed.</p></div>
+            <div><span>Risk and workflow analytics</span><h2>Portfolio Analytics</h2><p>Review security trends, suppression decisions, and pending work across the QA portfolio.</p></div>
             <div className="pill-tabs dashboard-insight-tabs">
               <button className={insightTab === 'security' ? 'active' : ''} onClick={() => setInsightTab('security')}>Security</button>
               <button className={insightTab === 'suppression' ? 'active' : ''} onClick={() => setInsightTab('suppression')}>Suppression</button>
