@@ -1919,6 +1919,17 @@ class ChecklistTemplateOrderUpdate(BaseModel):
 
 
 # ---------------- Module 10: Application Name Master ----------------
+class ApplicationMasterQARequestRef(ORMModel):
+    """QA Request that introduced an application name.
+
+    Unlike linked child requests, this relationship can point to a Draft or
+    Submitted gateway before its public request ID has been assigned.
+    """
+    id: int
+    request_id: Optional[str] = None
+    status: Optional[str] = None
+
+
 class ApplicationMasterOut(ORMModel):
     id: int
     name: str
@@ -1926,7 +1937,7 @@ class ApplicationMasterOut(ORMModel):
     department: Optional[str] = None
     requested_by_id: Optional[int] = None
     qa_request_id: Optional[int] = None
-    qa_request: Optional[LinkedRequestRef] = None
+    qa_request: Optional[ApplicationMasterQARequestRef] = None
     # Application Owner tier -- populated once an Application Owner has
     # decided (see models.ApplicationMaster's two-tier docstring).
     app_owner_decided_by_id: Optional[int] = None

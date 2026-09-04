@@ -141,7 +141,9 @@ export interface ApplicationMasterOut {
   department?: string | null
   requested_by_id?: number | null
   qa_request_id?: number | null
-  qa_request?: LinkedRequestRef | null
+  // The application name may have been introduced by a Draft QA Request,
+  // before that gateway receives its public request ID.
+  qa_request?: { id: number; request_id?: string | null; status?: string | null } | null
   // Application Owner tier -- populated once an Application Owner has
   // decided (see backend models.ApplicationMaster's two-tier docstring).
   app_owner_decided_by_id?: number | null
