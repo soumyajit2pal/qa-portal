@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import MutableMapping
 
 from dotenv import dotenv_values
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -83,8 +83,10 @@ class Settings(BaseSettings):
 
     app_env: str = DEFAULT_PROFILE
     database_url: str | None = None
-    secret_key: str = "change-this-secret-in-production-please"
-    access_token_expire_minutes: int = 60
+    secret_key: str = ""
+    access_token_expire_minutes: int = 30
+    jwt_issuer: str = "qualityops-api"
+    jwt_audience: str = "qualityops-web"
     upload_storage_root: str | None = None
     document_portal_storage_host_path: str | None = None
     document_portal_embedded: bool = True
@@ -92,11 +94,34 @@ class Settings(BaseSettings):
     document_portal_upload_chunk_size: int = 1024 * 1024
     document_portal_allowed_extensions: str = ""
     document_portal_blocked_extensions: str = ".exe,.bat,.cmd,.sh,.ps1,.dll,.com,.msi,.scr"
+    cors_allowed_origins: str = ""
+    trusted_hosts: str = "localhost,127.0.0.1,backend,document_portal"
+    domain_name: str = ""
 
     @field_validator("app_env")
     @classmethod
     def validate_app_env(cls, value: str) -> str:
         return _validated_profile(value)
+
+    @model_validator(mode="after")
+    def validate_security_configuration(self):
+        if len(self.secret_key) < 32:
+            raise ValueError("SECRET_KEY must be a deployment secret of at least 32 characters")
+        if self.app_env in {"uat", "prod", "production"}:
+            if not self.database_url:
+                raise ValueError("DATABASE_URL is required outside development")
+        return self
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [item.strip().rstrip("/") for item in self.cors_allowed_origins.split(",") if item.strip()]
+
+    @property
+    def allowed_hosts(self) -> list[str]:
+        hosts = [item.strip() for item in self.trusted_hosts.split(",") if item.strip()]
+        if self.domain_name.strip():
+            hosts.append(self.domain_name.strip())
+        return list(dict.fromkeys(hosts))
 
 
 settings = Settings()

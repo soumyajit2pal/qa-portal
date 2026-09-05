@@ -11,6 +11,7 @@ from sqlalchemy import text as sqlalchemy_text
 from sqlalchemy.exc import DBAPIError, TimeoutError as SQLAlchemyTimeoutError
 from starlette.background import BackgroundTask, BackgroundTasks
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .logging_config import (
     bind_request_id,
@@ -101,6 +102,9 @@ app = FastAPI(
     description="Backend for the Bank of Maharashtra QualityOps Enterprise "
                 "Quality Operations Platform.",
     version="1.0.0",
+    docs_url=None if settings.app_env in {"uat", "prod", "production"} else "/docs",
+    redoc_url=None if settings.app_env in {"uat", "prod", "production"} else "/redoc",
+    openapi_url=None if settings.app_env in {"uat", "prod", "production"} else "/openapi.json",
 )
 
 # Workflow emails are queued transactionally for every approval action. SMTP
@@ -115,13 +119,28 @@ if smtp_ready:
 else:
     logger.info("SMTP delivery is disabled or incomplete: %s", smtp_reason)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if settings.allowed_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+if settings.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.exception_handler(Exception)

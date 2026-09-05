@@ -4,7 +4,7 @@ import json
 from collections import Counter
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import and_, func, literal, or_, select, union_all
+from sqlalchemy import and_, exists as db_exists, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from .. import models, cache
@@ -39,15 +39,46 @@ def _join_qa_department(query, model, scope):
     qa_request_id (already department=None today) is naturally excluded by
     this inner join, same as it already reads as unscoped/departmentless
     everywhere else in the app."""
-    if not scope:
+    if scope is None:
         return query
     # 2026-08 "one user can be on multiple departments" CR -- scope is now a
     # list of departments (dashboard_department_scope's own docstring), so
     # this is an `.in_()` membership filter, not `==`.
     query = query.join(models.QARequest, model.qa_request_id == models.QARequest.id)
-    if scope:
+    if scope is not None:
         query = query.filter(models.QARequest.department.in_(scope))
     return query
+
+
+def _scope_fortify_suppression_requests(query, model, scope):
+    """Apply department visibility consistently across Suppression analytics.
+
+    Current SAST/DAST rows resolve their department through their parent QA
+    Request. Older suppression data can still contain a valid, persisted
+    department even when that legacy parent link is missing. The QualityOps
+    figures already use that persisted value, so use it as a fallback for the
+    Fortify figures on the same tab.
+    """
+    if scope is None:
+        return query
+    query = query.join(
+        models.QARequest,
+        model.qa_request_id == models.QARequest.id,
+        isouter=True,
+    )
+    suppression_link = (
+        models.SuppressionRequest.sast_request_id == model.id
+        if model is models.SASTRequest
+        else models.SuppressionRequest.dast_request_id == model.id
+    )
+    has_scoped_suppression = db_exists().where(
+        suppression_link,
+        models.SuppressionRequest.department.in_(scope),
+    )
+    return query.filter(or_(
+        models.QARequest.department.in_(scope),
+        has_scoped_suppression,
+    ))
 
 
 def _date_bounds(date_from: str | None, date_to: str | None):
@@ -138,7 +169,7 @@ def _dashboard_requests_scope_predicate(model, qa_model, scope_name: str, curren
 
     if scope_name == "mine":
         clauses = [model.requester_id == current_user.id]
-        if visible_scope:
+        if visible_scope is not None:
             clauses.append(department_predicate(visible_scope))
         return clauses
     departments = current_user.departments or ([current_user.department] if current_user.department else [])
@@ -1303,7 +1334,7 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
     _pending_suppressions_q = _in_period(
         db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to
     ).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
-    if scope:
+    if scope is not None:
         _pending_suppressions_q = _pending_suppressions_q.filter(models.SuppressionRequest.department.in_(scope))
     pending_approvals = (
         len([r for r in requests if r.status in PENDING_APPROVAL_STATUSES])
@@ -1399,7 +1430,7 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
         models.QARequest.target_release_date >= today,
         models.QARequest.target_release_date <= today + datetime.timedelta(days=14),
     )
-    if scope:
+    if scope is not None:
         nearing_release_q = nearing_release_q.filter(models.QARequest.department.in_(scope))
     nearing_release_count = nearing_release_q.count()
 
@@ -1628,7 +1659,7 @@ def dashboard_attention_detail(
         suppressions = _in_period(
             db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to
         ).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
-        if scope:
+        if scope is not None:
             suppressions = suppressions.filter(models.SuppressionRequest.department.in_(scope))
         suppression_pending_with = {
             "Draft": "Requester",
@@ -1841,7 +1872,7 @@ def suppression_dashboard(date_from: str | None = Query(None), date_to: str | No
     # SuppressionRequest.department is a real column (auto-populated at
     # creation time, see its own column comment in models.py) -- unlike
     # Functional/SAST/DAST/Performance, no join needed here.
-    if scope:
+    if scope is not None:
         q = q.filter(models.SuppressionRequest.department.in_(scope))
     sups = q.all()
     open_sups = [s for s in sups if s.status not in SUPPRESSION_TERMINAL_STATUSES]
@@ -1854,12 +1885,12 @@ def suppression_dashboard(date_from: str | None = Query(None), date_to: str | No
     # from each in-scope request's latest immutable SSC snapshot. As with the
     # SAST/DAST dashboards, the selected period scopes when the request was
     # raised; only its latest imported scan represents its current state.
-    sast_reqs = _join_qa_department(
+    sast_reqs = _scope_fortify_suppression_requests(
         _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
         models.SASTRequest,
         scope,
     ).all()
-    dast_reqs = _join_qa_department(
+    dast_reqs = _scope_fortify_suppression_requests(
         _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
         models.DASTRequest,
         scope,
@@ -1920,7 +1951,7 @@ def fortify_suppression_details(
         ("SAST", models.SASTRequest, "/sast"),
         ("DAST", models.DASTRequest, "/dast"),
     ):
-        requests = _join_qa_department(
+        requests = _scope_fortify_suppression_requests(
             _in_period(db.query(model), model.created_at, date_from, date_to),
             model,
             scope,
@@ -2131,7 +2162,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     }
     _suppression_q = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to).filter(
         models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
-    if scope:
+    if scope is not None:
         _suppression_q = _suppression_q.filter(models.SuppressionRequest.department.in_(scope))
     for s in _suppression_q.all():
         age = _age_days(s.updated_at)

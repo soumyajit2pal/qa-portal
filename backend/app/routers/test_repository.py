@@ -16,6 +16,7 @@ from ..deps import (
     require_can_manage_repository_governance,
     can_review_repository,
     get_project_or_404 as _get_project_or_404,
+    require_project_visibility,
 )
 from ..constants import (
     Role, TEST_CASE_PRIORITIES, TEST_CASE_STATUSES,
@@ -920,12 +921,14 @@ def get_test_case_by_key(test_case_key: str, db: Session = Depends(get_db),
     obj = db.query(models.TestCase).filter_by(test_case_key=normalized_key).first()
     if not obj:
         raise HTTPException(404, f"Test Case {normalized_key} was not found")
+    require_project_visibility(db, obj.project_id, current_user)
     return obj
 
 
 @router.get("/test-cases/{case_id}", response_model=schemas.TestCaseOut)
 def get_test_case(case_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
+    require_project_visibility(db, obj.project_id, current_user)
     return obj
 
 
@@ -934,6 +937,7 @@ def get_test_case(case_id: int, db: Session = Depends(get_db), current_user: mod
 def list_test_case_versions(case_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(get_current_user)):
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
+    require_project_visibility(db, obj.project_id, current_user)
     return (db.query(models.TestCaseVersion).filter_by(test_case_id=case_id)
             .order_by(models.TestCaseVersion.id.desc()).all())
 
@@ -941,6 +945,8 @@ def list_test_case_versions(case_id: int, db: Session = Depends(get_db),
 @router.get("/test-cases/{case_id}/versions/{version_id}", response_model=schemas.TestCaseVersionOut)
 def get_test_case_version(case_id: int, version_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
+    case = get_or_404(db, models.TestCase, case_id, "Test Case")
+    require_project_visibility(db, case.project_id, current_user)
     version = db.query(models.TestCaseVersion).filter_by(id=version_id, test_case_id=case_id).first()
     if not version:
         raise HTTPException(404, "Test case version not found")
@@ -952,6 +958,8 @@ def compare_test_case_versions(case_id: int, left: int, right: int, db: Session 
                                current_user: models.User = Depends(get_current_user)):
     """SRS VER-005 -- field-level and step-level differences between any two
     versions of the same testcase."""
+    case = get_or_404(db, models.TestCase, case_id, "Test Case")
+    require_project_visibility(db, case.project_id, current_user)
     left_v = db.query(models.TestCaseVersion).filter_by(id=left, test_case_id=case_id).first()
     right_v = db.query(models.TestCaseVersion).filter_by(id=right, test_case_id=case_id).first()
     if not left_v or not right_v:

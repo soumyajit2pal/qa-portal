@@ -228,15 +228,17 @@ def require_same_department(current_user: models.User, entity_department) -> Non
     should only invoke this from the SM/Department Head decision endpoints.
     ADMIN always bypasses this check.
 
-    entity_department may be None (e.g. a requester with no department set on
-    their profile, or a standalone security request with nothing to match
-    against) -- in that case the check is skipped rather than blocking
-    everyone, since there's nothing meaningful to compare against.
+    A missing entity department fails closed for non-Admin users. Allowing
+    it through would make a malformed/legacy record actionable by every SM
+    or Department Head regardless of business ownership.
     """
     if current_user.has_role(Role.ADMIN):
         return
     if not entity_department:
-        return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This record has no department ownership and cannot be accessed until its linkage is repaired.",
+        )
     # 2026-08 "one user can be on multiple departments" CR -- any overlap
     # between the request's department and ANY of the approver's own
     # departments is sufficient, not just their primary one.
@@ -249,6 +251,35 @@ def require_same_department(current_user: models.User, entity_department) -> Non
                 f"'{', '.join(current_user.departments) or 'no department'}'."
             ),
         )
+
+
+def require_department_visibility(
+    current_user: models.User,
+    entity_department: Optional[str],
+    *,
+    requester_id: Optional[int] = None,
+    delegated: bool = False,
+) -> None:
+    """Enforce the same scope on direct record URLs as their list queries.
+
+    QA/Security/Admin-wide roles receive ``None`` from
+    dashboard_department_scope and may view across departments. Business
+    users need an assigned department match; the original requester and a
+    verified active delegate retain access to their own record.
+    """
+    scope = dashboard_department_scope(current_user)
+    if scope is None:
+        return
+    if requester_id is not None and requester_id == current_user.id:
+        return
+    if delegated:
+        return
+    if entity_department and entity_department in scope:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You do not have access to this record.",
+    )
 
 
 # Reported directly: "In dashboard, every-where show data from which
@@ -304,16 +335,15 @@ def dashboard_department_scope(current_user: models.User) -> Optional[list]:
     ... Department"). Admin now always bypasses first, same as
     require_same_department already does and always has.
 
-    A user with no department set on their own profile is treated the same
-    as require_same_department treats a None entity_department: there's
-    nothing meaningful to scope by, so this returns None (unrestricted)
-    rather than filtering down to "department IS NULL" rows only."""
+    A scoped user with no assigned department receives an empty scope. This
+    is deliberately fail closed: missing profile data must never expand a
+    business user's access to every department."""
     if current_user.has_role(Role.ADMIN):
         return None
     # QA working roles retain their established cross-department scope.
     if set(current_user.roles) & DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES:
         return None
-    return current_user.departments or None
+    return current_user.departments
 
 
 def viewable_project_ids(db: Session, current_user: models.User) -> Optional[list]:
@@ -353,6 +383,13 @@ def viewable_project_ids(db: Session, current_user: models.User) -> Optional[lis
     return list(dict.fromkeys(own_ids + granted_ids))
 
 
+def require_project_visibility(db: Session, project_id: int, current_user: models.User) -> None:
+    """Reject direct Test Management URLs outside the caller's project scope."""
+    visible_ids = viewable_project_ids(db, current_user)
+    if visible_ids is not None and project_id not in visible_ids:
+        raise HTTPException(status_code=404, detail="Test Project not found")
+
+
 def resolve_entity_department(db: Session, entity_type: str, entity_id: int) -> Optional[str]:
     """Given an ApprovalAction-style entity_type/entity_id pair, returns the
     underlying record's department -- shared by list_approvals (approvals.py)
@@ -390,10 +427,19 @@ def resolve_entity_department(db: Session, entity_type: str, entity_id: int) -> 
         return obj.department if obj else None
     if entity_type == "SIGNOFF":
         obj = db.query(models.QASignOff).get(entity_id)
-        return obj.department if obj else None
+        return obj.request_department if obj else None
     if entity_type == "DEFECT":
         obj = db.query(models.Defect).get(entity_id)
         return obj.qa_request.department if obj and obj.qa_request else None
+    if entity_type == "TEST_PROJECT":
+        obj = db.query(models.TestProject).get(entity_id)
+        return obj.department if obj else None
+    if entity_type == "TEST_CASE":
+        obj = db.query(models.TestCase).get(entity_id)
+        return obj.project.department if obj and obj.project else None
+    if entity_type == "TEST_CYCLE":
+        obj = db.query(models.TestCycle).get(entity_id)
+        return obj.project.department if obj and obj.project else None
     return None
 
 

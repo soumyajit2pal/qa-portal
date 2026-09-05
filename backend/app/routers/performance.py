@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session, joinedload
 
 from .. import models, pagination, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
+from ..deps import (
+    get_current_user, require_roles, require_same_department, require_not_requester,
+    dashboard_department_scope, require_department_visibility,
+)
 from ..constants import Role, QA_DEPARTMENT, PERFORMANCE_EDITABLE_STATUSES, PERFORMANCE_TESTER_REASSIGNABLE_STATUSES, PERFORMANCE_STATUS_LABELS, PERFORMANCE_TERMINAL_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -57,6 +60,14 @@ def _get_or_404(db: Session, req_id: int):
     if not obj:
         raise HTTPException(404, "Performance request not found")
     return obj
+
+
+def _require_visible(obj: "models.PerformanceRequest", user: models.User) -> None:
+    delegation = obj.active_delegation
+    require_department_visibility(
+        user, obj.department, requester_id=obj.requester_id,
+        delegated=bool(delegation and delegation.assigned_to_id == user.id),
+    )
 
 
 def _it_qa_user(db: Session, user_id: int | None, role: str, label: str) -> models.User:
@@ -166,7 +177,7 @@ def list_performance(params: pagination.PageParams = Depends(), requester_id: Op
             f",{current_user.id},",
         ) > 0,
     )
-    if scope:
+    if scope is not None:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, delegated_to_user))
@@ -200,6 +211,7 @@ def get_performance(req_id: int, db: Session = Depends(get_db), current_user: mo
     # PAG-006 -- the detail endpoint the frontend fetches from when a list
     # row is opened, now that the list above only returns PerformanceListOut.
     obj = _get_or_404(db, req_id)
+    _require_visible(obj, current_user)
     return obj
 
 
@@ -475,6 +487,7 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
 # stage gate at all -- unified here to match).
 @router.get("/{req_id}/checklist", response_model=List[schemas.PerformanceChecklistItemOut])
 def get_checklist(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     return db.query(models.PerformanceChecklistItem).filter_by(performance_request_id=req_id).all()
 
 
@@ -689,6 +702,7 @@ def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Se
 
 @router.get("/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def request_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="PERFORMANCE", entity_id=req_id)
             .order_by(models.ApprovalAction.created_at).all())
@@ -701,6 +715,7 @@ def export_performance(req_id: int, db: Session = Depends(get_db), current_user:
     and its full approval/workflow history -- who submitted, approved,
     returned, etc., and when -- as one downloadable PDF."""
     obj = _get_or_404(db, req_id)
+    _require_visible(obj, current_user)
 
     def uname(uid):
         if not uid:
@@ -843,6 +858,7 @@ def _can_edit_details(obj: "models.PerformanceRequest", user: models.User) -> bo
 # request has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/{req_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_performance_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     return doc_store.list_documents(db, "PERFORMANCE", req_id)
 
 
@@ -859,6 +875,7 @@ def upload_performance_documents(req_id: int, files: List[UploadFile] = File(...
 @router.get("/{req_id}/documents/{doc_id}/download")
 def download_performance_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                                    current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     doc = doc_store.get_document_or_404(db, "PERFORMANCE", req_id, doc_id)
     full_path = doc_store.full_path(doc)
     if not os.path.exists(full_path):
@@ -890,7 +907,7 @@ def list_performance_checklist_documents_batch(req_id: int, db: Session = Depend
                                                 current_user: models.User = Depends(get_current_user)):
     """Batched counterpart to list_performance_checklist_documents below --
     see ChecklistItemDocumentOut for why this exists."""
-    _get_or_404(db, req_id)
+    _require_visible(_get_or_404(db, req_id), current_user)
     item_ids = [row.id for row in db.query(models.PerformanceChecklistItem.id)
                 .filter_by(performance_request_id=req_id).all()]
     docs = doc_store.list_documents_for_items(db, "PERFORMANCE_ITEM", item_ids)
@@ -903,6 +920,7 @@ def list_performance_checklist_documents_batch(req_id: int, db: Session = Depend
 @router.get("/{req_id}/checklist/{item_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_performance_checklist_documents(req_id: int, item_id: int, db: Session = Depends(get_db),
                                           current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     _performance_checklist_item_or_404(db, req_id, item_id)
     return doc_store.list_documents(db, "PERFORMANCE_ITEM", item_id)
 
@@ -927,6 +945,7 @@ def upload_performance_checklist_documents(req_id: int, item_id: int, files: Lis
 def download_performance_checklist_document(req_id: int, item_id: int, doc_id: int,
                                              db: Session = Depends(get_db),
                                              current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     _performance_checklist_item_or_404(db, req_id, item_id)
     doc = doc_store.get_document_or_404(db, "PERFORMANCE_ITEM", item_id, doc_id)
     full_path = doc_store.full_path(doc)

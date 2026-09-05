@@ -82,6 +82,13 @@ def _get(defect_id: int, db: Session) -> models.Defect:
     return obj
 
 
+def _get_visible(defect_id: int, db: Session, current_user: models.User) -> models.Defect:
+    obj = _scoped_defects(db, current_user).filter(models.Defect.id == defect_id).first()
+    if not obj:
+        raise HTTPException(404, "Defect not found")
+    return obj
+
+
 def _scoped_defects(db: Session, current_user: models.User):
     """Loophole fix: every OTHER list endpoint in this app applies
     dashboard_department_scope (see that function's own docstring in
@@ -109,7 +116,7 @@ def _scoped_defects(db: Session, current_user: models.User):
     CR existed."""
     q = db.query(models.Defect)
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         project_ids = viewable_project_ids(db, current_user)
         q = q.join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id) \
              .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id) \
@@ -591,7 +598,9 @@ def get_defect_by_key(defect_key: str, db: Session = Depends(get_db), current_us
     this mirrors test_repository.py's `/test-cases/by-key/{key}` pattern
     instead. Must stay above `/{defect_id}` so FastAPI doesn't try to parse
     the literal `by-key` segment as an integer id."""
-    obj = db.query(models.Defect).filter_by(defect_key=defect_key.strip().upper()).first()
+    obj = _scoped_defects(db, current_user).filter(
+        models.Defect.defect_key == defect_key.strip().upper()
+    ).first()
     if not obj:
         raise HTTPException(404, f"Defect {defect_key} was not found")
     return obj
@@ -599,7 +608,7 @@ def get_defect_by_key(defect_key: str, db: Session = Depends(get_db), current_us
 
 @router.get("/{defect_id}", response_model=schemas.DefectOut)
 def get_defect(defect_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    return _get(defect_id, db)
+    return _get_visible(defect_id, db, current_user)
 
 
 @router.post("", response_model=schemas.DefectOut)
@@ -622,7 +631,7 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
     # every department's requests; a department-scoped role may only
     # report defects against its own department's requests.
     scope = dashboard_department_scope(current_user)
-    if scope and request.department and request.department not in scope:
+    if scope is not None and request.department not in scope:
         raise HTTPException(403, "You can only report defects against QA Requests from your own department.")
     link_values = (payload.execution_id, payload.cycle_id, payload.test_case_id)
     if any(value is not None for value in link_values) and not all(value is not None for value in link_values):
@@ -977,14 +986,14 @@ def upload_attachments(defect_id: int, files: List[UploadFile] = File(...), db: 
 
 @router.get("/{defect_id}/attachments", response_model=List[schemas.RequestDocumentOut])
 def list_attachments(defect_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    _get(defect_id, db)
+    _get_visible(defect_id, db, current_user)
     return doc_store.list_documents(db, _DOC_MODULE, defect_id)
 
 
 @router.get("/{defect_id}/attachments/{document_id}/download")
 def download_attachment(defect_id: int, document_id: int, db: Session = Depends(get_db),
                         current_user: models.User = Depends(get_current_user)):
-    obj = _get(defect_id, db)
+    obj = _get_visible(defect_id, db, current_user)
     document = doc_store.get_document_or_404(db, _DOC_MODULE, obj.id, document_id)
     path = doc_store.full_path(document)
     if not os.path.exists(path):

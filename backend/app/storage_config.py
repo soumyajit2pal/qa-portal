@@ -40,4 +40,7 @@ def get_upload_root() -> str:
 
 
 def resolve_upload_path(relative_path: str) -> str:
-    return os.path.join(_UPLOAD_ROOT, relative_path)
+    candidate = os.path.abspath(os.path.join(_UPLOAD_ROOT, relative_path or ""))
+    if os.path.commonpath((_UPLOAD_ROOT, candidate)) != _UPLOAD_ROOT:
+        raise ValueError("Stored upload path escapes UPLOAD_STORAGE_ROOT")
+    return candidate

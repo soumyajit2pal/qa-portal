@@ -1,11 +1,13 @@
 import os
 import datetime
-from zoneinfo import ZoneInfo
+import uuid
 
 import bcrypt
 from jose import jwt
 from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE
 from ldap3.core.exceptions import LDAPException
+from ldap3.utils.conv import escape_filter_chars
+from ldap3.utils.dn import escape_rdn
 
 from .config import settings
 
@@ -25,24 +27,38 @@ BCRYPT_MAX_BYTES = 72
 
 
 def hash_password(password: str) -> str:
-    pw_bytes = password.encode("utf-8")[:BCRYPT_MAX_BYTES]
+    pw_bytes = password.encode("utf-8")
+    if len(pw_bytes) > BCRYPT_MAX_BYTES:
+        raise ValueError("Password must be 72 UTF-8 bytes or fewer")
     return bcrypt.hashpw(pw_bytes, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    pw_bytes = plain.encode("utf-8")[:BCRYPT_MAX_BYTES]
-    return bcrypt.checkpw(pw_bytes, hashed.encode("utf-8"))
+    pw_bytes = plain.encode("utf-8")
+    if len(pw_bytes) > BCRYPT_MAX_BYTES:
+        return False
+    try:
+        return bcrypt.checkpw(pw_bytes, hashed.encode("utf-8"))
+    except (TypeError, ValueError):
+        return False
 
 
 def create_access_token(data: dict, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES) -> str:
     to_encode = data.copy()
-    expire = datetime.datetime.now(datetime.UTC).astimezone(ZoneInfo("Asia/Kolkata")) + datetime.timedelta(minutes=expires_minutes)
-    to_encode.update({"exp": expire})
+    issued_at = datetime.datetime.now(datetime.UTC)
+    expire = issued_at + datetime.timedelta(minutes=expires_minutes)
+    to_encode.update({
+        "exp": expire, "iat": issued_at, "jti": str(uuid.uuid4()),
+        "iss": settings.jwt_issuer, "aud": settings.jwt_audience,
+    })
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    return jwt.decode(
+        token, SECRET_KEY, algorithms=[ALGORITHM],
+        issuer=settings.jwt_issuer, audience=settings.jwt_audience,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -53,15 +69,15 @@ def decode_access_token(token: str) -> dict:
 # bank's directory server every time they log in. All connection details are
 # environment-driven so the same code works against on-prem AD or OpenLDAP
 # without a code change -- only the .env needs updating per environment.
-LDAP_SERVER_URI = os.getenv("LDAP_SERVER_URI", "ldap://bomldap.mahabank.co.in:389")               # e.g. ldaps://ldap.bankofmaharashtra.bank.in:636
-LDAP_USE_SSL = os.getenv("LDAP_USE_SSL", "false").lower() == "false"
-LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "dc=mahabank,dc=co,dc=in")                      # e.g. dc=bankofmaharashtra,dc=bank,dc=in
+LDAP_SERVER_URI = os.getenv("LDAP_SERVER_URI", "").strip()
+LDAP_USE_SSL = os.getenv("LDAP_USE_SSL", "true").strip().lower() in {"1", "true", "yes", "on"}
+LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "").strip()
 LDAP_USER_SEARCH_FILTER = os.getenv("LDAP_USER_SEARCH_FILTER", "(sAMAccountName={username})")
 # Strategy 1 (recommended): a read-only service account searches for the
 # user's DN, then a second connection binds as that DN with the supplied
 # password. Works regardless of how deep/irregular the directory tree is.
-LDAP_BIND_DN = os.getenv("LDAP_BIND_DN", "cn=qasso,ou=ServerAdmins,ou=Users,ou=PuneDc,dc=mahabank,dc=co,dc=in")
-LDAP_BIND_PASSWORD = os.getenv("LDAP_BIND_PASSWORD", "QaLdap#123456")
+LDAP_BIND_DN = os.getenv("LDAP_BIND_DN", "").strip()
+LDAP_BIND_PASSWORD = os.getenv("LDAP_BIND_PASSWORD", "")
 # Strategy 2 (simpler, no service account needed): build the user's DN
 # directly from a fixed template, e.g. "uid={username},ou=people,dc=bank,dc=in".
 LDAP_USER_DN_TEMPLATE = os.getenv("LDAP_USER_DN_TEMPLATE", "")
@@ -99,6 +115,8 @@ def _ldap_bind_and_fetch(username: str, password: str):
     directory exposes / which binding strategy is configured."""
     if not LDAP_SERVER_URI:
         raise LDAPAuthError("LDAP_SERVER_URI is not configured on the server")
+    if settings.app_env in {"uat", "prod", "production"} and not LDAP_USE_SSL:
+        raise LDAPAuthError("LDAP_USE_SSL must be enabled outside development")
     if not password:
         return None
 
@@ -110,7 +128,7 @@ def _ldap_bind_and_fetch(username: str, password: str):
             # free), then bind as the resolved user DN to verify the password.
             with Connection(server, user=LDAP_BIND_DN, password=LDAP_BIND_PASSWORD,
                              authentication=SIMPLE, auto_bind=True) as service_conn:
-                search_filter = LDAP_USER_SEARCH_FILTER.format(username=username)
+                search_filter = LDAP_USER_SEARCH_FILTER.format(username=escape_filter_chars(username))
                 service_conn.search(search_base=LDAP_BASE_DN, search_filter=search_filter,
                                      search_scope=SUBTREE, attributes=_PROFILE_ATTRS)
                 if not service_conn.entries:
@@ -132,7 +150,7 @@ def _ldap_bind_and_fetch(username: str, password: str):
             # Strategy 2: direct bind using a predictable DN template. No
             # service account, so profile attributes are only available if
             # the directory lets an authenticated user read their own entry.
-            user_dn = LDAP_USER_DN_TEMPLATE.format(username=username)
+            user_dn = LDAP_USER_DN_TEMPLATE.format(username=escape_rdn(username))
             with Connection(server, user=user_dn, password=password, authentication=SIMPLE) as conn:
                 if not conn.bind():
                     return None

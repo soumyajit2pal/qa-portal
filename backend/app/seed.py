@@ -4,12 +4,14 @@ DAST requests, or other dummy records. Run with:
 
     python -m app.seed
 """
+import os
+
 from .database import SessionLocal
 from . import models
 from .auth import hash_password
 from .constants import Role, LoginType, SEED_DEPARTMENTS
 
-DEMO_PASSWORD = "Password@123"
+DEMO_PASSWORD = os.getenv("DEMO_SEED_PASSWORD", "")
 
 # (username, full_name, role, department) -- one user per role, in the exact
 # order of the role list.
@@ -53,6 +55,11 @@ def _seed_departments(db):
 
 
 def run():
+    if len(DEMO_PASSWORD) < 12 or len(DEMO_PASSWORD.encode("utf-8")) > 72:
+        raise RuntimeError(
+            "Set DEMO_SEED_PASSWORD to a unique value of at least 12 characters "
+            "and no more than 72 UTF-8 bytes before running the demo seed."
+        )
     db = SessionLocal()
     try:
         # Departments are seeded independently of the users check below so

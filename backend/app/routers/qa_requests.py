@@ -11,10 +11,13 @@ from sqlalchemy.orm import Session, selectinload
 
 from .. import models, schemas, pagination
 from .. import documents as doc_store
-from ..upload_limits import validate_qa_document_sizes
+from ..upload_limits import validate_qa_document_sizes, validate_document_file_types
 from .. import application_names as app_names
 from ..database import get_db
-from ..deps import get_current_user, require_roles, dashboard_department_scope
+from ..deps import (
+    get_current_user, require_roles, dashboard_department_scope,
+    require_department_visibility,
+)
 from ..constants import (
     Role,
     REQUEST_TYPES, FUNCTIONAL_BUCKET_TYPES, QAStatus, GatewayStatus,
@@ -128,6 +131,15 @@ def _can_view_gateway(obj: "models.QARequest", user: models.User) -> bool:
 def _is_active_delegate(obj: "models.QARequest", user: models.User) -> bool:
     delegation = obj.active_delegation
     return bool(delegation and delegation.assigned_to_id == user.id)
+
+
+def _require_gateway_visibility(obj: "models.QARequest", user: models.User) -> None:
+    if not _can_view_gateway(obj, user):
+        raise HTTPException(403, "You do not have access to this request")
+    require_department_visibility(
+        user, obj.department, requester_id=obj.requester_id,
+        delegated=_is_active_delegate(obj, user),
+    )
 
 
 def _can_edit_draft(obj: "models.QARequest", user: models.User) -> bool:
@@ -489,7 +501,7 @@ def list_requests(params: pagination.PageParams = Depends(),
     # pagination.paginate() below so PAG-009's "the total count shall
     # include only records the current user is authorized to access" holds.
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
         q = q.filter(my_gateway_input_work)
@@ -587,7 +599,7 @@ def bug_fix_source_options(application_name: str = Query(..., min_length=1),
              models.FunctionalRequest.status.in_(_BUG_FIX_SOURCE_STATUSES),
          ))
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = q.filter(models.QARequest.department.in_(scope))
     rows = q.order_by(models.FunctionalRequest.updated_at.desc()).limit(limit).all()
     return [{
@@ -608,8 +620,7 @@ def get_request(req_id: int, db: Session = Depends(get_db), current_user: models
     ).filter(models.QARequest.id == req_id).first())
     if not obj:
         raise HTTPException(404, "QA Request not found")
-    if not _can_view_gateway(obj, current_user):
-        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
+    _require_gateway_visibility(obj, current_user)
     # Same batched-in-list_requests() reasoning applies here for a single
     # row -- QASignOff has no FK to QARequest, only a business-ID match
     # against a linked FunctionalRequest's own request_id.
@@ -1653,8 +1664,7 @@ def request_history(req_id: int, db: Session = Depends(get_db), current_user: mo
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
-    if not _can_view_gateway(obj, current_user):
-        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
+    _require_gateway_visibility(obj, current_user)
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="QA_REQUEST", entity_id=req_id)
             .order_by(models.ApprovalAction.created_at).all())
@@ -1672,8 +1682,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
-    if not _can_view_gateway(obj, current_user):
-        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
+    _require_gateway_visibility(obj, current_user)
 
     linked = []
     linked += [f"Functional QA {f.request_id}" for f in obj.linked_functional_requests]
@@ -1752,8 +1761,7 @@ def _draft_request_for_evidence(db: Session, req_id: int, current_user: models.U
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
-    if not _can_view_gateway(req, current_user):
-        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
+    _require_gateway_visibility(req, current_user)
     if require_editable:
         if not _can_edit_draft(req, current_user):
             raise HTTPException(403, "Only the current Draft editor can change checklist evidence")
@@ -1853,8 +1861,7 @@ def list_documents(req_id: int, db: Session = Depends(get_db), current_user: mod
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
-    if not _can_view_gateway(req, current_user):
-        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
+    _require_gateway_visibility(req, current_user)
     return (db.query(models.QARequestDocument)
             .filter_by(qa_request_id=req_id)
             .order_by(models.QARequestDocument.uploaded_at).all())
@@ -1891,6 +1898,11 @@ def upload_documents(req_id: int, files: List[UploadFile] = File(...), db: Sessi
     # request has already been raised" purpose.
     if req.status == GatewayStatus.CANCELLED:
         raise HTTPException(400, "Documents cannot be uploaded to a cancelled request")
+
+    # Supporting documents retain their separate business size policy, but
+    # executable and active web content must never enter authenticated file
+    # storage regardless of which upload screen was used.
+    validate_document_file_types(files)
 
     storage_key = _storage_key(req)
     upload_root = doc_store.get_upload_root()
@@ -1932,8 +1944,7 @@ def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
-    if not _can_view_gateway(req, current_user):
-        raise HTTPException(403, "This request was never raised (still Draft, or Cancelled before being raised) and is only visible to its requester")
+    _require_gateway_visibility(req, current_user)
     doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
     if not doc:
         raise HTTPException(404, "Document not found")
@@ -1957,8 +1968,7 @@ def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "QA Request not found")
     if req.active_delegation and req.requester_id == current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "This request is delegated and read-only until it is returned or recalled")
-    if not _can_view_gateway(req, current_user):
-        raise HTTPException(403, "You do not have access to this request")
+    _require_gateway_visibility(req, current_user)
     doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
     if not doc:
         raise HTTPException(404, "Document not found")

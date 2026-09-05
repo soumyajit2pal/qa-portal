@@ -3,7 +3,7 @@ import { isQaEvidenceUpload, qaDocumentSizeError } from './qaDocumentUpload'
 const BASE_URL: string = (import.meta.env.VITE_API_BASE_URL as string) || ''
 
 function getToken(): string | null {
-  return localStorage.getItem('qa_portal_token')
+  return sessionStorage.getItem('qa_portal_token')
 }
 
 interface RequestOptions {
@@ -462,8 +462,12 @@ export function setToken(token: string | null | undefined): void {
   cacheGeneration += 1
   completedGets.clear()
   inFlightGets.clear()
-  if (token) localStorage.setItem('qa_portal_token', token)
-  else localStorage.removeItem('qa_portal_token')
+  // Bearer credentials must not survive the browser session. Keeping the
+  // token in sessionStorage limits persistence while preserving reloads in
+  // the active tab; CSP and escaped rich text provide the XSS boundary.
+  localStorage.removeItem('qa_portal_token')
+  if (token) sessionStorage.setItem('qa_portal_token', token)
+  else sessionStorage.removeItem('qa_portal_token')
 }
 
 export function hasToken(): boolean {

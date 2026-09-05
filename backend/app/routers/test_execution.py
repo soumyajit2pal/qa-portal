@@ -16,6 +16,7 @@ from ..deps import (
     require_can_execute_project, require_can_manage_execution_governance,
     can_view_cycle_folder, require_can_view_cycle_folder,
     get_project_or_404 as _get_project_or_404,
+    require_project_visibility,
 )
 from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
 from .. import documents as doc_store
@@ -998,6 +999,7 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
 @router.get("/cycles/{cycle_id}", response_model=schemas.TestCycleOut)
 def get_cycle(cycle_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_cycle_or_404(db, cycle_id)
+    require_project_visibility(db, obj.project_id, current_user)
     # Folder-restriction check lives here (the main read entry point the
     # frontend uses to open a cycle) rather than inside _get_cycle_or_404
     # itself, which dozens of execution/export/bulk-action endpoints also
@@ -1543,7 +1545,8 @@ def list_execution_case_ids(cycle_id: int, db: Session = Depends(get_db),
     (to exclude them from the candidate pool), not one page of the full
     execution rows -- just the ids, so this is far cheaper than the main
     list endpoint above even at full cycle size."""
-    _get_cycle_or_404(db, cycle_id)
+    cycle = _get_cycle_or_404(db, cycle_id)
+    require_project_visibility(db, cycle.project_id, current_user)
     return [
         row[0] for row in
         db.query(models.TestExecution.test_case_id).filter(models.TestExecution.cycle_id == cycle_id).all()
@@ -1559,7 +1562,9 @@ def get_execution(execution_id: int, db: Session = Depends(get_db),
     is paginated, TestExecution.tsx's own `?execution=<id>` deep-link (from
     defect traceability) needs this to open a specific slot even when it
     isn't on whatever page happens to be loaded."""
-    return _execution_or_404(db, execution_id)
+    obj = _execution_or_404(db, execution_id)
+    require_project_visibility(db, obj.cycle.project_id, current_user)
+    return obj
 
 
 @router.get("/cycles/{cycle_id}/export-xlsx")
@@ -1570,6 +1575,7 @@ def export_test_cycle(
 ):
     """Export one complete test lifecycle, including every retained run."""
     cycle = _get_cycle_or_404(db, cycle_id)
+    require_project_visibility(db, cycle.project_id, current_user)
     project = _get_project_or_404(db, cycle.project_id)
     executions = (db.query(models.TestExecution).filter_by(cycle_id=cycle_id)
                   .order_by(models.TestExecution.id).all())
@@ -2441,6 +2447,7 @@ def list_execution_runs(execution_id: int, db: Session = Depends(get_db),
     """Full attempt-by-attempt history for this test case's slot in this
     cycle, oldest first -- see models.TestExecutionRun."""
     obj = _execution_or_404(db, execution_id)
+    require_project_visibility(db, obj.cycle.project_id, current_user)
     return (db.query(models.TestExecutionRun).filter_by(execution_id=obj.id)
             .order_by(models.TestExecutionRun.attempt_no).all())
 
@@ -2450,6 +2457,7 @@ def add_run_defect(execution_id: int, run_id: int, payload: schemas.TestRunDefec
                    db: Session = Depends(get_db),
                    current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _execution_or_404(db, execution_id)
+    require_project_visibility(db, obj.cycle.project_id, current_user)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
@@ -2472,6 +2480,7 @@ def remove_run_defect(execution_id: int, run_id: int, defect_id: int,
                       db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
     obj = _execution_or_404(db, execution_id)
+    require_project_visibility(db, obj.cycle.project_id, current_user)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
@@ -2498,6 +2507,7 @@ def remove_run_defect(execution_id: int, run_id: int, defect_id: int,
 def list_run_images(execution_id: int, run_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(get_current_user)):
     obj = _execution_or_404(db, execution_id)
+    require_project_visibility(db, obj.cycle.project_id, current_user)
     run = _run_or_404(db, obj, run_id)
     return doc_store.list_documents(db, _RESULT_IMAGE_MODULE, run.id)
 
@@ -2506,6 +2516,7 @@ def list_run_images(execution_id: int, run_id: int, db: Session = Depends(get_db
 def download_run_image(execution_id: int, run_id: int, document_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
     obj = _execution_or_404(db, execution_id)
+    require_project_visibility(db, obj.cycle.project_id, current_user)
     run = _run_or_404(db, obj, run_id)
     document = doc_store.get_document_or_404(db, _RESULT_IMAGE_MODULE, run.id, document_id)
     path = doc_store.full_path(document)
@@ -2540,6 +2551,7 @@ def delete_run_image(execution_id: int, run_id: int, document_id: int, db: Sessi
 def list_result_images(execution_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
     obj = _execution_or_404(db, execution_id)
+    require_project_visibility(db, obj.cycle.project_id, current_user)
     run = (db.query(models.TestExecutionRun).filter_by(execution_id=obj.id)
            .order_by(models.TestExecutionRun.attempt_no.desc()).first())
     if not run:
@@ -2551,6 +2563,7 @@ def list_result_images(execution_id: int, db: Session = Depends(get_db),
 def download_result_image(execution_id: int, document_id: int, db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
     obj = _execution_or_404(db, execution_id)
+    require_project_visibility(db, obj.cycle.project_id, current_user)
     run = _latest_run_or_404(db, obj)
     document = doc_store.get_document_or_404(db, _RESULT_IMAGE_MODULE, run.id, document_id)
     path = doc_store.full_path(document)

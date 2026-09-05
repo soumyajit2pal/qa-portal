@@ -2399,6 +2399,19 @@ tbody tr:hover { background: #f8f9fc; }
 .dashboard-insights-head h2 { margin: 3px 0 2px; color: #1c3035; font-size: 19px; }
 .dashboard-insights-head p { margin: 0; color: var(--muted); font-size: 11px; }
 .dashboard-insight-tabs { flex-shrink: 0; margin: 0; }
+.portfolio-scope-note {
+  display:flex; align-items:center; gap:18px; margin:-4px 0 16px; padding:10px 14px;
+  border:1px solid #d8e3ef; border-radius:10px; background:#f7fafd; color:#334b69;
+}
+.portfolio-scope-note > div { min-width:180px; display:flex; flex-direction:column; gap:2px; }
+.portfolio-scope-note span { color:#718096; font-size:9px; font-weight:750; letter-spacing:.1em; text-transform:uppercase; }
+.portfolio-scope-note strong { color:#173f73; font-size:12px; }
+.portfolio-scope-note p { margin:0; font-size:11px; line-height:1.45; }
+.portfolio-scope-note p b { color:#1c3035; }
+@media (max-width:700px) {
+  .portfolio-scope-note { align-items:flex-start; flex-direction:column; gap:6px; }
+  .portfolio-scope-note > div { min-width:0; }
+}
 .dashboard-command-centre > .card { border: 0; padding: 20px; box-shadow: 0 1px 3px rgba(15,23,42,.06), 0 0 0 1px rgba(225,227,237,.9); }
 .dashboard-command-centre > .card::before { opacity: 0; }
 .governance-chart-grid .subpanel { min-height: 245px; padding: 17px; background: #fafbfe; border-color: #e9ebf2; }
@@ -3201,8 +3214,6 @@ body, .redesigned-shell { background: var(--bg); }
 }
 .bank-logo {
   display: block; flex-shrink: 0; background-color: #17697b;
-  background-image: url('/bank-of-maharashtra-logo.png'); background-repeat: no-repeat;
-  background-size: 172%; background-position: 50% 27%;
 }
 .navigation-v2 .sidebar,
 .redesigned-shell .sidebar {

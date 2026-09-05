@@ -54,7 +54,7 @@ def _get_visible_or_404(db: Session, signoff_id: int, user: models.User) -> "mod
     """Resolve a certificate while enforcing request-department privacy."""
     obj = _get_or_404(db, signoff_id)
     scope = dashboard_department_scope(user)
-    if scope and obj.request_department not in scope:
+    if scope is not None and obj.request_department not in scope:
         # Deliberately 404 instead of 403 so another department cannot use
         # sequential IDs to discover whether a private certificate exists.
         raise HTTPException(404, "Clearance certificate not found")
@@ -152,7 +152,7 @@ def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Dep
         .joinedload(models.FunctionalRequest.qa_request)
     )
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = (q.join(
                 models.FunctionalRequest,
                 models.FunctionalRequest.request_id == models.QASignOff.testing_request_id,

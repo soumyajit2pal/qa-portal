@@ -78,6 +78,15 @@ const AGEING_BUCKET_COLORS: Record<string, string> = {
   '30+ days': '#991b1b',
 }
 
+// Mirrors backend/app/deps.py::DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES so
+// Portfolio Analytics explains why two signed-in users can legitimately see
+// different totals. Keep this as display-only context; the API remains the
+// authority that enforces the actual record scope.
+const ORGANISATION_WIDE_PORTFOLIO_ROLES = new Set([
+  'ADMIN', 'QA_LEAD', 'QA_ENGINEER', 'SECURITY_ANALYST',
+  'CHIEF_MANAGER_QA', 'AGM_QA', 'SCALE_6_PLUS', 'VIEW_ONLY',
+])
+
 // "Raised" date-range filter -- reported directly ("add filter like within 1
 // hr raised, 1 month, from date to to date"). Applies to whatever on-screen
 // data is actually keyed by a raise/created timestamp (the "Active requests"
@@ -1753,6 +1762,11 @@ export default function Dashboard() {
   const showTesterOverviewTab = !!user?.roles?.some((role) => (
     ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA', 'VIEW_ONLY'].includes(role)
   ))
+  const organisationWidePortfolio = !!user?.roles?.some((role) => ORGANISATION_WIDE_PORTFOLIO_ROLES.has(role))
+    || !user?.departments?.length
+  const portfolioScopeLabel = organisationWidePortfolio
+    ? 'All departments'
+    : user?.departments.join(', ') || 'No department assigned'
 
   const tabs = [
     { key: 'command', label: 'Dashboard' },
@@ -1808,6 +1822,13 @@ export default function Dashboard() {
               <button className={insightTab === 'suppression' ? 'active' : ''} onClick={() => setInsightTab('suppression')}>Suppression</button>
               <button className={insightTab === '3w' ? 'active' : ''} onClick={() => setInsightTab('3w')}>3W Pending</button>
             </div>
+          </div>
+          <div className="portfolio-scope-note" role="note">
+            <div>
+              <span>Data scope</span>
+              <strong>{organisationWidePortfolio ? 'Organization-wide portfolio' : 'Department portfolio'}</strong>
+            </div>
+            <p><b>{portfolioScopeLabel}</b> · Security and suppression totals follow the signed-in user&apos;s role and department access, so authorized users with different scopes can see different figures.</p>
           </div>
           {insightTab === 'security' && <SecurityTab range={range} />}
           {insightTab === 'suppression' && <SuppressionTab range={range} />}

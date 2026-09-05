@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .resilience import CircuitOpenError, fortify_circuit
+from .config import settings
 
 
 class FortifySSCError(Exception):
@@ -55,6 +56,8 @@ class FortifySSCClient:
         self.basic_auth = os.getenv(f"{prefix}_AUTH") or os.getenv("FORTIFY_SSC_AUTH") or ""
         self.timeout = float(os.getenv("FORTIFY_SSC_TIMEOUT_SECONDS", "25"))
         self.verify_tls = os.getenv("FORTIFY_SSC_VERIFY_TLS", "true").strip().lower() not in ("0", "false", "no")
+        if settings.app_env in {"uat", "prod", "production"} and not self.verify_tls:
+            raise FortifySSCError("Fortify SSC TLS verification must be enabled outside development")
         if not self.base_url or not self.basic_auth:
             raise FortifySSCError(
                 f"Fortify SSC is not configured for {kind.upper()}. Set {prefix}_URL/{prefix}_AUTH "

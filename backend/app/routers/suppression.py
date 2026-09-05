@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session, selectinload, joinedload
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
+from ..deps import (
+    get_current_user, require_roles, require_same_department, require_not_requester,
+    dashboard_department_scope, require_department_visibility,
+)
 from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, SUPPRESSION_TERMINAL_STATUSES
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -39,6 +42,14 @@ def _require(obj, expected, action: str):
         expected = [expected]
     if obj.status not in expected:
         raise HTTPException(400, f"'{action}' requires status in {expected} (currently '{obj.status}')")
+
+
+def _require_visible(obj: "models.SuppressionRequest", user: models.User) -> None:
+    require_department_visibility(
+        user,
+        obj.department,
+        requester_id=obj.created_by_id,
+    )
 
 
 def _require_linked_request(db: Session, data: dict):
@@ -87,6 +98,20 @@ def _require_linked_request(db: Session, data: dict):
             f"longer be raised against it once the security review is complete.",
         )
     return linked, kind
+
+
+def _apply_linked_request_identity(data: dict, linked, kind: str) -> None:
+    """Copy authoritative ownership fields from the selected SAST/DAST row."""
+    if not linked.department:
+        raise HTTPException(
+            409,
+            f"Linked {kind} request {linked.request_id} has no QA Request department. "
+            "Repair its QA Request linkage before raising a suppression.",
+        )
+    data["application_name"] = linked.application_name
+    data["department"] = linked.department
+    data["application_owner"] = linked.application_owner
+    data["scan_type"] = kind
 
 
 def _require_no_existing_pending_suppression(db: Session, linked, kind: str, exclude_id: int = None) -> None:
@@ -198,7 +223,7 @@ def list_suppressions(db: Session = Depends(get_db), current_user: models.User =
         joinedload(models.SuppressionRequest.dast_request),
     )
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = q.filter(models.SuppressionRequest.department.in_(scope))
     return q.order_by(models.SuppressionRequest.created_at.desc()).all()
 
@@ -218,6 +243,7 @@ def create_suppression(payload: schemas.SuppressionCreate, db: Session = Depends
     linked, kind = _require_linked_request(db, data)
     _require_requester_of_linked(linked, current_user)
     _require_no_existing_pending_suppression(db, linked, kind)
+    _apply_linked_request_identity(data, linked, kind)
     obj = models.SuppressionRequest(**data, created_by_id=current_user.id, status="Draft")
     obj.items = [models.SuppressionItem(**item) for item in items_data]
     db.add(obj)
@@ -233,6 +259,7 @@ def get_suppression(sup_id: int, db: Session = Depends(get_db), current_user: mo
     obj = db.query(models.SuppressionRequest).get(sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    _require_visible(obj, current_user)
     return obj
 
 
@@ -261,6 +288,7 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
     # DIFFERENT already-pending suppression against the (possibly new)
     # linked request should.
     _require_no_existing_pending_suppression(db, linked, kind, exclude_id=obj.id)
+    _apply_linked_request_identity(data, linked, kind)
     for k, v in data.items():
         setattr(obj, k, v)
     if items_data is not None:
@@ -298,14 +326,12 @@ def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Se
     _require_no_existing_pending_suppression(db, linked, kind, exclude_id=obj.id)
     obj.sast_request_id = data.get("sast_request_id")
     obj.dast_request_id = data.get("dast_request_id")
-    obj.scan_type = kind
-    # Re-derive the application identity fields from the newly linked
-    # request, same as the New Suppression form's own auto-populate --
-    # keeps them consistent with the new link rather than stale from the old
-    # one.
-    obj.application_name = linked.application_name
-    obj.department = linked.department
-    obj.application_owner = linked.application_owner
+    identity = {}
+    _apply_linked_request_identity(identity, linked, kind)
+    obj.scan_type = identity["scan_type"]
+    obj.application_name = identity["application_name"]
+    obj.department = identity["department"]
+    obj.application_owner = identity["application_owner"]
     _log(db, obj.id, "Requester", current_user, "Relinked", f"Relinked to {kind} request {linked.request_id}")
     db.commit()
     db.refresh(obj)
@@ -443,6 +469,10 @@ def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: S
 
 @router.get("/{sup_id}/history", response_model=List[schemas.ApprovalActionOut])
 def suppression_history(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = db.query(models.SuppressionRequest).get(sup_id)
+    if not obj:
+        raise HTTPException(404, "Suppression request not found")
+    _require_visible(obj, current_user)
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="SUPPRESSION", entity_id=sup_id)
             .order_by(models.ApprovalAction.created_at).all())
@@ -457,6 +487,7 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
     obj = db.query(models.SuppressionRequest).get(sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
+    _require_visible(obj, current_user)
 
     def uname(uid):
         if not uid:
@@ -546,6 +577,10 @@ def _can_upload_documents(obj: "models.SuppressionRequest", user: models.User) -
 # request has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/{sup_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_suppression_documents(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = db.query(models.SuppressionRequest).get(sup_id)
+    if not obj:
+        raise HTTPException(404, "Suppression request not found")
+    _require_visible(obj, current_user)
     return doc_store.list_documents(db, "SUPPRESSION", sup_id)
 
 
@@ -564,6 +599,10 @@ def upload_suppression_documents(sup_id: int, files: List[UploadFile] = File(...
 @router.get("/{sup_id}/documents/{doc_id}/download")
 def download_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(get_db),
                                    current_user: models.User = Depends(get_current_user)):
+    obj = db.query(models.SuppressionRequest).get(sup_id)
+    if not obj:
+        raise HTTPException(404, "Suppression request not found")
+    _require_visible(obj, current_user)
     doc = doc_store.get_document_or_404(db, "SUPPRESSION", sup_id, doc_id)
     full_path = doc_store.full_path(doc)
     if not os.path.exists(full_path):
@@ -582,4 +621,3 @@ def delete_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
     doc_store.delete_document(db, doc, log_entity_type="SUPPRESSION", log_entity_id=sup_id, log_actor=current_user)
     return {"ok": True}
-

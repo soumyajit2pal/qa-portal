@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from . import models
 from .constants import Role
 from .storage_config import get_upload_root, resolve_upload_path
+from .upload_limits import validate_document_uploads
 
 # Shares the same physical uploads folder as QARequest's own documents.
 # Request folders are always the top-level boundary; module/type is nested
@@ -84,6 +85,7 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
     tab of its own. log_label, if given, is folded into the log message
     (e.g. "checklist item 'Test Data Prepared'") so an item-level upload
     reads distinctly from a top-level Documents-tab one."""
+    validate_document_uploads(files)
     upload_root = get_upload_root()
     request_dir = os.path.join(upload_root, folder_name, module)
     os.makedirs(request_dir, exist_ok=True)

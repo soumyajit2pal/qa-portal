@@ -70,7 +70,7 @@ def _visible_qa_requests(db: Session, current_user: models.User, date_from: str 
             models.QARequest.requester_id == current_user.id,
         ))
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = q.filter(models.QARequest.department.in_(scope))
     return _in_period(q, models.QARequest.created_at, date_from, date_to)
 
@@ -87,7 +87,7 @@ def _visible_defects(db: Session, current_user: models.User, date_from: str | No
     """Report-centre equivalent of Defect Management's visibility scope."""
     q = db.query(models.Defect)
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         project_ids = viewable_project_ids(db, current_user)
         q = (q.join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
              .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
@@ -169,7 +169,7 @@ def functional_request_register(date_from: str | None = None, date_to: str | Non
                isouter=True)
          .options(joinedload(models.FunctionalRequest.qa_request)))
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         # FunctionalRequest.department is a delegated property, hence the
         # explicit parent join rather than filtering a non-column property.
         q = q.filter(models.QARequest.department.in_(scope))
@@ -367,7 +367,7 @@ def sast_scan_report(date_from: str | None = None, date_to: str | None = None, d
     # as they already resolve to department=None today.
     q = db.query(models.SASTRequest)
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
     rows = _in_period(q, models.SASTRequest.created_at, date_from, date_to).all()
@@ -387,7 +387,7 @@ def dast_scan_report(date_from: str | None = None, date_to: str | None = None, d
     # See sast_scan_report's matching comment just above -- identical reasoning.
     q = db.query(models.DASTRequest)
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
              .filter(models.QARequest.department.in_(scope))
     rows = _in_period(q, models.DASTRequest.created_at, date_from, date_to).all()
@@ -411,7 +411,7 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
     request_model = models.SASTRequest if kind == "SAST" else models.DASTRequest
     request_query = db.query(request_model)
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         request_query = (
             request_query
             .join(models.QARequest, request_model.qa_request_id == models.QARequest.id)
@@ -522,7 +522,7 @@ def dast_observation_history(date_from: str | None = None, date_to: str | None =
 def performance_testing_report(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     q = db.query(models.PerformanceRequest).options(joinedload(models.PerformanceRequest.qa_request))
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = (q.join(models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id)
              .filter(models.QARequest.department.in_(scope)))
     rows = _in_period(q, models.PerformanceRequest.created_at, date_from, date_to).order_by(models.PerformanceRequest.created_at.desc()).all()
@@ -562,7 +562,7 @@ def _security_severity_counts(db: Session, current_user: models.User, date_from:
     scope = dashboard_department_scope(current_user)
     sast_q = db.query(models.SASTRequest.id)
     dast_q = db.query(models.DASTRequest.id)
-    if scope:
+    if scope is not None:
         sast_q = sast_q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
                         .filter(models.QARequest.department.in_(scope))
         dast_q = dast_q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
@@ -594,7 +594,7 @@ def suppression_register(date_from: str | None = None, date_to: str | None = Non
     # is enough, same as list_suppressions in routers/suppression.py.
     q = db.query(models.SuppressionRequest).options(selectinload(models.SuppressionRequest.items))
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = q.filter(models.SuppressionRequest.department.in_(scope))
     rows = _in_period(q, models.SuppressionRequest.created_at, date_from, date_to).all()
     out = []
@@ -673,7 +673,7 @@ def quality_scorecard(date_from: str | None = None, date_to: str | None = None, 
 def qa_signoff_register(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     q = db.query(models.QASignOff).options(joinedload(models.QASignOff.source_functional_request))
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         q = (q.join(models.FunctionalRequest,
                     models.FunctionalRequest.request_id == models.QASignOff.testing_request_id)
              .join(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id)
@@ -716,7 +716,7 @@ def audit_evidence(date_from: str | None = None, date_to: str | None = None, db:
     # department data can not be shown").
     rows = _in_period(db.query(models.ApprovalAction), models.ApprovalAction.created_at, date_from, date_to).order_by(models.ApprovalAction.created_at.desc()).limit(1000).all()
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]
     names = _user_name_map(db, [row.actor_id for row in rows])
     out = []

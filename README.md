@@ -167,7 +167,7 @@ tear down/recreate alongside the app services.
 
 ## Quickstart (local dev, no Docker)
 
-Requires Python 3.10+, Node 18+, and a reachable Oracle database (see above).
+Requires Python 3.10+, Node 24 LTS, and a reachable Oracle database (see above).
 
 ### 1. Backend
 
@@ -181,7 +181,8 @@ cp .env.example .env            # shared local settings; edit DATABASE_URL / SEC
 cp .env.dev.example .env.dev    # optional development-profile overrides
 export APP_ENV=dev              # selects backend/.env.dev
 
-python -m app.seed              # first empty DB only: creates tables + seeds demo data
+DEMO_SEED_PASSWORD='<unique temporary password>' python -m app.seed
+                                 # first empty DB only: creates tables + seeds demo data
 alembic stamp head              # first empty DB only: records the Alembic baseline
 # Existing baseline adopted: use `alembic upgrade head` on every deployment.
 uvicorn app.main:app --reload --port 8000
@@ -266,7 +267,7 @@ request.
 
 ### Demo accounts
 
-Seeded by `python -m app.seed`, password **`Password@123`** for all:
+Seeded by `DEMO_SEED_PASSWORD='<unique temporary password>' python -m app.seed`. The seed refuses to run without an explicit password of at least 12 characters:
 
 | Username | Role |
 |---|---|

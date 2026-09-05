@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas, pagination
 from ..database import get_db
-from ..deps import get_current_user, require_roles, dashboard_department_scope, resolve_entity_department
+from ..deps import (
+    get_current_user, require_roles, dashboard_department_scope,
+    resolve_entity_department, require_department_visibility, viewable_project_ids,
+)
 from .. import documents as doc_store
 from ..constants import GatewayStatus, Role
 
@@ -117,7 +120,7 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
             if hidden_ids:
                 rows = [r for r in rows if not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
     scope = dashboard_department_scope(current_user)
-    if scope:
+    if scope is not None:
         rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]
     return rows[:500]
 
@@ -176,7 +179,7 @@ def list_assignment_history(
     if department is None:
         raise HTTPException(404, "Assignment-history entity not found")
     scope = dashboard_department_scope(current_user)
-    if scope and department not in scope and not current_user.has_role(Role.ADMIN):
+    if scope is not None and department not in scope and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Assignment history is outside your department scope")
     q = db.query(models.AssignmentHistory).filter(
         models.AssignmentHistory.entity_type == normalized_type,
@@ -249,13 +252,25 @@ _COMMENT_IMAGE_LIMIT = 8
 _COMMENT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
 
 
-def _comment_target_or_404(db: Session, entity_type: str, entity_id: int):
+def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, current_user: models.User):
     normalized_type = entity_type.strip().upper()
     model = _COMMENT_ENTITY_MODELS.get(normalized_type)
     if not model:
         raise HTTPException(400, f"Comments are not supported for entity type '{entity_type}'")
-    if not db.query(model).get(entity_id):
+    obj = db.query(model).get(entity_id)
+    if not obj:
         raise HTTPException(404, "Record not found")
+    if normalized_type in {"TEST_PROJECT", "TEST_CASE", "TEST_CYCLE"}:
+        project_id = obj.id if normalized_type == "TEST_PROJECT" else obj.project_id
+        visible_ids = viewable_project_ids(db, current_user)
+        if visible_ids is not None and project_id not in visible_ids:
+            raise HTTPException(403, "You do not have access to this record")
+    else:
+        requester_id = getattr(obj, "requester_id", None) or getattr(obj, "created_by_id", None)
+        require_department_visibility(
+            current_user, resolve_entity_department(db, normalized_type, entity_id),
+            requester_id=requester_id,
+        )
     return normalized_type
 
 
@@ -304,7 +319,7 @@ def add_comment(entity_type: str, entity_id: int, payload: schemas.CommentCreate
     """Append a Jira-style standalone comment to any supported module's
     existing audit stream. Comments are immutable audit events and therefore
     remain visible alongside workflow actions and approvals."""
-    normalized_type = _comment_target_or_404(db, entity_type, entity_id)
+    normalized_type = _comment_target_or_404(db, entity_type, entity_id, current_user)
     body = _validated_comment_body(payload.body)
     row = _create_comment(db, normalized_type, entity_id, body, current_user)
     return _to_out(db, row)
@@ -317,7 +332,7 @@ def add_rich_comment(entity_type: str, entity_id: int, body: str = Form(""),
     """Post formatted comment text plus images pasted or selected in the
     shared Jira-style editor. Formatting is stored as safe Markdown text;
     images are immutable authenticated attachments owned by the comment."""
-    normalized_type = _comment_target_or_404(db, entity_type, entity_id)
+    normalized_type = _comment_target_or_404(db, entity_type, entity_id, current_user)
     _validate_comment_images(files)
     text = _validated_comment_body(body, allow_empty=bool(files))
     row = _create_comment(db, normalized_type, entity_id, text, current_user)
@@ -335,17 +350,23 @@ def _comment_or_404(db: Session, comment_id: int) -> models.ApprovalAction:
     return row
 
 
+def _visible_comment_or_404(db: Session, comment_id: int, current_user: models.User) -> models.ApprovalAction:
+    row = _comment_or_404(db, comment_id)
+    _comment_target_or_404(db, row.entity_type, row.entity_id, current_user)
+    return row
+
+
 @router.get("/comments/{comment_id}/attachments", response_model=List[schemas.RequestDocumentOut])
 def list_comment_attachments(comment_id: int, db: Session = Depends(get_db),
                              current_user: models.User = Depends(get_current_user)):
-    _comment_or_404(db, comment_id)
+    _visible_comment_or_404(db, comment_id, current_user)
     return doc_store.list_documents(db, "COMMENT_IMAGE", comment_id)
 
 
 @router.get("/comments/{comment_id}/attachments/{document_id}/download")
 def download_comment_attachment(comment_id: int, document_id: int, db: Session = Depends(get_db),
                                 current_user: models.User = Depends(get_current_user)):
-    _comment_or_404(db, comment_id)
+    _visible_comment_or_404(db, comment_id, current_user)
     document = doc_store.get_document_or_404(db, "COMMENT_IMAGE", comment_id, document_id)
     path = doc_store.full_path(document)
     if not os.path.exists(path):

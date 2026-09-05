@@ -39,7 +39,10 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import get_current_user, viewable_project_ids, get_project_or_404 as _get_project_or_404
+from ..deps import (
+    get_current_user, viewable_project_ids,
+    get_project_or_404 as _get_project_or_404, require_project_visibility,
+)
 from ..constants import TEST_CYCLE_LOCKED_STATUSES
 
 router = APIRouter(prefix="/api/test-reports", tags=["test-management"])
@@ -70,6 +73,7 @@ def repository_health(project_id: int, db: Session = Depends(get_db),
     duration" this data model can support without a separate usage-tracking
     table."""
     project = _get_project_or_404(db, project_id)
+    require_project_visibility(db, project.id, current_user)
     cases = db.query(models.TestCase).filter_by(project_id=project_id).all()
     now = models.now()
 
@@ -121,6 +125,7 @@ def cycle_progress(cycle_id: int, db: Session = Depends(get_db),
     cycle = db.query(models.TestCycle).get(cycle_id)
     if not cycle:
         raise HTTPException(404, "Test Cycle not found")
+    require_project_visibility(db, cycle.project_id, current_user)
     executions = db.query(models.TestExecution).filter_by(cycle_id=cycle_id).all()
     total = len(executions)
     by_status = {}
@@ -152,6 +157,7 @@ def defect_quality(project_id: int, db: Session = Depends(get_db),
     on a subsequent attempt (an honest proxy -- this app has no external
     defect-tracker integration to pull real severity/resolution data from)."""
     project = _get_project_or_404(db, project_id)
+    require_project_visibility(db, project.id, current_user)
     defects = (
         db.query(models.TestRunDefect)
         .join(models.TestExecutionRun, models.TestRunDefect.run_id == models.TestExecutionRun.id)
@@ -202,6 +208,7 @@ def version_impact(
     split into items still eligible for upgrade_execution_version
     (unexecuted) vs. items now permanently pinned (already executed)."""
     project = _get_project_or_404(db, project_id)
+    require_project_visibility(db, project.id, current_user)
     cycles = db.query(models.TestCycle).filter_by(project_id=project_id).all()
     rows = []
     for cycle in cycles:

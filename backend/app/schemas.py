@@ -116,6 +116,13 @@ class UserCreate(BaseModel):
     login_type: str = "STANDARD"       # STANDARD / LDAP
     password: Optional[str] = None      # required when login_type == STANDARD; ignored for LDAP
 
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value):
+        if value is not None and (len(value) < 12 or len(value.encode("utf-8")) > 72):
+            raise ValueError("Password must be at least 12 characters and no more than 72 UTF-8 bytes")
+        return value
+
 
 class UserUpdate(BaseModel):
     """Admin-only partial update -- role reassignment, activation, login-type change, etc.
@@ -141,6 +148,13 @@ class UserUpdate(BaseModel):
 
 class PasswordReset(BaseModel):
     new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value):
+        if len(value) < 12 or len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must be at least 12 characters and no more than 72 UTF-8 bytes")
+        return value
 
 
 class LocalAdminUserUpdate(BaseModel):

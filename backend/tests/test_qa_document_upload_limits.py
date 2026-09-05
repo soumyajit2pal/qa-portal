@@ -15,6 +15,10 @@ class QADocumentUploadLimitTests(unittest.TestCase):
         stream = tempfile.TemporaryFile()
         self.addCleanup(stream.close)
         stream.truncate(size)
+        if name.lower().endswith(".pdf") and size >= 5:
+            stream.seek(0)
+            stream.write(b"%PDF-")
+            stream.seek(0)
         # Size metadata must not override the actual file length.
         return UploadFile(file=stream, filename=name, size=0)
 

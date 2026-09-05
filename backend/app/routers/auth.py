@@ -1,4 +1,7 @@
 from typing import Optional
+from collections import defaultdict, deque
+from threading import Lock
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -21,6 +24,47 @@ from ..constants import (
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+_LOGIN_WINDOW_SECONDS = 15 * 60
+_LOGIN_MAX_FAILURES = 5
+_login_failures = defaultdict(deque)
+_login_failure_lock = Lock()
+
+
+def _login_key(request: Request, username: str) -> tuple[str, str]:
+    return ((request.client.host if request.client else "unknown"), username)
+
+
+def _prune_login_failures(attempts, now: float) -> None:
+    while attempts and now - attempts[0] >= _LOGIN_WINDOW_SECONDS:
+        attempts.popleft()
+
+
+def _enforce_login_rate_limit(request: Request, username: str) -> None:
+    now = time.monotonic()
+    with _login_failure_lock:
+        attempts = _login_failures[_login_key(request, username)]
+        _prune_login_failures(attempts, now)
+        if len(attempts) >= _LOGIN_MAX_FAILURES:
+            retry_after = max(1, int(_LOGIN_WINDOW_SECONDS - (now - attempts[0])))
+            raise HTTPException(
+                status_code=429,
+                detail="Too many failed sign-in attempts. Try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+
+def _record_login_failure(request: Request, username: str) -> None:
+    now = time.monotonic()
+    with _login_failure_lock:
+        attempts = _login_failures[_login_key(request, username)]
+        _prune_login_failures(attempts, now)
+        attempts.append(now)
+
+
+def _clear_login_failures(request: Request, username: str) -> None:
+    with _login_failure_lock:
+        _login_failures.pop(_login_key(request, username), None)
 
 
 @router.post("/admin/test-email", response_model=schemas.AdminTestEmailResult)
@@ -91,6 +135,7 @@ def _redact_confidential_roles(user: "models.User", viewer: "models.User") -> "s
 @router.post("/login", response_model=schemas.Token)
 def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     username = _canonical_login_username(form_data.username)
+    _enforce_login_rate_limit(request, username)
     user = db.query(models.User).filter(func.lower(models.User.username) == username).first()
     just_provisioned = False
     document_only_ldap_account = False
@@ -108,6 +153,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         except LDAPAuthError:
             profile = None
         if not profile:
+            _record_login_failure(request, username)
             write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
                         actor_username=username, request=request, status_code=401,
                         details={"reason": "Invalid username or password"})
@@ -166,17 +212,20 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                                      detail=f"LDAP authentication unavailable: {e}")
             if not authenticated:
+                _record_login_failure(request, username)
                 write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
                             actor=user, request=request, status_code=401,
                             details={"reason": "Invalid username or password"})
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
         else:
             if not user.hashed_password or not verify_password(form_data.password, user.hashed_password):
+                _record_login_failure(request, username)
                 write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
                             actor=user, request=request, status_code=401,
                             details={"reason": "Invalid username or password"})
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
+    _clear_login_failures(request, username)
     token = create_access_token({"sub": user.username, "roles": user.roles}, )
     if just_provisioned:
         # An external/document-only identity is already placed in Other and

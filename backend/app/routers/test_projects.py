@@ -10,6 +10,7 @@ from ..deps import (
     get_current_user, require_roles, dashboard_department_scope, viewable_project_ids, get_project_member_role,
     can_author_repository, can_review_repository, can_execute_project, can_manage_execution_governance,
     can_give_final_approval, require_can_manage_project, get_or_404, get_project_or_404,
+    require_project_visibility,
 )
 from ..constants import Role, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
 
@@ -283,6 +284,7 @@ def get_my_project_access(project_id: int, db: Session = Depends(get_db),
     mutating endpoint still enforces these same rules itself regardless of
     what the UI shows."""
     obj = get_project_or_404(db, project_id)
+    require_project_visibility(db, obj.id, current_user)
     role = get_project_member_role(db, project_id, current_user.id)
     return schemas.TestProjectMyAccessOut(
         project_id=project_id,
@@ -359,6 +361,7 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
 @router.get("/{project_id}", response_model=schemas.TestProjectOut)
 def get_test_project(project_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = get_project_or_404(db, project_id)
+    require_project_visibility(db, obj.id, current_user)
     own_scope = dashboard_department_scope(current_user)
     obj.view_only = bool(own_scope is not None and not current_user.has_department(obj.department))
     return obj
@@ -377,6 +380,7 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
     live is_active at all, until a QA Lead resolves it via
     review_project_activation below."""
     obj = get_project_or_404(db, project_id)
+    require_project_visibility(db, obj.id, current_user)
     # Only the "edit the project record itself" fields are Owner/QA-Lead
     # gated -- deliberately NOT applied when the payload is is_active-only,
     # since that's the separate PRJ-004 activate/deactivate request flow
@@ -529,6 +533,7 @@ def list_project_view_access(project_id: int, db: Session = Depends(get_db),
     only ADDING/REMOVING a grant is Owner/QA-Lead-Group/Admin gated below,
     same as this project's other detail-management fields."""
     obj = get_project_or_404(db, project_id)
+    require_project_visibility(db, obj.id, current_user)
     return (
         db.query(models.TestProjectViewGrant)
         .filter(models.TestProjectViewGrant.project_id == obj.id)
@@ -720,6 +725,7 @@ def list_project_members(project_id: int, db: Session = Depends(get_db),
     remain visible for historical/audit reference; add/update/remove below
     are disabled."""
     obj = get_project_or_404(db, project_id)
+    require_project_visibility(db, obj.id, current_user)
     return (db.query(models.TestProjectMember).filter_by(project_id=project_id)
             .order_by(models.TestProjectMember.added_at).all())
 

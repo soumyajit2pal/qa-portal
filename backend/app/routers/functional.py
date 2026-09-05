@@ -9,7 +9,10 @@ from sqlalchemy.exc import IntegrityError
 
 from .. import models, pagination, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
+from ..deps import (
+    get_current_user, require_roles, require_same_department, require_not_requester,
+    dashboard_department_scope, require_department_visibility,
+)
 from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, QA_REQUEST_TERMINAL_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -68,6 +71,13 @@ def _get_or_404(db: Session, req_id: int) -> "models.FunctionalRequest":
 def _is_active_delegate(obj: "models.FunctionalRequest", user: models.User) -> bool:
     delegation = obj.active_delegation
     return bool(delegation and delegation.assigned_to_id == user.id)
+
+
+def _require_visible(obj: "models.FunctionalRequest", user: models.User) -> None:
+    require_department_visibility(
+        user, obj.department, requester_id=obj.requester_id,
+        delegated=_is_active_delegate(obj, user),
+    )
 
 
 def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> models.User:
@@ -188,7 +198,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
             f",{current_user.id},",
         ) > 0,
     )
-    if scope:
+    if scope is not None:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, delegated_to_user))
@@ -221,6 +231,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
 @router.get("/{req_id}", response_model=schemas.FunctionalOut)
 def get_functional(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
+    _require_visible(obj, current_user)
     return obj
 
 
@@ -1007,6 +1018,7 @@ def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Se
 # ---- Readiness checklist (Ready for Testing gate) ----
 @router.get("/{req_id}/checklist", response_model=List[schemas.ChecklistItemOut])
 def get_checklist(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     return db.query(models.ReadinessChecklistItem).filter_by(functional_request_id=req_id).all()
 
 
@@ -1050,6 +1062,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistI
 
 @router.get("/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def request_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="FUNCTIONAL_REQUEST", entity_id=req_id)
             .order_by(models.ApprovalAction.created_at).all())
@@ -1062,6 +1075,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
     and its full approval/workflow history -- who submitted, approved,
     returned, signed off, etc., and when -- as one downloadable PDF."""
     obj = _get_or_404(db, req_id)
+    _require_visible(obj, current_user)
 
     tester_names = []
     for uid in (obj.assigned_tester_ids or "").split(","):
@@ -1203,6 +1217,7 @@ def _can_edit_details(obj: "models.FunctionalRequest", user: models.User) -> boo
 
 @router.get("/{req_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_functional_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     return doc_store.list_documents(db, "FUNCTIONAL", req_id)
 
 
@@ -1219,6 +1234,7 @@ def upload_functional_documents(req_id: int, files: List[UploadFile] = File(...)
 @router.get("/{req_id}/documents/{doc_id}/download")
 def download_functional_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL", req_id, doc_id)
     full_path = doc_store.full_path(doc)
     if not os.path.exists(full_path):
@@ -1253,7 +1269,7 @@ def list_functional_checklist_documents_batch(req_id: int, db: Session = Depends
                                                current_user: models.User = Depends(get_current_user)):
     """Batched counterpart to list_functional_checklist_documents below --
     see ChecklistItemDocumentOut for why this exists."""
-    _get_or_404(db, req_id)
+    _require_visible(_get_or_404(db, req_id), current_user)
     item_ids = [row.id for row in db.query(models.ReadinessChecklistItem.id)
                 .filter_by(functional_request_id=req_id).all()]
     docs = doc_store.list_documents_for_items(db, "FUNCTIONAL_ITEM", item_ids)
@@ -1266,6 +1282,7 @@ def list_functional_checklist_documents_batch(req_id: int, db: Session = Depends
 @router.get("/{req_id}/checklist/{item_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_functional_checklist_documents(req_id: int, item_id: int, db: Session = Depends(get_db),
                                          current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     _functional_checklist_item_or_404(db, req_id, item_id)
     return doc_store.list_documents(db, "FUNCTIONAL_ITEM", item_id)
 
@@ -1290,6 +1307,7 @@ def upload_functional_checklist_documents(req_id: int, item_id: int, files: List
 def download_functional_checklist_document(req_id: int, item_id: int, doc_id: int,
                                             db: Session = Depends(get_db),
                                             current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, req_id), current_user)
     _functional_checklist_item_or_404(db, req_id, item_id)
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL_ITEM", item_id, doc_id)
     full_path = doc_store.full_path(doc)

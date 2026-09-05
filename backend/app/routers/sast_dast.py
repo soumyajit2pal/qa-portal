@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import models, pagination, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department, require_not_requester, dashboard_department_scope
+from ..deps import (
+    get_current_user, require_roles, require_same_department, require_not_requester,
+    dashboard_department_scope, require_department_visibility,
+)
 from ..constants import Role, QA_DEPARTMENT, SAST_DAST_EDITABLE_STATUSES, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SAST_DAST_STATUS_LABELS, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES, is_readiness_evidence_editable, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
@@ -170,6 +173,14 @@ def _get_or_404(db: Session, model_cls, req_id: int, label: str):
     if not obj:
         raise HTTPException(404, f"{label} request not found")
     return obj
+
+
+def _require_visible(obj, user: models.User) -> None:
+    delegation = obj.active_delegation
+    require_department_visibility(
+        user, obj.department, requester_id=obj.requester_id,
+        delegated=bool(delegation and delegation.assigned_to_id == user.id),
+    )
 
 
 def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> models.User:
@@ -1034,7 +1045,7 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
         models.SASTRequest.security_lead_id == current_user.id,
         models.SASTRequest.security_analyst_id == current_user.id,
     )
-    if scope:
+    if scope is not None:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, delegated_to_user))
@@ -1072,6 +1083,7 @@ def get_sast(req_id: int, db: Session = Depends(get_db), current_user: models.Us
     # unpaginated list just to find one row by id (see SAST.tsx's own
     # resolveFinding) now uses this instead.
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    _require_visible(obj, current_user)
     return obj
 
 
@@ -1221,14 +1233,14 @@ def sast_start_scan(req_id: int, payload: schemas.SecurityScanStartIn, db: Sessi
 @router.get("/api/sast-requests/{req_id}/scan-results", response_model=List[schemas.SecurityScanResultOut])
 def sast_scan_results(req_id: int, db: Session = Depends(get_db),
                       current_user: models.User = Depends(get_current_user)):
-    _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     return _scan_results(db, "SAST", req_id)
 
 
 @router.get("/api/sast-requests/{req_id}/scan-summary", response_model=schemas.SecurityScanSummaryOut)
 def sast_scan_summary(req_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
-    _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     return _scan_summary(db, "SAST", req_id, models.SuppressionRequest.sast_request_id)
 
 
@@ -1243,6 +1255,7 @@ def sast_rescan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session =
 def sast_mark_scan_complete(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                              current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    _require_visible(obj, current_user)
     return _mark_scan_complete(db, obj, "SAST", payload, current_user, models.SuppressionRequest.sast_request_id)
 
 
@@ -1303,6 +1316,7 @@ def export_sast(req_id: int, db: Session = Depends(get_db), current_user: models
     and its full approval/workflow history -- who submitted, approved,
     returned, etc., and when -- as one downloadable PDF."""
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    _require_visible(obj, current_user)
 
     sections = [
         ("Status", [
@@ -1352,6 +1366,7 @@ def export_sast(req_id: int, db: Session = Depends(get_db), current_user: models
 # request has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/api/sast-requests/{req_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_sast_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     return doc_store.list_documents(db, "SAST", req_id)
 
 
@@ -1368,6 +1383,7 @@ def upload_sast_documents(req_id: int, files: List[UploadFile] = File(...), db: 
 @router.get("/api/sast-requests/{req_id}/documents/{doc_id}/download")
 def download_sast_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     doc = doc_store.get_document_or_404(db, "SAST", req_id, doc_id)
     full_path = doc_store.full_path(doc)
     if not os.path.exists(full_path):
@@ -1398,7 +1414,7 @@ def list_sast_checklist_documents_batch(req_id: int, db: Session = Depends(get_d
                                         current_user: models.User = Depends(get_current_user)):
     """Batched counterpart to list_sast_checklist_documents below -- see
     ChecklistItemDocumentOut for why this exists."""
-    _get_or_404(db, models.SASTRequest, req_id, "SAST")
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     item_ids = [row.id for row in db.query(models.SASTChecklistItem.id)
                 .filter_by(sast_request_id=req_id).all()]
     docs = doc_store.list_documents_for_items(db, "SAST_ITEM", item_ids)
@@ -1411,6 +1427,7 @@ def list_sast_checklist_documents_batch(req_id: int, db: Session = Depends(get_d
 @router.get("/api/sast-requests/{req_id}/checklist/{item_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_sast_checklist_documents(req_id: int, item_id: int, db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     _sast_checklist_item_or_404(db, req_id, item_id)
     return doc_store.list_documents(db, "SAST_ITEM", item_id)
 
@@ -1433,6 +1450,7 @@ def upload_sast_checklist_documents(req_id: int, item_id: int, files: List[Uploa
 @router.get("/api/sast-requests/{req_id}/checklist/{item_id}/documents/{doc_id}/download")
 def download_sast_checklist_document(req_id: int, item_id: int, doc_id: int,
                                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     _sast_checklist_item_or_404(db, req_id, item_id)
     doc = doc_store.get_document_or_404(db, "SAST_ITEM", item_id, doc_id)
     full_path = doc_store.full_path(doc)
@@ -1463,6 +1481,7 @@ def delete_sast_checklist_document(req_id: int, item_id: int, doc_id: int,
 # what the requester hasn't self-declared" guard as round 69). ----
 @router.get("/api/sast-requests/{req_id}/checklist", response_model=List[schemas.ChecklistItemOut])
 def get_sast_checklist(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     return db.query(models.SASTChecklistItem).filter_by(sast_request_id=req_id).all()
 
 
@@ -1501,6 +1520,7 @@ def update_sast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
 
 @router.get("/api/sast-requests/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def sast_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.SASTRequest, req_id, "SAST"), current_user)
     return _sast_dast_history_rows(db, "SAST", req_id)
 
 
@@ -1553,7 +1573,7 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
         models.DASTRequest.security_lead_id == current_user.id,
         models.DASTRequest.security_analyst_id == current_user.id,
     )
-    if scope:
+    if scope is not None:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, delegated_to_user))
@@ -1586,6 +1606,7 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
 def get_dast(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # PAG-006, same reasoning as get_sast above -- did not exist before.
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    _require_visible(obj, current_user)
     return _dast_out(obj, current_user)
 
 
@@ -1699,14 +1720,14 @@ def dast_start_scan(req_id: int, payload: schemas.SecurityScanStartIn, db: Sessi
 @router.get("/api/dast-requests/{req_id}/scan-results", response_model=List[schemas.SecurityScanResultOut])
 def dast_scan_results(req_id: int, db: Session = Depends(get_db),
                       current_user: models.User = Depends(get_current_user)):
-    _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return _scan_results(db, "DAST", req_id)
 
 
 @router.get("/api/dast-requests/{req_id}/scan-summary", response_model=schemas.SecurityScanSummaryOut)
 def dast_scan_summary(req_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
-    _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return _scan_summary(db, "DAST", req_id, models.SuppressionRequest.dast_request_id)
 
 
@@ -1721,6 +1742,7 @@ def dast_rescan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session =
 def dast_mark_scan_complete(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                              current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    _require_visible(obj, current_user)
     obj = _mark_scan_complete(db, obj, "DAST", payload, current_user, models.SuppressionRequest.dast_request_id)
     return _dast_out(obj, current_user)
 
@@ -1789,6 +1811,7 @@ def export_dast(req_id: int, db: Session = Depends(get_db), current_user: models
     sensitivity as the Targets tab -- exporting isn't a substitute for the
     existing masking rule)."""
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    _require_visible(obj, current_user)
 
     sections = [
         ("Status", [
@@ -1838,6 +1861,7 @@ def export_dast(req_id: int, db: Session = Depends(get_db), current_user: models
 # request has been raised) -- see documents.py for the shared implementation. ----
 @router.get("/api/dast-requests/{req_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_dast_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return doc_store.list_documents(db, "DAST", req_id)
 
 
@@ -1854,6 +1878,7 @@ def upload_dast_documents(req_id: int, files: List[UploadFile] = File(...), db: 
 @router.get("/api/dast-requests/{req_id}/documents/{doc_id}/download")
 def download_dast_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                             current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     doc = doc_store.get_document_or_404(db, "DAST", req_id, doc_id)
     full_path = doc_store.full_path(doc)
     if not os.path.exists(full_path):
@@ -1884,7 +1909,7 @@ def list_dast_checklist_documents_batch(req_id: int, db: Session = Depends(get_d
                                         current_user: models.User = Depends(get_current_user)):
     """Batched counterpart to list_dast_checklist_documents below -- see
     ChecklistItemDocumentOut for why this exists."""
-    _get_or_404(db, models.DASTRequest, req_id, "DAST")
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     item_ids = [row.id for row in db.query(models.DASTChecklistItem.id)
                 .filter_by(dast_request_id=req_id).all()]
     docs = doc_store.list_documents_for_items(db, "DAST_ITEM", item_ids)
@@ -1897,6 +1922,7 @@ def list_dast_checklist_documents_batch(req_id: int, db: Session = Depends(get_d
 @router.get("/api/dast-requests/{req_id}/checklist/{item_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_dast_checklist_documents(req_id: int, item_id: int, db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     _dast_checklist_item_or_404(db, req_id, item_id)
     return doc_store.list_documents(db, "DAST_ITEM", item_id)
 
@@ -1919,6 +1945,7 @@ def upload_dast_checklist_documents(req_id: int, item_id: int, files: List[Uploa
 @router.get("/api/dast-requests/{req_id}/checklist/{item_id}/documents/{doc_id}/download")
 def download_dast_checklist_document(req_id: int, item_id: int, doc_id: int,
                                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     _dast_checklist_item_or_404(db, req_id, item_id)
     doc = doc_store.get_document_or_404(db, "DAST_ITEM", item_id, doc_id)
     full_path = doc_store.full_path(doc)
@@ -1946,6 +1973,7 @@ def delete_dast_checklist_document(req_id: int, item_id: int, doc_id: int,
 # for the full reasoning; identical pattern, DAST's own table. ----
 @router.get("/api/dast-requests/{req_id}/checklist", response_model=List[schemas.ChecklistItemOut])
 def get_dast_checklist(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return db.query(models.DASTChecklistItem).filter_by(dast_request_id=req_id).all()
 
 
@@ -1984,4 +2012,5 @@ def update_dast_checklist_item(req_id: int, item_id: int, payload: schemas.Check
 
 @router.get("/api/dast-requests/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def dast_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    _require_visible(_get_or_404(db, models.DASTRequest, req_id, "DAST"), current_user)
     return _sast_dast_history_rows(db, "DAST", req_id)

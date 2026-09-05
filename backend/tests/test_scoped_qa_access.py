@@ -11,6 +11,7 @@ from starlette.requests import Request
 from app.deps import (
     _enforce_view_only_request,
     dashboard_department_scope,
+    require_department_visibility,
     require_document_portal_contributor,
     require_document_portal_viewer,
     require_roles,
@@ -123,6 +124,35 @@ class ScopedQAAccessTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as raised:
             _require_qa_dashboard_access(requester)
         self.assertEqual(raised.exception.status_code, 403)
+
+    def test_scoped_user_without_department_fails_closed(self):
+        requester = models.User(
+            id=5, username="unmapped", full_name="Unmapped", login_type="STANDARD",
+            role_assignments=[models.UserRole(role=Role.REQUESTER)],
+        )
+        self.db.add(requester)
+        self.db.commit()
+        self.db.refresh(requester)
+
+        self.assertEqual(dashboard_department_scope(requester), [])
+        with self.assertRaises(HTTPException) as raised:
+            require_department_visibility(requester, "Operations")
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_direct_record_visibility_allows_owner_and_matching_department(self):
+        requester = models.User(
+            id=6, username="owner", full_name="Owner", login_type="STANDARD",
+            role_assignments=[models.UserRole(role=Role.REQUESTER)],
+            department_assignments=[models.UserDepartment(department="Operations")],
+        )
+        self.db.add(requester)
+        self.db.commit()
+        self.db.refresh(requester)
+
+        require_department_visibility(requester, "Operations")
+        require_department_visibility(requester, "Other", requester_id=requester.id)
+        with self.assertRaises(HTTPException):
+            require_department_visibility(requester, "Other", requester_id=999)
 
 
 if __name__ == "__main__":
