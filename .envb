@@ -6,9 +6,9 @@
 #   DATABASE_URL=oracle+oracledb://QA_PORTAL:your_password@dbhost:1521/?service_name=ORCLPDB1
 # Local Oracle Database Free / XE via Docker (see README "Local Oracle for development"):
 # DATABASE_URL=sqlite:///ORCLPDB1.db
-DATABASE_URL=oracle+oracledb://qa_portal:Oracle123@127.0.0.1:1521/?service_name=FREEPDB1
-SECRET_KEY=fYjtWV4VO80trvAPaSSg9gY3am9A2DdfShH1myihTUU
-ACCESS_TOKEN_EXPIRE_MINUTES=120
+DATABASE_URL=
+SECRET_KEY=
+ACCESS_TOKEN_EXPIRE_MINUTES=30
 
 # --- LDAP / Active Directory login (only needed for users created with
 #     login_type=LDAP from the Admin section; Standard accounts ignore these) ---
@@ -48,5 +48,5 @@ LOG_BACKUP_COUNT=5
 SLOW_REQUEST_MS=2000
 
 FORTIFY_SSC_URL=http://127.0.0.1:8089
-FORTIFY_SSC_AUTH=bW9jazptb2Nr
-FORTIFY_SSC_VERIFY_TLS=false
+FORTIFY_SSC_AUTH=
+FORTIFY_SSC_VERIFY_TLS=true
