@@ -1,12 +1,16 @@
 import React, { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
 import { Badge } from './Common'
 import { DefectListOut, PageOut } from '../types'
 
-export default function LinkedDefects({ query, title = 'Linked Defects', returnTo }: { query: string; title?: string; returnTo?: string }) {
-  const navigate = useNavigate()
+// Keep the Defect Management implementation in its existing lazy bundle;
+// linked-defect panels only download it after the user asks to open one.
+const EmbeddedDefectDetail = React.lazy(() => import('../modules/test-management/Defects')
+  .then((module) => ({ default: module.EmbeddedDefectDetail })))
+
+export default function LinkedDefects({ query, title = 'Linked Defects' }: { query: string; title?: string }) {
   const [items, setItems] = useState<DefectListOut[]>([])
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
   useEffect(() => {
     let active = true
     // SRS 7.2 pagination rollout -- /api/defects is now paginated;
@@ -19,18 +23,13 @@ export default function LinkedDefects({ query, title = 'Linked Defects', returnT
     return () => { active = false }
   }, [query])
   if (!items.length) return null
-  // 2026-08 -- reported directly: opening a defect from here (e.g. Test
-  // Execution's "Cycle Defects" panel) is a full-page navigation to
-  // /defects, so closing the defect used to just land on the Defects
-  // register instead of going back to wherever the click came from.
-  // `returnTo` (when the caller has a sensible page to return to -- see
-  // TestExecution.tsx's usage) is carried through as a `return` query param
-  // that Defects.tsx's DefectDetail onClose reads and navigates back to.
-  const openUrl = (key: string) => `/defects?open=${encodeURIComponent(key)}${returnTo ? `&return=${encodeURIComponent(returnTo)}` : ''}`
-  return <section className="linked-defects-panel">
-    <div><strong>{title}</strong><span>{items.length}</span></div>
-    <div>{items.map((defect) => <button key={defect.id} type="button" onClick={() => navigate(openUrl(defect.defect_key))}>
-      <span><b>{defect.defect_key}</b><small>{defect.title}</small></span><Badge status={defect.status} /><em className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</em>
-    </button>)}</div>
-  </section>
+  return <>
+    <section className="linked-defects-panel">
+      <div><strong>{title}</strong><span>{items.length}</span></div>
+      <div>{items.map((defect) => <button key={defect.id} type="button" onClick={() => setSelectedKey(defect.defect_key)}>
+        <span><b>{defect.defect_key}</b><small>{defect.title}</small></span><Badge status={defect.status} /><em className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</em>
+      </button>)}</div>
+    </section>
+    {selectedKey && <React.Suspense fallback={null}><EmbeddedDefectDetail defectKey={selectedKey} onClose={() => setSelectedKey(null)} /></React.Suspense>}
+  </>
 }

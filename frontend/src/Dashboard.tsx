@@ -4,10 +4,11 @@ import React, { useEffect, useState, useMemo, useRef } from 'react'
 import { api } from './api'
 import { formatDateIST, formatDateTimeIST } from './time'
 import { useAuth } from './context/AuthContext'
-import { Card, MetricCard, BarChart, Table, Badge, ErrorText, Modal, TableColumn } from './components/Common'
+import { Card, MetricCard, BarChart, Table, Badge, ErrorText, Modal, TableColumn, EmptyState } from './components/Common'
 import SearchableSelect from './components/SearchableSelect'
 import ClearableSearchInput from './components/ClearableSearchInput'
 import ActiveProjectsBrowser from './components/ActiveProjectsBrowser'
+import DefectsBrowser from './components/DefectsBrowser'
 import {
   IconGrid, IconWarning, IconApprove, IconWorkflow, IconCheckCircle,
 } from './components/Icons'
@@ -434,7 +435,7 @@ function ACTIVITY_ICON(decision?: string | null) {
 }
 
 function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
-  if (items.length === 0) return <p className="muted small">No activity recorded yet.</p>
+  if (items.length === 0) return <EmptyState compact title="No activity recorded" description="Recent workflow actions will appear here." />
   return (
     <div>
       {items.map((a) => {
@@ -451,6 +452,24 @@ function RecentActivity({ items }: { items: ApprovalActionOut[] }) {
       })}
     </div>
   )
+}
+
+function ResolutionActivityGrid({ items }: { items: NonNullable<DashboardAttentionOut['resolution_activity']> }) {
+  const [search, setSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const pageSize = 6
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase()
+    return needle ? items.filter((item) => item.resolver_name.toLowerCase().includes(needle)) : items
+  }, [items, search])
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  useEffect(() => { setPage(1) }, [search, items])
+  const visible = filtered.slice((page - 1) * pageSize, page * pageSize)
+  return <div className="dashboard-defect-resolvers">
+    <div className="dashboard-defect-resolvers-head"><div><strong>Resolution activity</strong><span>Attributed to the user who submitted the latest audited Resolved action.</span></div><label><span>Find contributor</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search by name…" /></label></div>
+    <div>{visible.map((item) => <article key={item.resolver_id}><strong>{item.resolver_name}</strong><dl><div><dt>Resolved</dt><dd>{item.resolved_defects}</dd></div><div><dt>Reopened defects</dt><dd>{item.reopened_defects}</dd></div><div><dt>Reopen events</dt><dd>{item.reopen_events}</dd></div></dl></article>)}</div>
+    <footer><span>{filtered.length ? `${(page - 1) * pageSize + 1}–${Math.min(page * pageSize, filtered.length)} of ${filtered.length}` : 'No contributors match'}</span><div><button disabled={page === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>← Previous</button><button disabled={page === pages || !filtered.length} onClick={() => setPage((value) => Math.min(pages, value + 1))}>Next →</button></div></footer>
+  </div>
 }
 
 // Reported directly: "lots of api calling, sometime same api calling
@@ -596,7 +615,21 @@ function CommandCentre({ range }: { range: RaisedRange }) {
     { key: 'priority', header: 'Priority', render: (r) => r.priority ? <Badge status={r.priority} /> : '—' },
   ]
 
-  const drilldownColumns: TableColumn<DashboardAttentionRow>[] = attentionMetric === 'security-findings'
+  const drilldownColumns: TableColumn<DashboardAttentionRow>[] = attentionMetric === 'defects'
+    ? [
+        { key: 'defect_id', header: 'Defect ID' },
+        { key: 'request_id', header: 'Request ID', render: (r) => r.request_id || '—' },
+        { key: 'project_id', header: 'Project ID', render: (r) => <span className="dashboard-trace-list">{r.project_ids?.length ? r.project_ids.map((key) => <small key={key}>{key}</small>) : '—'}</span> },
+        { key: 'cycle_id', header: 'Cycle ID', render: (r) => <span className="dashboard-trace-list">{r.cycle_ids?.length ? r.cycle_ids.map((key) => <small key={key}>{key}</small>) : '—'}</span> },
+        { key: 'test_case_id', header: 'Testcase IDs', render: (r) => <span className="dashboard-trace-list">{r.test_case_ids?.length ? r.test_case_ids.map((key) => <small key={key}>{key}</small>) : '—'}</span> },
+        { key: 'application_name', header: 'Application' },
+        { key: 'status', header: 'Status', render: (r) => <Badge status={r.status || ''} /> },
+        { key: 'severity', header: 'Severity', render: (r) => <Badge status={r.severity || ''} /> },
+        { key: 'resolver_name', header: 'Resolved by', render: (r) => r.resolver_name || 'Not resolved' },
+        { key: 'reopen_count', header: 'Reopens', render: (r) => r.reopen_count || 0 },
+        { key: 'updated_at', header: 'Last updated', render: (r) => r.updated_at ? timeAgo(r.updated_at) : '—' },
+      ]
+    : attentionMetric === 'security-findings'
     ? [
         { key: 'type', header: 'Scan type' },
         { key: 'request_id', header: 'Request ID' },
@@ -638,7 +671,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
           <p>Select any card to see the exact records behind its total and open the relevant request.</p>
         </div>
       </div>
-      <div className="grid grid-4 dashboard-metric-grid">
+      <div className="grid dashboard-metric-grid dashboard-metric-grid-five">
         <StatCard icon={IconGrid} iconClass="blue" tag="Distinct CR / EPIC" value={m.active_projects} label="Active CRs / EPICs"
                   hint="Distinct CR/EPICs with at least one active Functional QA request."
                   footline="Source: active Functional QA requests"
@@ -660,6 +693,11 @@ function CommandCentre({ range }: { range: RaisedRange }) {
                   footline={`${summary.child_requests_total} total child request${summary.child_requests_total === 1 ? '' : 's'} in the selected range`}
                   loading={attentionLoading && attentionMetric === 'active-requests'}
                   onOpen={() => openAttention('active-requests')} />
+        <StatCard icon={IconCheckCircle} iconClass="blue" tag={`${summary.defects_resolved} resolved`} value={summary.defects_total} label="Defects"
+                  hint="Governed defects reported within the selected period, with resolver and execution traceability."
+                  footline={`${summary.defects_open} open · ${summary.defect_reopen_events} reopen event${summary.defect_reopen_events === 1 ? '' : 's'}`}
+                  loading={attentionLoading && attentionMetric === 'defects'}
+                  onOpen={() => openAttention('defects')} />
       </div>
 
       {attentionMetric && (
@@ -686,7 +724,12 @@ function CommandCentre({ range }: { range: RaisedRange }) {
               <p className="muted small dashboard-drilldown-help">
                 Five records are shown per page by default. Use the page-size control or column filters to review the data, then select a row to open its source request.
               </p>
-              <Table
+              {attentionMetric === 'defects' && !!attentionDetail.resolution_activity?.length && <ResolutionActivityGrid items={attentionDetail.resolution_activity} />}
+              {attentionMetric === 'defects' ? <DefectsBrowser
+                data={attentionDetail} loading={attentionLoading}
+                onLoad={(page, pageSize, search) => loadAttention('defects', page, pageSize, search)}
+                onOpen={(route) => navigate(route)} formatUpdated={timeAgo}
+              /> : <Table
                 rowKey="key"
                 columns={drilldownColumns}
                 rows={attentionDetail.rows}
@@ -702,8 +745,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
                   onPageSizeChange: (pageSize) => loadAttention(attentionMetric, 1, pageSize),
                 }}
                 onRowClick={(row) => { if (row.route) navigate(row.route) }}
-              />
-              {attentionDetail.rows.length === 0 && <p className="muted small">No source records currently contribute to this metric.</p>}
+              />}
             </>
           ))}
         </Modal>
@@ -1080,7 +1122,6 @@ function SuppressionTab({ range }: { range: RaisedRange }) {
                 }}
                 onRowClick={(row) => navigate(row.route)}
               />
-              {detail.rows.length === 0 && <p className="muted small">No applications contribute to this severity in the selected period.</p>}
             </>
           )}
         </Modal>
@@ -1651,7 +1692,6 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
       <div className="tester-metric-definition" role="note"><strong>How these figures are counted</strong><span>A testcase is counted once from its original author record; versions do not increase the count. Draft, pending, and approved figures show the current workflow stage of testcases created in the selected period. Defects use the reporter. Retests use the recorded retest tester and retest date. Projects require actual authoring, execution, defect, or retest activity. Click any number for record-level evidence.</span></div>
       <Card>
         <Table rowKey="tester_id" columns={contributionColumns} rows={filteredRows} onRowClick={(row) => openContribution(row)} />
-        {!filteredRows.length && <p className="muted small" style={{ marginTop: 8 }}>No QA contribution matches the selected filters and period.</p>}
       </Card>
       {detailLoading && <p className="muted">Loading tester contribution details…</p>}
       {contributionDetail && !detailLoading && <Card title={`${contributionDetail.tester_name} · Contribution evidence`} className="tester-contribution-detail">
@@ -1724,7 +1764,6 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
               { key: 'updated_at', header: 'Last Activity', render: (item) => formatDateTimeIST(item.updated_at) },
             ]}
           />
-          {!tester.assignments.length && <p className="muted small">No request assignments found for the selected period.</p>}
         </Card>
       })()}
       </>}

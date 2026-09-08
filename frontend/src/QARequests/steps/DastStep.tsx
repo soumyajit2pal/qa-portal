@@ -5,6 +5,7 @@ import { DraftChecklistEvidenceOut } from '../../types'
 import { QARequestForm, SetField, blankDastComponent } from '../types'
 import { EvidenceKind } from './ChecklistEvidencePicker'
 import { ReadinessChecklistSection } from './ReadinessChecklistSection'
+import SearchableSelect from '../../components/SearchableSelect'
 
 interface Props {
   form: QARequestForm
@@ -73,14 +74,10 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
             </div>
             <div className="security-classification-grid">
               <Field label="Priority *">
-                <select value={form.dast_priority} onChange={(e) => set('dast_priority', e.target.value)}>
-                  {PRIORITIES.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
+                <SearchableSelect searchable={false} value={form.dast_priority} options={PRIORITIES} onChange={(value) => set('dast_priority', value)} />
               </Field>
               <Field label="Risk Category *">
-                <select value={form.dast_risk_category} onChange={(e) => set('dast_risk_category', e.target.value)}>
-                  {RISK_RATINGS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
+                <SearchableSelect searchable={false} value={form.dast_risk_category} options={RISK_RATINGS} onChange={(value) => set('dast_risk_category', value)} />
               </Field>
             </div>
             <div className="security-context-note">
@@ -117,12 +114,10 @@ export function DastStep({ form, set, existingDast, draftRequestId, evidenceFile
                           onChange={(event) => setTarget(index, 'application_url', event.target.value)}
                         />
                       </label>
-                      <label className="security-control security-control-environment">
+                      <div className="security-control security-control-environment">
                         <span>Environment *</span>
-                        <select value={target.environment} onChange={(event) => setTarget(index, 'environment', event.target.value)}>
-                          {POST_SIT_ENVIRONMENTS.map((option) => <option key={option} value={option}>{option}</option>)}
-                        </select>
-                      </label>
+                        <SearchableSelect searchable={false} value={target.environment} options={POST_SIT_ENVIRONMENTS} onChange={(value) => setTarget(index, 'environment', value)} />
+                      </div>
                       <div className="security-auth-control">
                         <span>Authentication Required?</span>
                         <div className="security-auth-options" role="radiogroup" aria-label={`Authentication required for target ${index + 1}`}>

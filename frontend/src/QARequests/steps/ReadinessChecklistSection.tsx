@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react'
-import { ErrorText } from '../../components/Common'
+import { EmptyState, ErrorText } from '../../components/Common'
 import { DraftChecklistEvidenceOut } from '../../types'
 import { ChecklistEvidencePicker, EvidenceKind } from './ChecklistEvidencePicker'
 import { useChecklistTemplate } from './useChecklistTemplate'
@@ -70,6 +70,10 @@ export function ReadinessChecklistSection({
 
       {loading && <div className="security-checklist-loading">Loading readiness criteria…</div>}
       <ErrorText error={error} title={`${heading} could not be loaded`} />
+
+      {!loading && !error && items.length === 0 && (
+        <EmptyState compact title="No readiness criteria available" description={`Checklist criteria will appear here when they are configured for ${module}.`} />
+      )}
 
       {!loading && items.length > 0 && (
         <div className="security-checklist-table" role="group" aria-label={`${module} readiness checklist`}>

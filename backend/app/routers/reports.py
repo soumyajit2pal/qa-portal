@@ -300,7 +300,8 @@ def testcase_approval_summary(date_from: str | None = None, date_to: str | None 
     projects = _visible_test_projects(db, current_user).order_by(models.TestProject.name).all()
     project_ids = [project.id for project in projects]
     grouped_query = db.query(models.TestCase.project_id, models.TestCase.status, func.count(models.TestCase.id)).filter(
-        models.TestCase.project_id.in_(project_ids), models.TestCase.is_deleted.is_(False),
+        models.TestCase.project_id.in_(project_ids),
+        models.TestCase.is_deleted == False,  # noqa: E712 - Oracle requires = 0, not IS 0
     )
     grouped_query = _in_period(grouped_query, models.TestCase.created_at, date_from, date_to)
     grouped = grouped_query.group_by(models.TestCase.project_id, models.TestCase.status).all() if project_ids else []
@@ -604,7 +605,7 @@ def suppression_register(date_from: str | None = None, date_to: str | None = Non
             out.append({
                 "Suppression ID": s.suppression_id, "Application": s.application_name, "Scan Type": s.scan_type,
                 "Department": s.department, "Application Owner": s.application_owner,
-                "Issue ID": item.issue_id if item else None, "Severity": item.severity if item else None,
+                "Issue Group": item.issue_id if item else None, "Severity": item.severity if item else None,
                 "Status": s.status,
                 "SM Decision": s.sm_decision, "Dept Head Decision": s.dept_head_decision,
                 "Security Team Decision": s.security_decision,

@@ -6,10 +6,9 @@ import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { ENVIRONMENTS, hasRole, hasDepartment, hasRetestEligibleHistory, QA_DEPARTMENT, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
+import { ENVIRONMENTS, hasRole, hasDepartment, hasRetestEligibleHistory, QA_DEPARTMENT, TEST_CASE_PRIORITIES, TEST_CASE_TYPES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
-import InfoModal from '../../components/InfoModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import UserAssignSelect from '../../components/UserAssignSelect'
@@ -35,8 +34,13 @@ const QA_LEAD_GROUP_ROLES = ['QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA']
 // pseudo-folder, same convention as TestRepository.tsx's own UNFILED.
 const CYCLE_UNFILED = '__unfiled__'
 
-function CycleModal({ projectId, requests, users, folders, defaultFolderId, editing, onClose, onSaved }: {
-  projectId: number
+// Keep Defect Management in its existing lazy bundle. The completion review
+// loads the full detail only when someone explicitly opens a defect row.
+const EmbeddedDefectDetail = React.lazy(() => import('./Defects')
+  .then((module) => ({ default: module.EmbeddedDefectDetail })))
+
+function CycleModal({ project, requests, users, folders, defaultFolderId, editing, onClose, onSaved }: {
+  project: TestProjectOut
   requests: QARequestListOut[]
   users: UserOut[]
   // Reported directly: "Create Test Cycle Folder ... Under this folder
@@ -53,7 +57,7 @@ function CycleModal({ projectId, requests, users, folders, defaultFolderId, edit
   const [folderId, setFolderId] = useState<number | ''>(editing ? (editing.folder_id ?? '') : defaultFolderId)
   const [startDate, setStartDate] = useState(editing?.start_date || '')
   const [endDate, setEndDate] = useState(editing?.end_date || '')
-  const [linkedRequest, setLinkedRequest] = useState(editing?.linked_request_type && editing.linked_request_id ? `${editing.linked_request_type}:${editing.linked_request_id}` : '')
+  const [linkedRequest, setLinkedRequest] = useState(editing?.linked_request_type === 'Functional' && editing.linked_request_id ? `Functional:${editing.linked_request_id}` : '')
   // SRS CYC-001 "type, dates, owner, environment and build".
   const [cycleType, setCycleType] = useState(editing?.cycle_type || '')
   const [environment, setEnvironment] = useState(editing?.environment || '')
@@ -73,6 +77,7 @@ function CycleModal({ projectId, requests, users, folders, defaultFolderId, edit
   const hasExistingOwner = !!editing?.owner_id
   const isCurrentOwner = !!editing && editing.owner_id === user?.id
   const canChangeOwner = !hasExistingOwner || isAdmin || isCurrentOwner || isQADepartmentHead
+  const requestLinkLocked = !!editing?.linked_request_key && editing.linked_request_change_allowed === false
   const isOwnerReassignment = hasExistingOwner && (ownerId || null) !== editing?.owner_id
   const [ownerReassignReason, setOwnerReassignReason] = useState('')
 
@@ -81,14 +86,15 @@ function CycleModal({ projectId, requests, users, folders, defaultFolderId, edit
     if (!name.trim()) { setError(new Error('Cycle name cannot be blank')); return }
     if (!startDate || !endDate) { setError(new Error('Start date and end date are required')); return }
     if (startDate > endDate) { setError(new Error('Start date cannot be after end date')); return }
+    if (!linkedRequest) { setError(new Error('Select a Functional QA Request')); return }
     if (isOwnerReassignment && !ownerReassignReason.trim()) { setError(new Error('A reassignment reason is required to change the cycle owner')); return }
     setBusy(true); setError(null)
     try {
       const payload = {
         name: name.trim(), description: description || null,
         start_date: startDate, end_date: endDate,
-        linked_request_type: linkedRequest ? linkedRequest.split(':')[0] : null,
-        linked_request_id: linkedRequest ? Number(linkedRequest.split(':')[1]) : null,
+        linked_request_type: 'Functional',
+        linked_request_id: Number(linkedRequest.split(':')[1]),
         cycle_type: cycleType || null,
         environment: environment || null, build: build || null,
         owner_id: ownerId || null,
@@ -97,7 +103,7 @@ function CycleModal({ projectId, requests, users, folders, defaultFolderId, edit
       }
       const saved = editing
         ? await api.patch<TestCycleOut>(`/api/test-execution/cycles/${editing.id}`, payload)
-        : await api.post<TestCycleOut>(`/api/test-execution/projects/${projectId}/cycles`, payload)
+        : await api.post<TestCycleOut>(`/api/test-execution/projects/${project.id}/cycles`, payload)
       onSaved(saved)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
@@ -105,6 +111,14 @@ function CycleModal({ projectId, requests, users, folders, defaultFolderId, edit
   return (
     <Modal title={editing ? `Edit ${editing.cycle_key}` : 'New Test Cycle'} onClose={onClose}>
       <form onSubmit={submit}>
+        <Field label="Test Project">
+          <input
+            value={`${project.project_key} — ${project.name}`}
+            disabled
+            aria-label="Selected Test Project"
+          />
+          <small className="muted">This cycle belongs to this Test Project and the project cannot be changed here.</small>
+        </Field>
         <Field label="Cycle Name *">
           <input required value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
@@ -160,14 +174,11 @@ function CycleModal({ projectId, requests, users, folders, defaultFolderId, edit
             <input className="reassign-reason-input" value={ownerReassignReason} onChange={(e) => setOwnerReassignReason(e.target.value)} placeholder="Required when changing an already-assigned owner…" />
           </Field>
         )}
-        <Field label="Linked Child Request">
-          <SearchableSelect value={linkedRequest} onChange={setLinkedRequest} placeholder="Optional — select Functional, SAST, DAST or Performance ID…" options={requests.flatMap((request) => [
-            ...request.linked_functional_requests.map((child) => ({ value: `Functional:${child.id}`, label: `${child.request_id} · Functional — ${request.application_name}` })),
-            ...request.linked_sast_requests.map((child) => ({ value: `SAST:${child.id}`, label: `${child.request_id} · SAST — ${request.application_name}` })),
-            ...request.linked_dast_requests.map((child) => ({ value: `DAST:${child.id}`, label: `${child.request_id} · DAST — ${request.application_name}` })),
-            ...request.linked_performance_requests.map((child) => ({ value: `Performance:${child.id}`, label: `${child.request_id} · Performance — ${request.application_name}` })),
-          ])} />
-          <small className="muted">Link the cycle directly to the testing request it executes.</small>
+        <Field label="Functional QA Request *">
+          <SearchableSelect disabled={requestLinkLocked} value={linkedRequest} onChange={setLinkedRequest} placeholder="Select a Functional QA Request…" options={requests.flatMap((request) =>
+            request.linked_functional_requests.map((child) => ({ value: `Functional:${child.id}`, label: `${child.request_id} — ${request.application_name}` }))
+          )} />
+          <small className="muted">{requestLinkLocked ? 'Execution has started, so this Functional QA Request link is locked.' : 'Required. This Test Cycle executes the selected Functional QA Request.'}</small>
         </Field>
         <div className="grid grid-2">
           <Field label="Start Date *">
@@ -350,17 +361,18 @@ function LinkCycleRequestModal({ cycle, requests, onClose, onSaved }: {
   onClose: () => void
   onSaved: (c: TestCycleOut) => void
 }) {
-  const [linkedRequest, setLinkedRequest] = useState(cycle.linked_request_type && cycle.linked_request_id ? `${cycle.linked_request_type}:${cycle.linked_request_id}` : '')
+  const [linkedRequest, setLinkedRequest] = useState(cycle.linked_request_type === 'Functional' && cycle.linked_request_id ? `Functional:${cycle.linked_request_id}` : '')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    if (!linkedRequest) { setError(new Error('Select a Functional QA Request')); return }
     setBusy(true); setError(null)
     try {
       const saved = await api.patch<TestCycleOut>(`/api/test-execution/cycles/${cycle.id}`, {
-        linked_request_type: linkedRequest ? linkedRequest.split(':')[0] : null,
-        linked_request_id: linkedRequest ? Number(linkedRequest.split(':')[1]) : null,
+        linked_request_type: 'Functional',
+        linked_request_id: Number(linkedRequest.split(':')[1]),
       })
       onSaved(saved)
     } catch (err) { setError(err) } finally { setBusy(false) }
@@ -369,19 +381,16 @@ function LinkCycleRequestModal({ cycle, requests, onClose, onSaved }: {
   return (
     <Modal title={`Link QA Request — ${cycle.cycle_key}`} onClose={onClose}>
       <form onSubmit={submit}>
-        <p className="muted small">{cycle.cycle_key} is Completed and otherwise read-only. The QA Request it's filed against can still be linked, changed, or cleared here for traceability and reporting.</p>
-        <Field label="Linked Child Request">
-          <SearchableSelect value={linkedRequest} onChange={setLinkedRequest} placeholder="Optional — select Functional, SAST, DAST or Performance ID…" options={requests.flatMap((request) => [
-            ...request.linked_functional_requests.map((child) => ({ value: `Functional:${child.id}`, label: `${child.request_id} · Functional — ${request.application_name}` })),
-            ...request.linked_sast_requests.map((child) => ({ value: `SAST:${child.id}`, label: `${child.request_id} · SAST — ${request.application_name}` })),
-            ...request.linked_dast_requests.map((child) => ({ value: `DAST:${child.id}`, label: `${child.request_id} · DAST — ${request.application_name}` })),
-            ...request.linked_performance_requests.map((child) => ({ value: `Performance:${child.id}`, label: `${child.request_id} · Performance — ${request.application_name}` })),
-          ])} />
-          <small className="muted">Leave blank to unlink.</small>
+        <p className="muted small">{cycle.cycle_key} is Completed and otherwise read-only. Its Functional QA Request can be replaced here for traceability and reporting.</p>
+        <Field label="Functional QA Request *">
+          <SearchableSelect value={linkedRequest} onChange={setLinkedRequest} placeholder="Select a Functional QA Request…" options={requests.flatMap((request) =>
+            request.linked_functional_requests.map((child) => ({ value: `Functional:${child.id}`, label: `${child.request_id} — ${request.application_name}` }))
+          )} />
+          <small className="muted">Required. Select the Functional QA Request executed by this cycle.</small>
         </Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-          <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save Link'}</button>
+          <button className="btn btn-primary" disabled={busy || !linkedRequest}>{busy ? 'Saving…' : 'Save Link'}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -396,6 +405,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
   onChanged: (c: TestCycleOut) => void
   onError: (err: unknown) => void
 }) {
+  const { user } = useAuth()
   const [busy, setBusy] = useState(false)
   const [showBlock, setShowBlock] = useState(false)
   const [showComplete, setShowComplete] = useState(false)
@@ -404,18 +414,31 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
   const [dialogError, setDialogError] = useState<unknown>(null)
   const [completionDefects, setCompletionDefects] = useState<DefectListOut[]>([])
   const [loadingCompletion, setLoadingCompletion] = useState(false)
+  const [completionFilter, setCompletionFilter] = useState<'all' | 'blocker' | 'target'>('all')
+  const [completionPage, setCompletionPage] = useState(1)
+  const [selectedCompletionDefect, setSelectedCompletionDefect] = useState<string | null>(null)
 
   useEffect(() => {
     if (!showComplete) return
+    let active = true
     setLoadingCompletion(true); setDialogError(null)
-    // SRS 7.2 pagination rollout -- /api/defects is now paginated;
-    // page_size=100 is a practical ceiling for "defects linked to one Test
-    // Cycle" (bounded by the cycle's own case count, not unbounded
-    // register-wide growth).
-    api.get<PageOut<DefectListOut>>(`/api/defects?cycle_id=${cycle.id}&page_size=100`)
-      .then((p) => setCompletionDefects(p.items))
-      .catch(setDialogError)
-      .finally(() => setLoadingCompletion(false))
+    setCompletionDefects([]); setSelectedCompletionDefect(null)
+    setCompletionFilter('all'); setCompletionPage(1)
+    // Completion rules must evaluate the complete defect set even when the
+    // cycle grows beyond one server page. The table below paginates locally
+    // after every server page has been collected.
+    async function loadAllCompletionDefects() {
+      const first = await api.get<PageOut<DefectListOut>>(`/api/defects?cycle_id=${cycle.id}&page=1&page_size=100`)
+      const remaining = first.total_pages > 1
+        ? await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) =>
+          api.get<PageOut<DefectListOut>>(`/api/defects?cycle_id=${cycle.id}&page=${index + 2}&page_size=100`)))
+        : []
+      if (active) setCompletionDefects([first, ...remaining].flatMap((page) => page.items))
+    }
+    loadAllCompletionDefects()
+      .catch((error) => { if (active) setDialogError(error) })
+      .finally(() => { if (active) setLoadingCompletion(false) })
+    return () => { active = false }
   }, [showComplete, cycle.id])
 
   async function transition(status: string, reason = '', transitionRemarks = '') {
@@ -444,13 +467,74 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
         : cycle.status === 'Blocked'
           ? [{ label: 'Resume Execution', status: 'In Progress' }]
           : []
-  const unresolvedStatuses = new Set(['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened'])
+  const unresolvedStatuses = new Set(['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened'])
   const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && unresolvedStatuses.has(defect.status))
   const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && unresolvedStatuses.has(defect.status))
   const deferredDefects = completionDefects.filter((defect) => defect.status === 'Deferred')
+  const residualMissingTarget = residualDefects.filter((defect) => !defect.target_release)
+  const deferredMissingTarget = deferredDefects.filter((defect) => !defect.target_release)
+  const canCompleteWithResidualRisk = hasRole(user, ...QA_LEAD_GROUP_ROLES)
   const notExecutedCount = Math.max(0, executionTotal - executedCount)
   const severitySummary = ['Critical', 'High', 'Medium', 'Low'].map((severity) => ({ severity, count: completionDefects.filter((defect) => defect.severity === severity).length }))
-  const statusSummary = Array.from(new Set(completionDefects.map((defect) => defect.status))).map((status) => ({ status, count: completionDefects.filter((defect) => defect.status === status).length }))
+  const targetReleaseMissing = completionDefects.filter((defect) =>
+    !defect.target_release && (
+      (['Medium', 'Low'].includes(defect.severity) && unresolvedStatuses.has(defect.status)) || defect.status === 'Deferred'
+    ))
+  const completionBlockers = new Set(severeBlockers.map((defect) => defect.id))
+  const missingTargetDefects = new Set(targetReleaseMissing.map((defect) => defect.id))
+  const filteredCompletionDefects = completionDefects.filter((defect) =>
+    completionFilter === 'all'
+      ? true
+      : completionFilter === 'blocker'
+        ? completionBlockers.has(defect.id)
+        : missingTargetDefects.has(defect.id))
+  const completionPageSize = 5
+  const completionTotalPages = Math.max(1, Math.ceil(filteredCompletionDefects.length / completionPageSize))
+  const safeCompletionPage = Math.min(completionPage, completionTotalPages)
+  const visibleCompletionDefects = filteredCompletionDefects.slice((safeCompletionPage - 1) * completionPageSize, safeCompletionPage * completionPageSize)
+  const firstVisibleDefect = filteredCompletionDefects.length ? (safeCompletionPage - 1) * completionPageSize + 1 : 0
+  const lastVisibleDefect = Math.min(safeCompletionPage * completionPageSize, filteredCompletionDefects.length)
+  const hasCompletionBlockers = notExecutedCount > 0 || severeBlockers.length > 0 || targetReleaseMissing.length > 0 || (residualDefects.length > 0 && !canCompleteWithResidualRisk)
+  const needsResidualJustification = residualDefects.length > 0 && canCompleteWithResidualRisk && !remarks.trim()
+  const completionState = hasCompletionBlockers ? 'blocked' : needsResidualJustification ? 'pending' : 'ready'
+
+  function setDefectFilter(filter: 'all' | 'blocker' | 'target') {
+    setCompletionFilter(filter)
+    setCompletionPage(1)
+  }
+
+  function requiredDefectAction(defect: DefectListOut) {
+    if (completionBlockers.has(defect.id)) return 'Resolve, reject, defer, or close'
+    if (missingTargetDefects.has(defect.id)) return 'Set Target Release or resolve'
+    if (residualDefects.some((item) => item.id === defect.id)) return 'QA Lead Group residual-risk review'
+    return 'No action required'
+  }
+
+  function defectExecutionImpact(defect: DefectListOut) {
+    const byExecution = new Map<number, { testCase: string; status: string }>()
+    if (defect.execution_id) {
+      byExecution.set(defect.execution_id, {
+        testCase: defect.test_case_key || 'Unknown testcase',
+        status: defect.execution_status || 'Not Executed',
+      })
+    }
+    for (const link of defect.execution_links || []) {
+      byExecution.set(link.execution_id, {
+        testCase: link.test_case_key || 'Unknown testcase',
+        status: link.status || 'Not Executed',
+      })
+    }
+    const impacts = Array.from(byExecution.values())
+    const resultCounts = impacts.reduce<Record<string, number>>((counts, impact) => {
+      counts[impact.status] = (counts[impact.status] || 0) + 1
+      return counts
+    }, {})
+    return {
+      count: impacts.length,
+      summary: Object.entries(resultCounts).map(([status, count]) => `${count} ${status}`).join(' · ') || 'No execution linked',
+      details: impacts.map((impact) => `${impact.testCase}: ${impact.status}`).join('\n'),
+    }
+  }
 
   return (
     <>
@@ -494,27 +578,96 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
         </Modal>
       )}
       {showComplete && (
-        <Modal title={`Complete ${cycle.cycle_key}?`} onClose={() => setShowComplete(false)} variant="dialog" preventBackdropClose wide>
-          <div className="tm-cycle-defect-summary">
-            <p>Review all linked defects before completing this Test Cycle. Completion is final.</p>
+        <Modal title={`Review before completing ${cycle.cycle_key}`} onClose={() => setShowComplete(false)} variant="dialog" preventBackdropClose wide>
+          <div className="tm-cycle-completion-review">
             {loadingCompletion ? <p className="muted">Loading defect validation…</p> : <>
+              <section className={`tm-completion-state ${completionState}`}>
+                <span aria-hidden="true">{completionState === 'ready' ? '✓' : '!'}</span>
+                <div>
+                  <strong>{hasCompletionBlockers ? 'This cycle is not ready to complete' : needsResidualJustification ? 'Residual-risk approval details required' : 'This cycle satisfies the completion checks'}</strong>
+                  <p>
+                    {notExecutedCount > 0
+                      ? `Record results for ${notExecutedCount} remaining testcase(s).`
+                      : severeBlockers.length > 0
+                        ? `Resolve ${severeBlockers.length} open Critical/High defect(s) before completion.`
+                        : targetReleaseMissing.length > 0
+                          ? `Add Target Releases to ${targetReleaseMissing.length} residual defect(s).`
+                          : residualDefects.length > 0 && !canCompleteWithResidualRisk
+                            ? 'A QA Lead Group member must review the residual risk and complete this cycle.'
+                            : residualDefects.length > 0
+                              ? 'Add the residual-risk justification, then complete the cycle.'
+                              : 'Review the details below before completing. Completion is final.'}
+                  </p>
+                </div>
+              </section>
               <div className="tm-cycle-defect-counts">
-                {severitySummary.map((item) => <div key={item.severity}><small>{item.severity}</small><strong>{item.count}</strong></div>)}
+                {severitySummary.map((item) => <div key={item.severity} data-severity={item.severity.toLowerCase()}><small>{item.severity}</small><strong>{item.count}</strong><span>{['Critical', 'High'].includes(item.severity) ? 'Blocks completion when open' : 'Residual risk when open'}</span></div>)}
               </div>
-              {notExecutedCount > 0 && <div className="alert alert-error"><strong>Execution incomplete</strong><span>{notExecutedCount} of {executionTotal} testcase(s) are still Not Executed. Record a result for every testcase before completing this cycle.</span></div>}
-              <div className="tm-cycle-defect-statuses">{statusSummary.length ? statusSummary.map((item) => <span key={item.status}>{item.status} <b>{item.count}</b></span>) : <span>No linked defects</span>}</div>
-              {severeBlockers.length > 0 && <div className="alert alert-error"><strong>Completion blocked</strong><span>Resolve, reject, defer with approval, or close: {severeBlockers.map((defect) => defect.defect_key).join(', ')}</span></div>}
-              {residualDefects.length > 0 && <div className="alert alert-warning"><strong>QA Lead approval required</strong><span>{residualDefects.length} open Medium/Low defect(s) require justification and a Target Release before completion.</span></div>}
-              {deferredDefects.length > 0 && <div className="tm-cycle-deferred"><strong>Deferred defects ({deferredDefects.length})</strong>{deferredDefects.map((defect) => <span key={defect.id}>{defect.defect_key} · {defect.target_release || 'Target release missing'}</span>)}</div>}
+              <section className="tm-completion-readiness" aria-label="Completion readiness">
+                <div className={notExecutedCount ? 'failed' : 'passed'}><i>{notExecutedCount ? '×' : '✓'}</i><span><strong>Execution results</strong><small>{executedCount} of {executionTotal} recorded</small></span></div>
+                <div className={severeBlockers.length ? 'failed' : 'passed'}><i>{severeBlockers.length ? '×' : '✓'}</i><span><strong>Critical/High defect gate</strong><small>{severeBlockers.length ? `${severeBlockers.length} open Critical/High defect(s)` : 'No open Critical/High defects'}</small></span></div>
+                <div className={targetReleaseMissing.length ? 'failed' : 'passed'}><i>{targetReleaseMissing.length ? '×' : '✓'}</i><span><strong>Target Releases</strong><small>{targetReleaseMissing.length ? `${targetReleaseMissing.length} missing` : 'All required releases set'}</small></span></div>
+              </section>
+
+              <section className="tm-completion-defects">
+                <header>
+                  <div><h4>Linked defects</h4><p>Each defect is counted once. Execution impact shows every testcase result affected by that defect.</p></div>
+                  <div className="tm-completion-filters" role="group" aria-label="Defect filters">
+                    <button type="button" className={completionFilter === 'all' ? 'active' : ''} onClick={() => setDefectFilter('all')}>All <b>{completionDefects.length}</b></button>
+                    <button type="button" className={completionFilter === 'blocker' ? 'active' : ''} onClick={() => setDefectFilter('blocker')}>Critical/High <b>{severeBlockers.length}</b></button>
+                    <button type="button" className={completionFilter === 'target' ? 'active' : ''} onClick={() => setDefectFilter('target')}>Missing target <b>{targetReleaseMissing.length}</b></button>
+                  </div>
+                </header>
+                <div className="tm-completion-table-wrap">
+                  <table>
+                    <thead><tr><th>Defect</th><th>Severity</th><th>Defect status</th><th>Execution impact</th><th>Target Release</th><th>Required action</th><th><span className="sr-only">Open</span></th></tr></thead>
+                    <tbody>
+                      {visibleCompletionDefects.map((defect) => {
+                        const impact = defectExecutionImpact(defect)
+                        return <tr key={defect.id}>
+                          <td><strong>{defect.defect_key}</strong><small>{defect.title}</small></td>
+                          <td><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span></td>
+                          <td><Badge status={defect.status} /></td>
+                          <td className="tm-execution-impact" title={impact.details}><strong>{impact.count} testcase{impact.count === 1 ? '' : 's'}</strong><small>{impact.summary}</small></td>
+                          <td className={!defect.target_release && missingTargetDefects.has(defect.id) ? 'missing' : ''}>{defect.target_release || (missingTargetDefects.has(defect.id) ? 'Not set' : '—')}</td>
+                          <td>{requiredDefectAction(defect)}</td>
+                          <td><button type="button" className="link-btn" onClick={() => setSelectedCompletionDefect(defect.defect_key)}>Open</button></td>
+                        </tr>
+                      })}
+                      {!visibleCompletionDefects.length && <tr><td colSpan={7} className="tm-completion-empty">No defects match this filter.</td></tr>}
+                    </tbody>
+                  </table>
+                  <footer>
+                    <span>Showing {firstVisibleDefect}–{lastVisibleDefect} of {filteredCompletionDefects.length} defects</span>
+                    <div><button type="button" disabled={safeCompletionPage <= 1} onClick={() => setCompletionPage((page) => Math.max(1, page - 1))}>‹ Previous</button><span>Page {safeCompletionPage} of {completionTotalPages}</span><button type="button" disabled={safeCompletionPage >= completionTotalPages} onClick={() => setCompletionPage((page) => Math.min(completionTotalPages, page + 1))}>Next ›</button></div>
+                  </footer>
+                </div>
+              </section>
             </>}
-            <Field label={residualDefects.length ? 'Completion Justification *' : 'Completion Remarks (optional)'}>
-              <textarea rows={3} required={residualDefects.length > 0} value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder="Record the completion decision and any accepted residual risk." />
-            </Field>
+            {(residualDefects.length === 0 || canCompleteWithResidualRisk) && (
+              <Field label={residualDefects.length ? 'Residual Risk Justification *' : 'Completion Remarks (optional)'}>
+                <textarea rows={3} required={residualDefects.length > 0} value={remarks} onChange={(event) => setRemarks(event.target.value)} placeholder={residualDefects.length ? 'Explain why completion is accepted with the remaining Medium/Low defects.' : 'Record any completion remarks.'} />
+              </Field>
+            )}
             <ErrorText error={dialogError} />
-            <div className="modal-actions"><button type="button" className="btn btn-primary" disabled={busy || loadingCompletion || notExecutedCount > 0 || severeBlockers.length > 0 || (residualDefects.length > 0 && !remarks.trim())} onClick={() => transition('Completed', '', remarks.trim())}>{busy ? 'Completing…' : 'Complete Execution'}</button><button type="button" className="btn" disabled={busy} onClick={() => setShowComplete(false)}>Cancel</button></div>
+            <div className="tm-completion-actions">
+              <span>Completion becomes available only after every prerequisite passes.</span>
+              <div>
+              <button type="button" className="btn" disabled={busy} onClick={() => setShowComplete(false)}>Close</button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy || loadingCompletion || notExecutedCount > 0 || severeBlockers.length > 0 || deferredMissingTarget.length > 0 || residualMissingTarget.length > 0 || (residualDefects.length > 0 && (!canCompleteWithResidualRisk || !remarks.trim()))}
+                onClick={() => transition('Completed', '', remarks.trim())}
+              >
+                {busy ? 'Completing…' : 'Complete cycle'}
+              </button>
+              </div>
+            </div>
           </div>
         </Modal>
       )}
+      {selectedCompletionDefect && <React.Suspense fallback={null}><EmbeddedDefectDetail defectKey={selectedCompletionDefect} onClose={() => setSelectedCompletionDefect(null)} /></React.Suspense>}
     </>
   )
 }
@@ -548,6 +701,9 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
   const [candidateLoading, setCandidateLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [priority, setPriority] = useState('')
+  const [testType, setTestType] = useState('')
+  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest')
   // Each entry is the cursor used to load that page. Keeping the small
   // history client-side gives Previous/Next navigation without OFFSET.
   const [cursorStack, setCursorStack] = useState<Array<number | null>>([null])
@@ -570,7 +726,11 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
     setSelectAllMatching(false)
     setSelected(new Set())
     setExcluded(new Set())
-  }, [debouncedSearch])
+  }, [debouncedSearch, priority, testType])
+
+  // Sorting changes presentation only, so keep explicit selections while
+  // restarting cursor pagination from the beginning of the new order.
+  useEffect(() => { setCursorStack([null]) }, [sortOrder])
 
   const cursor = cursorStack[cursorStack.length - 1]
   const pageNumber = cursorStack.length
@@ -579,12 +739,15 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
     const qs = new URLSearchParams({ page_size: String(pageSize) })
     if (cursor != null) qs.set('cursor', String(cursor))
     if (debouncedSearch) qs.set('search', debouncedSearch)
+    if (priority) qs.set('priority', priority)
+    if (testType) qs.set('test_type', testType)
+    qs.set('sort_order', sortOrder)
     setCandidateLoading(true)
     api.get<TestCaseCandidatePage>(`/api/test-execution/cycles/${cycleId}/candidate-test-cases?${qs.toString()}`)
       .then((result) => { if (requestId === requestRef.current) { setCandidatePage(result); setError(null) } })
       .catch((err) => { if (requestId === requestRef.current) setError(err) })
       .finally(() => { if (requestId === requestRef.current) setCandidateLoading(false) })
-  }, [cycleId, cursor, debouncedSearch])
+  }, [cycleId, cursor, debouncedSearch, priority, testType, sortOrder])
 
   const candidates = candidatePage.items
   const selectedCount = selectAllMatching ? Math.max(0, candidatePage.total - excluded.size) : selected.size
@@ -655,6 +818,8 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
         test_case_ids: selectAllMatching ? [] : Array.from(selected),
         excluded_ids: selectAllMatching ? Array.from(excluded) : [],
         search: debouncedSearch || null,
+        priority: priority || null,
+        test_type: testType || null,
         assigned_to_id: assignedTo ? Number(assignedTo) : null,
       }, 180_000)
       while (result.job_id && result.status !== 'COMPLETED') {
@@ -685,9 +850,21 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
         </div>
       )}
       {canAssign && <div className="tm-add-cases-runner"><div><strong>Assign selected testcases</strong><span>Optional—assign all selected cases to one runner now, then reassign individual rows later.</span></div><UserAssignSelect value={assignedTo} onChange={setAssignedTo} users={runnerCandidates} placeholder="Leave unassigned…" disabled={busy} /></div>}
-      <Field label="Search approved testcases">
-        <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Test Case ID, scenario, module or type…" disabled={busy} />
-      </Field>
+      <div className="tm-add-cases-discovery">
+        <Field label="Find approved testcases">
+          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Test Case ID, scenario, module or type…" disabled={busy} />
+        </Field>
+        <Field label="Test Type">
+          <select value={testType} onChange={(event) => setTestType(event.target.value)} disabled={busy}><option value="">All types</option>{TEST_CASE_TYPES.map((type) => <option key={type}>{type}</option>)}</select>
+        </Field>
+        <Field label="Priority">
+          <select value={priority} onChange={(event) => setPriority(event.target.value)} disabled={busy}><option value="">All priorities</option>{TEST_CASE_PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>
+        </Field>
+        <Field label="Sort By">
+          <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as 'newest' | 'oldest')} disabled={busy}><option value="newest">Recently added first</option><option value="oldest">Oldest added first</option></select>
+        </Field>
+      </div>
+      <div className="tm-add-cases-discovery-note"><span>Newest testcases are shown first by default.</span>{(search || priority || testType || sortOrder !== 'newest') && <button type="button" className="link-btn" disabled={busy} onClick={() => { setSearch(''); setPriority(''); setTestType(''); setSortOrder('newest') }}>Reset filters</button>}</div>
       {candidateLoading ? (
         <p className="muted small">Loading approved testcases…</p>
       ) : candidates.length === 0 ? (
@@ -881,7 +1058,7 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
       </div>, document.body)}
       {linkingDefect && latestRun && <form className="tm-inline-defect-panel" onSubmit={linkDefect}>
         <strong>Link to latest {latestRun.status.toLowerCase()} run</strong><small>Attempt #{latestRun.attempt_no} only</small>
-        <input required value={defectKey} onChange={(event) => setDefectKey(event.target.value)} placeholder="Defect key, e.g. JIRA-142" />
+        <input required value={defectKey} onChange={(event) => setDefectKey(event.target.value)} placeholder="External defect reference" />
         <input type="url" value={defectUrl} onChange={(event) => setDefectUrl(event.target.value)} placeholder="Defect URL (optional)" />
         <div className="tm-inline-run-actions"><button type="button" className="btn btn-sm" onClick={() => setLinkingDefect(false)}>Cancel</button><button className="btn btn-sm btn-danger" disabled={busy}>{busy ? 'Linking…' : 'Link external'}</button></div>
       </form>}
@@ -905,12 +1082,23 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
     // governed defect", linked or not. Picking an already-linked one adds
     // this execution as an ADDITIONAL trace (see routers/defects.py's
     // _link_additional_execution) without moving its original link.
-    // page_size=100 is a practical ceiling for this picker, same compromise
-    // as Defects.tsx's own duplicate-defect candidate pool.
-    const openStatuses = ['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+    // Load every page so an older governed defect does not disappear merely
+    // because more than 100 open records exist. Triaged is actionable and
+    // must be included as well.
+    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
     const qs = new URLSearchParams({ page_size: '100' })
     openStatuses.forEach((s) => qs.append('status', s))
-    api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}`).then((p) => setDefects(p.items)).catch(setError)
+    let active = true
+    async function loadCandidates() {
+      const first = await api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=1`)
+      const remaining = first.total_pages > 1
+        ? await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) =>
+          api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=${index + 2}`)))
+        : []
+      if (active) setDefects([first, ...remaining].flatMap((page) => page.items))
+    }
+    loadCandidates().catch((reason) => { if (active) setError(reason) })
+    return () => { active = false }
   }, [])
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -1002,7 +1190,12 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
   readOnly: boolean
   onChanged: (defects: TestRunDefectOut[]) => void
 }) {
+  const navigate = useNavigate()
   const [adding, setAdding] = useState(false)
+  const [linkMode, setLinkMode] = useState<'internal' | 'external' | null>(null)
+  const [internalDefects, setInternalDefects] = useState<DefectListOut[]>([])
+  const [internalDefectId, setInternalDefectId] = useState('')
+  const [loadingInternal, setLoadingInternal] = useState(false)
   const [key, setKey] = useState('')
   const [url, setUrl] = useState('')
   const [title, setTitle] = useState('')
@@ -1011,6 +1204,28 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [pendingRemove, setPendingRemove] = useState<TestRunDefectOut | null>(null)
+
+  useEffect(() => {
+    if (!adding || linkMode !== 'internal' || internalDefects.length) return
+    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+    const qs = new URLSearchParams({ page_size: '100' })
+    openStatuses.forEach((status) => qs.append('status', status))
+    let active = true
+    setLoadingInternal(true)
+    async function loadInternalDefects() {
+      const first = await api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=1`)
+      const remaining = first.total_pages > 1
+        ? await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) =>
+          api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=${index + 2}`)))
+        : []
+      if (active) {
+        const alreadyLinked = new Set((run.defects || []).map((defect) => defect.defect_key))
+        setInternalDefects([first, ...remaining].flatMap((page) => page.items).filter((defect) => !alreadyLinked.has(defect.defect_key)))
+      }
+    }
+    loadInternalDefects().catch((reason) => { if (active) setError(reason) }).finally(() => { if (active) setLoadingInternal(false) })
+    return () => { active = false }
+  }, [adding, internalDefects.length, linkMode, run.defects])
 
   async function link(e: React.FormEvent) {
     e.preventDefault()
@@ -1022,8 +1237,28 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
         defect_status: defectStatus || null, notes: notes.trim() || null,
       })
       onChanged([...(run.defects || []), created])
-      setKey(''); setUrl(''); setTitle(''); setDefectStatus('Open'); setNotes(''); setAdding(false)
+      setKey(''); setUrl(''); setTitle(''); setDefectStatus('Open'); setNotes(''); setAdding(false); setLinkMode(null)
     } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  async function linkInternal(e: React.FormEvent) {
+    e.preventDefault()
+    if (!internalDefectId) { setError(new Error('Select an internal defect')); return }
+    setBusy(true); setError(null)
+    try {
+      await api.post(`/api/defects/${internalDefectId}/link-execution`, { execution_id: executionId })
+      const runs = await api.get<TestExecutionRunOut[]>(`/api/test-execution/executions/${executionId}/runs`)
+      const refreshedRun = runs.find((item) => item.id === run.id)
+      onChanged(refreshedRun?.defects || run.defects || [])
+      setInternalDefectId(''); setAdding(false); setLinkMode(null)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  function closeLinker() {
+    setAdding(false)
+    setLinkMode(null)
+    setInternalDefectId('')
+    setError(null)
   }
 
   async function unlink() {
@@ -1038,12 +1273,26 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
 
   return (
     <div className="tm-defect-links">
-      <div className="tm-defect-links-head"><strong>Linked Defects</strong><span>{run.defects?.length || 0}</span>{!readOnly && <button type="button" className="btn btn-sm" onClick={() => setAdding((value) => !value)}>+ Link defect</button>}</div>
+      <div className="tm-defect-links-head"><strong>Linked Defects</strong><span>{run.defects?.length || 0}</span>{!readOnly && <button type="button" className="btn btn-sm" onClick={() => { setAdding((value) => !value); setLinkMode(null); setError(null) }}>+ Link defect</button>}</div>
       {(run.defects || []).length === 0 && <p className="muted small">No defects linked to this attempt.</p>}
       {(run.defects || []).map((defect) => (
         <div className="tm-defect-link" key={defect.id}>
           <div>
-            {defect.defect_url ? <a href={defect.defect_url} target="_blank" rel="noreferrer">{defect.defect_key}</a> : <strong>{defect.defect_key}</strong>}
+            {defect.defect_url?.startsWith('/defects') ? (
+              <a
+                href={defect.defect_url}
+                onClick={(event) => {
+                  event.preventDefault()
+                  navigate(defect.defect_url!)
+                }}
+              >
+                {defect.defect_key}
+              </a>
+            ) : defect.defect_url ? (
+              <a href={defect.defect_url} target="_blank" rel="noreferrer">{defect.defect_key}</a>
+            ) : (
+              <strong>{defect.defect_key}</strong>
+            )}
             <span>{defect.title || 'No title provided'}</span>
             {defect.notes && <small>{defect.notes}</small>}
           </div>
@@ -1051,12 +1300,28 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
           {!readOnly && <button type="button" className="tm-defect-unlink" title="Unlink defect" onClick={() => setPendingRemove(defect)}>×</button>}
         </div>
       ))}
-      {adding && <form className="tm-defect-form" onSubmit={link}>
-        <div className="grid grid-2"><Field label="Defect Key *"><input required value={key} onChange={(e) => setKey(e.target.value)} placeholder="e.g. JIRA-142" /></Field><Field label="Defect Status"><select value={defectStatus} onChange={(e) => setDefectStatus(e.target.value)}><option>Open</option><option>In Progress</option><option>Resolved</option><option>Closed</option><option>Reopened</option></select></Field></div>
-        <Field label="Defect URL"><input type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://jira.example/browse/JIRA-142" /></Field>
-        <Field label="Title"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Short defect summary" /></Field>
+      {adding && !linkMode && <div className="tm-defect-form tm-defect-link-choice">
+        <strong>Choose defect source</strong>
+        <p>Select an existing governed defect in QualityOps or add a reference from an external defect-management system.</p>
+        <div>
+          <button type="button" onClick={() => setLinkMode('internal')}><strong>Internal defect</strong><span>Link an existing governed QualityOps defect</span></button>
+          <button type="button" onClick={() => setLinkMode('external')}><strong>External reference</strong><span>Add a defect maintained outside QualityOps</span></button>
+        </div>
+        <button type="button" className="btn btn-sm" onClick={closeLinker}>Cancel</button>
+      </div>}
+      {adding && linkMode === 'internal' && <form className="tm-defect-form" onSubmit={linkInternal}>
+        <div className="tm-defect-form-heading"><div><strong>Link internal defect</strong><small>The selected governed defect will retain its lifecycle and ownership.</small></div><button type="button" className="link-btn" onClick={() => setLinkMode(null)}>Change source</button></div>
+        <Field label="Internal Defect *"><SearchableSelect value={internalDefectId} onChange={setInternalDefectId} placeholder={loadingInternal ? 'Loading defects…' : 'Select an open defect…'} disabled={loadingInternal} options={internalDefects.map((defect) => ({ value: String(defect.id), label: `${defect.defect_key} · ${defect.title} · ${defect.status}` }))} /></Field>
+        {!loadingInternal && !internalDefects.length && <p className="muted small">No open internal defects are available.</p>}
+        <div className="tm-defect-form-actions"><button className="btn btn-primary btn-sm" disabled={busy || loadingInternal || !internalDefectId}>{busy ? 'Linking…' : 'Link internal defect'}</button><button type="button" className="btn btn-sm" onClick={closeLinker}>Cancel</button></div>
+      </form>}
+      {adding && linkMode === 'external' && <form className="tm-defect-form" onSubmit={link}>
+        <div className="tm-defect-form-heading"><div><strong>Link external reference</strong><small>Use the identifier and URL from the external defect-management system.</small></div><button type="button" className="link-btn" onClick={() => setLinkMode(null)}>Change source</button></div>
+        <div className="grid grid-2"><Field label="External Defect Reference *"><input required value={key} onChange={(e) => setKey(e.target.value)} placeholder="Enter external defect reference" /></Field><Field label="External Defect Status"><select value={defectStatus} onChange={(e) => setDefectStatus(e.target.value)}><option>Open</option><option>In Progress</option><option>Resolved</option><option>Closed</option><option>Reopened</option></select></Field></div>
+        <Field label="External Defect URL"><input type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://defects.example.com/item/12345" /></Field>
+        <Field label="Title"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Brief defect summary" /></Field>
         <Field label="Notes"><textarea value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
-        <div className="tm-defect-form-actions"><button className="btn btn-primary btn-sm" disabled={busy}>Link defect</button><button type="button" className="btn btn-sm" onClick={() => setAdding(false)}>Cancel</button></div>
+        <div className="tm-defect-form-actions"><button className="btn btn-primary btn-sm" disabled={busy}>{busy ? 'Linking…' : 'Link external reference'}</button><button type="button" className="btn btn-sm" onClick={closeLinker}>Cancel</button></div>
       </form>}
       <ErrorText error={error} title="Defect linking failed" />
       {pendingRemove && <ConfirmModal title="Unlink defect?" message={<p>Remove the link to <strong>{pendingRemove.defect_key}</strong> from Attempt #{run.attempt_no}? The defect itself will not be deleted.</p>} confirmLabel="Unlink defect" cancelLabel="Keep link" destructive busy={busy} onConfirm={unlink} onCancel={() => setPendingRemove(null)} />}
@@ -1400,8 +1665,8 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
                   : 'Optional · More defects can be linked from Attempt History'}
               </span>
             </div>
-            <div className="grid grid-2"><Field label="Defect Key"><input value={defectId} onChange={(e) => setDefectId(e.target.value)} placeholder="e.g. JIRA-142" /></Field><Field label="Defect Status"><select value={defectStatus} onChange={(e) => setDefectStatus(e.target.value)}><option>Open</option><option>In Progress</option><option>Resolved</option><option>Closed</option><option>Reopened</option></select></Field></div>
-            <Field label="Defect URL"><input type="url" value={defectUrl} onChange={(e) => setDefectUrl(e.target.value)} placeholder="https://jira.example/browse/JIRA-142" /></Field>
+            <div className="grid grid-2"><Field label="Defect Reference"><input value={defectId} onChange={(e) => setDefectId(e.target.value)} placeholder="Enter defect reference" /></Field><Field label="Defect Status"><select value={defectStatus} onChange={(e) => setDefectStatus(e.target.value)}><option>Open</option><option>In Progress</option><option>Resolved</option><option>Closed</option><option>Reopened</option></select></Field></div>
+            <Field label="Defect URL"><input type="url" value={defectUrl} onChange={(e) => setDefectUrl(e.target.value)} placeholder="https://defects.example.com/item/12345" /></Field>
             <Field label="Defect Title"><input value={defectTitle} onChange={(e) => setDefectTitle(e.target.value)} placeholder="Short defect summary" /></Field>
             <Field label="Defect Notes"><textarea value={defectNotes} onChange={(e) => setDefectNotes(e.target.value)} /></Field>
           </div>}
@@ -1551,8 +1816,8 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
           </Field>
           {['Fail', 'Blocked'].includes(status) && <div className="tm-new-attempt-defect">
             <div className="tm-new-attempt-defect-head"><strong>Link one shared defect</strong><span>Optional · Added to every selected attempt</span></div>
-            <div className="grid grid-2"><Field label="Defect Key"><input value={defectId} onChange={(event) => setDefectId(event.target.value)} placeholder="e.g. JIRA-142" /></Field><Field label="Defect Status"><select value={defectStatus} onChange={(event) => setDefectStatus(event.target.value)}><option>Open</option><option>In Progress</option><option>Resolved</option><option>Closed</option><option>Reopened</option></select></Field></div>
-            <Field label="Defect URL"><input type="url" value={defectUrl} onChange={(event) => setDefectUrl(event.target.value)} placeholder="https://jira.example/browse/JIRA-142" /></Field>
+            <div className="grid grid-2"><Field label="Defect Reference"><input value={defectId} onChange={(event) => setDefectId(event.target.value)} placeholder="Enter defect reference" /></Field><Field label="Defect Status"><select value={defectStatus} onChange={(event) => setDefectStatus(event.target.value)}><option>Open</option><option>In Progress</option><option>Resolved</option><option>Closed</option><option>Reopened</option></select></Field></div>
+            <Field label="Defect URL"><input type="url" value={defectUrl} onChange={(event) => setDefectUrl(event.target.value)} placeholder="https://defects.example.com/item/12345" /></Field>
             <Field label="Defect Title"><input maxLength={255} value={defectTitle} onChange={(event) => setDefectTitle(event.target.value)} placeholder="Short defect summary" /></Field>
             <Field label="Defect Notes"><textarea maxLength={5000} value={defectNotes} onChange={(event) => setDefectNotes(event.target.value)} /></Field>
           </div>}
@@ -1845,16 +2110,13 @@ export default function TestExecution() {
   const [cycleSidebarCollapsed, setCycleSidebarCollapsed] = useState(false)
   const [users, setUsers] = useState<UserOut[]>([])
   const [exportingCycle, setExportingCycle] = useState(false)
-  const [unlinkingCycleLink, setUnlinkingCycleLink] = useState(false)
-  const [pendingUnlinkCycleRequest, setPendingUnlinkCycleRequest] = useState(false)
-  const [unlinkedCycleRequestNotice, setUnlinkedCycleRequestNotice] = useState<string | null>(null)
   const [qaRequests, setQaRequests] = useState<QARequestListOut[]>([])
   const [linkingExistingExecution, setLinkingExistingExecution] = useState<TestExecutionOut | null>(null)
   // 2026-08 -- reported directly: "once test cycle completed, then test
   // cycle is locked to edit. that is okay, but give option to link QA
   // request." A Completed cycle stays frozen for everything else (Edit
   // Cycle stays hidden below), but the QA Request it's filed against can
-  // still be set/changed/cleared afterward for traceability -- see
+  // still be replaced afterward for traceability -- see
   // LinkCycleRequestModal, a narrower standalone form for just that one
   // field, and the matching backend allowance in update_cycle.
   const [linkingCycleRequest, setLinkingCycleRequest] = useState<TestCycleOut | null>(null)
@@ -1867,7 +2129,11 @@ export default function TestExecution() {
       const p = page.items
       setProjects(p)
       const requested = Number(searchParams.get('project'))
-      if (p.length && !projectId) setProjectId(p.some((x) => x.id === requested) ? requested : p[0].id)
+      if (requested && p.some((project) => project.id === requested)) {
+        setProjectId((current) => current === requested ? current : requested)
+      } else if (p.length) {
+        setProjectId((current) => current || p[0].id)
+      }
     }).catch(setError)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams])
@@ -1926,6 +2192,12 @@ export default function TestExecution() {
     } catch (err) { setError(err) }
   }, [])
   const cycleFolderParam = selectedCycleFolder === '' ? undefined : selectedCycleFolder === CYCLE_UNFILED ? 'unfiled' : String(selectedCycleFolder)
+  // A direct result link can target a cycle outside the folder currently
+  // expanded in the navigator. Switch to All cycles before resolving it so
+  // the requested cycle is guaranteed to be present in loadCycles.
+  useEffect(() => {
+    if (searchParams.get('execution') && selectedCycleFolder !== '') setSelectedCycleFolder('')
+  }, [searchParams, selectedCycleFolder])
   useEffect(() => {
     if (projectId) loadCycleFolders(projectId)
     else { setCycleFolders([]); setCycleFolderTotals({ unfiled_count: 0, total: 0 }) }
@@ -1972,13 +2244,27 @@ export default function TestExecution() {
   useEffect(() => {
     const requestedExecution = Number(searchParams.get('execution'))
     if (!requestedExecution) return
+    const requestedProject = Number(searchParams.get('project'))
+    const requestedCycle = Number(searchParams.get('cycle'))
+    // Wait for the workspace selectors to match the deep link before opening
+    // Record Result. This prevents a result from appearing over whichever
+    // project/cycle happened to be selected previously.
+    if (requestedProject && projectId !== requestedProject) return
+    if (requestedCycle && Number(cycleId) !== requestedCycle) return
     let active = true
     api.get<TestExecutionOut>(`/api/test-execution/executions/${requestedExecution}`)
-      .then((target) => { if (active) setEditingExecution(target) })
-      .catch((err) => { if (active) setError(err) })
-    setSearchParams((params) => { params.delete('execution'); return params }, { replace: true })
+      .then((target) => {
+        if (!active) return
+        setEditingExecution(target)
+        setSearchParams((params) => { params.delete('execution'); return params }, { replace: true })
+      })
+      .catch((err) => {
+        if (!active) return
+        setError(err)
+        setSearchParams((params) => { params.delete('execution'); return params }, { replace: true })
+      })
     return () => { active = false }
-  }, [searchParams, setSearchParams])
+  }, [searchParams, setSearchParams, projectId, cycleId])
   // Selection is only ever meaningful against whatever's currently loaded --
   // same reasoning as Test Repository's own equivalent effect.
   useEffect(() => {
@@ -2146,27 +2432,6 @@ export default function TestExecution() {
     } catch (err) { setError(err) } finally { setExportingCycle(false) }
   }
 
-  // 2026-08 -- reported directly: unlinking a cycle's request "sometime not
-  // working, opening as javascript alert window" (the browser's own
-  // window.confirm, which some browsers/policies silently block or dismiss).
-  // Swapped for the same ConfirmModal pop-up used everywhere else in this
-  // page (e.g. cycleToDelete below), plus a follow-up InfoModal acknowledging
-  // success -- previously there was no feedback at all once the link
-  // silently disappeared from the sidebar.
-  async function unlinkCycleRequest() {
-    if (!selectedCycle?.linked_request_key) return
-    const requestKey = selectedCycle.linked_request_key
-    const cycleKey = selectedCycle.cycle_key
-    setUnlinkingCycleLink(true); setError(null)
-    try {
-      const saved = await api.del<TestCycleOut>(`/api/test-execution/cycles/${selectedCycle.id}/request-link`)
-      setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle))
-      api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${selectedCycle.id}`).then(setCycleActivity).catch(() => undefined)
-      setPendingUnlinkCycleRequest(false)
-      setUnlinkedCycleRequestNotice(`${requestKey} has been unlinked from ${cycleKey}.`)
-    } catch (err) { setError(err); setPendingUnlinkCycleRequest(false) } finally { setUnlinkingCycleLink(false) }
-  }
-
   // Reported directly: "MAKE child hierarchy based, more easier to
   // visulaize" -- `cycles` (already scoped to whichever folder/pseudo-
   // folder is currently selected -- see loadCycles/cycleFolderParam above)
@@ -2322,8 +2587,8 @@ export default function TestExecution() {
                     {selectedCycle?.linked_request_key && (
                       <div className="tm-cycle-request-link">
                         <b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>
-                        {canExec && projectIsActive && !cycleIsLocked && <button type="button" disabled={unlinkingCycleLink} onClick={() => setPendingUnlinkCycleRequest(true)}>{unlinkingCycleLink ? 'Unlinking…' : 'Unlink'}</button>}
-                        {canExec && projectIsActive && selectedCycle.status === 'Completed' && <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Change link</button>}
+                        {selectedCycle.linked_request_type === 'Functional' && !selectedCycle.linked_request_change_allowed && <span className="badge badge-gray">Link locked</span>}
+                        {canExec && projectIsActive && selectedCycle.status === 'Completed' && selectedCycle.linked_request_change_allowed && <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Change link</button>}
                       </div>
                     )}
                     {!selectedCycle?.linked_request_key && canExec && projectIsActive && selectedCycle?.status === 'Completed' && (
@@ -2382,7 +2647,7 @@ export default function TestExecution() {
                 <button className={!resultFilter ? 'active' : ''} onClick={() => setResultFilter('')}>All <span>{cycleExecutionTotal}</span></button>
                 {TEST_EXECUTION_STATUSES.map((s) => <button key={s} className={resultFilter === s ? 'active' : ''} onClick={() => setResultFilter(s)}>{s} <span>{executionSummary?.status_counts[s] || 0}</span></button>)}
               </div>
-              {selectedCycle && <LinkedDefects query={`cycle_id=${selectedCycle.id}`} title="Cycle Defects" returnTo={`/test-execution?project=${projectId}&cycle=${selectedCycle.id}`} />}
+              {selectedCycle && <LinkedDefects query={`cycle_id=${selectedCycle.id}`} title="Cycle Defects" />}
               {canExec && projectIsActive && !cycleIsLocked && (
                 <div className="tm-bulk-bar" role="region" aria-label={selectedExecutionIds.size > 1 ? 'Bulk testcase lifecycle actions' : 'Testcase lifecycle actions'}>
                   <strong>{selectedExecutionIds.size ? `${selectedExecutionIds.size} testcase${selectedExecutionIds.size !== 1 ? 's' : ''} selected` : 'Select one or more rows to assign, execute, or remove'}</strong>
@@ -2471,8 +2736,8 @@ export default function TestExecution() {
       )}
       {showNewCycle && projectId && projectIsActive && (
         <CycleModal
-          projectId={projectId}
-          requests={qaRequests}
+          project={selectedProject!}
+          requests={qaRequests.filter((request) => !selectedProject?.application_master_id || request.application_master_id === selectedProject.application_master_id)}
           users={users}
           folders={cycleFolders}
           defaultFolderId={typeof selectedCycleFolder === 'number' ? selectedCycleFolder : ''}
@@ -2499,8 +2764,8 @@ export default function TestExecution() {
       {linkingExistingExecution && cycleId && <LinkExistingDefectModal execution={linkingExistingExecution} onClose={() => setLinkingExistingExecution(null)} onLinked={() => { refreshExecutions(); setLinkingExistingExecution(null) }} />}
       {editingCycle && projectId && projectIsActive && (
         <CycleModal
-          projectId={projectId}
-          requests={qaRequests}
+          project={selectedProject!}
+          requests={qaRequests.filter((request) => !selectedProject?.application_master_id || request.application_master_id === selectedProject.application_master_id)}
           users={users}
           folders={cycleFolders}
           defaultFolderId={typeof selectedCycleFolder === 'number' ? selectedCycleFolder : ''}
@@ -2560,7 +2825,7 @@ export default function TestExecution() {
       {linkingCycleRequest && projectIsActive && (
         <LinkCycleRequestModal
           cycle={linkingCycleRequest}
-          requests={qaRequests}
+          requests={qaRequests.filter((request) => !selectedProject?.application_master_id || request.application_master_id === selectedProject.application_master_id)}
           onClose={() => setLinkingCycleRequest(null)}
           onSaved={(saved) => { setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle)); setLinkingCycleRequest(null) }}
         />
@@ -2654,19 +2919,6 @@ export default function TestExecution() {
           confirmLabel="Delete cycle" cancelLabel="Keep cycle" destructive busy={deletingCycle}
           onConfirm={deleteCycle} onCancel={() => setCycleToDelete(null)}
         />
-      )}
-      {pendingUnlinkCycleRequest && selectedCycle?.linked_request_key && (
-        <ConfirmModal
-          title="Unlink QA Request?"
-          message={<p>Unlink <strong>{selectedCycle.linked_request_key}</strong> from <strong>{selectedCycle.cycle_key}</strong>? Test cases and execution history will remain unchanged.</p>}
-          confirmLabel="Unlink" cancelLabel="Cancel" destructive busy={unlinkingCycleLink}
-          onConfirm={unlinkCycleRequest} onCancel={() => setPendingUnlinkCycleRequest(false)}
-        />
-      )}
-      {unlinkedCycleRequestNotice && (
-        <InfoModal title="Request unlinked" onClose={() => setUnlinkedCycleRequestNotice(null)}>
-          <p>{unlinkedCycleRequestNotice}</p>
-        </InfoModal>
       )}
     </div>
   )

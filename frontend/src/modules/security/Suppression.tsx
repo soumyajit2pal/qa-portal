@@ -9,6 +9,7 @@ import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_TERMINAL_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole, hasDepartment } from '../../constants'
 import { SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
+import InfoModal from '../../components/InfoModal'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -106,7 +107,7 @@ function RequestIdSearch({ requests, selected, onSelect, onClear }: {
   )
 }
 
-function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
+export function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
   onClose: () => void; onCreated: (s: SuppressionOut) => void
   // 2026-08 "Findings Validation" requirement doc, section 4.4 Action
   // Buttons -- "Initiate Suppression Request" from a SAST/DAST request's own
@@ -121,6 +122,11 @@ function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
   const [dastRequests, setDastRequests] = useState<DASTListOut[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
+  // Keep the shared creation flow open after the POST succeeds and replace
+  // the form with the same acknowledgement modal used by QA Requests. This
+  // applies to all three entry points (Suppression register, SAST Findings,
+  // and DAST Findings) without each parent having to reproduce the notice.
+  const [created, setCreated] = useState<SuppressionOut | null>(null)
   function set<K extends keyof SuppressionForm>(k: K, v: SuppressionForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   useEffect(() => {
@@ -247,8 +253,29 @@ function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
     if (!selectedRef) { setError(new Error('Select a SAST/DAST Request ID above before submitting.')); return }
     setBusy(true)
     setError(null)
-    try { onCreated(await api.post<SuppressionOut>('/api/suppressions', form)) }
+    try { setCreated(await api.post<SuppressionOut>('/api/suppressions', form)) }
     catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  // Creation deliberately produces a Draft; calling it "raised" here would
+  // imply that the approval workflow has already started. The acknowledgement
+  // makes the saved state, linked request, and required next action explicit.
+  if (created) {
+    const linkedRequestId = created.linked_request?.request_id || selectedRef?.request_id || '—'
+    const findingCount = created.items.length
+    return (
+      <InfoModal title="Suppression Request Saved as Draft" onClose={() => onCreated(created)}>
+        <p style={{ marginTop: -4 }}>
+          <strong>{created.suppression_id}</strong> has been created and linked to{' '}
+          <strong>{linkedRequestId}</strong> for <strong>{created.application_name}</strong>.
+        </p>
+        <p className="muted small">
+          {findingCount} {findingCount === 1 ? 'finding is' : 'findings are'} included. This request is still a{' '}
+          <strong>Draft</strong> and has not entered the approval workflow yet.
+          Open the suppression request and select <strong>Submit for SM Approval</strong> when it is ready.
+        </p>
+      </InfoModal>
+    )
   }
 
   return (
@@ -274,9 +301,12 @@ function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
             <div className="form-section-title">Application Details</div>
             <div className="form-row">
               <Field label="Scan Type *">
-                <select required value={form.scan_type} disabled>
-                  <option value="SAST">SAST</option><option value="DAST">DAST</option>
-                </select>
+                <div className="system-select">
+                  <select required value={form.scan_type} disabled>
+                    <option value="SAST">SAST</option><option value="DAST">DAST</option>
+                  </select>
+                  <span aria-hidden="true">⌄</span>
+                </div>
               </Field>
               <Field label="Application Name *">
                 <input required value={form.application_name} disabled />
@@ -298,11 +328,14 @@ function NewSuppressionModal({ onClose, onCreated, initialRequest }: {
             {form.items.map((item, idx) => (
               <div key={idx} className="card" style={{ padding: 14, marginBottom: 12 }}>
                 <div className="form-row" style={{ marginBottom: 8 }}>
-                  <Field label="Issue ID *"><input required value={item.issue_id} onChange={(e) => setItem(idx, 'issue_id', e.target.value)} /></Field>
+                  <Field label="Issue Group *"><input required value={item.issue_id} onChange={(e) => setItem(idx, 'issue_id', e.target.value)} /></Field>
                   <Field label="Severity *">
-                    <select required value={item.severity} onChange={(e) => setItem(idx, 'severity', e.target.value)}>
-                      {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
-                    </select>
+                    <div className="system-select">
+                      <select required value={item.severity} onChange={(e) => setItem(idx, 'severity', e.target.value)}>
+                        {SEVERITIES.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                      <span aria-hidden="true">⌄</span>
+                    </div>
                   </Field>
                 </div>
                 <Field label="Issue Description *"><textarea required value={item.description} onChange={(e) => setItem(idx, 'description', e.target.value)} /></Field>
@@ -417,6 +450,110 @@ function RelinkSuppressionModal({ sup, onClose, onRelinked }: {
   )
 }
 
+function EditSuppressionModal({ sup, onClose, onSaved }: {
+  sup: SuppressionOut
+  onClose: () => void
+  onSaved: (s: SuppressionOut) => void
+}) {
+  const [form, setForm] = useState<SuppressionForm>(() => ({
+    scan_type: sup.scan_type,
+    sast_request_id: sup.sast_request_id ?? null,
+    dast_request_id: sup.dast_request_id ?? null,
+    application_name: sup.application_name,
+    department: sup.department || '',
+    application_owner: sup.application_owner || '',
+    risk_assessment: sup.risk_assessment || '',
+    items: sup.items.map((item) => ({
+      issue_id: item.issue_id || '',
+      severity: item.severity || 'Medium',
+      description: item.description || '',
+      justification: item.justification || '',
+    })),
+  }))
+  const [error, setError] = useState<unknown>(null)
+  const [busy, setBusy] = useState(false)
+
+  function setItem<K extends keyof SuppressionItemForm>(idx: number, key: K, value: SuppressionItemForm[K]) {
+    setForm((current) => ({
+      ...current,
+      items: current.items.map((item, itemIdx) => itemIdx === idx ? { ...item, [key]: value } : item),
+    }))
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    try {
+      onSaved(await api.put<SuppressionOut>(`/api/suppressions/${sup.id}`, form))
+    } catch (err) {
+      setError(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal title={`Edit ${sup.suppression_id}`} onClose={onClose} wide>
+      <div className="suppression-form">
+        <form onSubmit={submit}>
+          <div className="form-section">
+            <div className="form-section-title">Linked Security Request</div>
+            <div className="form-row">
+              <Field label="Request ID"><input disabled value={sup.linked_request?.request_id || '—'} /></Field>
+              <Field label="Scan Type"><input disabled value={form.scan_type} /></Field>
+              <Field label="Application Name"><input disabled value={form.application_name} /></Field>
+              <Field label="Department"><input disabled value={form.department} /></Field>
+            </div>
+            <p className="muted small" style={{ margin: '6px 0 0' }}>
+              Use Relink from the Overview tab if the linked SAST/DAST request is incorrect.
+            </p>
+          </div>
+
+          <div className="form-section">
+            <div className="form-section-title">Findings to Suppress</div>
+            {form.items.map((item, idx) => (
+              <div key={idx} className="card" style={{ padding: 14, marginBottom: 12 }}>
+                <div className="form-row" style={{ marginBottom: 8 }}>
+                  <Field label="Issue Group *"><input required value={item.issue_id} onChange={(e) => setItem(idx, 'issue_id', e.target.value)} /></Field>
+                  <Field label="Severity *">
+                    <select required value={item.severity} onChange={(e) => setItem(idx, 'severity', e.target.value)}>
+                      {SEVERITIES.map((severity) => <option key={severity} value={severity}>{severity}</option>)}
+                    </select>
+                  </Field>
+                </div>
+                <Field label="Issue Description *"><textarea required value={item.description} onChange={(e) => setItem(idx, 'description', e.target.value)} /></Field>
+                <Field label="Justification *"><textarea required value={item.justification} onChange={(e) => setItem(idx, 'justification', e.target.value)} /></Field>
+                {form.items.length > 1 && (
+                  <button type="button" className="btn btn-sm btn-danger" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, itemIdx) => itemIdx !== idx) }))}>
+                    Remove Finding
+                  </button>
+                )}
+              </div>
+            ))}
+            <button type="button" className="btn btn-sm" onClick={() => setForm((current) => ({ ...current, items: [...current.items, { ...EMPTY_ITEM }] }))}>
+              + Add Another Finding
+            </button>
+          </div>
+
+          <div className="form-section">
+            <div className="form-section-title">Risk Assessment</div>
+            <Field label="Risk Assessment &amp; Acknowledgement *">
+              <textarea required value={form.risk_assessment} onChange={(e) => setForm((current) => ({ ...current, risk_assessment: e.target.value }))} />
+            </Field>
+          </div>
+
+          <ErrorText error={error} />
+          <div className="modal-actions">
+            <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save Changes'}</button>
+            <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    </Modal>
+  )
+}
+
 export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: SuppressionOut; onClose: () => void; onChanged: (s: SuppressionOut) => void; users: UserOut[] }) {
   const { user } = useAuth()
   const [tab, setTab] = useState<'overview' | 'documents' | 'history'>('overview')
@@ -430,6 +567,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
   // at the moment of returning it instead.
   const [showReapprovalConfirm, setShowReapprovalConfirm] = useState(false)
   const [showRelink, setShowRelink] = useState(false)
+  const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const loadExtras = useCallback(async () => {
@@ -475,6 +613,13 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
   const canSMDecide = hasRole(user, 'SM') && status === 'SM_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
   const canDeptHeadDecide = hasRole(user, 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM') && status === 'DEPARTMENT_HEAD_APPROVAL_PENDING' && (sameDept || hasRole(user, 'ADMIN')) && !isSelfApproval
   const canSecurityDecide = hasRole(user, 'SECURITY_ANALYST') && status === 'SECURITY_TEAM_VERIFICATION'
+  const editableStatuses = ['Draft', 'SM_APPROVAL_PENDING', 'RETURNED_BY_SM', 'DEPARTMENT_HEAD_APPROVAL_PENDING', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM']
+  const canEditDetails = !viewOnly && editableStatuses.includes(status) && (
+    hasRole(user, 'ADMIN')
+    || (sup.created_by_id === user?.id && ['Draft', 'RETURNED_BY_SM', 'RETURNED_BY_DEPARTMENT_HEAD', 'RETURNED_BY_SECURITY_TEAM'].includes(status))
+    || canSMDecide
+    || canDeptHeadDecide
+  )
   // Document and Evidence Access Control Based on Workflow Stage: exactly 3
   // upload stages, then a hard lock -- (1) the requester while it's Draft/
   // Returned-by-*, (2) the SM only while SM_APPROVAL_PENDING, (3) the
@@ -502,7 +647,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
       {tab === 'overview' && (
         <div>
           <div className="grid grid-2">
-            <div><strong>Status:</strong> <Badge status={status} /> <span className="muted small">{SUPPRESSION_STATUS_LABELS[status] || status}</span></div>
+            <div><strong>Status:</strong> <Badge status={status} label={SUPPRESSION_STATUS_LABELS[status] || status} /></div>
             <div><strong>Scan Type:</strong> {sup.scan_type}</div>
             <div>
               <strong>{sup.scan_type} Request ID:</strong> {sup.linked_request?.request_id || '—'}
@@ -520,9 +665,19 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
             <div><strong>Security Team Decision:</strong> {sup.security_decision || 'Pending'}</div>
           </div>
 
+          {status === 'RETURNED_BY_SECURITY_TEAM' && sup.needs_dept_head_reapproval && (
+            <div className="execution-cycle-required-warning" role="status">
+              <strong>Department Head re-approval required</strong>
+              <span>
+                Security Team returned this request for correction. After the requester updates and
+                re-submits it, the request will go to the Department Head before returning to Security Team verification.
+              </span>
+            </div>
+          )}
+
           <div className="section-title">Findings ({sup.items.length})</div>
           <Table rowKey="id" columns={[
-            { key: 'issue_id', header: 'Issue ID', render: (i) => i.issue_id || '—' },
+            { key: 'issue_id', header: 'Issue Group', render: (i) => i.issue_id || '—' },
             { key: 'severity', header: 'Severity' },
             { key: 'description', header: 'Description', render: (i) => i.description || '—' },
             { key: 'justification', header: 'Justification', render: (i) => i.justification || '—' },
@@ -535,6 +690,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
             <button className="btn btn-sm" onClick={() => api.downloadFile(`/api/suppressions/${sup.id}/export`, `${sup.suppression_id}.pdf`)}>
               Export PDF
             </button>
+            {canEditDetails && <button className="btn btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit Details</button>}
             {canSubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('submit')}>Submit for SM Approval</button>}
             {canResubmit && <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => act('resubmit')}>Re-submit</button>}
             {canSMDecide && (
@@ -637,6 +793,13 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
           onRelinked={(updated) => { setShowRelink(false); onChanged(updated) }}
         />
       )}
+      {editing && (
+        <EditSuppressionModal
+          sup={sup}
+          onClose={() => setEditing(false)}
+          onSaved={(updated) => { setEditing(false); onChanged(updated); loadExtras() }}
+        />
+      )}
     </Modal>
   )
 }
@@ -735,9 +898,7 @@ export default function Suppression() {
           { key: 'findings', header: 'Findings', render: (r) => r.items.length, filterValue: (r) => String(r.items.length) },
           { key: 'severity', header: 'Worst Severity', render: (r) => worstSeverity(r.items) || '—', filterValue: (r) => worstSeverity(r.items) || '' },
           { key: 'status', header: 'Status', render: (r) => (
-            <>
-              <Badge status={r.status} /> <span className="muted small">{SUPPRESSION_STATUS_LABELS[r.status] || ''}</span>
-            </>
+            <Badge status={r.status} label={SUPPRESSION_STATUS_LABELS[r.status] || r.status} />
           ), filterValue: (r) => `${r.status} ${SUPPRESSION_STATUS_LABELS[r.status] || ''}` },
           { key: 'pending_with', header: 'Pending With', render: (r) => SUPPRESSION_PENDING_WITH[r.status] || '—', filterValue: (r) => SUPPRESSION_PENDING_WITH[r.status] || '' },
         ]} rows={rows} />
@@ -762,6 +923,11 @@ export default function Suppression() {
             // Suppression Request", no prefill) stays here as before.
             if (newRequestPrefill && created.linked_request) {
               navigate(`${newRequestPrefill.kind === 'SAST' ? '/sast' : '/dast'}?open=${created.linked_request.request_id}`)
+            } else {
+              // Manual creation from this register should reveal the saved
+              // Draft immediately after the acknowledgement so the requester
+              // can perform the stated next step without searching for it.
+              setSelected(created)
             }
             setNewRequestPrefill(undefined)
           }}

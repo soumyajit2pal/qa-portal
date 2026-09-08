@@ -3,7 +3,7 @@ import type { RepeatableGroupField, RepeatableGroupRow } from './Common'
 import { Field } from './Common'
 
 export const SAST_COMPONENT_FIELDS: RepeatableGroupField[] = [
-  { key: 'repository_url', label: 'Repository URL', placeholder: 'https://source-control/project/repository' },
+  { key: 'repository_url', label: 'Repository URL', placeholder: 'https://source-control/project/repository.git' },
   { key: 'git_branch', label: 'Branch' },
   { key: 'commit_id', label: 'Commit ID' },
   { key: 'technology_stack', label: 'Tech Stack' },
@@ -11,6 +11,14 @@ export const SAST_COMPONENT_FIELDS: RepeatableGroupField[] = [
 ]
 
 export type SastRepositoryRow = RepeatableGroupRow
+
+export function isGitRepositoryUrl(value: string): boolean {
+  const normalized = value.trim()
+  if (!normalized) return false
+  const urlStyle = /^(?:https?|ssh|git):\/\/[^\s/]+\/[^\s]+\.git$/i
+  const scpStyle = /^[^\s@/:]+@[^\s/:]+:[^\s]+\.git$/i
+  return urlStyle.test(normalized) || scpStyle.test(normalized)
+}
 
 export function blankSastComponent(): SastRepositoryRow {
   return { repository_url: '', git_branch: '', commit_id: '', technology_stack: '', build_number: '' }
@@ -73,6 +81,9 @@ export default function SastRepositoryDetails({
                     placeholder={field.placeholder || field.label}
                     onChange={(event) => setAt(index, field.key, event.target.value)}
                   />
+                  {field.key === 'repository_url' && (
+                    <small className="muted">Use a Git clone URL ending in .git.</small>
+                  )}
                 </label>
               ))}
             </div>

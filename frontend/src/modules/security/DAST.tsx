@@ -4,7 +4,7 @@ import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, RepeatableRows, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, RepeatableRows, TableColumn, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, suppressionAwareStatusLabel, EmptyState } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
@@ -14,7 +14,8 @@ import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAS
 import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
-import { SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
+import { SecurityFindingsNextAction, SecurityRemediationAssignment, SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
+import { NewSuppressionModal } from './Suppression'
 
 function userName(users: UserOut[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
@@ -375,6 +376,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   // and supression both" -- opens LinkSuppressionModal (SecurityScan.tsx),
   // the DAST-side counterpart to Suppression.tsx's own Relink control.
   const [showLinkSuppression, setShowLinkSuppression] = useState(false)
+  const [showNewSuppression, setShowNewSuppression] = useState(false)
   const [scanError, setScanError] = useState<unknown>(null)
   const [scanNotice, setScanNotice] = useState('')
   const [scanResults, setScanResults] = useState<SecurityScanResultOut[]>([])
@@ -387,9 +389,21 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   }, [req.id])
 
   useEffect(() => { load() }, [load])
-  const loadScan = useCallback(() => {
-    api.get<SecurityScanResultOut[]>(`/api/dast-requests/${req.id}/scan-results`).then(setScanResults).catch(() => setScanResults([]))
-    api.get<SecurityScanSummaryOut>(`/api/dast-requests/${req.id}/scan-summary`).then(setScanSummary).catch(() => setScanSummary(null))
+  const loadScan = useCallback(async () => {
+    try {
+      // Commit the related responses together. On the first scan, publishing
+      // results before the refreshed summary creates a transient invalid UI
+      // state (new result + the pre-scan summary with current=null).
+      const [results, summary] = await Promise.all([
+        api.get<SecurityScanResultOut[]>(`/api/dast-requests/${req.id}/scan-results`),
+        api.get<SecurityScanSummaryOut>(`/api/dast-requests/${req.id}/scan-summary`),
+      ])
+      setScanResults(results)
+      setScanSummary(summary)
+    } catch {
+      setScanResults([])
+      setScanSummary(null)
+    }
   }, [req.id])
   useEffect(() => { loadScan() }, [loadScan])
   useEffect(() => { setReassignAnalystReason('') }, [req.id, req.security_analyst_id])
@@ -447,7 +461,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
       })
       onChanged(response.request)
       setShowRescan(false)
-      loadScan()
+      await loadScan()
       await load()
     } catch (err) { setScanError(err) } finally { setBusy(false) }
   }
@@ -466,10 +480,10 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
       : 'Findings validated successfully. No unresolved finding requires requester action.')
     await loadScan()
   }
-  // Deep-links into the Suppression module with this request pre-selected --
-  // see Suppression.tsx's newRequestPrefill/NewSuppressionModal initialRequest.
+  // Keep the originating DAST detail open and layer the shared suppression
+  // form over it. The form is still pre-linked to this exact request.
   function initiateSuppression() {
-    navigate(`/suppression?new=1&scan_type=DAST&request_id=${req.id}`)
+    setShowNewSuppression(true)
   }
   const isAdmin = hasRole(user, 'ADMIN')
   const viewOnly = !!user?.roles?.includes('VIEW_ONLY')
@@ -674,6 +688,15 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'overview' && (
         <div>
+          {scanResults.length > 0 && (
+            <SecurityFindingsNextAction
+              status={status}
+              activeCount={scanResults[0]?.total_count ?? 0}
+              suppressedCount={scanResults[0]?.suppressed_total_count ?? 0}
+              hasWorkflowAction={canValidateFindings || canAssignToRequester || canMarkFixed || canRescan || canInitiateSuppression}
+              onOpen={() => setTab('findings')}
+            />
+          )}
           <DetailSection title="Status">
             <DetailField label="Status">
               <Badge status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status) || suppressionAwareStatusLabel(status, hasOpenSuppression)} />
@@ -952,7 +975,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
             <span style={{ width: 130, textAlign: 'center' }}>Verified</span>
             <span style={{ width: 230, textAlign: 'center' }}>Evidence</span>
           </div>
-          {checklist.length === 0 && <p className="muted small">No checklist items found.</p>}
+          {checklist.length === 0 && <EmptyState compact title="No checklist items available" description="Checklist items will appear here when they are configured for DAST." />}
           {checklist.map((c) => (
             <div key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
               <span style={{ flex: 1 }}>
@@ -1000,12 +1023,19 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
 
       {tab === 'findings' && (
         <div>
-          {scanNotice && (
+          {status === 'WAITING_FOR_FIX' && (
+            <SecurityRemediationAssignment
+              requesterName={userName(users, req.requester_id) || 'the requester'}
+              activeCount={scanResults[0]?.total_count ?? 0}
+              viewerOwnsAction={canMarkFixed}
+            />
+          )}
+          {scanNotice && status !== 'WAITING_FOR_FIX' && (
             <div className="execution-start-notice linked" role="status">
               <strong>Success</strong><span>{scanNotice}</span>
             </div>
           )}
-          {/* The old manual findings table (Issue ID/Severity/Description/
+          {/* The old manual findings table (Issue Group/Severity/Description/
               Status, backed by req.findings -- DASTFinding rows) is removed
               -- reported directly. It always showed "No records found."
               since manual "Log Finding" entry was removed (findings come
@@ -1096,6 +1126,20 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
             setShowLinkSuppression(false)
             onChanged(await api.get<DASTOut>(`/api/dast-requests/${req.id}`))
             await load()
+          }}
+        />
+      )}
+      {showNewSuppression && (
+        <NewSuppressionModal
+          initialRequest={{ kind: 'DAST', id: req.id }}
+          onClose={() => setShowNewSuppression(false)}
+          onCreated={async () => {
+            setShowNewSuppression(false)
+            try {
+              onChanged(await api.get<DASTOut>(`/api/dast-requests/${req.id}`))
+              await loadScan()
+              await load()
+            } catch (err) { setError(err) }
           }}
         />
       )}

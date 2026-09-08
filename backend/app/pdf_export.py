@@ -67,6 +67,14 @@ class RichTextValue:
 
 
 @dataclass(frozen=True)
+class StructuredTableValue:
+    """A labelled, multi-column table embedded as a section field."""
+    headers: Sequence[str]
+    rows: Sequence[Sequence[object]]
+    width_ratios: Optional[Sequence[float]] = None
+
+
+@dataclass(frozen=True)
 class SignatureValue:
     """Structured electronic-signature evidence rendered as a signed card."""
     signer: str
@@ -358,6 +366,36 @@ def _detail_table(data: list[list], available_width: float) -> Table:
     return table
 
 
+def _structured_table(value: StructuredTableValue, available_width: float) -> Table:
+    column_count = len(value.headers)
+    ratios = list(value.width_ratios or ([1 / column_count] * column_count))
+    if column_count == 0 or len(ratios) != column_count or sum(ratios) <= 0:
+        raise ValueError("Structured PDF table requires matching headers and positive width ratios")
+    ratio_total = sum(ratios)
+    widths = [available_width * ratio / ratio_total for ratio in ratios]
+    header = [Paragraph(_safe_text(item), _history_header_style) for item in value.headers]
+    rows = [
+        [Paragraph(_fmt(cell), _body_style) for cell in row]
+        for row in value.rows
+    ]
+    if not rows:
+        rows = [[Paragraph("No records", _body_style)] + [Paragraph("—", _body_style) for _ in range(column_count - 1)]]
+    table = Table([header] + rows, repeatRows=1, colWidths=widths, splitByRow=1, splitInRow=1, hAlign="LEFT")
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#173f48")),
+        ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#cfdde0")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]
+    for row_index in range(2, len(rows) + 1, 2):
+        style.append(("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor("#f6f9fa")))
+    table.setStyle(TableStyle(style))
+    return table
+
+
 def _rich_field_block(label: str, value: RichTextValue, available_width: float) -> list:
     """Render a full-width rich field without nesting page-splittable tables.
 
@@ -562,6 +600,10 @@ def build_request_detail_pdf(
             if isinstance(value, RichTextValue):
                 flush_rows()
                 elements.extend(_rich_field_block(label, value, doc.width))
+                elements.append(Spacer(1, 7))
+            elif isinstance(value, StructuredTableValue):
+                flush_rows()
+                elements.append(_structured_table(value, doc.width))
                 elements.append(Spacer(1, 7))
             elif isinstance(value, SignatureValue):
                 flush_rows()

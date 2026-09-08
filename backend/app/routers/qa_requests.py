@@ -6,6 +6,7 @@ from typing import Optional, List, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, selectinload
 
@@ -1548,6 +1549,27 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # edit_request). "Linked Requests" is correctly empty right up until
     # this call.
     checked_items, sast_components, dast_components, performance_details, performance_checked_items, classification_details, sast_checked_items, dast_checked_items = _unstash_draft_details(obj.draft_child_details)
+    # Revalidate the stashed SAST rows at the irreversible Draft -> Raised
+    # boundary. Besides protecting direct API clients, this catches drafts
+    # saved before the `.git` URL rule existed instead of creating a child
+    # SAST request with an invalid repository reference.
+    if "SAST" in request_types:
+        if not sast_components:
+            raise HTTPException(400, "Cannot raise -- add at least one SAST repository with a Git clone URL ending in .git.")
+        validated_sast_components = []
+        for index, component in enumerate(sast_components, start=1):
+            try:
+                validated = schemas.SASTComponentIn.model_validate(component)
+            except ValidationError as exc:
+                message = exc.errors()[0]["msg"]
+                raise HTTPException(400, f"Repository {index}: {message}") from exc
+            if not validated.repository_url:
+                raise HTTPException(
+                    400,
+                    f"Repository {index} URL is required and must be a Git clone URL ending in .git.",
+                )
+            validated_sast_components.append(validated.model_dump())
+        sast_components = validated_sast_components
     # Every linked child now lands straight at SM_APPROVAL_PENDING with no
     # separate per-module Submit click of its own (see _raise_child_to_sm),
     # so each module's own mandatory-checklist gate that would otherwise only

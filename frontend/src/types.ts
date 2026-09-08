@@ -248,6 +248,7 @@ export interface QARequestListOut {
   request_date?: string | null
   department?: string | null
   application_name: string
+  application_master_id?: number | null
   // See backend schemas.QARequestListOut's own comment -- previously
   // missing from this lightweight list schema entirely, which is why the
   // "CR Number/EPIC Number" list column always showed blank.
@@ -801,6 +802,7 @@ export interface SuppressionOut {
   sm_decision?: string | null
   dept_head_decision?: string | null
   security_decision?: string | null
+  needs_dept_head_reapproval: boolean
   created_at: string
 }
 
@@ -869,6 +871,10 @@ export interface DashboardSummaryOut {
   nearing_release_count: number
   critical_pending_count: number
   functional_status_counts: Record<string, number>
+  defects_total: number
+  defects_open: number
+  defects_resolved: number
+  defect_reopen_events: number
 }
 
 export type DashboardAttentionMetric =
@@ -876,6 +882,7 @@ export type DashboardAttentionMetric =
   | 'security-findings'
   | 'pending-decisions'
   | 'active-requests'
+  | 'defects'
 
 export interface DashboardAttentionRow {
   key: string
@@ -884,6 +891,16 @@ export interface DashboardAttentionRow {
   request_ids?: string
   linked_requests?: { id: number; request_id: string; status: string; route: string }[]
   project_id?: string
+  defect_id?: string
+  title?: string
+  cycle_id?: string
+  test_case_id?: string
+  project_ids?: string[]
+  cycle_ids?: string[]
+  test_case_ids?: string[]
+  severity?: string
+  resolver_name?: string | null
+  reopen_count?: number
   application_name?: string
   department?: string | null
   status?: string
@@ -912,6 +929,13 @@ export interface DashboardAttentionOut {
   total_pages: number
   has_next: boolean
   has_previous: boolean
+  resolution_activity?: Array<{
+    resolver_id: number
+    resolver_name: string
+    resolved_defects: number
+    reopened_defects: number
+    reopen_events: number
+  }>
 }
 
 export interface ThreeWItem {
@@ -1384,13 +1408,14 @@ export interface TestCaseVersionCompareOut {
   left: TestCaseVersionOut
   right: TestCaseVersionOut
   field_diffs: Record<string, { left: unknown; right: unknown }>
-  step_diffs: Record<string, { left: { step_text?: string | null; expected_result?: string | null } | null; right: { step_text?: string | null; expected_result?: string | null } | null }>
+  step_diffs: Record<string, { change_type?: 'added' | 'removed' | 'modified'; left: { step_text?: string | null; expected_result?: string | null } | null; right: { step_text?: string | null; expected_result?: string | null } | null }>
 }
 
 export interface TestCaseImportResult {
   created_test_cases: number
   imported_executions: number
   skipped_rows: number
+  duplicate_test_cases: number
   errors: string[]
   failure_reason?: string | null
 }
@@ -1407,6 +1432,7 @@ export interface TestCycleOut {
   linked_request_type?: string | null
   linked_request_id?: number | null
   linked_request_key?: string | null
+  linked_request_change_allowed?: boolean
   cycle_type?: string | null
   environment?: string | null
   build?: string | null
@@ -1609,11 +1635,88 @@ export interface CycleProgressOut {
 export interface DefectQualityOut {
   project_id: number
   project_key: string
+  project_name: string
   population_note: string
   total_defect_links: number
+  total_governed_defects: number
+  open_defects: number
+  resolved_defects: number
+  reopened_defects: number
+  reopen_events: number
   by_module: ReportCountRow[]
   by_status: ReportCountRow[]
   retest_success_rate_pct: number
+  resolution_activity: Array<{
+    resolver_id: number
+    resolver_name: string
+    resolved_defects: number
+    reopened_defects: number
+    reopen_events: number
+  }>
+  total_items: number
+  returned_items: number
+  items: Array<{
+    defect_id: number
+    defect_key: string
+    title: string
+    qa_request_key?: string | null
+    project_id: number
+    project_key: string
+    project_name: string
+    application_name: string
+    module_feature: string
+    severity: string
+    status: string
+    cycle_keys: string[]
+    test_case_keys: string[]
+    resolved_by_id?: number | null
+    resolved_by_name?: string | null
+    reopen_count: number
+    target_release?: string | null
+    updated_at: string
+  }>
+}
+
+export interface RequirementTraceabilityRowOut {
+  row_id: string
+  test_case_id: number
+  test_case_key: string
+  test_case_version: string
+  test_case_status: string
+  epic_id?: string | null
+  cr_number?: string | null
+  feature_id?: string | null
+  user_story_id?: string | null
+  module_name?: string | null
+  test_scenario?: string | null
+  functional_request_id?: number | null
+  functional_request_key?: string | null
+  cycle_id?: number | null
+  cycle_key?: string | null
+  cycle_name?: string | null
+  cycle_status?: string | null
+  execution_id?: number | null
+  latest_result: string
+  executed_at?: string | null
+  run_count: number
+  defect_keys: string[]
+  defect_statuses: string[]
+}
+
+export interface RequirementTraceabilityOut {
+  project_id: number
+  project_key: string
+  population_note: string
+  total_rows: number
+  returned_rows: number
+  total_test_cases: number
+  mapped_test_cases: number
+  unmapped_test_cases: number
+  covered_test_cases: number
+  executed_test_cases: number
+  failed_or_blocked_rows: number
+  defect_linked_rows: number
+  items: RequirementTraceabilityRowOut[]
 }
 
 export interface DefectExecutionLinkOut {
@@ -1646,6 +1749,7 @@ export interface DefectOut {
   primary_test_case_id?: number | null
   test_case_key?: string | null
   execution_id?: number | null
+  execution_assignee_id?: number | null
   linked_test_case_ids: number[]
   linked_test_case_keys: string[]
   // Additional executions this same governed defect has also been traced
@@ -1665,6 +1769,7 @@ export interface DefectOut {
   reported_at: string
   assignee_id?: number | null
   assignee_name?: string | null
+  assignee_is_requester: boolean
   assigned_team?: string | null
   assigned_by_id?: number | null
   assigned_by_name?: string | null
@@ -1726,6 +1831,8 @@ export interface DefectListOut {
   project_id?: number | null
   test_case_key?: string | null
   execution_id?: number | null
+  execution_status?: string | null
+  execution_links: DefectExecutionLinkOut[]
   application_name: string
   module_feature: string
   environment: string

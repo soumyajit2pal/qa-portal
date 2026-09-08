@@ -18,6 +18,7 @@ from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
 from .. import reassignment
+from ..execution_cycles import execution_cycle_choice, require_cycle_startable, require_cycles_completed
 
 router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
 
@@ -673,10 +674,8 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
                      .filter_by(child_type="Functional", child_id=obj.id)
                      .order_by(models.TestCycleChildRequestLink.id.asc())
                      .first())
-    cycle = existing_link.cycle if existing_link else None
-    if payload.link_test_cycle:
-        if payload.test_cycle_id is None:
-            raise HTTPException(400, "Select a test cycle before starting execution")
+    cycle, should_create_link = execution_cycle_choice(existing_link, payload.test_cycle_id)
+    if should_create_link:
         selected_cycle = (db.query(models.TestCycle)
                           .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
                           .filter(models.TestCycle.id == payload.test_cycle_id,
@@ -685,8 +684,6 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
                           .first())
         if not selected_cycle:
             raise HTTPException(400, "The selected test cycle is no longer eligible (only Draft, Ready, or In Progress cycles can be linked)")
-        if existing_link and existing_link.cycle_id != selected_cycle.id:
-            raise HTTPException(400, f"Test cycle {cycle.cycle_key} is already linked to this request")
         cycle = selected_cycle
         application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
         if (application_master_id and cycle.project.application_master_id is not None
@@ -700,10 +697,11 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
             db.add(models.TestCycleChildRequestLink(
                 cycle_id=cycle.id, child_type="Functional", child_id=obj.id, child_key=obj.request_id,
             ))
+    require_cycle_startable(cycle)
     obj.status = QAStatus.EXECUTION_IN_PROGRESS
     _log(
         db, obj.id, "Test Design", current_user, "Execution Started",
-        f"Linked test cycle {cycle.cycle_key} - {cycle.name}" if cycle else "Started without a linked test cycle",
+        f"Using test cycle {cycle.cycle_key} - {cycle.name}",
     )
     try:
         db.commit()
@@ -718,7 +716,7 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
         # second commit trips that constraint. Same fix shape as
         # test_execution.py's create_cycle_folder_access.
         db.rollback()
-        raise HTTPException(400, f"Test cycle {cycle.cycle_key} was just linked to another request -- refresh and try again" if cycle else "This test cycle was just linked to another request -- refresh and try again")
+        raise HTTPException(400, f"Test cycle {cycle.cycle_key} was just linked to another request -- refresh and try again")
     db.refresh(obj)
     return obj
 
@@ -737,14 +735,11 @@ def eligible_test_cycles(req_id: int, db: Session = Depends(get_db),
                      models.TestCycleChildRequestLink.id.is_(None)))
     application_master_id = obj.qa_request.application_master_id if obj.qa_request else None
     if application_master_id:
-        # Older Test Projects and projects created without an Application
-        # Master mapping have NULL here. They are still valid candidates;
-        # only projects explicitly mapped to a different application are
-        # irrelevant and excluded.
-        query = query.filter(or_(
-            models.TestProject.application_master_id == application_master_id,
-            models.TestProject.application_master_id.is_(None),
-        ))
+        query = query.filter(models.TestProject.application_master_id == application_master_id)
+    else:
+        # A Functional request without an approved Application mapping
+        # cannot be paired safely with an application-bound Test Project.
+        query = query.filter(False)
     cycles = query.order_by(models.TestCycle.created_at.desc()).all()
     return [{
         "id": cycle.id, "cycle_key": cycle.cycle_key, "project_id": cycle.project_id,
@@ -767,43 +762,22 @@ def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
     ).first()
     if not link:
         raise HTTPException(404, "This test cycle is not linked to the Functional Testing request")
-    if link.cycle.status in ("Blocked", "Completed"):
-        raise HTTPException(400, f"This Test Cycle is {link.cycle.status} and its request link cannot be changed")
-    cycle_key = link.cycle.cycle_key
-    cycle_name = link.cycle.name
-    db.delete(link)
-    _log(db, obj.id, "Test Execution", current_user, "Test Cycle Unlinked",
-         f"Unlinked test cycle {cycle_key} - {cycle_name}")
-    db.add(models.ApprovalAction(
-        entity_type="TEST_CYCLE", entity_id=cycle_id, step_name="Request Link",
-        actor_id=current_user.id, actor_role=current_user.roles_csv,
-        decision="Functional Request Unlinked", comments=f"Unlinked {obj.request_id}",
-    ))
-    db.commit()
-    db.refresh(obj)
-    return obj
+    raise HTTPException(
+        400,
+        "A Test Cycle link is mandatory. Replace the Functional QA Request from Test Lifecycle instead.",
+    )
 
 
 # ---- Defect -> Fix -> Retest -> Regression cycle ----
 # Workflow change (reported directly: "raise defect, start retest currently
 # not required as everything is linked with test cycle"): once a Test Cycle
-# is linked to this request (see start_execution's link_test_cycle option),
+# is linked to this request (mandatory in start_execution),
 # defects are raised, tracked, and retested through Test Execution + the
 # Defects module -- both scoped to that Test Cycle -- instead of this
 # request's own manual Defect Raised -> Waiting For Fix -> Retesting states.
-# This whole 3-endpoint sub-flow (raise_defect/mark_waiting_for_fix/
-# start_retesting) is therefore now reachable only for a request that was
-# started WITHOUT linking a cycle (still a supported path -- see
-# eligible_test_cycles/start_execution's own link_test_cycle=False branch),
-# where it remains the only defect-tracking mechanism available. See
-# complete_qa below for the matching linked-cycle-completion gate.
-def _require_no_linked_cycle_for_manual_defect_flow(obj: "models.FunctionalRequest", action: str) -> None:
-    if obj.linked_test_cycles:
-        raise HTTPException(
-            400,
-            f"'{action}' is not used once a Test Cycle is linked -- raise, fix, and retest defects from "
-            "Test Execution / the Defects module against the linked Test Cycle instead.",
-        )
+# The entry point is retired now that a Test Cycle is mandatory. The later
+# waiting/retest endpoints remain only so historical records already in those
+# states are not stranded.
 
 
 @router.post("/{req_id}/raise-defect", response_model=schemas.FunctionalOut)
@@ -812,12 +786,10 @@ def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(
     obj = _get_or_404(db, req_id)
     _require(obj, QAStatus.EXECUTION_IN_PROGRESS, "Raise defect")
     _require_assigned_tester(obj, current_user)
-    _require_no_linked_cycle_for_manual_defect_flow(obj, "Raise Defect")
-    obj.status = QAStatus.DEFECT_RAISED
-    _log(db, obj.id, "Execution In Progress", current_user, "Defect Raised", payload.comments)
-    db.commit()
-    db.refresh(obj)
-    return obj
+    raise HTTPException(
+        400,
+        "Raise defects from Test Execution / the Defects module against the linked Test Cycle.",
+    )
 
 
 @router.post("/{req_id}/mark-waiting-for-fix", response_model=schemas.FunctionalOut)
@@ -865,20 +837,11 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     # Workflow change (reported directly): once execution is tracked through
     # a linked Test Cycle, that cycle's own lifecycle is the real record of
     # whether testing actually finished -- QA Complete can no longer jump
-    # ahead of it. Every linked cycle must reach "Completed" first. A
-    # request that was started without linking a cycle (link_test_cycle=
-    # False at Start Execution) has nothing to wait on and keeps today's
-    # behavior unchanged. See raise_defect's matching comment above for why
+    # ahead of it. At least one linked cycle is required and every linked
+    # cycle must reach "Completed" first. See raise_defect's matching comment for why
     # the Defect Raised/Waiting For Fix/Retesting states are no longer part
     # of this path once a cycle is linked.
-    open_cycles = [cycle for cycle in obj.linked_test_cycles if cycle.status != "Completed"]
-    if open_cycles:
-        names = ", ".join(f"{cycle.cycle_key} ({cycle.status})" for cycle in open_cycles)
-        raise HTTPException(
-            400,
-            f"Mark QA Complete requires every linked Test Cycle to reach Completed first. "
-            f"Still open: {names}",
-        )
+    require_cycles_completed(obj.linked_test_cycles)
 
     obj.status = QAStatus.QA_COMPLETED
     _log(db, obj.id, "Execution", current_user, "QA Completed", payload.comments)

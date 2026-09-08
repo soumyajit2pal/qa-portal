@@ -653,28 +653,80 @@ def _assigned_user_route(target) -> NotificationRoute | None:
                     "You have been assigned this test case for final QA approval.",
                 )
 
-    if isinstance(target, models.Defect) and status in {
-        "ASSIGNED", "IN PROGRESS", "RESOLVED", "REOPENED", "DEFERRED",
-    }:
-        recipients = _user_ids(target.assignee_id)
+    return None
+
+
+_DEFECT_QA_ROUTING_STATUSES = {"NEW"}
+_DEFECT_OWNER_STATUSES = {"TRIAGED", "ASSIGNED", "IN PROGRESS", "REOPENED"}
+_DEFECT_RETEST_STATUSES = {"RESOLVED", "RETEST"}
+_DEFECT_PAUSED_STATUSES = {"DEFERRED"}
+_DEFECT_OUTCOME_STATUSES = {"REJECTED", "DUPLICATE", "NOT A DEFECT", "CLOSED"}
+
+
+def _defect_notification_route(db: SASession, target: models.Defect) -> NotificationRoute | None:
+    """Route every governed Defect stage to its next responsible audience.
+
+    Defect status labels do not consistently contain generic workflow verbs
+    (for example ``Triaged``, ``In Progress`` and ``Retest``), so they need an
+    explicit contract instead of the generic keyword-based routing used by
+    the other request workflows. Outcome messages go to both the defect
+    reporter and the linked QA Request's requester; the commit listener
+    removes the actor so users never receive mail for their own action.
+    """
+    status = str(getattr(target, "status", "") or "").upper()
+    if status in _DEFECT_QA_ROUTING_STATUSES:
+        roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+        recipients = _role_user_ids(db, roles, None)
+        if recipients:
+            return NotificationRoute(
+                recipients, "QA Defect Team", True,
+                "This defect requires triage or assignment before the workflow can continue.",
+            )
+        return None
+    if status in _DEFECT_OWNER_STATUSES:
+        recipients = _user_ids(getattr(target, "assignee_id", None))
         if recipients:
             return NotificationRoute(
                 recipients, "Assigned Defect Owner", True,
-                "You have been assigned this defect. Open the record to continue the workflow.",
+                "You own the next action for this defect. Open the record to continue the workflow.",
             )
-    if isinstance(target, models.Defect) and status == "RETEST":
-        recipients = _user_ids(target.retest_tester_id)
+        return None
+    if status in _DEFECT_RETEST_STATUSES:
+        recipients = _user_ids(getattr(target, "retest_tester_id", None))
+        if not recipients:
+            recipients.update(_user_ids(getattr(target, "execution_assignee_id", None)))
         if recipients:
             return NotificationRoute(
                 recipients, "Assigned QA Tester", True,
-                "This defect is ready for your retest decision.",
+                "This defect is ready for retest activity or a retest decision.",
+            )
+        return None
+    if status in _DEFECT_PAUSED_STATUSES:
+        recipients = _user_ids(getattr(target, "assignee_id", None))
+        recipients.update(_user_ids(getattr(target, "reporter_id", None)))
+        parent = getattr(target, "qa_request", None)
+        recipients.update(_user_ids(getattr(parent, "requester_id", None)))
+        if recipients:
+            return NotificationRoute(
+                recipients, "Defect Stakeholder", False,
+                "This defect has been deferred. Open the record for its target release and expected resolution date.",
+            )
+        return None
+    if status in _DEFECT_OUTCOME_STATUSES:
+        recipients = _user_ids(getattr(target, "reporter_id", None))
+        parent = getattr(target, "qa_request", None)
+        recipients.update(_user_ids(getattr(parent, "requester_id", None)))
+        if recipients:
+            return NotificationRoute(
+                recipients, "Defect Stakeholder", False,
+                "This defect has reached a workflow outcome. Open the record for the decision details.",
             )
     return None
 
 
 def _role_label(roles: set[str]) -> str:
     labels = {
-        Role.SM: "Service Manager",
+        Role.SM: "SM",
         Role.DEPARTMENT_HEAD_CM: "Department Head",
         Role.DEPARTMENT_HEAD_AGM: "Department Head",
         Role.APPLICATION_OWNER: "Application Owner",
@@ -697,7 +749,31 @@ def _is_workflow_transition(action: models.ApprovalAction) -> bool:
     Without this guard, an evidence upload during SM approval would send a
     second, misleading SM reminder even though no workflow stage changed.
     """
+    # Defects have an explicit state graph. Several legitimate stage names
+    # contain none of the generic action keywords below, so use the recorded
+    # state change as the authoritative signal. This covers creation and
+    # reassignment too, while link/edit/evidence audit rows have no state
+    # change and remain silent.
+    if action.entity_type == "DEFECT" and action.new_state \
+            and action.previous_state != action.new_state:
+        return True
     decision = (action.decision or "").strip().lower()
+    # SAST/DAST have several legitimate hand-off labels that contain none of
+    # the generic verbs below (Finding Validation, Awaiting Fix, Rescanning,
+    # Report Ready, and Started).  Treat the request module's explicit audit
+    # decisions as workflow events so every resting stage is evaluated by the
+    # mail router.  Audit-only document/evidence actions use different labels
+    # and remain silent.
+    if action.entity_type in {"SAST", "DAST"} and decision in {
+        "submitted", "pending", "approved", "returned", "rejected",
+        "resubmitted", "reopened", "started", "passed", "failed",
+        "security analyst assigned", "security analyst reassigned",
+        "ssc results imported / scanning started",
+        "rescan imported / scanning started", "scan marked complete",
+        "finding validation", "assigned to requester", "awaiting fix",
+        "fix submitted", "rescanning", "report ready", "closed",
+    }:
+        return True
     return any(word in decision for word in (
         "submit", "pending", "resubmit", "reopen", "approv", "recommend",
         "return", "reject", "fail", "accept", "clear", "issue", "complete",
@@ -725,6 +801,20 @@ def _notification_route(db: SASession, action: models.ApprovalAction, target) ->
         logger.info(
             "SMTP workflow notification skipped reference=%s status=%s decision=%s reason=non_workflow_action",
             reference, getattr(target, "status", None), action.decision or "",
+        )
+        return None
+
+    if isinstance(target, models.Defect):
+        route = _defect_notification_route(db, target)
+        if route:
+            logger.info(
+                "SMTP defect route evaluated reference=%s status=%s recipient=%s eligible_recipient_count=%s",
+                reference, target.status, route.recipient_label, len(route.recipient_ids),
+            )
+            return route
+        logger.warning(
+            "SMTP defect notification skipped reference=%s status=%s reason=no_eligible_recipient",
+            reference, target.status,
         )
         return None
 

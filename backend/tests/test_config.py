@@ -58,6 +58,28 @@ class ConfigurationProfileTests(unittest.TestCase):
             self.assertEqual(loaded, (root / ".env.uat",))
             self.assertTrue(environ["DATABASE_URL"].startswith("oracle+oracledb://"))
 
+    def test_root_base_selects_profile_without_loading_container_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backend = root / "backend"
+            backend.mkdir()
+            (root / ".env").write_text(
+                "APP_ENV=uat\nSECRET_KEY=container-only-secret\nLOG_DIR=/app/logs\n",
+                encoding="utf-8",
+            )
+            (root / ".env.uat").write_text(
+                "SECRET_KEY=host-profile-secret-with-32-characters\n",
+                encoding="utf-8",
+            )
+            environ = {}
+
+            profile, loaded = load_environment(backend_dir=backend, environ=environ)
+
+            self.assertEqual(profile, "uat")
+            self.assertEqual(loaded, (root / ".env.uat",))
+            self.assertEqual(environ["SECRET_KEY"], "host-profile-secret-with-32-characters")
+            self.assertNotIn("LOG_DIR", environ)
+
     def test_invalid_profile_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(RuntimeError):

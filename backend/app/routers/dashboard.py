@@ -4,8 +4,8 @@ import json
 from collections import Counter
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import and_, exists as db_exists, func, literal, or_, select, union_all
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, case, exists as db_exists, func, literal, or_, select, union_all
+from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
 from .. import models, cache
 from ..database import get_db
@@ -1408,7 +1408,7 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     scope = dashboard_department_scope(current_user)
     # 2026-08 CR -- scope is now a list; join it into a stable, readable cache
     # key segment (sorted so department order never produces a cache miss).
-    cache_key = f"dashboard:summary:v4:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
+    cache_key = f"dashboard:summary:v5:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
     cached = cache.get_json(cache_key)
     if cached is not None:
         return cached
@@ -1457,12 +1457,26 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
         .group_by(models.FunctionalRequest.status).all()
     )
 
+    defect_q = _in_period(db.query(models.Defect), models.Defect.reported_at, date_from, date_to)
+    if scope is not None:
+        defect_q = defect_q.join(
+            models.QARequest, models.Defect.qa_request_id == models.QARequest.id,
+        ).filter(models.QARequest.department.in_(scope))
+    defects_total = defect_q.count()
+    defects_open = defect_q.filter(models.Defect.status.notin_(["Closed", "Rejected", "Duplicate", "Not a Defect"])).count()
+    defects_resolved = defect_q.filter(models.Defect.resolved_at.isnot(None)).count()
+    defect_reopen_events = defect_q.with_entities(func.coalesce(func.sum(models.Defect.reopen_count), 0)).scalar() or 0
+
     result = {
         "child_requests_total": child_requests_total,
         "active_requests_count": active_requests_count,
         "nearing_release_count": nearing_release_count,
         "critical_pending_count": critical_pending_count,
         "functional_status_counts": functional_status_counts,
+        "defects_total": defects_total,
+        "defects_open": defects_open,
+        "defects_resolved": defects_resolved,
+        "defect_reopen_events": int(defect_reopen_events),
     }
     cache.set_json(cache_key, result, ttl_seconds=60)
     return result
@@ -1473,6 +1487,7 @@ _ATTENTION_METRICS = {
     "security-findings",
     "pending-decisions",
     "active-requests",
+    "defects",
 }
 
 
@@ -1528,7 +1543,7 @@ def dashboard_attention_detail(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Record-level reconciliation for the four Command Centre cards.
+    """Record-level reconciliation for the Command Centre cards.
 
     This endpoint is deliberately loaded only after a card is clicked. The
     lightweight summary endpoints remain fast, while users can still see the
@@ -1539,6 +1554,185 @@ def dashboard_attention_detail(
         raise HTTPException(404, "Unknown dashboard attention metric")
 
     scope = dashboard_department_scope(current_user)
+
+    if metric == "defects":
+        latest_resolution = (
+            db.query(
+                models.ApprovalAction.entity_id.label("defect_id"),
+                func.max(models.ApprovalAction.id).label("action_id"),
+            )
+            .filter(
+                models.ApprovalAction.entity_type == "DEFECT",
+                models.ApprovalAction.decision == "Resolved",
+            )
+            .group_by(models.ApprovalAction.entity_id)
+            .subquery()
+        )
+        resolver = aliased(models.User)
+        query = (
+            db.query(
+                models.Defect.id.label("id"),
+                models.Defect.defect_key.label("defect_key"),
+                models.Defect.title.label("title"),
+                models.Defect.status.label("status"),
+                models.Defect.severity.label("severity"),
+                models.Defect.reopen_count.label("reopen_count"),
+                models.Defect.reported_at.label("created_at"),
+                models.Defect.updated_at.label("updated_at"),
+                models.QARequest.request_id.label("request_id"),
+                models.QARequest.application_name.label("application_name"),
+                models.QARequest.department.label("department"),
+                models.TestProject.project_key.label("project_id"),
+                models.TestCycle.cycle_key.label("cycle_id"),
+                models.TestCase.test_case_key.label("test_case_id"),
+                resolver.full_name.label("resolver_name"),
+            )
+            .join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
+            .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
+            .outerjoin(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+            .outerjoin(models.TestCase, models.Defect.primary_test_case_id == models.TestCase.id)
+            .outerjoin(latest_resolution, latest_resolution.c.defect_id == models.Defect.id)
+            .outerjoin(models.ApprovalAction, models.ApprovalAction.id == latest_resolution.c.action_id)
+            .outerjoin(resolver, resolver.id == models.ApprovalAction.actor_id)
+        )
+        query = _in_period(query, models.Defect.reported_at, date_from, date_to)
+        if scope is not None:
+            query = query.filter(models.QARequest.department.in_(scope))
+        search = (getattr(params, "search", None) or "").strip().casefold()
+        if search:
+            pattern = f"%{search}%"
+            query = query.filter(or_(
+                func.lower(models.Defect.defect_key).like(pattern),
+                func.lower(models.Defect.title).like(pattern),
+                func.lower(models.QARequest.request_id).like(pattern),
+                func.lower(models.QARequest.application_name).like(pattern),
+                func.lower(models.TestProject.project_key).like(pattern),
+                func.lower(models.TestCycle.cycle_key).like(pattern),
+                func.lower(models.TestCase.test_case_key).like(pattern),
+                models.Defect.test_case_links.any(
+                    models.DefectTestCaseLink.test_case.has(
+                        func.lower(models.TestCase.test_case_key).like(pattern)
+                    )
+                ),
+                models.Defect.execution_links.any(
+                    models.DefectExecutionLink.execution.has(or_(
+                        models.TestExecution.cycle.has(
+                            func.lower(models.TestCycle.cycle_key).like(pattern)
+                        ),
+                        models.TestExecution.test_case.has(
+                            func.lower(models.TestCase.test_case_key).like(pattern)
+                        ),
+                    ))
+                ),
+                func.lower(resolver.full_name).like(pattern),
+            ))
+        total_rows = query.count()
+        total_pages = max(1, -(-total_rows // params.page_size))
+        records = query.order_by(models.Defect.updated_at.desc(), models.Defect.id.desc()).offset(
+            (params.page - 1) * params.page_size
+        ).limit(params.page_size).all()
+        record_ids = [record.id for record in records]
+        traced_defects = {
+            defect.id: defect for defect in db.query(models.Defect)
+            .options(
+                joinedload(models.Defect.cycle).joinedload(models.TestCycle.project),
+                joinedload(models.Defect.primary_test_case),
+                selectinload(models.Defect.test_case_links).joinedload(models.DefectTestCaseLink.test_case),
+                selectinload(models.Defect.execution_links)
+                    .joinedload(models.DefectExecutionLink.execution)
+                    .joinedload(models.TestExecution.cycle)
+                    .joinedload(models.TestCycle.project),
+                selectinload(models.Defect.execution_links)
+                    .joinedload(models.DefectExecutionLink.execution)
+                    .joinedload(models.TestExecution.test_case),
+            )
+            .filter(models.Defect.id.in_(record_ids)).all()
+        } if record_ids else {}
+
+        def traceability(record):
+            defect = traced_defects.get(record.id)
+            projects = {record.project_id} if record.project_id else set()
+            cycles = {record.cycle_id} if record.cycle_id else set()
+            cases = {record.test_case_id} if record.test_case_id else set()
+            if defect:
+                for link in defect.execution_links:
+                    if link.project_id and link.execution and link.execution.cycle and link.execution.cycle.project:
+                        projects.add(link.execution.cycle.project.project_key)
+                    if link.cycle_key:
+                        cycles.add(link.cycle_key)
+                    if link.test_case_key:
+                        cases.add(link.test_case_key)
+                for link in defect.test_case_links:
+                    if link.test_case and link.test_case.test_case_key:
+                        cases.add(link.test_case.test_case_key)
+            return sorted(projects), sorted(cycles), sorted(cases)
+
+        traces = {record.id: traceability(record) for record in records}
+        rows = [{
+            "key": f"Defect:{record.id}",
+            "type": "Defect",
+            "defect_id": record.defect_key,
+            "title": record.title,
+            "request_id": record.request_id,
+            "project_ids": traces[record.id][0],
+            "cycle_ids": traces[record.id][1],
+            "test_case_ids": traces[record.id][2],
+            "project_id": ", ".join(traces[record.id][0]) or None,
+            "cycle_id": ", ".join(traces[record.id][1]) or None,
+            "test_case_id": ", ".join(traces[record.id][2]) or None,
+            "application_name": record.application_name,
+            "department": record.department,
+            "status": record.status,
+            "severity": record.severity,
+            "resolver_name": record.resolver_name,
+            "reopen_count": record.reopen_count,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "value": 1,
+            "route": f"/defects?open={record.defect_key}",
+        } for record in records]
+        resolved_count = func.count(models.Defect.id)
+        reopened_defect_count = func.sum(case((models.Defect.reopen_count > 0, 1), else_=0))
+        reopen_event_count = func.coalesce(func.sum(models.Defect.reopen_count), 0)
+        resolution_query = (
+            db.query(
+                resolver.id, resolver.full_name,
+                resolved_count, reopened_defect_count, reopen_event_count,
+            )
+            .select_from(models.Defect)
+            .join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
+            .join(latest_resolution, latest_resolution.c.defect_id == models.Defect.id)
+            .join(models.ApprovalAction, models.ApprovalAction.id == latest_resolution.c.action_id)
+            .join(resolver, resolver.id == models.ApprovalAction.actor_id)
+        )
+        resolution_query = _in_period(resolution_query, models.Defect.reported_at, date_from, date_to)
+        if scope is not None:
+            resolution_query = resolution_query.filter(models.QARequest.department.in_(scope))
+        resolution_activity = [{
+            "resolver_id": resolver_id,
+            "resolver_name": resolver_name,
+            "resolved_defects": int(resolved or 0),
+            "reopened_defects": int(reopened or 0),
+            "reopen_events": int(events or 0),
+        } for resolver_id, resolver_name, resolved, reopened, events in (
+            resolution_query.group_by(resolver.id, resolver.full_name)
+            .order_by(resolved_count.desc(), resolver.full_name.asc()).all()
+        )]
+        return {
+            "metric": metric,
+            "title": "Defects",
+            "description": "Defect records in the selected reporting period with request, project, execution traceability, latest audited resolver, and reopen history.",
+            "total": total_rows,
+            "unit": "defects",
+            "rows": rows,
+            "resolution_activity": resolution_activity,
+            "page": params.page,
+            "page_size": params.page_size,
+            "total_rows": total_rows,
+            "total_pages": total_pages,
+            "has_next": params.page < total_pages,
+            "has_previous": params.page > 1,
+        }
 
     if metric == "active-projects":
         requests = _join_qa_department(

@@ -8,7 +8,14 @@ from sqlalchemy.orm import sessionmaker
 
 from app import models
 from app import email_notifications
-from app.email_notifications import _next_approver_roles, install_outbox_listener, smtp_readiness
+from app.email_notifications import (
+    _defect_notification_route,
+    _is_workflow_transition,
+    _next_approver_roles,
+    _notification_route,
+    install_outbox_listener,
+    smtp_readiness,
+)
 from app.constants import GatewayStatus, QAStatus, Role
 
 
@@ -59,6 +66,114 @@ class EmailNotificationTests(unittest.TestCase):
             _next_approver_roles(models.QASignOff(status="SM_APPROVAL_PENDING")),
             {Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA},
         )
+
+    def test_every_defect_stage_is_recognized_as_a_workflow_transition(self):
+        stages = (
+            "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest",
+            "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect", "Closed",
+        )
+        for stage in stages:
+            action = models.ApprovalAction(
+                entity_type="DEFECT", previous_state="Earlier", new_state=stage,
+                decision=stage,
+            )
+            with self.subTest(stage=stage):
+                self.assertTrue(_is_workflow_transition(action))
+
+        evidence_upload = models.ApprovalAction(
+            entity_type="DEFECT", decision="Document Uploaded",
+        )
+        self.assertFalse(_is_workflow_transition(evidence_upload))
+
+    def test_every_security_request_transition_is_recognized(self):
+        decisions = (
+            "Submitted", "Pending", "Approved", "Returned", "Rejected",
+            "Resubmitted", "Reopened", "Started", "Passed", "Failed",
+            "Security Analyst Assigned", "Security Analyst Reassigned",
+            "SSC Results Imported / Scanning Started",
+            "Rescan Imported / Scanning Started", "Scan Marked Complete",
+            "Finding Validation", "Assigned To Requester", "Awaiting Fix",
+            "Fix Submitted", "Rescanning", "Report Ready", "Closed",
+        )
+        for entity_type in ("SAST", "DAST"):
+            for decision in decisions:
+                with self.subTest(entity_type=entity_type, decision=decision):
+                    self.assertTrue(_is_workflow_transition(models.ApprovalAction(
+                        entity_type=entity_type, decision=decision,
+                    )))
+
+        evidence_upload = models.ApprovalAction(
+            entity_type="SAST", decision="Document Uploaded",
+        )
+        self.assertFalse(_is_workflow_transition(evidence_upload))
+
+    def test_validate_findings_handoff_notifies_requester(self):
+        target = models.SASTRequest(
+            request_id="TQA-SAST-21", application_name="Portal",
+            requester_id=41, status="WAITING_FOR_FIX",
+        )
+        action = models.ApprovalAction(
+            entity_type="SAST", entity_id=21, actor_id=12,
+            step_name="Waiting For Fix", decision="Awaiting Fix",
+        )
+
+        route = _notification_route(None, action, target)
+
+        self.assertEqual(route.recipient_ids, {41})
+        self.assertEqual(route.recipient_label, "Requester")
+        self.assertTrue(route.action_required)
+
+    def test_defect_mail_routes_cover_every_lifecycle_audience(self):
+        parent = SimpleNamespace(requester_id=41)
+        with patch("app.email_notifications._role_user_ids", return_value={11, 12}):
+            for stage in ("New",):
+                route = _defect_notification_route(None, SimpleNamespace(status=stage))
+                with self.subTest(stage=stage):
+                    self.assertEqual(route.recipient_ids, {11, 12})
+                    self.assertEqual(route.recipient_label, "QA Defect Team")
+                    self.assertTrue(route.action_required)
+
+        for stage in ("Triaged", "Assigned", "In Progress", "Reopened"):
+            route = _defect_notification_route(
+                None, SimpleNamespace(status=stage, assignee_id=21),
+            )
+            with self.subTest(stage=stage):
+                self.assertEqual(route.recipient_ids, {21})
+                self.assertEqual(route.recipient_label, "Assigned Defect Owner")
+                self.assertTrue(route.action_required)
+
+        for stage in ("Resolved", "Retest"):
+            route = _defect_notification_route(
+                None,
+                SimpleNamespace(
+                    status=stage, retest_tester_id=31, execution_assignee_id=32,
+                ),
+            )
+            with self.subTest(stage=stage):
+                self.assertEqual(route.recipient_ids, {31})
+                self.assertEqual(route.recipient_label, "Assigned QA Tester")
+                self.assertTrue(route.action_required)
+
+        deferred = _defect_notification_route(
+            None,
+            SimpleNamespace(
+                status="Deferred", assignee_id=21, reporter_id=40,
+                qa_request=parent,
+            ),
+        )
+        self.assertEqual(deferred.recipient_ids, {21, 40, 41})
+        self.assertEqual(deferred.recipient_label, "Defect Stakeholder")
+        self.assertFalse(deferred.action_required)
+
+        for stage in ("Rejected", "Duplicate", "Not a Defect", "Closed"):
+            route = _defect_notification_route(
+                None,
+                SimpleNamespace(status=stage, reporter_id=40, qa_request=parent),
+            )
+            with self.subTest(stage=stage):
+                self.assertEqual(route.recipient_ids, {40, 41})
+                self.assertEqual(route.recipient_label, "Defect Stakeholder")
+                self.assertFalse(route.action_required)
 
     def test_access_review_notification_targets_each_active_admin(self):
         engine = create_engine("sqlite:///:memory:")
@@ -186,7 +301,7 @@ class EmailNotificationTests(unittest.TestCase):
             self.assertIn("Record: TQA-FUNC-20", messages[0].body)
             self.assertNotIn("Record: #20", messages[0].body)
             self.assertIn("Action required", messages[0].subject)
-            self.assertIn("Service Manager review", messages[0].body)
+            self.assertIn("SM review", messages[0].body)
             self.assertIsNotNone(messages[0].html_body)
             self.assertIn("qa-portal-email-template:v1", messages[0].html_body)
             self.assertIn("Open in QA Portal", messages[0].html_body)

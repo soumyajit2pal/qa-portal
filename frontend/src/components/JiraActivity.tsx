@@ -4,7 +4,7 @@ import { formatDateIST, formatDateTimeIST } from '../time'
 import { useAuth } from '../context/AuthContext'
 import { ROLE_LABELS } from '../constants'
 import { ApprovalActionOut, RequestDocumentOut } from '../types'
-import { ErrorText } from './Common'
+import { EmptyState, ErrorText } from './Common'
 import {
   RICH_TEXT_MAX_IMAGES,
   editorContentToMarkdown,
@@ -414,7 +414,13 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
             </article>
           )
         })}
-        {visible.length === 0 && <div className="jira-activity-empty">{filter === 'comments' ? 'No comments yet. Start the conversation above.' : 'No activity recorded yet.'}</div>}
+        {visible.length === 0 && (
+          <EmptyState
+            compact
+            title={filter === 'comments' ? 'No comments yet' : 'No activity recorded'}
+            description={filter === 'comments' ? 'Start the conversation using the comment box above.' : 'Workflow events will appear here as the request progresses.'}
+          />
+        )}
       </div>
     </section>
   )

@@ -207,20 +207,15 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
           </Field>
 
           <Field label="Change Type *">
-            <select
+            <SearchableSelect
               value={form.change_type}
-              onChange={(e) => {
-                const value = e.target.value;
+              searchable={false}
+              options={CHANGE_TYPES}
+              onChange={(value) => {
                 set("change_type", value);
                 if (value !== "Bug Fix") set("bug_fix_source_request_id", "");
               }}
-            >
-              {CHANGE_TYPES.map((o) => (
-                <option key={o} value={o}>
-                  {o}
-                </option>
-              ))}
-            </select>
+            />
           </Field>
           {form.change_type === "Bug Fix" && (
             <Field label="Previous Completed Request ID (optional)">
@@ -293,10 +288,11 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
             />
           </Field>
           <Field label="Deployment Environment *">
-            <select
+            <SearchableSelect
               value={form.environment}
-              onChange={(e) => {
-                const nextEnv = e.target.value;
+              searchable={false}
+              options={DEPLOYMENT_ENVIRONMENTS}
+              onChange={(nextEnv) => {
                 set("environment", nextEnv);
                 // Target Promotion Environment must always stay strictly
                 // later than Deployment Environment in the SIT -> UAT ->
@@ -314,13 +310,7 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
                   set("target_promotion_environment", validTargets[0] || "");
                 }
               }}
-            >
-              {DEPLOYMENT_ENVIRONMENTS.map((o) => (
-                <option key={o} value={o}>
-                  {o}
-                </option>
-              ))}
-            </select>
+            />
           </Field>
           {/* Reported directly: this dropdown could be left on its blank
               placeholder and Next/Submit still went through -- fixed in
@@ -341,24 +331,16 @@ export function DetailsStep({ form, set, departmentOptions, departmentLocked = f
               <Field
                 label={`Target Promotion Environment${hasTargetOptions ? " *" : ""}`}
               >
-                <select
+                <SearchableSelect
                   value={form.target_promotion_environment}
                   disabled={!hasTargetOptions}
-                  onChange={(e) =>
-                    set("target_promotion_environment", e.target.value)
-                  }
-                >
-                  <option value="">
-                    {hasTargetOptions
-                      ? "Select Target Promotion Environment"
-                      : "Not applicable -- Production is the final stage"}
-                  </option>
-                  {targetOptions.map((o) => (
-                    <option key={o} value={o}>
-                      {o}
-                    </option>
-                  ))}
-                </select>
+                  searchable={false}
+                  onChange={(value) => set("target_promotion_environment", value)}
+                  placeholder={hasTargetOptions
+                    ? "Select Target Promotion Environment"
+                    : "Not applicable -- Production is the final stage"}
+                  options={targetOptions}
+                />
               </Field>
             );
           })()}

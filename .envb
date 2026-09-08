@@ -7,7 +7,7 @@
 # Local Oracle Database Free / XE via Docker (see README "Local Oracle for development"):
 # DATABASE_URL=sqlite:///ORCLPDB1.db
 DATABASE_URL=
-SECRET_KEY=
+SECRET_KEY=-_rvjdBWHYVSiSPQP9CoeYUTgLEIBQbBr8JID6XInHOCrKZKtpeQZ1ZkgXmWRlVM
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 
 # --- LDAP / Active Directory login (only needed for users created with

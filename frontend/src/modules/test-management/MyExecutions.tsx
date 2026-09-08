@@ -4,8 +4,9 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
 import { Table, TableColumn, ErrorText, PageHeader, Badge } from '../../components/Common'
+import SearchableSelect from '../../components/SearchableSelect'
 import { TEST_EXECUTION_STATUSES, executionStatusGate, hasRetestEligibleHistory } from '../../constants'
-import { MyExecutionOut, TestProjectOut, TestCycleOut, TestExecutionOut, TestRunDefectOut } from '../../types'
+import { MyExecutionOut, TestProjectOut, TestCycleOut, TestExecutionOut, TestRunDefectOut, PageOut, DefectListOut, TestExecutionRunOut } from '../../types'
 
 // SRS EXE-002 -- the backend returns the signed-in user's actionable queue
 // in one joined, permission-scoped query. Reuses the shared Table component
@@ -129,13 +130,30 @@ function QuickDefectLink({ execution, onChanged, onError }: {
 }) {
   const latestRun = execution.runs?.[execution.runs.length - 1]
   const [open, setOpen] = useState(false)
+  const [linkMode, setLinkMode] = useState<'internal' | 'external' | null>(null)
+  const [internalDefects, setInternalDefects] = useState<DefectListOut[]>([])
+  const [internalDefectId, setInternalDefectId] = useState('')
+  const [loadingInternal, setLoadingInternal] = useState(false)
   const [defectKey, setDefectKey] = useState('')
   const [defectUrl, setDefectUrl] = useState('')
   const [busy, setBusy] = useState(false)
-  // A second, separate defect can't be linked to an attempt that already
-  // has one -- see TestExecution.tsx's matching latestCanLinkDefect comment
-  // for the full reasoning; enforced backend-side regardless.
-  if (!latestRun || !['Fail', 'Blocked'].includes(latestRun.status) || latestRun.defects?.length) return null
+  useEffect(() => {
+    if (!open || linkMode !== 'internal' || internalDefects.length) return
+    const statuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+    const qs = new URLSearchParams({ page_size: '100' })
+    statuses.forEach((status) => qs.append('status', status))
+    let active = true
+    setLoadingInternal(true)
+    async function loadCandidates() {
+      const first = await api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=1`)
+      const remaining = first.total_pages > 1
+        ? await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) => api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=${index + 2}`)))
+        : []
+      if (active) setInternalDefects([first, ...remaining].flatMap((page) => page.items))
+    }
+    loadCandidates().catch(onError).finally(() => { if (active) setLoadingInternal(false) })
+    return () => { active = false }
+  }, [internalDefects.length, linkMode, onError, open])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -150,19 +168,41 @@ function QuickDefectLink({ execution, onChanged, onError }: {
     } catch (error) { onError(error) } finally { setBusy(false) }
   }
 
+  async function submitInternal(e: React.FormEvent) {
+    e.preventDefault()
+    if (!internalDefectId) return
+    setBusy(true)
+    try {
+      await api.post(`/api/defects/${internalDefectId}/link-execution`, { execution_id: execution.id })
+      const runs = await api.get<TestExecutionRunOut[]>(`/api/test-execution/executions/${execution.id}/runs`)
+      onChanged({ ...execution, runs })
+      setInternalDefectId(''); setLinkMode(null); setOpen(false)
+    } catch (error) { onError(error) } finally { setBusy(false) }
+  }
+
+  // A second, separate defect can't be linked to an attempt that already
+  // has one -- see TestExecution.tsx's matching latestCanLinkDefect comment
+  // for the full reasoning; enforced backend-side regardless.
+  if (!latestRun || !['Fail', 'Blocked'].includes(latestRun.status) || latestRun.defects?.length) return null
+
   return (
     <div className="tm-inline-run" onClick={(event) => event.stopPropagation()}>
-      <button type="button" className="tm-link-last-defect" onClick={() => setOpen((v) => !v)}>Link defect</button>
+      <button type="button" className="tm-link-last-defect" onClick={() => { setOpen((v) => !v); setLinkMode(null) }}>Link defect</button>
       {open && (
-        <form className="tm-inline-defect-panel" onSubmit={submit}>
+        <div className="tm-inline-defect-panel">
           <strong>Link to latest {latestRun.status.toLowerCase()} run</strong><small>Attempt #{latestRun.attempt_no} only</small>
-          <input required value={defectKey} onChange={(e) => setDefectKey(e.target.value)} placeholder="Defect key, e.g. JIRA-142" />
-          <input type="url" value={defectUrl} onChange={(e) => setDefectUrl(e.target.value)} placeholder="Defect URL (optional)" />
-          <div className="tm-inline-run-actions">
-            <button type="button" className="btn btn-sm" onClick={() => setOpen(false)}>Cancel</button>
-            <button className="btn btn-sm btn-danger" disabled={busy}>{busy ? 'Linking…' : 'Link defect'}</button>
-          </div>
-        </form>
+          {!linkMode && <div className="tm-inline-defect-source"><button type="button" onClick={() => setLinkMode('internal')}><strong>Internal defect</strong><small>Existing governed defect</small></button><button type="button" onClick={() => setLinkMode('external')}><strong>External reference</strong><small>Managed in another system</small></button></div>}
+          {linkMode === 'internal' && <form onSubmit={submitInternal}>
+            <SearchableSelect value={internalDefectId} onChange={setInternalDefectId} placeholder={loadingInternal ? 'Loading defects…' : 'Select an open internal defect…'} disabled={loadingInternal} options={internalDefects.map((defect) => ({ value: String(defect.id), label: `${defect.defect_key} · ${defect.title} · ${defect.status}` }))} />
+            <div className="tm-inline-run-actions"><button type="button" className="btn btn-sm" onClick={() => setLinkMode(null)}>Back</button><button className="btn btn-sm btn-primary" disabled={busy || loadingInternal || !internalDefectId}>{busy ? 'Linking…' : 'Link internal'}</button></div>
+          </form>}
+          {linkMode === 'external' && <form onSubmit={submit}>
+            <input required value={defectKey} onChange={(e) => setDefectKey(e.target.value)} placeholder="External defect reference" />
+            <input type="url" value={defectUrl} onChange={(e) => setDefectUrl(e.target.value)} placeholder="External defect URL (optional)" />
+            <div className="tm-inline-run-actions"><button type="button" className="btn btn-sm" onClick={() => setLinkMode(null)}>Back</button><button className="btn btn-sm btn-primary" disabled={busy}>{busy ? 'Linking…' : 'Link external'}</button></div>
+          </form>}
+          <button type="button" className="link-btn" onClick={() => setOpen(false)}>Cancel</button>
+        </div>
       )}
     </div>
   )

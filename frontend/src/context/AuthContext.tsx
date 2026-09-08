@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
-import { api, setToken, hasToken } from '../api'
+import { api, setToken, hasToken, startTokenRenewal } from '../api'
 import { UserOut } from '../types'
 
 interface LoginResult {
@@ -55,6 +55,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => { loadMe() }, [loadMe])
+
+  useEffect(() => {
+    if (!user) return
+    return startTokenRenewal()
+  }, [user?.id])
+
+  useEffect(() => {
+    const expired = () => { setUser(null); setJustLoggedIn(false) }
+    window.addEventListener('qa-session-expired', expired)
+    return () => window.removeEventListener('qa-session-expired', expired)
+  }, [])
 
   const login = async (username: string, password: string): Promise<LoginResult> => {
     // The sign-in field already displays lowercase input; normalize here as

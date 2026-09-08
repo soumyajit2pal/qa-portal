@@ -1,8 +1,8 @@
 """Authenticated, filesystem-backed Document Portal.
 
 This is the QA Portal integration of the supplied Upload Document application.
-It deliberately has no delete route: documents remain recoverable and every
-write goes through the existing authenticated ``/api`` middleware/audit trail.
+Deletion is restricted to the Document Portal Manager role; every write goes
+through the existing authenticated ``/api`` middleware/audit trail.
 Set ``DOCUMENT_PORTAL_STORAGE_HOST_PATH`` to a persistent shared volume in
 production.
 """
@@ -25,7 +25,11 @@ from pydantic import BaseModel, Field
 
 from .. import models
 from ..config import settings
-from ..deps import require_document_portal_contributor, require_document_portal_viewer
+from ..deps import (
+    require_document_portal_contributor,
+    require_document_portal_manager,
+    require_document_portal_viewer,
+)
 
 
 router = APIRouter(prefix="/api/document-portal", tags=["Document Portal"])
@@ -440,6 +444,28 @@ def move(payload: MoveItem, _: models.User = Depends(require_document_portal_con
     item = _item(target)
     logger.info("Document Portal item moved user=%s source=%s destination=%s", _log_user(_), payload.path, item["path"])
     return {"item": item}
+
+
+@router.delete("/items")
+def delete_item(
+    path: str = Query(...),
+    _: models.User = Depends(require_document_portal_manager),
+):
+    relative, item = _path(path, must_exist=True)
+    if item == DOCUMENT_ROOT.resolve():
+        raise _http_error("The document repository root cannot be deleted.")
+    is_folder = item.is_dir()
+    if is_folder:
+        shutil.rmtree(item)
+    else:
+        item.unlink()
+    logger.warning(
+        "Document Portal item deleted user=%s type=%s path=%s",
+        _log_user(_),
+        "folder" if is_folder else "file",
+        relative,
+    )
+    return {"deleted": relative, "is_folder": is_folder}
 
 
 @router.get("/download")

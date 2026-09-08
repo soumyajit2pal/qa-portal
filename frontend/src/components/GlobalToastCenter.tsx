@@ -10,40 +10,47 @@ interface ToastItem {
 }
 
 const TOAST_DURATION_MS = 4_500
-const MAX_VISIBLE_TOASTS = 4
 
 export default function GlobalToastCenter() {
-  const [toasts, setToasts] = useState<ToastItem[]>([])
+  const [toast, setToast] = useState<ToastItem | null>(null)
+  const activeToast = useRef<ToastItem | null>(null)
   const nextId = useRef(0)
-  const timers = useRef(new Map<number, number>())
+  const timer = useRef<number | null>(null)
 
   const dismiss = useCallback((id: number) => {
-    const timer = timers.current.get(id)
-    if (timer) window.clearTimeout(timer)
-    timers.current.delete(id)
-    setToasts((current) => current.filter((toast) => toast.id !== id))
+    if (activeToast.current?.id !== id) return
+    if (timer.current !== null) window.clearTimeout(timer.current)
+    timer.current = null
+    activeToast.current = null
+    setToast(null)
   }, [])
 
   useEffect(() => {
     const unsubscribe = subscribeToApiMutations((event) => {
       const copy = mutationSuccessCopy(event)
       if (!copy) return
-      const id = ++nextId.current
-      setToasts((current) => [...current, { id, ...copy }].slice(-MAX_VISIBLE_TOASTS))
-      const timer = window.setTimeout(() => dismiss(id), TOAST_DURATION_MS)
-      timers.current.set(id, timer)
+      const current = activeToast.current
+      // One user action can make several API calls (for example, one request
+      // update plus one upload per evidence file). Never stack a toast for
+      // every successful call. Identical feedback is ignored while visible;
+      // different feedback replaces it instead of creating another card.
+      if (current && current.title === copy.title && current.message === copy.message) return
+      const next = { id: ++nextId.current, ...copy }
+      activeToast.current = next
+      setToast(next)
+      if (timer.current !== null) window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => dismiss(next.id), TOAST_DURATION_MS)
     })
-    const activeTimers = timers.current
     return () => {
       unsubscribe()
-      activeTimers.forEach((timer) => window.clearTimeout(timer))
-      activeTimers.clear()
+      if (timer.current !== null) window.clearTimeout(timer.current)
+      timer.current = null
     }
   }, [dismiss])
 
   return (
     <div className="toast-viewport" aria-live="polite" aria-atomic="false">
-      {toasts.map((toast) => (
+      {toast && (
         <div className="success-toast" role="status" key={toast.id}>
           <span className="success-toast-icon" aria-hidden="true">✓</span>
           <div className="success-toast-copy">
@@ -53,7 +60,7 @@ export default function GlobalToastCenter() {
           <button type="button" className="success-toast-close" aria-label={`Dismiss ${toast.title}`} onClick={() => dismiss(toast.id)}>×</button>
           <span className="success-toast-progress" aria-hidden="true" />
         </div>
-      ))}
+      )}
     </div>
   )
 }

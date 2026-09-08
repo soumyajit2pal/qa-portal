@@ -60,6 +60,7 @@ function NewProjectModal({ applications, departments, users, currentUserId, onCl
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    if (!applicationId) { setError(new Error('Select an application')); return }
     if (!name.trim()) { setError(new Error('Project name cannot be blank')); return }
     if (!department) { setError(new Error('Select a department')); return }
     setBusy(true)
@@ -67,7 +68,7 @@ function NewProjectModal({ applications, departments, users, currentUserId, onCl
     try {
       const created = await api.post<TestProjectOut>('/api/test-projects', {
         name: name.trim(),
-        application_master_id: applicationId || null,
+        application_master_id: applicationId,
         department,
         description: description.trim() || null,
         owner_id: ownerId || null,
@@ -79,25 +80,23 @@ function NewProjectModal({ applications, departments, users, currentUserId, onCl
   return (
     <Modal title="New Test Project" onClose={onClose}>
       <form onSubmit={submit}>
-        <Field label="Application (optional -- links this Project to an approved application)">
+        <Field label="Application *">
           {/* Searchable -- same growing-list case as Application Name in the
               QA Request wizard (this reuses that same approved-name list). */}
           <SearchableSelect
             value={applicationId === '' ? '' : String(applicationId)}
             onChange={pickApplication}
-            placeholder="-- Not linked --"
-            options={[
-              { value: '', label: '-- Not linked --' },
-              ...applications.map((a) => ({ value: String(a.id), label: a.name })),
-            ]}
+            placeholder="Select an approved application…"
+            options={applications.map((a) => ({ value: String(a.id), label: a.name }))}
           />
+          <small className="muted">Required. The project, its Test Cycles, and the Functional QA Request must use the same application.</small>
         </Field>
         <Field label="Project Name *">
           <input required maxLength={150} value={name} onChange={(e) => setName(e.target.value)} />
           <small className="muted">{name.length}/150 characters</small>
         </Field>
-        <Field label="Department *">
-          <SearchableSelect disabled={applicationId !== ''} value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select department…"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
+        <Field label="Department (from Application)">
+          <SearchableSelect disabled value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select an application first"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
           {applicationId !== '' && <small className="muted">Department is controlled by the selected Application.</small>}
         </Field>
         {/* SRS PRJ-001/PRJ-005 -- the owner is auto-added as a project member
@@ -160,6 +159,7 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    if (!applicationId) { setError(new Error('Select an application')); return }
     if (!name.trim()) { setError(new Error('Project name cannot be blank')); return }
     if (!department) { setError(new Error('Select a department')); return }
     setBusy(true)
@@ -167,7 +167,7 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
     try {
       const updated = await api.patch<TestProjectOut>(`/api/test-projects/${project.id}`, {
         name: name.trim(),
-        application_master_id: applicationId || null,
+        application_master_id: applicationId,
         department,
         description: description.trim() || null,
         owner_id: ownerId || null,
@@ -179,23 +179,21 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
   return (
     <Modal title={`Edit ${project.project_key}`} onClose={onClose}>
       <form onSubmit={submit}>
-        <Field label="Application (optional -- links this Project to an approved application)">
+        <Field label="Application *">
           <SearchableSelect
             value={applicationId === '' ? '' : String(applicationId)}
             onChange={pickApplication}
-            placeholder="-- Not linked --"
-            options={[
-              { value: '', label: '-- Not linked --' },
-              ...applications.map((a) => ({ value: String(a.id), label: a.name })),
-            ]}
+            placeholder="Select an approved application…"
+            options={applications.map((a) => ({ value: String(a.id), label: a.name }))}
           />
+          <small className="muted">Required. Existing unlinked projects must be mapped before they can continue through Test Lifecycle.</small>
         </Field>
         <Field label="Project Name *">
           <input required maxLength={150} value={name} onChange={(e) => setName(e.target.value)} />
           <small className="muted">{name.length}/150 characters</small>
         </Field>
-        <Field label="Department *">
-          <SearchableSelect disabled={applicationId !== ''} value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select department…"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
+        <Field label="Department (from Application)">
+          <SearchableSelect disabled value={department} onChange={setDepartment} placeholder={applicationId !== '' ? "Mapped from selected application" : "Select an application first"} options={departments.map((item) => ({ value: item.name, label: item.name }))} />
           {applicationId !== '' && <small className="muted">Department is controlled by the selected Application.</small>}
         </Field>
         <Field label="Owner">

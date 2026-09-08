@@ -73,8 +73,8 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'collaboration', number: '10', title: 'Comments and collaboration',
-    summary: 'Jira-style comments, rich text, images, attachments, and activity history.',
-    keywords: 'comment activity rich text bullet image paste attachment collaboration jira edit delete history table merged cell colspan rowspan pdf export',
+    summary: 'Comments, rich text, images, attachments, and activity history.',
+    keywords: 'comment activity rich text bullet image paste attachment collaboration edit delete history table merged cell colspan rowspan pdf export',
   },
   {
     id: 'find-report', number: '11', title: 'Find, monitor, and report',
@@ -94,7 +94,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
 ]
 
 const ROLE_ROWS = [
-  ['Requester / Others', 'Raise QA requests; add request details and evidence; correct returned requests; confirm completion.', 'Own requests and returned actions.'],
+  ['Requester', 'Raise QA requests; add request details and evidence; correct returned requests; confirm completion.', 'Own requests and returned actions.'],
   ['Business Analyst', 'Raise QA requests and provide business or requirement context.', 'Request initiation.'],
   ['Application Owner', 'Approve or reject a newly proposed application name for the same department.', 'Same-department application-name decisions.'],
   ['SM', 'Review the requester’s submission before Department Head review.', 'Same department; cannot approve their own request.'],
@@ -502,19 +502,19 @@ export default function Help() {
                 <li><IconCheckCircle />Successful reassignment records the old assignee, new assignee, reason, actor, and timestamp in history.</li>
               </ul>
               <h3 className="help-subheading">Defect lifecycle and terminal triage</h3>
-              <Workflow label="Standard defect path" steps={['New', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Closed']} />
+              <Workflow label="Standard defect path" steps={['New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Closed']} />
               <div className="help-table-wrap">
                 <table className="help-role-table">
                   <thead><tr><th>Outcome</th><th>Who can mark it</th><th>Required condition</th></tr></thead>
                   <tbody>
-                    <tr><td><strong>Not a Defect</strong></td><td>QA Lead or Defect Reporter</td><td>Record the discussion with the Developer/Dev Lead and confirmation against requirements.</td></tr>
-                    <tr><td><strong>Duplicate</strong></td><td>QA Lead or Defect Reporter</td><td>Select and link the original defect ID.</td></tr>
-                    <tr><td><strong>Rejected</strong></td><td>QA Lead or Defect Reporter</td><td>Enter a valid rejection reason and include supporting evidence, either already attached or newly pasted/uploaded.</td></tr>
+                    <tr><td><strong>Not a Defect</strong></td><td>QA Lead group or Defect Reporter before requester ownership; the assigned Requester or their Department Head afterward</td><td>Record the discussion with the Developer/Dev Lead and confirmation against requirements.</td></tr>
+                    <tr><td><strong>Duplicate</strong></td><td>QA Lead group or Defect Reporter before requester ownership; the assigned Requester or their Department Head afterward</td><td>Select and link the canonical defect ID.</td></tr>
+                    <tr><td><strong>Rejected</strong></td><td>QA Lead group or Defect Reporter before requester ownership; the assigned Requester or their Department Head afterward</td><td>Enter a valid rejection reason and include supporting evidence, either already attached or newly pasted/uploaded.</td></tr>
                   </tbody>
                 </table>
               </div>
-              <Callout tone="warning" title="Terminal triage is available from New">
-                Rejected, Duplicate, and Not a Defect close that triage path and remain visible in defect details and history. Use Deferred when valid work is intentionally postponed; it can later return to Assigned.
+              <Callout tone="warning" title="Alternative outcomes and reopening">
+                Rejected and Not a Defect can be reopened by an authorized QA actor or the responsible requester side when new evidence requires another investigation. Reopening requires a reason and supporting evidence, records the change in history, and returns the defect through Reopened before work resumes. Duplicate remains terminal. Use Deferred when valid work is intentionally postponed; it can later return to In Progress.
               </Callout>
               <h3 className="help-subheading">Project view sharing</h3>
               <SopSteps items={[
@@ -569,7 +569,7 @@ export default function Help() {
               <ul className="help-check-list">
                 <li><IconCheckCircle />After posting, the editor clears and the new comment is shown immediately.</li>
                 <li><IconCheckCircle />Inline images preserve their position: text → image → more text. Select an image to open the authenticated full-size version.</li>
-                <li><IconCheckCircle />Tables pasted from spreadsheet or Jira-style content preserve merged rows and columns in the editor, record view, and PDF export.</li>
+                <li><IconCheckCircle />Tables pasted from supported rich-text content preserve merged rows and columns in the editor, record view, and PDF export.</li>
                 <li><IconCheckCircle />Images from older comments remain available in their attachment gallery even though those records do not contain inline position information.</li>
                 <li><IconCheckCircle />Do not place credentials, secrets, production customer data, or unmasked personal information in comments or screenshots.</li>
                 <li><IconCheckCircle />Use the workflow action dialog for an approval reason; use Activity for ongoing collaboration and supporting context.</li>

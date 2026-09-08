@@ -5,6 +5,7 @@ import { DraftChecklistEvidenceOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
 import { EvidenceKind } from "./ChecklistEvidencePicker";
 import { ReadinessChecklistSection } from "./ReadinessChecklistSection";
+import SearchableSelect from "../../components/SearchableSelect";
 
 interface Props {
   form: QARequestForm;
@@ -55,14 +56,10 @@ export function FunctionalStep({ form, set, draftRequestId, evidenceFiles, setEv
         </div>
         <div className="security-classification-grid">
           <Field label="Priority *">
-            <select value={form.functional_priority} onChange={(e) => set("functional_priority", e.target.value)}>
-              {PRIORITIES.map((option) => <option key={option} value={option}>{option}</option>)}
-            </select>
+            <SearchableSelect searchable={false} value={form.functional_priority} options={PRIORITIES} onChange={(value) => set("functional_priority", value)} />
           </Field>
           <Field label="Risk Rating *">
-            <select value={form.functional_risk_rating} onChange={(e) => set("functional_risk_rating", e.target.value)}>
-              {RISK_RATINGS.map((option) => <option key={option} value={option}>{option}</option>)}
-            </select>
+            <SearchableSelect searchable={false} value={form.functional_risk_rating} options={RISK_RATINGS} onChange={(value) => set("functional_risk_rating", value)} />
           </Field>
         </div>
       </section>

@@ -14,7 +14,7 @@ from .constants import Role
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 _SAFE_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
-_VIEW_ONLY_SELF_SERVICE_PATHS = {"/api/auth/logout", "/api/auth/me/email"}
+_VIEW_ONLY_SELF_SERVICE_PATHS = {"/api/auth/logout", "/api/auth/renew", "/api/auth/me/email"}
 _VIEW_ONLY_READ_OPERATION_POST_PATHS = {"/api/document-portal/download-selection"}
 _VIEW_ONLY_ROLE_GATED_READ_PREFIXES = (
     "/api/qa-requests",
@@ -192,6 +192,14 @@ def require_document_portal_viewer(current_user: models.User = Depends(get_docum
 def require_document_portal_contributor(current_user: models.User = Depends(get_document_portal_current_user)) -> models.User:
     if not current_user.has_role(Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER):
         raise HTTPException(status_code=403, detail="You have view-only Document Management access")
+    _require_ldap_notification_email(current_user)
+    return current_user
+
+
+def require_document_portal_manager(current_user: models.User = Depends(get_document_portal_current_user)) -> models.User:
+    """Allow destructive Document Portal operations only to its manager role."""
+    if not current_user.has_role(Role.DOCUMENT_PORTAL_MANAGER):
+        raise HTTPException(status_code=403, detail="Only a Document Portal Manager can delete documents or folders")
     _require_ldap_notification_email(current_user)
     return current_user
 

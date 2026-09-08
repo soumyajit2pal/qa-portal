@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel } from '../../components/Common'
+import { Card, Table, Badge, Modal, Field, ErrorText, ReadinessPassError, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, DetailSection, DetailField, RequestDocuments, ChecklistEvidence, useChecklistDocuments, applicationNameAwareStatusLabel, EmptyState } from '../../components/Common'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import MultiUserAssignSelect from '../../components/MultiUserAssignSelect'
 import ConfirmModal from '../../components/ConfirmModal'
@@ -751,7 +751,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
             <span style={{ width: 130, textAlign: 'center' }}>QA verified</span>
             <span style={{ width: 230, textAlign: 'center' }}>Evidence</span>
           </div>
-          {checklist.length === 0 && <p className="muted small">No checklist items found.</p>}
+          {checklist.length === 0 && <EmptyState compact title="No checklist items available" description="Checklist items will appear here when they are configured for Performance testing." />}
           {checklist.map((c) => (
             <div key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
               <span style={{ flex: 1 }}>

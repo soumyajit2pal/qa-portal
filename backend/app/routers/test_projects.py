@@ -57,10 +57,9 @@ def _require_unique_project_name(db: Session, name: str, exclude_id: Optional[in
 # time and is still "the" current project for that application, so it still
 # blocks a duplicate; only Archived (a deliberate, more final retirement --
 # see archive_test_project below) frees the application up for a fresh
-# project. Skipped entirely when application_master_id is None -- plenty of
-# projects have no application link at all (nullable field, department-only
-# projects), and those shouldn't collide with each other just for both being
-# unlinked. Same "application layer, not a DB constraint" reasoning as
+# project. The parameter remains Optional only for internal compatibility
+# with legacy rows; current create/edit APIs require an Application. Same
+# "application layer, not a DB constraint" reasoning as
 # _require_unique_project_name above -- no unique=True added to
 # application_master_id, since retrofitting that onto an existing,
 # already-populated production table risks failing outright if any
@@ -93,6 +92,36 @@ def _require_no_active_project_for_application(db: Session, application_master_i
             f"Application \"{existing.application_master.name if existing.application_master else ''}\" "
             f"already has an active test project (\"{existing.name}\"). Archive it first, or reuse the "
             "existing project, before creating another one for the same application.",
+        )
+
+
+def _require_existing_cycle_links_match_application(db: Session, project_id: int, application_master_id: int) -> None:
+    """Do not remap a Project away from Functional requests its cycles execute."""
+    links = (
+        db.query(models.TestCycleChildRequestLink)
+        .join(models.TestCycle, models.TestCycle.id == models.TestCycleChildRequestLink.cycle_id)
+        .filter(
+            models.TestCycle.project_id == project_id,
+            models.TestCycleChildRequestLink.child_type == "Functional",
+        )
+        .all()
+    )
+    if not links:
+        return
+    request_ids = {link.child_id for link in links}
+    request_applications = dict(
+        db.query(models.FunctionalRequest.id, models.QARequest.application_master_id)
+        .join(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id)
+        .filter(models.FunctionalRequest.id.in_(request_ids))
+        .all()
+    )
+    mismatched = [link.child_key for link in links if request_applications.get(link.child_id) != application_master_id]
+    if mismatched:
+        preview = ", ".join(mismatched[:5])
+        raise HTTPException(
+            400,
+            f"The selected Application does not match existing Test Cycle link(s): {preview}. "
+            "Replace those Functional QA Request links before changing the Project Application.",
         )
 
 
@@ -310,12 +339,13 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
 
     department = payload.department.strip()
     application_master_id = payload.application_master_id
-    if application_master_id:
-        app_master = get_or_404(db, models.ApplicationMaster, application_master_id, "Application")
-        department = (app_master.department or "").strip()
-        if not department:
-            raise HTTPException(400, "The selected Application does not have a mapped department")
-        _require_no_active_project_for_application(db, application_master_id)
+    app_master = get_or_404(db, models.ApplicationMaster, application_master_id, "Application")
+    if app_master.status != "APPROVED":
+        raise HTTPException(400, "Select an approved Application")
+    department = (app_master.department or "").strip()
+    if not department:
+        raise HTTPException(400, "The selected Application does not have a mapped department")
+    _require_no_active_project_for_application(db, application_master_id)
     if not department:
         raise HTTPException(400, "Department is required")
     department_row = db.query(models.Department).filter(
@@ -413,7 +443,10 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
             raise HTTPException(400, "Select an active department from the system department list")
         data["department"] = department
     if "application_master_id" in data and data["application_master_id"] != obj.application_master_id:
+        if data["application_master_id"] is None:
+            raise HTTPException(400, "Application is required for every Test Project")
         _require_no_active_project_for_application(db, data["application_master_id"], exclude_id=obj.id)
+        _require_existing_cycle_links_match_application(db, obj.id, data["application_master_id"])
     # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
     # gated action, same as ADMIN -- see ORACLE_MIGRATION_2026-07.md
     # section 59. (Variable name predates has_role()'s own ADMIN bypass.)
@@ -439,21 +472,22 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
                 ))
     if "application_master_id" in data:
         new_app_id = data.pop("application_master_id")
-        if new_app_id is not None:
-            app_master = get_or_404(db, models.ApplicationMaster, new_app_id, "Application")
-            obj.application_master_id = new_app_id
-            mapped_department = (app_master.department or "").strip()
-            if not mapped_department:
-                raise HTTPException(400, "The selected Application does not have a mapped department")
-            mapped_row = db.query(models.Department).filter(
-                models.Department.name == mapped_department,
-                models.Department.is_active == True,  # noqa: E712 - Oracle boolean column
-            ).first()
-            if not mapped_row:
-                raise HTTPException(400, "The selected Application's department is not active")
-            data["department"] = mapped_department
-        else:
-            obj.application_master_id = None
+        if new_app_id is None:
+            raise HTTPException(400, "Application is required for every Test Project")
+        app_master = get_or_404(db, models.ApplicationMaster, new_app_id, "Application")
+        if app_master.status != "APPROVED":
+            raise HTTPException(400, "Select an approved Application")
+        obj.application_master_id = new_app_id
+        mapped_department = (app_master.department or "").strip()
+        if not mapped_department:
+            raise HTTPException(400, "The selected Application does not have a mapped department")
+        mapped_row = db.query(models.Department).filter(
+            models.Department.name == mapped_department,
+            models.Department.is_active == True,  # noqa: E712 - Oracle boolean column
+        ).first()
+        if not mapped_row:
+            raise HTTPException(400, "The selected Application's department is not active")
+        data["department"] = mapped_department
     elif obj.application_master_id and "department" in data:
         # A linked Application owns the department even if a caller attempts
         # to PATCH only the department and omit application_master_id.

@@ -5,7 +5,9 @@ Configuration precedence, from highest to lowest, is:
 1. Variables already present in the process environment.
 2. ``backend/.env.<APP_ENV>`` (or the repository-root profile file when the
    backend-specific file does not exist).
-3. ``backend/.env``.
+3. ``backend/.env``. When it is absent, the repository-root ``.env`` may
+   select ``APP_ENV`` but its container-only values are not loaded into a
+   direct host process.
 4. Typed defaults declared by :class:`Settings`.
 
 Docker Compose supplies the selected environment as real process variables,
@@ -50,7 +52,21 @@ def load_environment(
     """
     base_file = backend_dir / ".env"
     base_values = dotenv_values(base_file) if base_file.is_file() else {}
-    profile = _validated_profile(environ.get("APP_ENV") or base_values.get("APP_ENV"))
+    # Compose reads the repository-root .env itself and exports every value to
+    # its containers. A direct host process must not inherit container paths
+    # such as LOG_DIR=/app/logs from that same file. It may, however, use the
+    # root APP_ENV value to select the complete host-compatible profile file.
+    root_selector_file = backend_dir.parent / ".env"
+    root_selector_values = (
+        dotenv_values(root_selector_file)
+        if not base_file.is_file() and root_selector_file.is_file()
+        else {}
+    )
+    profile = _validated_profile(
+        environ.get("APP_ENV")
+        or base_values.get("APP_ENV")
+        or root_selector_values.get("APP_ENV")
+    )
     backend_profile_file = backend_dir / f".env.{profile}"
     root_profile_file = backend_dir.parent / f".env.{profile}"
     profile_file = (
@@ -85,6 +101,7 @@ class Settings(BaseSettings):
     database_url: str | None = None
     secret_key: str = ""
     access_token_expire_minutes: int = 30
+    session_max_minutes: int = 480
     jwt_issuer: str = "qualityops-api"
     jwt_audience: str = "qualityops-web"
     upload_storage_root: str | None = None
@@ -105,6 +122,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security_configuration(self):
+        if self.access_token_expire_minutes <= 0 or self.session_max_minutes <= 0:
+            raise ValueError("Token and session durations must be positive")
         if len(self.secret_key) < 32:
             raise ValueError("SECRET_KEY must be a deployment secret of at least 32 characters")
         if self.app_env in {"uat", "prod", "production"}:

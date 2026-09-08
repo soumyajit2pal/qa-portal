@@ -1620,13 +1620,18 @@ class SuppressionRequest(Base):
     security_decision = Column(String(16))
     security_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     security_decided_at = Column(DateTime, nullable=True)
+    # Who returned the request and where it must go after correction are two
+    # different facts. The status remains RETURNED_BY_SECURITY_TEAM when the
+    # Security Analyst returns it; this flag routes the later resubmission
+    # through Department Head approval when requested.
+    needs_dept_head_reapproval = Column(Boolean, default=False, nullable=False)
 
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
     # One scan commonly turns up several findings -- this lets one suppression
     # request cover all of them instead of forcing a separate request per
-    # finding (each finding still gets its own issue id/severity/description/
+    # finding (each finding still gets its own Issue Group/severity/description/
     # justification, just grouped under a single approval workflow).
     items = relationship("SuppressionItem", back_populates="suppression_request", cascade="all,delete-orphan")
     sast_request = relationship("SASTRequest", back_populates="suppressions")
@@ -2263,9 +2268,18 @@ class TestCase(Base):
     has somewhere to read from) -- see TestCaseVersionStep for the real,
     version-scoped steps used by everything going forward."""
     __tablename__ = "qap_test_cases"
+    __table_args__ = (
+        UniqueConstraint("project_id", "import_fingerprint", name="uq_qap_tc_project_import_fp"),
+    )
     id = pk_column()
     test_case_key = Column(String(60), unique=True, nullable=False)
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
+    # SHA-256 of the normalized definition supplied by an Excel import.
+    # Manual cases/clones keep NULL. The project-scoped unique constraint is
+    # the final concurrency guard against two users importing the same case
+    # at the same time; the importer also compares existing content so cases
+    # created before this column was introduced are protected.
+    import_fingerprint = Column(String(64), nullable=True)
     folder_id = Column(Integer, ForeignKey("qap_test_folders.id"), nullable=True)
     epic_id = Column(String(60))
     cr_number = Column(String(64))
@@ -2879,7 +2893,7 @@ class TestCycle(Base):
         return self.owner.full_name if self.owner else None
 
 class TestCycleChildRequestLink(Base):
-    """Optional Functional/SAST/DAST/Performance child association."""
+    """Mandatory Functional QA Request association for a Test Cycle."""
     __tablename__ = "qap_test_cycle_child_links"
     id = pk_column()
     cycle_id = Column(Integer, ForeignKey("qap_test_cycles.id"), nullable=False, unique=True)
@@ -2958,17 +2972,27 @@ class TestExecution(Base):
     added_by = relationship("User", foreign_keys=[added_by_id])
     runs = relationship("TestExecutionRun", back_populates="execution",
                          cascade="all,delete-orphan", order_by="TestExecutionRun.attempt_no")
-    # Every governed Defect (defects.py) linked to this specific execution
-    # slot via Defect.execution_id. Used to lock/gate status changes -- see
-    # routers/test_execution.py's _execution_status_gate. One-directional
-    # viewonly relationship (same pattern as FunctionalRequest.
-    # test_cycle_links above) rather than a back_populates pair --
-    # Defect.execution_id is the only column actually written to.
-    linked_defects = relationship(
+    # Governed defects linked through the primary FK and through the
+    # additional many-to-many trace table. Keeping the two SQL relationships
+    # separate makes both paths eager-loadable; linked_defects combines them
+    # for the API so every affected testcase sees the same workflow lock.
+    primary_linked_defects = relationship(
         "Defect",
         primaryjoin=lambda: TestExecution.id == foreign(Defect.execution_id),
         viewonly=True,
     )
+    additional_linked_defects = relationship(
+        "Defect",
+        secondary="qap_defect_execution_links",
+        primaryjoin="TestExecution.id == DefectExecutionLink.execution_id",
+        secondaryjoin="Defect.id == DefectExecutionLink.defect_id",
+        viewonly=True,
+    )
+
+    @property
+    def linked_defects(self):
+        combined = [*self.primary_linked_defects, *self.additional_linked_defects]
+        return list({defect.id: defect for defect in combined}.values())
 
     @property
     def assigned_to_name(self):
@@ -3132,11 +3156,13 @@ class Defect(Base):
     duplicate_of_id = Column(Integer, ForeignKey("qap_defects.id"), nullable=True)
     # 2026-08 -- reported directly: "implement not a defect cycle, which is
     # missing as per defect cycle standard." A new terminal status, "Not a
-    # Defect" (routers/defects.py's STATUSES/TRANSITIONS), reachable only
-    # from "New" -- same triage-time slot as Rejected/Duplicate, distinct
+    # Defect" (routers/defects.py's STATUSES/TRANSITIONS), reachable during
+    # triage and active investigation, distinct
     # from Rejected (which can mean duplicate/invalid/won't-fix) in that the
     # reported behavior was investigated and found to be expected/working as
-    # designed, not an application defect at all. Mirrors rejection_reason's
+    # designed, not an application defect at all. It may be selected during
+    # triage, assignment, or active investigation and can later be reopened
+    # when new evidence changes the decision. Mirrors rejection_reason's
     # own pattern exactly (a single required free-text reason, no FK like
     # Duplicate's duplicate_of_id needs). New column on an EXISTING Oracle
     # table -- create_all() never alters existing columns (additive-only,
@@ -3179,6 +3205,30 @@ class Defect(Base):
     @property
     def assignee_name(self):
         return self.assignee.full_name if self.assignee else None
+
+    @property
+    def assignee_is_requester(self):
+        """Whether defect responsibility currently sits with the requester side."""
+        return bool(
+            self.assignee
+            and (
+                self.assignee.has_role(Role.REQUESTER)
+                or (
+                    self.qa_request
+                    and self.qa_request.requester_id == self.assignee_id
+                )
+            )
+        )
+
+    @property
+    def execution_assignee_id(self):
+        """Current runner of the primary linked execution, when one exists."""
+        return self.execution.assigned_to_id if self.execution else None
+
+    @property
+    def execution_status(self):
+        """Latest result of the primary linked execution, when one exists."""
+        return self.execution.status if self.execution else None
 
     @property
     def assigned_by_name(self):

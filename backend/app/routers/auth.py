@@ -3,7 +3,8 @@ from collections import defaultdict, deque
 from threading import Lock
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from jose import JWTError
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -15,7 +16,8 @@ from ..audit_service import snapshot_changes, user_snapshot, write_audit
 from ..auth import (
     verify_password, create_access_token, ldap_authenticate, ldap_authenticate_with_profile, LDAPAuthError,
 )
-from ..deps import get_current_user, require_roles
+from ..deps import get_current_user, require_roles, oauth2_scheme
+from ..auth import renew_access_token
 from ..constants import (
     Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES,
     DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES, CONFIDENTIAL_ROLES,
@@ -256,6 +258,20 @@ def logout(request: Request, db: Session = Depends(get_db),
     write_audit(db, event_type="AUTHENTICATION", action="LOGOUT", actor=current_user,
                 request=request, status_code=200)
     return {"status": "ok"}
+
+
+@router.post("/renew", response_model=schemas.Token)
+def renew(response: Response, token: str = Depends(oauth2_scheme),
+          current_user: models.User = Depends(get_current_user)):
+    # get_current_user rechecks the database account and resolves current roles.
+    try:
+        renewed = renew_access_token(token, current_user.username, current_user.roles)
+    except JWTError:
+        raise HTTPException(401, "Your session has ended. Please sign in again.")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return schemas.Token(access_token=renewed, roles=current_user.roles,
+                         full_name=current_user.full_name, username=current_user.username)
 
 
 @router.get("/me", response_model=schemas.UserOut)

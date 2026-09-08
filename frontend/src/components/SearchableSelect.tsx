@@ -20,6 +20,9 @@ interface SearchableSelectProps {
   options: string[] | SearchableSelectOption[]
   placeholder?: string
   disabled?: boolean
+  // Short, fixed enums should use the same portal dropdown panel without a
+  // redundant search input. Growing lists keep search enabled by default.
+  searchable?: boolean
   // Open and focus the suggestion panel as soon as the control mounts. This
   // is used by the shared Table column-filter popover: clicking the filter
   // icon should take the user directly to searchable suggestions rather than
@@ -41,10 +44,10 @@ function normalize(options: string[] | SearchableSelectOption[]): SearchableSele
 // growing option lists (Application Name, Department, Test Project/Folder
 // pickers, etc.) -- reusable anywhere a plain <select> would otherwise need
 // dozens of <option>s that only get harder to scan as more get added.
-// Deliberately NOT used for short, fixed-size enums (Priority, Risk,
-// Status, Environment and the like) -- a search box adds a click with no
-// payoff on a 3-6 option list; those stay plain <select>s.
-export default function SearchableSelect({ value, onChange, options, placeholder, disabled, autoOpen = false, style }: SearchableSelectProps) {
+// Short, fixed-size enums (Priority, Risk, Status, Environment and the like)
+// use `searchable={false}` so they keep this same visual and interaction
+// pattern without displaying an unnecessary search field.
+export default function SearchableSelect({ value, onChange, options, placeholder, disabled, searchable = true, autoOpen = false, style }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [panelPos, setPanelPos] = useState<PanelPos>({ top: 0, bottom: 'auto', left: 0, width: 0 })
@@ -64,8 +67,8 @@ export default function SearchableSelect({ value, onChange, options, placeholder
   }, [])
 
   useEffect(() => {
-    if (open) inputRef.current?.focus()
-  }, [open])
+    if (open && searchable) inputRef.current?.focus()
+  }, [open, searchable])
 
   useEffect(() => {
     if (!autoOpen || disabled) return
@@ -103,7 +106,9 @@ export default function SearchableSelect({ value, onChange, options, placeholder
 
   const opts = normalize(options)
   const current = opts.find((o) => o.value === value)
-  const filtered = opts.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()))
+  const filtered = searchable
+    ? opts.filter((o) => o.label.toLowerCase().includes(query.toLowerCase()))
+    : opts
 
   function select(opt: SearchableSelectOption) {
     onChange(opt.value)
@@ -148,17 +153,19 @@ export default function SearchableSelect({ value, onChange, options, placeholder
           className="searchable-select-panel searchable-select-panel-fixed"
           style={{ top: panelPos.top, bottom: panelPos.bottom, left: panelPos.left, width: panelPos.width }}
         >
-          <div className="searchable-select-search">
-            <IconSearch width={13} height={13} />
-            <ClearableSearchInput
-              ref={inputRef}
-              placeholder="Search..."
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onClear={() => setQuery('')}
-              clearLabel="Clear option search"
-            />
-          </div>
+          {searchable && (
+            <div className="searchable-select-search">
+              <IconSearch width={13} height={13} />
+              <ClearableSearchInput
+                ref={inputRef}
+                placeholder="Search..."
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onClear={() => setQuery('')}
+                clearLabel="Clear option search"
+              />
+            </div>
+          )}
           <div className="searchable-select-list">
             {filtered.length === 0 && <div className="searchable-select-empty">No matches</div>}
             {filtered.map((opt) => (

@@ -18,6 +18,7 @@ import {
   ChecklistEvidence,
   useChecklistDocuments,
   ReadinessPassError,
+  EmptyState,
   applicationNameAwareStatusLabel,
 } from "../../components/Common";
 import MultiUserAssignSelect from "../../components/MultiUserAssignSelect";
@@ -496,7 +497,6 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
   onCancel: () => void;
   onStart: (cycleId: number | null) => void;
 }) {
-  const [answer, setAnswer] = useState<"yes" | "no" | null>(null);
   const [cycles, setCycles] = useState<EligibleTestCycleOut[]>([]);
   const [selectedCycleId, setSelectedCycleId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
@@ -505,12 +505,12 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
   const linkedCycle = req.linked_test_cycles?.[0];
 
   useEffect(() => {
-    if (answer !== "yes") return;
+    if (linkedCycle) return;
     setLoading(true);
     setError(null);
     api.get<EligibleTestCycleOut[]>(`/api/functional-requests/${req.id}/eligible-test-cycles`)
       .then(setCycles).catch(setError).finally(() => setLoading(false));
-  }, [answer, req.id]);
+  }, [linkedCycle, req.id]);
 
   const query = search.trim().toLowerCase();
   const visibleCycles = cycles.filter((cycle) => !query ||
@@ -518,13 +518,13 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
     cycle.name.toLowerCase().includes(query) ||
     cycle.project_key.toLowerCase().includes(query) ||
     cycle.project_name.toLowerCase().includes(query));
+  const selectedCycle = cycles.find((cycle) => cycle.id === selectedCycleId);
 
   return <Modal
     title="Start Functional Test Execution"
     onClose={onCancel}
-    wide={!linkedCycle}
-    variant={linkedCycle ? "dialog" : "drawer"}
-    preventBackdropClose={!!linkedCycle}
+    variant="dialog"
+    preventBackdropClose
   >
     {linkedCycle ? <>
       <div className="execution-cycle-existing">
@@ -541,37 +541,46 @@ function StartExecutionModal({ req, busy, onCancel, onStart }: {
         <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
         <button type="button" className="btn btn-primary" disabled={busy} onClick={() => onStart(null)}>{busy ? "Starting…" : "Start Execution"}</button>
       </div>
-    </> : <>
-    <div className="execution-cycle-question">
-      <strong>No test cycle is currently linked to this request.</strong>
-      <p>Do you want to link a test cycle before starting execution?</p>
-      <div className="execution-cycle-answer">
-        <button type="button" className={`btn ${answer === "yes" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("yes"); setSelectedCycleId(null); }}>Yes, Link Test Cycle</button>
-        <button type="button" className={`btn ${answer === "no" ? "btn-primary" : ""}`} disabled={busy} onClick={() => { setAnswer("no"); setSelectedCycleId(null); }}>No, Start Without Linking</button>
+    </> : <div className="execution-cycle-dialog">
+      <div className="execution-cycle-hero">
+        <span className="execution-cycle-hero-icon" aria-hidden="true">↗</span>
+        <div>
+          <span className="execution-cycle-kicker">Required before execution</span>
+          <strong>Link a Test Cycle</strong>
+          <p>Select the cycle that will hold the test cases, results, and defects for <b>{req.request_id}</b>.</p>
+        </div>
       </div>
-    </div>
 
-    {answer === "yes" && <div className="execution-cycle-picker">
-      <ClearableSearchInput value={search} onChange={(event) => setSearch(event.target.value)} onClear={() => setSearch("")} placeholder="Search cycle name, ID or project…" clearLabel="Clear test cycle search" />
-      {loading && <p className="muted">Loading eligible test cycles…</p>}
-      {!loading && cycles.length === 0 && !error && <div className="execution-cycle-empty"><strong>No eligible test cycles found</strong><span>Only unlinked Draft, Ready, or In Progress cycles from an active project for this application can be selected.</span></div>}
-      {!loading && cycles.length > 0 && visibleCycles.length === 0 && <p className="muted">No test cycles match your search.</p>}
-      <div className="execution-cycle-list">
-        {visibleCycles.map((cycle) => <button type="button" key={cycle.id} className={selectedCycleId === cycle.id ? "selected" : ""} onClick={() => setSelectedCycleId(cycle.id)}>
-          <span><strong>{cycle.name}</strong><small>{cycle.cycle_key} · {cycle.project_key} — {cycle.project_name}</small></span>
-          <Badge status={cycle.status} />
-        </button>)}
+      <div className="execution-cycle-picker">
+        <div className="execution-cycle-picker-heading">
+          <div><strong>Eligible Test Cycles</strong><span>Draft, Ready, and In Progress cycles</span></div>
+          {!loading && <span>{cycles.length} available</span>}
+        </div>
+        <ClearableSearchInput value={search} onChange={(event) => setSearch(event.target.value)} onClear={() => setSearch("")} placeholder="Search by cycle name, ID, or project" clearLabel="Clear test cycle search" />
+        {loading && <div className="execution-cycle-loading"><span />Loading eligible Test Cycles…</div>}
+        {!loading && cycles.length === 0 && !error && <div className="execution-cycle-empty"><span className="execution-cycle-empty-icon">○</span><strong>No eligible Test Cycles</strong><span>Create or make a Test Cycle available for this application, then return here to start execution.</span></div>}
+        {!loading && cycles.length > 0 && visibleCycles.length === 0 && <div className="execution-cycle-empty compact"><strong>No matching Test Cycles</strong><span>Try a different cycle name, ID, or project.</span></div>}
+        <div className="execution-cycle-list">
+          {visibleCycles.map((cycle) => <button type="button" key={cycle.id} aria-pressed={selectedCycleId === cycle.id} className={selectedCycleId === cycle.id ? "selected" : ""} onClick={() => setSelectedCycleId(cycle.id)}>
+            <span className="execution-cycle-radio" aria-hidden="true"><i /></span>
+            <span className="execution-cycle-copy"><strong>{cycle.name}</strong><small><b>{cycle.cycle_key}</b><span>•</span>{cycle.project_key}<span>•</span>{cycle.project_name}</small></span>
+            <Badge status={cycle.status} />
+          </button>)}
+        </div>
+        <ErrorText error={error} />
       </div>
-      <ErrorText error={error} />
+
+      <div className="execution-cycle-footer">
+        <div className={`execution-cycle-selection ${selectedCycle ? "ready" : ""}`}>
+          <span aria-hidden="true">{selectedCycle ? "✓" : "1"}</span>
+          <div>{selectedCycle ? <><strong>{selectedCycle.cycle_key} selected</strong><small>Ready to link and begin execution</small></> : <><strong>Select one Test Cycle</strong><small>The action becomes available after selection</small></>}</div>
+        </div>
+        <div className="execution-cycle-actions">
+          <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+          <button type="button" className="btn btn-primary" disabled={busy || selectedCycleId === null} onClick={() => onStart(selectedCycleId)}>{busy ? "Starting…" : "Link & Start Execution"}</button>
+        </div>
+      </div>
     </div>}
-
-    {answer === "no" && <div className="execution-cycle-advice">Test execution can start without a cycle. Linking test cases and a cycle is recommended for traceability and reporting.</div>}
-
-    <div className="execution-cycle-actions">
-      <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
-      <button type="button" className="btn btn-primary" disabled={busy || answer === null || (answer === "yes" && selectedCycleId === null)} onClick={() => onStart(answer === "yes" ? selectedCycleId : null)}>{busy ? "Starting…" : "Start Execution"}</button>
-    </div>
-    </>}
   </Modal>;
 }
 
@@ -813,31 +822,13 @@ export function FunctionalDetail({
     try {
       const updated = await api.post<FunctionalOut>(
         `/api/functional-requests/${req.id}/start-execution`,
-        { link_test_cycle: cycleId !== null, test_cycle_id: cycleId }
+        { test_cycle_id: cycleId }
       );
       onChanged(updated);
       setShowStartExecution(false);
       setExecutionNotice(cycleId !== null
         ? "Test cycle linked successfully. Test execution has started."
-        : req.linked_test_cycles?.length
-          ? `Test Cycle ${req.linked_test_cycles[0].cycle_key} was already linked. Test execution has started.`
-          : "Execution has started without a linked test cycle. Linking a test cycle is recommended for traceability and reporting.");
-      await load();
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
-  async function unlinkTestCycle(cycle: FunctionalOut["linked_test_cycles"][number]) {
-    if (!window.confirm(`Unlink ${cycle.cycle_key} - ${cycle.name} from ${req.request_id}? Test cases and execution results will not be deleted.`)) return;
-    setError(null);
-    setBusyAction(`unlink-cycle-${cycle.id}`);
-    try {
-      const updated = await api.del<FunctionalOut>(`/api/functional-requests/${req.id}/test-cycles/${cycle.id}`);
-      onChanged(updated);
-      setExecutionNotice(`Test cycle ${cycle.cycle_key} was unlinked successfully. Existing test cases and execution results were preserved.`);
+        : `Test Cycle ${req.linked_test_cycles?.[0]?.cycle_key || ""} was already linked. Test execution has started.`);
       await load();
     } catch (err) {
       setError(err);
@@ -1036,37 +1027,31 @@ export function FunctionalDetail({
     isAssignedTester && status === "TESTER_ASSIGNED";
   const canStartExecution =
     isAssignedTester && status === "TEST_DESIGN";
-  // Workflow change (reported directly: "raise defect, start retest
-  // currently not required as everything is linked with test cycle") --
-  // once a Test Cycle is linked, defects are raised/tracked/retested via
-  // Test Execution + the Defects module against that cycle, not this
-  // request's own manual Defect Raised/Waiting For Fix/Retesting states.
-  // The backend enforces this too (see functional.py's
-  // _require_no_linked_cycle_for_manual_defect_flow) -- this just keeps the
-  // button from ever being offered in that case. Still shown for a request
-  // started without linking a cycle (link_test_cycle=false at Start
-  // Execution remains supported), where it's the only defect-tracking path.
+  // Defects are raised and retested from the mandatory Test Cycle. The old
+  // Functional Raise Defect entry point is retired; the remaining legacy
+  // status actions only let records already in those states finish.
   const hasLinkedCycle = (req.linked_test_cycles?.length ?? 0) > 0;
   const openLinkedCycles = (req.linked_test_cycles || []).filter(
     (cycle) => cycle.status !== "Completed"
   );
-  const canRaiseDefect =
-    isAssignedTester &&
-    status === "EXECUTION_IN_PROGRESS" &&
-    !hasLinkedCycle;
+  const canRaiseDefect = false;
   const canMarkWaitingForFix =
     isAssignedTester && status === "DEFECT_RAISED";
   const canStartRetest =
     isAssignedTester && status === "WAITING_FOR_FIX";
-  // Mark QA Complete now also requires every linked Test Cycle to have
-  // actually reached Completed -- see functional.py::complete_qa's matching
-  // gate. A request with no linked cycle has nothing to wait on.
+  // Mark QA Complete requires a linked Test Cycle and that cycle must have
+  // reached Completed -- see functional.py::complete_qa's matching gate.
   const canCompleteQA =
     isAssignedTester &&
     ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(
       status
     ) &&
+    hasLinkedCycle &&
     openLinkedCycles.length === 0;
+  const completeQAMissingCycle =
+    isAssignedTester &&
+    ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(status) &&
+    !hasLinkedCycle;
   const completeQABlockedByCycle =
     isAssignedTester &&
     ["EXECUTION_IN_PROGRESS", "RETESTING"].includes(status) &&
@@ -1262,7 +1247,6 @@ export function FunctionalDetail({
                 <DetailField key={cycle.id} label={cycle.cycle_key}>
                   <Link className="linked-cycle-link" to={`/test-execution?project=${cycle.project_id}&cycle=${cycle.id}`}><strong>{cycle.name}</strong></Link> · {cycle.status}
                   {(cycle.start_date || cycle.end_date) && <span className="muted small"> · {cycle.start_date || "—"} to {cycle.end_date || "—"}</span>}
-                  {(isAssignedTester || isAssignedQALead) && <button type="button" className="btn btn-sm" style={{ marginLeft: 8 }} disabled={!!busyAction} onClick={() => unlinkTestCycle(cycle)}>{busyAction === `unlink-cycle-${cycle.id}` ? "Unlinking…" : "Unlink"}</button>}
                 </DetailField>
               ))}
             </DetailSection>
@@ -1319,7 +1303,13 @@ export function FunctionalDetail({
             )}
 
           <div className="section-title">Workflow Actions</div>
-          {executionNotice && <div className={`execution-start-notice ${req.linked_test_cycles?.length ? "linked" : "unlinked"}`} role="status"><strong>{executionNotice.includes("was unlinked") ? "Test cycle unlinked" : req.linked_test_cycles?.length ? "Execution started" : "Execution started without a cycle"}</strong><span>{executionNotice}</span></div>}
+          {executionNotice && <div className={`execution-start-notice ${executionNotice.includes("was unlinked") ? "unlinked" : "linked"}`} role="status"><strong>{executionNotice.includes("was unlinked") ? "Test cycle unlinked" : "Execution started"}</strong><span>{executionNotice}</span></div>}
+          {completeQAMissingCycle && (
+            <div className="execution-cycle-required-warning" role="alert">
+              <strong>Mark QA Complete is locked</strong>
+              <span>This request has no linked Test Cycle. Relink it from Test Lifecycle before continuing.</span>
+            </div>
+          )}
           {completeQABlockedByCycle && (
             <div
               style={{
@@ -1794,6 +1784,9 @@ export function FunctionalDetail({
             </span>
             <span style={{ width: 230, textAlign: "center" }}>Evidence</span>
           </div>
+          {checklist.length === 0 && (
+            <EmptyState compact title="No checklist items available" description="Checklist items will appear here when they are configured for Functional testing." />
+          )}
           {checklist.map((c) => (
             <div
               key={c.id}

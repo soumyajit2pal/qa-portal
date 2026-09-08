@@ -4,6 +4,7 @@ import uuid
 
 import bcrypt
 from jose import jwt
+from jose import JWTError
 from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE
 from ldap3.core.exceptions import LDAPException
 from ldap3.utils.conv import escape_filter_chars
@@ -47,7 +48,10 @@ def create_access_token(data: dict, expires_minutes: int = ACCESS_TOKEN_EXPIRE_M
     to_encode = data.copy()
     issued_at = datetime.datetime.now(datetime.UTC)
     expire = issued_at + datetime.timedelta(minutes=expires_minutes)
+    session_exp = to_encode.get("session_exp", int((issued_at + datetime.timedelta(minutes=settings.session_max_minutes)).timestamp()))
+    expire = min(expire, datetime.datetime.fromtimestamp(session_exp, datetime.UTC))
     to_encode.update({
+        "session_exp": session_exp,
         "exp": expire, "iat": issued_at, "jti": str(uuid.uuid4()),
         "iss": settings.jwt_issuer, "aud": settings.jwt_audience,
     })
@@ -55,10 +59,29 @@ def create_access_token(data: dict, expires_minutes: int = ACCESS_TOKEN_EXPIRE_M
 
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(
+    payload = jwt.decode(
         token, SECRET_KEY, algorithms=[ALGORITHM],
         issuer=settings.jwt_issuer, audience=settings.jwt_audience,
     )
+    if "session_exp" in payload and (
+        not isinstance(payload["session_exp"], (int, float))
+        or payload["session_exp"] <= datetime.datetime.now(datetime.UTC).timestamp()
+    ):
+        raise JWTError("Maximum session duration exceeded")
+    return payload
+
+
+def renew_access_token(token: str, username: str, roles: list[str]) -> str:
+    """Renew a valid credential without resetting its original session deadline."""
+    payload = decode_access_token(token)
+    if payload.get("sub") != username or not isinstance(payload.get("iat"), (int, float)):
+        raise JWTError("Invalid session identity")
+    # Tokens issued before renewal was introduced get a deadline anchored to
+    # their signed original issue time, never to the renewal request time.
+    deadline = payload.get("session_exp", payload["iat"] + settings.session_max_minutes * 60)
+    if deadline <= datetime.datetime.now(datetime.UTC).timestamp():
+        raise JWTError("Maximum session duration exceeded")
+    return create_access_token({"sub": username, "roles": roles, "session_exp": deadline})
 
 
 # ---------------------------------------------------------------------------

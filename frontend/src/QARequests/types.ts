@@ -1,7 +1,7 @@
 import type { RepeatableGroupRow } from '../components/Common'
-import { SAST_COMPONENT_FIELDS, blankSastComponent } from '../components/SastRepositoryDetails'
+import { SAST_COMPONENT_FIELDS, blankSastComponent, isGitRepositoryUrl } from '../components/SastRepositoryDetails'
 
-export { SAST_COMPONENT_FIELDS, blankSastComponent }
+export { SAST_COMPONENT_FIELDS, blankSastComponent, isGitRepositoryUrl }
 
 // One "SAST component" = one repository, with its own branch/commit/tech
 // stack/build number -- the "+" on the SAST step adds a whole new one of

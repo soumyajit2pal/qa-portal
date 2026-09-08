@@ -98,19 +98,32 @@ function AccessApprovalPending() {
   }
 
   return (
-    <section className="card empty-state" role="status" aria-live="polite">
-      <h2>Access approval pending</h2>
-      <p className="msg">
-        Your department has been submitted. An Administrator or Department Coordinator must assign your portal role before you can use QA Portal.
-      </p>
-      <p className="muted small">You will be able to use the assigned modules after the approval is completed.</p>
-      <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 16 }}>
-        <button className="btn btn-primary" onClick={checkApprovalStatus} disabled={checking}>
-          {checking ? 'Checking…' : 'Check approval status'}
-        </button>
-        <button className="btn" onClick={logout}>Log out</button>
-      </div>
-    </section>
+    <main className="access-pending-page">
+      <section className="access-pending-card" role="status" aria-live="polite">
+        <div className="access-pending-brand">
+          <img className="qualityops-app-logo" src="/qualityops-logo.png" alt="" aria-hidden="true" />
+          <div>
+            <strong>Quality<em>Ops</em></strong>
+            <img className="bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
+          </div>
+        </div>
+        <span className="access-pending-status" aria-hidden="true">✓</span>
+        <p className="access-pending-kicker">Account registration received</p>
+        <h1>Access approval pending</h1>
+        <p className="access-pending-message">
+          Your department has been submitted. An Administrator or Department Coordinator must assign your portal role before you can use QualityOps.
+        </p>
+        <div className="access-pending-note">
+          The application navigation will become available automatically after your access is approved.
+        </div>
+        <div className="access-pending-actions">
+          <button className="btn btn-primary" onClick={checkApprovalStatus} disabled={checking}>
+            {checking ? 'Checking…' : 'Check approval status'}
+          </button>
+          <button className="btn" onClick={logout}>Log out</button>
+        </div>
+      </section>
+    </main>
   )
 }
 
@@ -193,13 +206,16 @@ function ProtectedLayout() {
   const { user, loading } = useAuth()
   if (loading) return <ModuleFallback />
   if (!user) return <Navigate to="/login" replace />
+  // A provisioned account awaiting role approval has no portal access yet,
+  // so do not mount Layout at all. Besides hiding the sidebar/topbar, this
+  // prevents their navigation-specific API calls from running while the
+  // backend pending-access guard intentionally permits only /me and logout.
+  if (isAccessApprovalPending(user)) return <AccessApprovalPending />
   return (
     <AuthenticatedChrome user={user}>
-      {isAccessApprovalPending(user) ? <AccessApprovalPending /> : (
-        <DocumentOnlyAccessGuard user={user}>
-          <Outlet />
-        </DocumentOnlyAccessGuard>
-      )}
+      <DocumentOnlyAccessGuard user={user}>
+        <Outlet />
+      </DocumentOnlyAccessGuard>
     </AuthenticatedChrome>
   )
 }
@@ -237,11 +253,10 @@ function DocumentPortalOnly({ children }: { children: ReactNode }) {
 function HelpRoute() {
   const { user, loading } = useAuth()
   if (loading) return <ModuleFallback />
+  if (isAccessApprovalPending(user)) return <AccessApprovalPending />
   if (user) return (
     <AuthenticatedChrome user={user}>
-      {isAccessApprovalPending(user)
-        ? <AccessApprovalPending />
-        : (isDocumentPortalOnly(user) ? <DocumentPortalOnlyAccessDenied /> : <Help />)}
+      {isDocumentPortalOnly(user) ? <DocumentPortalOnlyAccessDenied /> : <Help />}
     </AuthenticatedChrome>
   )
   return <PublicHelp />

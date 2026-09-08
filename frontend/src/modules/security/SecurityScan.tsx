@@ -5,7 +5,7 @@ import { api } from '../../api'
 import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { hasRole, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
-import { ErrorText, Field, Modal, Table, TableColumn } from '../../components/Common'
+import { EmptyState, ErrorText, Field, Modal, Table, TableColumn } from '../../components/Common'
 import { SecurityScanResultOut, SecurityScanSummaryOut, SuppressionOut } from '../../types'
 
 // One row per (scan, filter set) -- see findingsByFilter/the Scan History
@@ -121,10 +121,11 @@ function severityBreakdown(counts: { critical_count: number; high_count: number;
 // number (see fortify_ssc.py's retrieve_snapshot for why -- they're
 // overlapping views of the same issues, not disjoint subsets of them).
 function findingsByFilter(scan: SecurityScanResultOut) {
-  if (!scan.filters.length) return severityBreakdown(scan)
+  const filters = Array.isArray(scan.filters) ? scan.filters : []
+  if (!filters.length) return severityBreakdown(scan)
   return (
     <>
-      {scan.filters.map((filter) => (
+      {filters.map((filter) => (
         <div key={filter.guid} className="security-scan-filter-breakdown">
           <span className="security-scan-filter-label">{filter.title}</span>
           {severityBreakdown(filter)}
@@ -142,6 +143,94 @@ function suppressedFindingsBreakdown(scan: SecurityScanResultOut) {
     low_count: scan.suppressed_low_count ?? 0,
     total_count: scan.suppressed_total_count ?? 0,
   })
+}
+
+const FINDINGS_NEXT_STEP: Record<string, { title: string; description: string }> = {
+  SCANNING: {
+    title: 'Validate the imported findings',
+    description: 'Review the Fortify results in Findings, then validate them before the request can continue.',
+  },
+  REMEDIATION: {
+    title: 'Send validated findings for remediation',
+    description: 'Review the validated findings, then assign the request to the requester for remediation.',
+  },
+  WAITING_FOR_FIX: {
+    title: 'Review and resolve the active findings',
+    description: 'Use Findings to review what must be fixed, mark remediation complete, or raise a suppression request where appropriate.',
+  },
+  RESCAN: {
+    title: 'Review the findings and start the rescan',
+    description: 'Confirm the remediation context in Findings, then import the latest Fortify scan results.',
+  },
+}
+
+/** Keeps the post-scan workflow discoverable when a request is reopened on Overview. */
+export function SecurityFindingsNextAction({
+  status,
+  activeCount,
+  suppressedCount,
+  hasWorkflowAction,
+  onOpen,
+}: {
+  status: string
+  activeCount: number
+  suppressedCount: number
+  hasWorkflowAction: boolean
+  onOpen: () => void
+}) {
+  const nextStep = FINDINGS_NEXT_STEP[status] || {
+    title: 'Review the latest scan findings',
+    description: 'Open Findings to view the latest Fortify results, suppressed findings, and scan history.',
+  }
+
+  return (
+    <section className="security-findings-next-action" aria-labelledby="security-findings-next-action-title">
+      <div className="security-findings-next-action-icon" aria-hidden="true">!</div>
+      <div className="security-findings-next-action-copy">
+        <small>NEXT ACTION · FINDINGS</small>
+        <strong id="security-findings-next-action-title">{nextStep.title}</strong>
+        <p>{nextStep.description}</p>
+        <div className="security-findings-next-action-counts" aria-label={`${activeCount} active and ${suppressedCount} suppressed findings`}>
+          <span><b>{activeCount}</b> active</span>
+          <span><b>{suppressedCount}</b> suppressed</span>
+        </div>
+      </div>
+      <button type="button" className="btn btn-primary btn-sm" onClick={onOpen}>
+        {hasWorkflowAction ? 'Continue in Findings' : 'Review Findings'} <span aria-hidden="true">→</span>
+      </button>
+    </section>
+  )
+}
+
+/** Persistent ownership context while validated findings are with the requester. */
+export function SecurityRemediationAssignment({ requesterName, activeCount, viewerOwnsAction }: {
+  requesterName: string
+  activeCount: number
+  viewerOwnsAction: boolean
+}) {
+  return (
+    <section className="security-remediation-assignment" role="status" aria-label="Current remediation assignment">
+      <div className="security-remediation-assignment-icon" aria-hidden="true">R</div>
+      <div className="security-remediation-assignment-copy">
+        <small>REMEDIATION IN PROGRESS · ACTION WITH REQUESTER</small>
+        <strong>Currently assigned to {requesterName}</strong>
+        <p>
+          {activeCount} active {activeCount === 1 ? 'finding requires' : 'findings require'} remediation.
+          {' '}The requester must fix the findings or obtain an approved suppression, then select <b>Mark Fixed</b> to return the request for rescan.
+        </p>
+        <div className="security-remediation-flow" aria-label="Remediation workflow">
+          <span className="complete">✓ Findings validated</span>
+          <span aria-hidden="true">→</span>
+          <span className="current">Requester remediation</span>
+          <span aria-hidden="true">→</span>
+          <span>Security rescan</span>
+        </div>
+        <em>{viewerOwnsAction
+          ? 'You currently own the next action.'
+          : 'No Security action is required until the requester returns the request for rescan.'}</em>
+      </div>
+    </section>
+  )
 }
 
 // 2026-08, reported directly: "if supression request then link that
@@ -326,9 +415,22 @@ export function SecurityScanResults({
   // re-point), so no separate boolean prop needed.
   onLinkSuppression?: () => void
 }) {
-  if (!results.length || !summary) return null
-  const current = summary.current!
-  const initial = summary.initial!
+  // The empty summary returned before a request's first scan is a valid API
+  // response (`initial` and `current` are null). The scan-results and
+  // scan-summary requests used to update independently, so the first result
+  // could render briefly against that old empty summary and crash on
+  // `summary.current!`. Keep the renderer safe for that transition as well
+  // as for legacy/incomplete responses.
+  if (!results.length || !summary?.current || !summary?.initial) {
+    return (
+      <EmptyState
+        title="No scan results available"
+        description={`${kind} findings will appear here after a completed scan is imported from Fortify SSC.`}
+      />
+    )
+  }
+  const current = summary.current
+  const initial = summary.initial
 
   return (
     <section className="security-scan-results" aria-label="Fortify SSC scan results">
@@ -387,20 +489,23 @@ export function SecurityScanResults({
         <Table
           rowKey="id"
           columns={SCAN_HISTORY_COLUMNS}
-          rows={results.flatMap((r): ScanHistoryRow[] => (
-            r.filters.length > 0 ? r.filters : [{
-              guid: 'total', title: '—',
-              critical_count: r.critical_count, high_count: r.high_count,
-              medium_count: r.medium_count, low_count: r.low_count, total_count: r.total_count,
-            }]
-          ).map((f) => ({
-            id: `${r.id}-${f.guid}`,
-            scan_no: r.scan_no, scan_type: r.scan_type, filter_title: f.title,
-            imported_at: r.imported_at,
-            critical_count: f.critical_count, high_count: f.high_count,
-            medium_count: f.medium_count, low_count: f.low_count, total_count: f.total_count,
-            status: r.status,
-          })))}
+          rows={results.flatMap((r): ScanHistoryRow[] => {
+            const filters = Array.isArray(r.filters) ? r.filters : []
+            return (
+              filters.length > 0 ? filters : [{
+                guid: 'total', title: '—',
+                critical_count: r.critical_count, high_count: r.high_count,
+                medium_count: r.medium_count, low_count: r.low_count, total_count: r.total_count,
+              }]
+            ).map((f) => ({
+              id: `${r.id}-${f.guid}`,
+              scan_no: r.scan_no, scan_type: r.scan_type, filter_title: f.title,
+              imported_at: r.imported_at,
+              critical_count: f.critical_count, high_count: f.high_count,
+              medium_count: f.medium_count, low_count: f.low_count, total_count: f.total_count,
+              status: r.status,
+            }))
+          })}
         />
       </div>
 

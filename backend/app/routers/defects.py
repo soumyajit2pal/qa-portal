@@ -5,7 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import documents as doc_store
 from .. import models, schemas, pagination
@@ -36,23 +36,23 @@ TRANSITIONS = {
     # outgoing option New used to have; New itself only ever moves to
     # Triaged. (Two follow-up questions from that same report were answered
     # explicitly: "Won't Fix" is NOT a new status -- the existing "Not a
-    # Defect" status covers that ground -- and Reopened still goes back to
-    # Assigned first rather than straight to In Progress, unchanged below.)
+    # Defect" status covers that ground. Assignment is now captured as part
+    # of Triage, while Reopened and Deferred work resume at In Progress.)
     "New": {"Triaged"},
-    "Triaged": {"Assigned", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
+    "Triaged": {"In Progress", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
     "Assigned": {"In Progress", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
-    "In Progress": {"Resolved", "Rejected", "Duplicate", "Deferred"},
+    "In Progress": {"Resolved", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
     "Resolved": {"Retest"},
     "Retest": {"Closed", "Reopened"},
-    "Reopened": {"Assigned"},
-    "Deferred": {"Assigned"},
+    "Reopened": {"In Progress"},
+    "Deferred": {"In Progress"},
     "Closed": {"Reopened"},
     "Rejected": {"Reopened"},
     "Duplicate": set(),
-    "Not a Defect": set(),
+    "Not a Defect": {"Reopened"},
 }
 CREATE_ROLES = (
-    Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA,
+    Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
     Role.SECURITY_ANALYST, Role.REQUESTER, Role.BUSINESS_ANALYST,
     Role.APPLICATION_OWNER,
 )
@@ -73,6 +73,10 @@ CREATE_ROLES = (
 # (GET /{id}, GET /by-key/{key} -- e.g. from a direct link) was already
 # open to any authenticated user regardless, unchanged here.
 _DOC_MODULE = "DEFECT"
+_REQUESTER_DISPOSITION_STATUSES = {"Rejected", "Duplicate", "Not a Defect"}
+_QA_DEFECT_ROLES = {
+    Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+}
 
 
 def _get(defect_id: int, db: Session) -> models.Defect:
@@ -135,7 +139,7 @@ def _can_touch_defect(db: Session, obj: models.Defect, user: models.User) -> boo
     actor. True for anyone with a real stake in this specific defect: the
     reporter, current assignee, the assignee's Department Head, retest
     tester, or a manager. Department Heads need this access because they can
-    now decide or reopen Rejected/Duplicate outcomes and may need to provide
+    now decide or reopen Rejected/Not a Defect outcomes and may need to provide
     the supporting evidence required by those decisions."""
     return (
         _is_manager(db, obj, user)
@@ -166,6 +170,21 @@ def _can_assign(db: Session, obj: models.Defect, user: models.User) -> bool:
 
 def _is_assignee(obj: models.Defect, user: models.User) -> bool:
     return obj.assignee_id == user.id
+
+
+def _qa_disposition_blocked_for_requester_assignment(
+    obj: models.Defect,
+    user: models.User,
+    requested: str,
+) -> bool:
+    """Requester ownership prevents QA from closing the investigation path."""
+    roles = set(user.roles or [])
+    is_qa_user = bool(roles & _QA_DEFECT_ROLES) and Role.ADMIN not in roles
+    return bool(
+        requested in _REQUESTER_DISPOSITION_STATUSES
+        and obj.assignee_is_requester
+        and is_qa_user
+    )
 
 
 def _is_assignee_department_head(db: Session, obj: models.Defect, user: models.User) -> bool:
@@ -410,12 +429,18 @@ _RETEST_STATUSES = ("Resolved", "Retest")
 _LIST_DEFECT_EAGER_LOADS = [
     joinedload(models.Defect.qa_request), joinedload(models.Defect.cycle),
     joinedload(models.Defect.primary_test_case), joinedload(models.Defect.reporter),
-    joinedload(models.Defect.assignee),
+    joinedload(models.Defect.assignee), joinedload(models.Defect.execution),
+    selectinload(models.Defect.execution_links)
+        .joinedload(models.DefectExecutionLink.execution)
+        .joinedload(models.TestExecution.test_case),
+    selectinload(models.Defect.execution_links)
+        .joinedload(models.DefectExecutionLink.execution)
+        .joinedload(models.TestExecution.cycle),
 ]
 
 
 @router.get("", response_model=pagination.Page[schemas.DefectListOut])
-def list_defects(status: Optional[str] = None, severity: Optional[str] = None,
+def list_defects(severity: Optional[str] = None,
                  priority: Optional[str] = None, cycle_id: Optional[int] = None,
                  test_case_id: Optional[int] = None, execution_id: Optional[int] = None,
                  qa_request_id: Optional[int] = None, assignee_id: Optional[int] = None,
@@ -427,21 +452,35 @@ def list_defects(status: Optional[str] = None, severity: Optional[str] = None,
                  params: pagination.PageParams = Depends(),
                  db: Session = Depends(get_db),
                  current_user: models.User = Depends(get_current_user)):
-    # Kept as plain query params (not folded into PageParams.status) since
-    # they're single-value exact filters used by other modules' own narrow
-    # pickers (e.g. TestExecution.tsx's `?cycle_id=`), same convention as
-    # every other module's list endpoint. `params.status`/`params.search`
-    # (PAG-001/007) additionally cover the register's own multi-status and
-    # free-text search needs.
+    # Severity and entity IDs remain single-value exact filters. Status uses
+    # PageParams.status exclusively because it deliberately accepts repeated
+    # query parameters (status=New&status=Triaged&...), including the Test
+    # Execution picker that needs every non-terminal workflow state.
     q = _scoped_defects(db, current_user).options(*_LIST_DEFECT_EAGER_LOADS)
     for column, value in (
-        (models.Defect.status, status), (models.Defect.severity, severity),
-        (models.Defect.priority, priority), (models.Defect.cycle_id, cycle_id),
-        (models.Defect.execution_id, execution_id), (models.Defect.qa_request_id, qa_request_id),
+        (models.Defect.severity, severity), (models.Defect.priority, priority),
+        (models.Defect.qa_request_id, qa_request_id),
         (models.Defect.assignee_id, assignee_id), (models.Defect.reporter_id, reporter_id),
     ):
         if value is not None:
             q = q.filter(column == value)
+    # A governed defect keeps one primary execution on qap_defects and any
+    # further affected testcase executions in qap_defect_execution_links.
+    # List filters must search both paths; otherwise the additional link is
+    # saved successfully but disappears from the second cycle's defect list,
+    # completion checks, and execution-scoped views.
+    if cycle_id is not None:
+        q = q.filter(or_(
+            models.Defect.cycle_id == cycle_id,
+            models.Defect.execution_links.any(
+                models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == cycle_id)
+            ),
+        ))
+    if execution_id is not None:
+        q = q.filter(or_(
+            models.Defect.execution_id == execution_id,
+            models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == execution_id),
+        ))
     if test_case_id is not None:
         q = q.join(models.DefectTestCaseLink).filter(models.DefectTestCaseLink.test_case_id == test_case_id)
     if queue == "attention":
@@ -685,7 +724,7 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
 def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
                           db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
-    obj = _get(defect_id, db)
+    obj = _get_visible(defect_id, db, current_user)
     if obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect"}:
         raise HTTPException(400, f"A {obj.status} defect cannot be linked to a new execution")
     execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request)
@@ -707,12 +746,12 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
 @router.patch("/{defect_id}", response_model=schemas.DefectOut)
 def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(get_current_user)):
-    obj = _get(defect_id, db)
+    obj = _get_visible(defect_id, db, current_user)
     manager = _is_manager(db, obj, current_user)
     if obj.status != "New":
         raise HTTPException(400, "Only a New defect can be edited. Use workflow actions for later changes")
     if not manager and obj.reporter_id != current_user.id:
-        raise HTTPException(403, "Only the reporter, QA Lead, Project Lead, or Administrator can edit a New defect")
+        raise HTTPException(403, "Only the reporter, QA Lead group, or Administrator can edit a New defect")
     data = payload.model_dump(exclude_unset=True)
     if ("severity" in data or "priority" in data) and not manager:
         raise HTTPException(403, "Only an authorized lead can change severity or priority after submission")
@@ -737,23 +776,26 @@ def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = D
 @router.post("/{defect_id}/transition", response_model=schemas.DefectOut)
 def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Session = Depends(get_db),
                       current_user: models.User = Depends(get_current_user)):
-    obj = _get(defect_id, db)
+    obj = _get_visible(defect_id, db, current_user)
     requested = payload.status
     if requested not in STATUSES or requested not in TRANSITIONS.get(obj.status, set()):
         raise HTTPException(400, f"Invalid status transition. Defect {obj.defect_key} cannot be changed from {obj.status} to {requested}.")
     manager = _is_manager(db, obj, current_user)
     assignee = _is_assignee(obj, current_user)
     tester = _is_tester(obj, current_user)
-    # Triage happens before there's an assignee, so the "Dev Department
-    # Head" actor from the reported spec's table doesn't apply yet (that
-    # role only becomes reachable once someone from their team is actually
-    # assigned) -- scoped to whoever could route the defect anyway
-    # (_can_assign: QA Engineer or QA Lead group) or the reporter, same
-    # actor set already trusted to reject/duplicate it.
-    if requested == "Triaged" and not (_can_assign(db, obj, current_user) or obj.reporter_id == current_user.id):
-        raise HTTPException(403, "Only the Defect Reporter, a QA Engineer, QA Lead, or Administrator can triage a defect")
+    requester_owns_assignment = obj.assignee_is_requester
+    if _qa_disposition_blocked_for_requester_assignment(obj, current_user, requested):
+        raise HTTPException(
+            403,
+            "Rejected, Duplicate, and Not a Defect are controlled by the requester side while the defect is assigned to a Requester.",
+        )
+    # Triage now includes selecting the working owner. Assignment is an
+    # attribute of the defect rather than a separate lifecycle state, so
+    # only actors trusted to route work may complete this transition.
+    if requested == "Triaged" and not _can_assign(db, obj, current_user):
+        raise HTTPException(403, "Only a QA Engineer, QA Lead group member, or Administrator can triage and assign a defect")
     if requested == "Assigned" and not _can_assign(db, obj, current_user):
-        raise HTTPException(403, "Only a QA Engineer, QA Lead, Project Lead, or Administrator can assign a defect")
+        raise HTTPException(403, "Only a QA Engineer, QA Lead group member, or Administrator can assign a defect")
     if requested in {"Rejected", "Duplicate"} and not (
         manager or obj.reporter_id == current_user.id or assignee
         or _is_assignee_department_head(db, obj, current_user)
@@ -763,10 +805,20 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
             "Only the Defect Reporter, current assignee, the Department Head of the assignee, "
             "a QA Lead, or an Administrator can perform this action",
         )
-    if requested == "Not a Defect" and not (manager or obj.reporter_id == current_user.id):
-        raise HTTPException(403, "Only the Defect Reporter, a QA Lead, or an Administrator can perform this action")
+    if requested == "Not a Defect" and not (
+        (requester_owns_assignment and (
+            assignee
+            or _is_assignee_department_head(db, obj, current_user)
+            or Role.ADMIN in set(current_user.roles or [])
+        ))
+        or (not requester_owns_assignment and (manager or obj.reporter_id == current_user.id))
+    ):
+        raise HTTPException(
+            403,
+            "Only the responsible requester side, or the Defect Reporter/QA Lead before requester assignment, can mark this as Not a Defect",
+        )
     if requested == "Deferred" and not _can_defer(db, obj, current_user):
-        raise HTTPException(403, "Only a QA Lead, Project Lead, Application Owner, or Administrator can defer a defect")
+        raise HTTPException(403, "Only a QA Lead group member, Application Owner, or Administrator can defer a defect")
     if requested in {"In Progress", "Resolved"} and not (assignee or manager):
         raise HTTPException(403, "Only the assigned user or an authorized lead can perform this action")
     if requested in {"Retest", "Closed"} and not (tester or manager):
@@ -780,26 +832,23 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         # execution's assigned runner) -- those roles are specific to one
         # retest cycle and may no longer be current by the time a Closed
         # defect resurfaces, whereas the reporter is who'd actually notice.
-        if obj.status == "Closed" and not (
-            current_user.has_role(Role.QA_LEAD) or current_user.has_role(Role.CHIEF_MANAGER_QA)
-            or obj.reporter_id == current_user.id
-        ):
-            raise HTTPException(403, "Only the reporter, a QA Lead, or an Administrator can reopen a Closed defect")
+        if obj.status == "Closed" and not (manager or obj.reporter_id == current_user.id):
+            raise HTTPException(403, "Only the reporter, QA Lead group, or Administrator can reopen a Closed defect")
         if obj.status == "Retest" and not (tester or manager):
             raise HTTPException(403, "Only the assigned tester or an authorized lead can reopen this defect")
-        if obj.status == "Rejected" and not (
+        if obj.status in {"Rejected", "Not a Defect"} and not (
             manager or obj.reporter_id == current_user.id or assignee
             or _is_assignee_department_head(db, obj, current_user)
         ):
             raise HTTPException(
                 403,
                 "Only the Defect Reporter, current assignee, the Department Head of the assignee, "
-                "a QA Lead, or an Administrator can reopen a Rejected defect",
+                "a QA Lead, or an Administrator can reopen this defect decision",
             )
 
     previous = obj.status
     remarks = (payload.remarks or "").strip()
-    if requested == "Assigned":
+    if requested in {"Triaged", "Assigned"}:
         assignee_id = _required(payload.assignee_id, "Assignee")
         assignee_user = db.query(models.User).get(assignee_id)
         if not assignee_user or not assignee_user.is_active:
@@ -814,6 +863,8 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         ).first()
         if not department:
             raise HTTPException(400, "Select a valid active Department")
+        if not assignee_user.has_department(department.name):
+            raise HTTPException(400, "The selected assignee does not belong to the selected Department")
         previous_assignee_id = obj.assignee_id
         previous_assignee = obj.assignee_name
         previous_assigned_at = obj.assigned_at
@@ -824,7 +875,7 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
             [previous_assignee_id], [assignee_user.id], remarks,
             previous_assigned_at=previous_assigned_at,
         )
-        details = f"Assigned to {assignee_user.full_name} ({department.name})"
+        details = f"Triaged and assigned to {assignee_user.full_name} ({department.name})" if requested == "Triaged" else f"Assigned to {assignee_user.full_name} ({department.name})"
         if previous_assignee: details += f"; previous assignee: {previous_assignee}"
         # 2026-08 -- reported directly: "whenever assigning defect to
         # requester, system asking for remark, that remark not showing any
@@ -848,6 +899,18 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         obj.root_cause = _required(payload.root_cause, "Root Cause")
         obj.fix_details = _required(payload.fix_details, "Fix Details")
         obj.fixed_build_version = _required(payload.fixed_build_version, "Fixed Build/Release Version")
+        retest_tester_id = _required(payload.retest_tester_id, "QA Retest Owner")
+        retest_tester = db.query(models.User).get(retest_tester_id)
+        if not retest_tester or not retest_tester.is_active:
+            raise HTTPException(404, "Selected QA Retest Owner was not found or is inactive")
+        if not retest_tester.has_role(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
+            raise HTTPException(400, "QA Retest Owner must be an active QA user")
+        previous_retest_tester_id = obj.retest_tester_id
+        obj.retest_tester_id = retest_tester.id
+        reassignment.record_assignment_change(
+            db, "DEFECT", obj.id, "DEFECT_RETEST_TESTER", current_user,
+            [previous_retest_tester_id], [retest_tester.id], "Assigned during resolution",
+        )
         obj.resolved_at = models.now(); details = obj.resolution_summary
     elif requested == "Retest":
         obj.retest_result = "In Progress"; obj.retest_at = models.now(); details = remarks or "Retesting started."
@@ -862,13 +925,18 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         if not doc_store.list_documents(db, _DOC_MODULE, obj.id):
             raise HTTPException(400, "Supporting evidence must be attached before reopening a defect")
         # Reopening from Retest/Closed means a validation failure. Reopening
-        # a Rejected defect reverses an investigation decision, not a retest,
-        # so do not manufacture a misleading failed-retest result for it.
-        if previous != "Rejected":
+        # Reopening a Rejected or Not a Defect outcome reverses an
+        # investigation decision, not a retest, so do not manufacture a
+        # misleading failed-retest result for either decision.
+        if previous not in {"Rejected", "Not a Defect"}:
             obj.retest_result = "Failed"
             obj.retest_at = models.now()
         obj.reopen_count += 1
-        details = f"Rejection reopened: {obj.reopen_reason}" if previous == "Rejected" else obj.reopen_reason
+        details = (
+            f"{previous} decision reopened: {obj.reopen_reason}"
+            if previous in {"Rejected", "Not a Defect"}
+            else obj.reopen_reason
+        )
     elif requested == "Deferred":
         obj.deferral_reason = _required(payload.deferral_reason, "Deferral Reason")
         obj.deferral_approved_by = _required(payload.deferral_approved_by, "Approved By")
@@ -882,9 +950,11 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         details = obj.rejection_reason
     elif requested == "Duplicate":
         duplicate_id = _required(payload.duplicate_defect_id, "Original Defect ID")
-        original = db.query(models.Defect).get(duplicate_id)
+        original = _scoped_defects(db, current_user).filter(models.Defect.id == duplicate_id).first()
         if not original or original.id == obj.id:
             raise HTTPException(400, "Select a valid original Defect ID")
+        if original.status == "Duplicate":
+            raise HTTPException(400, "Select the canonical defect instead of another Duplicate")
         obj.duplicate_of_id = original.id; details = f"Duplicate of {original.defect_key}."
     elif requested == "Not a Defect":
         obj.not_a_defect_reason = _required(
@@ -904,17 +974,12 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     return obj
 
 
-# 2026-08 Reassignment Requirement -- the "Assigned" transition above is
-# only reachable from New/Reopened/Deferred, so once a defect is In
-# Progress/Resolved/Retest/Reopened/Deferred there was previously no way to
-# change who it's assigned to at all. Dedicated endpoint, deliberately kept
-# separate from transition_defect: it changes only the assignee, leaving
-# status/history untouched, exactly as the CR requires ("The record's
-# existing status and history shall remain unchanged").
+# Reassignment stays separate from lifecycle transitions: it changes only
+# the current owner while preserving status and history.
 @router.post("/{defect_id}/reassign", response_model=schemas.DefectOut)
 def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session = Depends(get_db),
                      current_user: models.User = Depends(get_current_user)):
-    obj = _get(defect_id, db)
+    obj = _get_visible(defect_id, db, current_user)
     if not obj.assignee_id or obj.status not in DEFECT_REASSIGNABLE_STATUSES:
         raise HTTPException(400, f"{obj.defect_key} does not currently have an assignee that can be reassigned.")
     previous_assignee_id = obj.assignee_id
@@ -925,6 +990,8 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
     new_assignee = db.query(models.User).get(payload.assignee_id)
     if not new_assignee or not new_assignee.is_active:
         raise HTTPException(404, "Selected assignee was not found or is inactive")
+    if new_assignee.id == previous_assignee_id:
+        raise HTTPException(400, "Select a different assignee for reassignment")
     # Reassignment pool: teammates of the current assignee plus configured
     # QA teams. A developer can therefore hand the defect to another member
     # of their own team or directly to QA without browsing unrelated
@@ -968,15 +1035,11 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
 @router.post("/{defect_id}/attachments", response_model=List[schemas.RequestDocumentOut])
 def upload_attachments(defect_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                        current_user: models.User = Depends(get_current_user)):
-    obj = _get(defect_id, db)
-    if obj.status == "Closed" and not _is_manager(db, obj, current_user):
-        raise HTTPException(403, "Closed defects are read-only")
-    # Loophole fix: this only ever checked the Closed-status case -- for
-    # every other status, ANY authenticated user (no relationship to this
-    # defect, its project, or its department at all) could attach files to
-    # it. Every sibling module's own document upload endpoint gates on a
-    # real "who can upload" check (_can_upload_documents in functional.py/
-    # sast_dast.py/performance.py/etc.); this brings Defects in line.
+    obj = _get_visible(defect_id, db, current_user)
+    # Evidence remains addable by a real workflow actor even while Closed,
+    # because a reporter who is allowed to reopen a Closed defect must be
+    # able to satisfy the reopen action's mandatory-evidence precondition.
+    # Everyone else is rejected by the same actor check used in the UI.
     if not _can_touch_defect(db, obj, current_user):
         raise HTTPException(403, "Only the reporter, assignee, assignee's Department Head, retest tester, or an authorized lead can attach evidence to this defect")
     return doc_store.save_documents(db, _DOC_MODULE, obj.id, obj.defect_key, files, current_user.id,

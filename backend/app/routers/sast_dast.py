@@ -618,6 +618,36 @@ SCAN_ACTIVE_STATUSES = {"SCANNING", "FINDING_VALIDATION", "REMEDIATION", "WAITIN
 # analyst can't act again until Mark Fixed hands it back (-> RESCAN).
 SCAN_ANALYST_ACTIVE_STATUSES = SCAN_ACTIVE_STATUSES - {"WAITING_FOR_FIX"}
 
+# “My Assigned Work” follows the actor who owns the current workflow step,
+# rather than every person whose id remains recorded on the request. In
+# particular, the Security Analyst remains stored after handing findings to
+# the requester; that historical assignment must not hide the request from
+# the requester or keep it in the analyst's active queue during remediation.
+SAST_DAST_REQUESTER_WORK_STATUSES = {
+    "DRAFT", "RETURNED_BY_SM", "SM_REJECTED",
+    "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_LEAD",
+    "ASSIGNED_TO_REQUESTER", "WAITING_FOR_FIX",
+}
+SAST_DAST_SECURITY_LEAD_WORK_STATUSES = {
+    "SECURITY_LEAD_ASSIGNED", "SECURITY_READINESS", "PLANNING",
+}
+SAST_DAST_SECURITY_ANALYST_WORK_STATUSES = {
+    "CONFIGURATION", "SCANNING", "FINDING_VALIDATION", "REMEDIATION",
+    "ASSIGNED_TO_LEAD", "RESCAN", "SECURITY_COMPLETE", "REPORT_READY",
+}
+
+
+def _sast_dast_named_assignment(model, user_id: int):
+    """SQL predicate for the named owner of the request's current step."""
+    return or_(
+        and_(model.requester_id == user_id,
+             model.status.in_(SAST_DAST_REQUESTER_WORK_STATUSES)),
+        and_(model.security_lead_id == user_id,
+             model.status.in_(SAST_DAST_SECURITY_LEAD_WORK_STATUSES)),
+        and_(model.security_analyst_id == user_id,
+             model.status.in_(SAST_DAST_SECURITY_ANALYST_WORK_STATUSES)),
+    )
+
 
 def _rescan_scan(db: Session, obj, kind: str, payload: schemas.SecurityScanStartIn, current_user):
     """Reported directly, full requirement doc pasted with a status-flow
@@ -1039,12 +1069,7 @@ def list_sast(params: pagination.PageParams = Depends(), requester_id: Optional[
         models.QARequestDelegation.status == "ACTIVE",
         models.QARequestDelegation.assigned_to_id == current_user.id,
     ))
-    # Security Lead/Analyst fields are the actual assignment source. A
-    # delegation is only an optional, temporary input hand-off.
-    named_assignee = or_(
-        models.SASTRequest.security_lead_id == current_user.id,
-        models.SASTRequest.security_analyst_id == current_user.id,
-    )
+    named_assignee = _sast_dast_named_assignment(models.SASTRequest, current_user.id)
     if scope is not None:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:
@@ -1569,10 +1594,7 @@ def list_dast(params: pagination.PageParams = Depends(), requester_id: Optional[
         models.QARequestDelegation.status == "ACTIVE",
         models.QARequestDelegation.assigned_to_id == current_user.id,
     ))
-    named_assignee = or_(
-        models.DASTRequest.security_lead_id == current_user.id,
-        models.DASTRequest.security_analyst_id == current_user.id,
-    )
+    named_assignee = _sast_dast_named_assignment(models.DASTRequest, current_user.id)
     if scope is not None:
         q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
     if assigned_to_me:

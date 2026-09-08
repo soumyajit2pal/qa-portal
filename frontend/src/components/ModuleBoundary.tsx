@@ -9,6 +9,12 @@ interface State {
   error: Error | null
 }
 
+function isChunkLoadError(error: Error): boolean {
+  return /ChunkLoadError|Loading chunk|Failed to fetch dynamically imported module|Importing a module script failed/i.test(
+    `${error.name} ${error.message}`,
+  )
+}
+
 // A `React.lazy()` chunk can fail to load -- most commonly after a fresh
 // deploy, when a tab that's been open since before the deploy tries to
 // fetch a module chunk by its old (now-replaced) hashed filename and gets a
@@ -35,18 +41,20 @@ export default class ModuleBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.error) {
+      const chunkLoadFailed = isChunkLoadError(this.state.error)
       return (
         <div style={{ padding: 40, maxWidth: 640 }}>
-          <h3 style={{ marginTop: 0 }}>Couldn't load the {this.props.moduleName} module</h3>
-          <p>
-            This usually means the app was updated (a new build shipped) while this tab was
-            still open, and the browser is holding a stale reference to a chunk that no longer
-            exists on the server.
+          <h3 style={{ marginTop: 0 }}>
+            {chunkLoadFailed ? `${this.props.moduleName} update available` : `${this.props.moduleName} could not be displayed`}
+          </h3>
+          <p>{chunkLoadFailed
+            ? 'The application was updated while this page was open. Reload to continue with the latest version.'
+            : 'An unexpected display error occurred. Retry this view; your saved request data is unchanged.'}
           </p>
-          <p>
-            <button onClick={() => window.location.reload()}>Reload the page</button>
-          </p>
-          <p>If reloading doesn't fix it, check the browser console/network tab for the exact failed request.</p>
+          <div style={{ display: 'flex', gap: 12 }}>
+            {!chunkLoadFailed && <button className="btn btn-primary" onClick={() => this.setState({ error: null })}>Retry</button>}
+            <button className="btn" onClick={() => window.location.reload()}>Reload page</button>
+          </div>
         </div>
       )
     }

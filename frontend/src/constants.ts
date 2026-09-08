@@ -1,5 +1,5 @@
 export const ROLE_LABELS: Record<string, string> = {
-  REQUESTER: 'Requester / Others',
+  REQUESTER: 'Requester',
   BUSINESS_ANALYST: 'Business Analyst',
   QA_ENGINEER: 'QA Engineer (QA)',
   QA_LEAD: 'QA Lead',
@@ -545,7 +545,7 @@ export const SAST_DAST_ANALYST_REASSIGNABLE_STATUSES: string[] = [
 // Mirrors backend/app/constants.py's DEFECT_REASSIGNABLE_STATUSES exactly --
 // every status where a defect actually has an assignee and is still active.
 // See Defects.tsx's DefectDetail (Reassign action) and ReassignDefectModal.
-export const DEFECT_REASSIGNABLE_STATUSES: string[] = ['Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+export const DEFECT_REASSIGNABLE_STATUSES: string[] = ['Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
 
 // SAST/DAST's own "Security Readiness" pre-scan checklists used to be
 // hardcoded here (DEFAULT_SAST_CHECKLIST_ITEMS/DEFAULT_DAST_CHECKLIST_ITEMS)
@@ -835,7 +835,7 @@ export const REPORTS: ReportDef[] = [
 // Mirrors backend constants.py's own Test Management block exactly -- see
 // models.TestProject's header comment for the feature's overall design.
 export const TEST_CASE_TYPES: string[] = [
-  'Functional Positive', 'Functional Negative', 'Regression', 'Sanity',
+  'Functional Positive', 'Functional Negative', 'Boundary Validation', 'Regression', 'Sanity',
   'Integration', 'Security', 'Performance', 'UAT', 'Other',
 ]
 // 2026-08 "Test Approval Workflow" refactor (Test_Approval_Workflow_

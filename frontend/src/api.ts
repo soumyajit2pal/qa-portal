@@ -6,6 +6,71 @@ function getToken(): string | null {
   return sessionStorage.getItem('qa_portal_token')
 }
 
+let lastUserActivity = 0
+let renewal: Promise<void> | null = null
+
+function tokenTimes(token: string): { exp: number; iat: number } | null {
+  try {
+    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    const claims = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, '=')))
+    return typeof claims.exp === 'number' && typeof claims.iat === 'number' ? claims : null
+  } catch { return null }
+}
+
+async function renewIfNeeded(): Promise<void> {
+  const token = getToken()
+  if (!token || Date.now() - lastUserActivity > 60_000) return
+  const times = tokenTimes(token)
+  if (!times) return
+  const margin = Math.min(120, Math.max(5, (times.exp - times.iat) / 3))
+  if (times.exp * 1000 - Date.now() > margin * 1000) return
+  if (renewal) return renewal
+  renewal = (async () => {
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 15_000)
+    try {
+      const response = await fetch(`${BASE_URL}/api/auth/renew`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal, cache: 'no-store',
+      })
+      if (response.status === 401) {
+        if (getToken() === token) {
+          setToken(null)
+          window.dispatchEvent(new Event('qa-session-expired'))
+        }
+        return
+      }
+      if (!response.ok) return
+      const result = await response.json()
+      // A response arriving after logout or a new login must never restore
+      // the old session. Concurrent requests share this single renewal.
+      if (getToken() === token && typeof result.access_token === 'string') setToken(result.access_token)
+    } catch { /* A transient outage does not discard a still-valid token. */ }
+    finally { window.clearTimeout(timeout) }
+  })().finally(() => { renewal = null })
+  return renewal
+}
+
+export function startTokenRenewal(): () => void {
+  lastUserActivity = Date.now()
+  const activity = (event: Event) => {
+    if (!event.isTrusted) return
+    lastUserActivity = Date.now()
+    void renewIfNeeded()
+  }
+  const events = ['pointerdown', 'keydown', 'scroll', 'pointermove']
+  events.forEach((name) => window.addEventListener(name, activity, { passive: true }))
+  const timer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') void renewIfNeeded()
+  }, 15_000)
+  void renewIfNeeded()
+  return () => {
+    events.forEach((name) => window.removeEventListener(name, activity))
+    window.clearInterval(timer)
+    lastUserActivity = 0
+  }
+}
+
 interface RequestOptions {
   method?: string
   body?: unknown
@@ -153,6 +218,7 @@ function formatBackendReason(detail: unknown): string {
 }
 
 async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T> {
+  if (!path.startsWith('/api/auth/')) await renewIfNeeded()
   const { method = 'GET', body, formEncoded = false, isBlob = false } = opts
   const headers: Record<string, string> = {}
   const token = getToken()

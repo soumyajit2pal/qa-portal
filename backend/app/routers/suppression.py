@@ -12,7 +12,7 @@ from ..deps import (
     dashboard_department_scope, require_department_visibility,
 )
 from ..constants import Role, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, SUPPRESSION_TERMINAL_STATUSES
-from ..pdf_export import build_request_detail_pdf
+from ..pdf_export import StructuredTableValue, build_request_detail_pdf
 from .. import documents as doc_store
 
 router = APIRouter(prefix="/api/suppressions", tags=["suppression"])
@@ -50,6 +50,21 @@ def _require_visible(obj: "models.SuppressionRequest", user: models.User) -> Non
         obj.department,
         requester_id=obj.created_by_id,
     )
+
+
+def _can_edit_details(obj: "models.SuppressionRequest", user: models.User) -> bool:
+    """Match the request-module edit hand-off at each workflow stage."""
+    if user.has_role(Role.ADMIN):
+        return True
+    if obj.status in ("Draft", "RETURNED_BY_SM", "RETURNED_BY_DEPARTMENT_HEAD", "RETURNED_BY_SECURITY_TEAM"):
+        return obj.created_by_id == user.id
+    if obj.status == "SM_APPROVAL_PENDING":
+        return (user.has_role(Role.SM) and user.has_department(obj.department)
+                and obj.created_by_id != user.id)
+    if obj.status == "DEPARTMENT_HEAD_APPROVAL_PENDING":
+        return (user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM)
+                and user.has_department(obj.department) and obj.created_by_id != user.id)
+    return False
 
 
 def _require_linked_request(db: Session, data: dict):
@@ -269,12 +284,19 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
     obj = db.query(models.SuppressionRequest).get(sup_id)
     if not obj:
         raise HTTPException(404, "Suppression request not found")
-    if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
-        raise HTTPException(403, "Only the requester or an admin can edit this request")
-    if obj.status != "Draft":
+    editable_statuses = (
+        "Draft", "SM_APPROVAL_PENDING", "RETURNED_BY_SM",
+        "DEPARTMENT_HEAD_APPROVAL_PENDING", "RETURNED_BY_DEPARTMENT_HEAD",
+        "RETURNED_BY_SECURITY_TEAM",
+    )
+    if obj.status not in editable_statuses:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
+    if not _can_edit_details(obj, current_user):
+        raise HTTPException(403, "You do not have permission to edit this request in its current status")
     data = payload.model_dump()
     items_data = data.pop("items", None)
+    if not items_data:
+        raise HTTPException(400, "At least one finding/issue is required")
     linked, kind = _require_linked_request(db, data)
     # Re-checked here too, not just in create_suppression -- an edit can
     # re-point sast_request_id/dast_request_id at a different request
@@ -282,7 +304,16 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
     # requester (obj.created_by_id, already verified above), otherwise a
     # requester could quietly relink their own Draft suppression onto
     # someone else's SAST/DAST request.
-    _require_requester_of_linked(linked, current_user)
+    # A reviewer may correct the request while it is pending their decision,
+    # but cannot use that access to relink it. Relinking stays a separate
+    # requester/Admin action with its own endpoint and audit entry.
+    is_requester = obj.created_by_id == current_user.id
+    is_admin = current_user.has_role(Role.ADMIN)
+    if not is_requester and not is_admin:
+        if data.get("sast_request_id") != obj.sast_request_id or data.get("dast_request_id") != obj.dast_request_id:
+            raise HTTPException(403, "Only the requester or an admin can relink this request")
+    else:
+        _require_requester_of_linked(linked, current_user)
     # Same re-link case as above -- exclude_id=obj.id so this suppression
     # (which is itself still pending) doesn't block its own edit; only a
     # DIFFERENT already-pending suppression against the (possibly new)
@@ -296,6 +327,7 @@ def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Sess
             db.delete(item)
         db.flush()
         obj.items = [models.SuppressionItem(**item) for item in items_data]
+    _log(db, obj.id, "Request Details", current_user, "Updated")
     db.commit()
     db.refresh(obj)
     return obj
@@ -374,8 +406,14 @@ def resubmit_suppression(sup_id: int, db: Session = Depends(get_db), current_use
     elif obj.status == "RETURNED_BY_DEPARTMENT_HEAD":
         obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
         _log(db, obj.id, "Department Head Approval", current_user, "Resubmitted", "Returned request re-submitted")
+    elif obj.status == "RETURNED_BY_SECURITY_TEAM" and obj.needs_dept_head_reapproval:
+        obj.status = "DEPARTMENT_HEAD_APPROVAL_PENDING"
+        obj.needs_dept_head_reapproval = False
+        _log(db, obj.id, "Department Head Approval", current_user, "Resubmitted",
+             "Security Team return corrected and re-submitted (Department Head re-approval required)")
     else:
         obj.status = "SECURITY_TEAM_VERIFICATION"
+        obj.needs_dept_head_reapproval = False
         _log(db, obj.id, "Security Team Verification", current_user, "Resubmitted", "Returned request re-submitted")
     db.commit()
     db.refresh(obj)
@@ -457,10 +495,16 @@ def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: S
     obj.security_decided_at = models.now()
     if decision in ("Accepted", "Approved"):
         obj.status = "Done"
+        obj.needs_dept_head_reapproval = False
     elif decision == "Rejected":
         obj.status = "Rejected"
+        obj.needs_dept_head_reapproval = False
     else:
-        obj.status = "RETURNED_BY_DEPARTMENT_HEAD" if payload.require_dept_head_reapproval else "RETURNED_BY_SECURITY_TEAM"
+        # The status records the actor that performed the return. Department
+        # Head reapproval is a later routing choice and must not make the UI
+        # claim that the Department Head returned the request.
+        obj.status = "RETURNED_BY_SECURITY_TEAM"
+        obj.needs_dept_head_reapproval = bool(payload.require_dept_head_reapproval)
     _log(db, obj.id, "Security Team Verification", current_user, decision, payload.comments)
     db.commit()
     db.refresh(obj)
@@ -516,8 +560,14 @@ def export_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
             ("Risk Assessment", obj.risk_assessment),
         ]),
         ("Findings Covered", [
-            (i.issue_id or f"Finding {i.id}", f"{i.severity} | {i.description or ''} | Justification: {i.justification or ''}")
-            for i in obj.items
+            ("Findings", StructuredTableValue(
+                headers=("Issue Group", "Severity", "Description", "Justification"),
+                rows=[
+                    (i.issue_id or f"Finding {i.id}", i.severity, i.description, i.justification)
+                    for i in obj.items
+                ],
+                width_ratios=(.17, .13, .32, .38),
+            )),
         ]),
         ("Requester", [
             ("Requester", uname(obj.created_by_id)),

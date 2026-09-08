@@ -6,6 +6,7 @@ import { DraftChecklistEvidenceOut } from "../../types";
 import { QARequestForm, SetField } from "../types";
 import { EvidenceKind } from "./ChecklistEvidencePicker";
 import { ReadinessChecklistSection } from "./ReadinessChecklistSection";
+import SearchableSelect from "../../components/SearchableSelect";
 
 interface Props {
   form: QARequestForm;
@@ -55,14 +56,10 @@ export function SastStep({ form, set, existingSast, draftRequestId, evidenceFile
             </div>
             <div className="security-classification-grid">
               <Field label="Priority *">
-                <select value={form.sast_priority} onChange={(e) => set("sast_priority", e.target.value)}>
-                  {PRIORITIES.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
+                <SearchableSelect searchable={false} value={form.sast_priority} options={PRIORITIES} onChange={(value) => set("sast_priority", value)} />
               </Field>
               <Field label="Risk Category *">
-                <select value={form.sast_risk_category} onChange={(e) => set("sast_risk_category", e.target.value)}>
-                  {RISK_RATINGS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
+                <SearchableSelect searchable={false} value={form.sast_risk_category} options={RISK_RATINGS} onChange={(value) => set("sast_risk_category", value)} />
               </Field>
             </div>
           </section>

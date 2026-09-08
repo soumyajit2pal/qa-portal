@@ -6,6 +6,7 @@ import { DraftChecklistEvidenceOut } from '../../types'
 import { QARequestForm, SetField } from '../types'
 import { EvidenceKind } from './ChecklistEvidencePicker'
 import { ReadinessChecklistSection } from './ReadinessChecklistSection'
+import SearchableSelect from '../../components/SearchableSelect'
 
 interface Props {
   form: QARequestForm
@@ -63,19 +64,13 @@ export function PerformanceStep({ form, set, existingPerformance, draftRequestId
             </div>
             <div className="security-classification-grid security-performance-classification">
               <Field label="Priority *">
-                <select value={form.performance_priority} onChange={(e) => set('performance_priority', e.target.value)}>
-                  {PRIORITIES.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
+                <SearchableSelect searchable={false} value={form.performance_priority} options={PRIORITIES} onChange={(value) => set('performance_priority', value)} />
               </Field>
               <Field label="Risk Category *">
-                <select value={form.performance_risk_category} onChange={(e) => set('performance_risk_category', e.target.value)}>
-                  {RISK_RATINGS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
+                <SearchableSelect searchable={false} value={form.performance_risk_category} options={RISK_RATINGS} onChange={(value) => set('performance_risk_category', value)} />
               </Field>
               <Field label="Environment *">
-                <select value={form.performance_environment} onChange={(e) => set('performance_environment', e.target.value)}>
-                  {POST_SIT_ENVIRONMENTS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </select>
+                <SearchableSelect searchable={false} value={form.performance_environment} options={POST_SIT_ENVIRONMENTS} onChange={(value) => set('performance_environment', value)} />
               </Field>
             </div>
           </section>

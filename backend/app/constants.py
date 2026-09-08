@@ -518,7 +518,7 @@ SAST_DAST_ANALYST_REASSIGNABLE_STATUSES = [
 # assignee). Every status where obj.assignee_id is actually populated and
 # the defect is still active -- excludes New (nothing to reassign yet) and
 # the terminal Rejected/Duplicate/Closed states.
-DEFECT_REASSIGNABLE_STATUSES = ["Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred"]
+DEFECT_REASSIGNABLE_STATUSES = ["Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred"]
 # Terminal states -- used to decide whether a SAST/DAST request still counts
 # as "outstanding" for dashboard/ageing purposes (see routers/dashboard.py's
 # 3W view). SM_REJECTED is deliberately NOT here -- reported directly, it's
@@ -830,7 +830,7 @@ SIGNOFF_STATUS_LABELS = {
 }
 
 TEST_CASE_TYPES = [
-    "Functional Positive", "Functional Negative", "Regression", "Sanity",
+    "Functional Positive", "Functional Negative", "Boundary Validation", "Regression", "Sanity",
     "Integration", "Security", "Performance", "UAT", "Other",
 ]
 

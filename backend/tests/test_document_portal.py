@@ -9,6 +9,8 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
+from app.constants import Role
+from app.deps import require_document_portal_manager
 from app.routers import document_portal
 
 
@@ -110,6 +112,44 @@ class DocumentPortalTests(unittest.TestCase):
 
         self.assertTrue(result["allowed"])
         self.assertEqual(result["requested_bytes"], 400)
+
+    def test_manager_can_delete_file_and_non_empty_folder(self):
+        user = SimpleNamespace(username="portal-manager")
+        document = self.root / "evidence.txt"
+        document.write_text("evidence", encoding="utf-8")
+        folder = self.root / "Release"
+        folder.mkdir()
+        (folder / "nested.txt").write_text("nested", encoding="utf-8")
+
+        document_portal.delete_item(path="evidence.txt", _=user)
+        document_portal.delete_item(path="Release", _=user)
+
+        self.assertFalse(document.exists())
+        self.assertFalse(folder.exists())
+
+    def test_document_repository_root_cannot_be_deleted(self):
+        with self.assertRaises(HTTPException) as error:
+            document_portal.delete_item(path="", _=SimpleNamespace(username="portal-manager"))
+
+        self.assertEqual(error.exception.status_code, 400)
+        self.assertTrue(self.root.exists())
+
+    def test_delete_permission_is_manager_only(self):
+        def user_with(*roles):
+            return SimpleNamespace(
+                roles=list(roles),
+                login_type="STANDARD",
+                has_role=lambda *allowed: bool(set(roles).intersection(allowed)),
+            )
+
+        self.assertIsNotNone(require_document_portal_manager(user_with(Role.DOCUMENT_PORTAL_MANAGER)))
+        with self.assertRaises(HTTPException) as contributor_error:
+            require_document_portal_manager(user_with(Role.DOCUMENT_PORTAL_CONTRIBUTOR))
+        with self.assertRaises(HTTPException) as viewer_error:
+            require_document_portal_manager(user_with(Role.DOCUMENT_PORTAL_VIEWER))
+
+        self.assertEqual(contributor_error.exception.status_code, 403)
+        self.assertEqual(viewer_error.exception.status_code, 403)
 
 
 if __name__ == "__main__":

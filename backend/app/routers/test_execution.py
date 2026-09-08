@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import List, Optional
+from typing import List, Literal, Optional
 from urllib.parse import urlparse
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.exc import IntegrityError
 
 from .. import models, schemas, pagination, email_notifications
+from ..execution_cycles import cycle_unlink_allowed, require_cycle_unlinkable
 from ..database import get_db
 from ..database import SessionLocal
 from ..deps import (
@@ -47,7 +48,8 @@ _LIST_EXECUTION_EAGER_LOADS = [
     # "3500 testcases, add to cycle, timeout" report below.
     joinedload(models.TestExecution.added_by),
     selectinload(models.TestExecution.runs),
-    selectinload(models.TestExecution.linked_defects),
+    selectinload(models.TestExecution.primary_linked_defects),
+    selectinload(models.TestExecution.additional_linked_defects),
 ]
 
 router = APIRouter(prefix="/api/test-execution", tags=["test-management"])
@@ -73,7 +75,8 @@ def _in_batches(values: List[int], size: int = _ORACLE_IN_BATCH_SIZE):
 
 
 def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
-                           search: Optional[str] = None, priority: Optional[str] = None):
+                           search: Optional[str] = None, priority: Optional[str] = None,
+                           test_type: Optional[str] = None):
     """Approved project testcases not already present in ``cycle``.
 
     The correlated NOT EXISTS is intentionally resolved by Oracle. It
@@ -107,6 +110,8 @@ def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
         ))
     if priority and priority.strip():
         query = query.filter(models.TestCase.priority == priority.strip())
+    if test_type and test_type.strip():
+        query = query.filter(models.TestCase.test_type == test_type.strip())
     return query
 
 
@@ -115,6 +120,38 @@ def _get_cycle_or_404(db: Session, cycle_id: int) -> models.TestCycle:
     if not obj:
         raise HTTPException(404, "Test Cycle not found")
     return obj
+
+
+def _require_cycle_request_link_change_allowed(db: Session, link) -> None:
+    """Protect a Functional execution link regardless of which UI changes it."""
+    if not link or link.child_type != "Functional":
+        return
+    functional_request = db.query(models.FunctionalRequest).get(link.child_id)
+    if functional_request:
+        require_cycle_unlinkable(functional_request.status)
+
+
+def _attach_request_link_permissions(db: Session, cycles) -> None:
+    """Expose whether Lifecycle may replace a Functional link without per-cycle queries."""
+    functional_ids = {
+        cycle.child_request_link.child_id
+        for cycle in cycles
+        if cycle.child_request_link and cycle.child_request_link.child_type == "Functional"
+    }
+    statuses = dict(
+        db.query(models.FunctionalRequest.id, models.FunctionalRequest.status)
+        .filter(models.FunctionalRequest.id.in_(functional_ids))
+        .all()
+    ) if functional_ids else {}
+    for cycle in cycles:
+        link = cycle.child_request_link
+        if not link:
+            allowed = False
+        elif link.child_type != "Functional" or link.child_id not in statuses:
+            allowed = True
+        else:
+            allowed = cycle_unlink_allowed(statuses[link.child_id])
+        cycle.linked_request_change_allowed = allowed
 
 
 def _get_cycle_folder_or_404(db: Session, folder_id: int) -> models.TestCycleFolder:
@@ -260,15 +297,11 @@ def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_
     if start_date > end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     link = cycle.child_request_link
-    if link:
-        child_models = {
-            "Functional": models.FunctionalRequest, "SAST": models.SASTRequest,
-            "DAST": models.DASTRequest, "Performance": models.PerformanceRequest,
-        }
-        child_model = child_models.get(link.child_type)
-        linked_request = db.query(child_model).get(link.child_id) if child_model else None
-        if not linked_request or not linked_request.request_id:
-            raise HTTPException(400, "This cycle's linked request is no longer valid -- unlink it before continuing")
+    if not link or link.child_type != "Functional":
+        raise HTTPException(400, "A Test Cycle must be linked to a Functional QA Request")
+    linked_request = db.query(models.FunctionalRequest).get(link.child_id)
+    if not linked_request or not linked_request.request_id:
+        raise HTTPException(400, "This cycle's Functional QA Request is no longer valid. Replace the link before continuing")
     not_ready_items = [
         e.test_case.test_case_key for e in executions
         if e.pinned_version and e.pinned_version.status in _CYCLE_ITEM_NOT_READY_STATUSES and e.test_case
@@ -415,26 +448,34 @@ def _require_assigned_runner(obj: models.TestExecution, current_user: models.Use
 
 # Governed statuses (defects.py) that count as "resolved enough to retest
 # against" -- Deferred (accepted, tracked, testing may proceed) or Closed
-# (fixed and verified). Every other status (New/Assigned/In Progress/
-# Resolved/Retest/Reopened/Rejected/Duplicate) counts as "active" and keeps
-# the full lock below engaged. Rejected/Duplicate deliberately NOT included
+# (fixed and verified). Every other status (New/Triaged/Assigned/In Progress/
+# Resolved/Retest/Reopened/Rejected/Duplicate/Not a Defect) counts as "active"
+# and keeps the full lock below engaged. Rejected/Duplicate/Not a Defect are
+# deliberately NOT included
 # even though they're also terminal -- reported directly as "Deferred or
-# Closed" only; flag to the QA process owner if Rejected/Duplicate should
-# also clear the lock.
+# Closed" only; flag to the QA process owner if another terminal decision
+# should also clear the lock.
 _DEFECT_RETEST_CLEAR_STATUSES = ("Deferred", "Closed")
+_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES = (
+    "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened",
+)
 
 
 def _execution_lock_state(db: Session, execution_id: int):
     """Returns (active_defects, has_prior_failed_or_blocked) for the status gate.
     active_defects -- every governed Defect (defects.py) linked to this slot
-    (Defect.execution_id) whose own status is not yet Deferred/Closed; a
+    through its primary execution or an additional execution trace, whose
+    own status is not yet Deferred/Closed; a
     non-empty list here is what drives the full lock. The second value is True
     if any attempt ever recorded on this slot (TestExecutionRun.status) was
     'Fail' or 'Blocked'. It enables Retest Passed and drives the permanent
     'Pass'/'NA' block for the rest of this slot's history, regardless of
     whether a defect is linked right now. The mirrored current status is a
     compatibility fallback for results saved before run history existed."""
-    defects = db.query(models.Defect).filter(models.Defect.execution_id == execution_id).all()
+    defects = db.query(models.Defect).filter(or_(
+        models.Defect.execution_id == execution_id,
+        models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == execution_id),
+    )).all()
     active_defects = [d for d in defects if d.status not in _DEFECT_RETEST_CLEAR_STATUSES]
     has_prior_failed_or_blocked = db.query(models.TestExecutionRun.id).filter(
         models.TestExecutionRun.execution_id == execution_id,
@@ -932,14 +973,14 @@ def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
     q = pagination.apply_sort(q, params, sortable={"name": models.TestCycle.name},
                                default_column=models.TestCycle.created_at, id_column=models.TestCycle.id)
     result = pagination.paginate(q, params)
+    _attach_request_link_permissions(db, result.items)
     return pagination.to_page_response(result, params)
 
 
 @router.post("/projects/{project_id}/cycles", response_model=schemas.TestCycleOut)
 def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    """SRS CYC-001 -- name, type, dates, owner, environment, build and an
-    optional request link are all captured at creation."""
+    """Create a Test Cycle linked to the Functional request it executes."""
     _require_active_project(db, project_id)
     require_can_execute_project(db, project_id, current_user)
     name = payload.name.strip()
@@ -956,18 +997,15 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
         if not folder:
             raise HTTPException(404, "Selected folder not found in this project")
         require_can_view_cycle_folder(folder, current_user)
-    linked_request = None
-    child_models = {
-        "Functional": models.FunctionalRequest, "SAST": models.SASTRequest,
-        "DAST": models.DASTRequest, "Performance": models.PerformanceRequest,
-    }
-    if payload.linked_request_id is not None:
-        child_model = child_models.get(payload.linked_request_type or "")
-        if not child_model:
-            raise HTTPException(400, "Select a valid child request type")
-        linked_request = db.query(child_model).get(payload.linked_request_id)
-        if not linked_request or not linked_request.request_id:
-            raise HTTPException(404, "Child request not found")
+    linked_request = db.query(models.FunctionalRequest).get(payload.linked_request_id)
+    if not linked_request or not linked_request.request_id:
+        raise HTTPException(404, "Functional QA Request not found")
+    project = _get_project_or_404(db, project_id)
+    if project.application_master_id is None:
+        raise HTTPException(400, "Select an Application on this Test Project before creating a Test Cycle")
+    if (project.application_master_id is not None
+            and linked_request.application_master_id != project.application_master_id):
+        raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
     obj = models.TestCycle(
         project_id=project_id, name=name, description=payload.description,
         start_date=payload.start_date, end_date=payload.end_date, created_by_id=current_user.id,
@@ -986,13 +1024,13 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
             db, "TEST_CYCLE", obj.id, "CYCLE_OWNER", current_user,
             [], [obj.owner_id], "Assigned during cycle creation",
         )
-    if linked_request:
-        obj.child_request_link = models.TestCycleChildRequestLink(
-            child_type=payload.linked_request_type, child_id=linked_request.id,
-            child_key=linked_request.request_id,
-        )
+    obj.child_request_link = models.TestCycleChildRequestLink(
+        child_type="Functional", child_id=linked_request.id,
+        child_key=linked_request.request_id,
+    )
     db.commit()
     db.refresh(obj)
+    _attach_request_link_permissions(db, [obj])
     return obj
 
 
@@ -1011,6 +1049,7 @@ def get_cycle(cycle_id: int, db: Session = Depends(get_db), current_user: models
     # UI itself uses to open a cycle.
     if obj.folder_id:
         require_can_view_cycle_folder(obj.folder, current_user)
+    _attach_request_link_permissions(db, [obj])
     return obj
 
 
@@ -1063,11 +1102,10 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     f"Every testcase must be executed before completing this Test Cycle. "
                     f"{len(incomplete_executions)} testcase(s) are still Not Executed: {labels}{suffix}",
                 )
-            unresolved_statuses = ("New", "Assigned", "In Progress", "Resolved", "Retest", "Reopened")
             severe = db.query(models.Defect).filter(
                 models.Defect.cycle_id == obj.id,
                 models.Defect.severity.in_(("Critical", "High")),
-                models.Defect.status.in_(unresolved_statuses),
+                models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
             ).all()
             if severe:
                 labels = ", ".join(defect.defect_key for defect in severe[:8])
@@ -1077,10 +1115,22 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     "Resolve, reject, defer with approval, or close these defects before completing the Test Cycle. "
                     f"Blocking defects: {labels}",
                 )
+            invalid_deferred = db.query(models.Defect).filter(
+                models.Defect.cycle_id == obj.id,
+                models.Defect.status == "Deferred",
+                or_(models.Defect.target_release.is_(None), models.Defect.target_release == ""),
+            ).all()
+            if invalid_deferred:
+                raise HTTPException(
+                    400,
+                    "Every deferred defect must have a Target Release before completing the Test Cycle. "
+                    "Update these defects in Defect Management: "
+                    + ", ".join(defect.defect_key for defect in invalid_deferred),
+                )
             residual = db.query(models.Defect).filter(
                 models.Defect.cycle_id == obj.id,
                 models.Defect.severity.in_(("Medium", "Low")),
-                models.Defect.status.in_(unresolved_statuses),
+                models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
             ).all()
             if residual:
                 # 2026-08 whole-module simplification: QA Lead Group system
@@ -1088,7 +1138,11 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                 # TestProjectMember carve-out is gone.
                 manager = current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
                 if not manager:
-                    raise HTTPException(403, "Open Medium or Low defects require QA Lead approval before cycle completion")
+                    raise HTTPException(
+                        403,
+                        "A QA Lead Group member must review the residual risk and complete this cycle "
+                        "while Medium or Low defects remain open",
+                    )
                 if not remarks:
                     raise HTTPException(400, "Completion justification is required while Medium or Low defects remain open")
                 missing_target = [defect.defect_key for defect in residual if not defect.target_release]
@@ -1111,8 +1165,8 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         # other field, same as before) -- this is narrowly scoped to a
         # request that changes ONLY the linked_request_type/
         # linked_request_id pair, so it can't be used to smuggle other
-        # edits through alongside a link change. Re-linking (or clearing)
-        # the QA Request a completed cycle is filed against stays useful
+        # edits through alongside a link change. Replacing the Functional
+        # QA Request a completed cycle is filed against stays useful
         # for traceability/reporting even though execution itself is done.
         pass
     else:
@@ -1148,30 +1202,38 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     link_changed = "linked_request_type" in data or "linked_request_id" in data
     link_type = data.pop("linked_request_type", None)
     link_id = data.pop("linked_request_id", None)
+    if link_changed and (link_type != "Functional" or link_id is None):
+        raise HTTPException(400, "A Test Cycle must be linked to a Functional QA Request")
+    if (link_changed and obj.child_request_link
+            and (link_type, link_id) != (previous_link_type, obj.linked_request_id)):
+        _require_cycle_request_link_change_allowed(db, obj.child_request_link)
     for field, value in data.items():
         setattr(obj, field, value)
     if link_changed:
-        if link_id is None:
-            obj.child_request_link = None
+        linked_request = db.query(models.FunctionalRequest).get(link_id)
+        if not linked_request or not linked_request.request_id:
+            raise HTTPException(404, "Functional QA Request not found")
+        if (obj.project.application_master_id is not None
+                and linked_request.application_master_id != obj.project.application_master_id):
+            raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
+        if obj.child_request_link:
+            obj.child_request_link.child_type = "Functional"
+            obj.child_request_link.child_id = linked_request.id
+            obj.child_request_link.child_key = linked_request.request_id
         else:
-            child_models = {
-                "Functional": models.FunctionalRequest, "SAST": models.SASTRequest,
-                "DAST": models.DASTRequest, "Performance": models.PerformanceRequest,
-            }
-            child_model = child_models.get(link_type or "")
-            if not child_model:
-                raise HTTPException(400, "Select a valid child request type")
-            linked_request = db.query(child_model).get(link_id)
-            if not linked_request or not linked_request.request_id:
-                raise HTTPException(404, "Child request not found")
-            if obj.child_request_link:
-                obj.child_request_link.child_type = link_type
-                obj.child_request_link.child_id = linked_request.id
-                obj.child_request_link.child_key = linked_request.request_id
-            else:
-                obj.child_request_link = models.TestCycleChildRequestLink(
-                    child_type=link_type, child_id=linked_request.id, child_key=linked_request.request_id,
-                )
+            obj.child_request_link = models.TestCycleChildRequestLink(
+                child_type="Functional", child_id=linked_request.id, child_key=linked_request.request_id,
+            )
+    if not obj.child_request_link or obj.child_request_link.child_type != "Functional":
+        raise HTTPException(400, "A Test Cycle must be linked to a Functional QA Request")
+    if obj.project.application_master_id is None:
+        raise HTTPException(400, "Select an Application on this Test Project before continuing Test Lifecycle")
+    current_linked_request = db.query(models.FunctionalRequest).get(obj.child_request_link.child_id)
+    if not current_linked_request or not current_linked_request.request_id:
+        raise HTTPException(400, "This cycle's Functional QA Request is no longer valid. Replace the link before continuing")
+    if (obj.project.application_master_id is not None
+            and current_linked_request.application_master_id != obj.project.application_master_id):
+        raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
     # 2026-08 "Test Approval Workflow" refactor, section 7 -- validated
     # against the FULLY-UPDATED obj (after link changes above have
     # already been applied in this same request), not the pre-update
@@ -1196,14 +1258,10 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         new_link_type = obj.linked_request_type
         new_link_key = obj.linked_request_key
         if (previous_link_type, previous_link_key) != (new_link_type, new_link_key):
-            if new_link_key:
-                decision = "Request Linked"
-                comments = f"Linked {new_link_type} request {new_link_key}."
-                if previous_link_key:
-                    comments += f" Replaced {previous_link_type} request {previous_link_key}."
-            else:
-                decision = "Request Unlinked"
-                comments = f"Unlinked {previous_link_type} request {previous_link_key}."
+            decision = "Request Linked"
+            comments = f"Linked {new_link_type} request {new_link_key}."
+            if previous_link_key:
+                comments += f" Replaced {previous_link_type} request {previous_link_key}."
             db.add(models.ApprovalAction(
                 entity_type="TEST_CYCLE", entity_id=obj.id, step_name="Request Link",
                 actor_id=current_user.id, actor_role=current_user.roles_csv,
@@ -1237,6 +1295,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         )
     db.commit()
     db.refresh(obj)
+    _attach_request_link_permissions(db, [obj])
     return obj
 
 
@@ -1250,22 +1309,10 @@ def unlink_cycle_request(cycle_id: int, db: Session = Depends(get_db),
     link = obj.child_request_link
     if not link:
         raise HTTPException(404, "This test cycle does not have a linked request")
-    child_type, child_id, child_key = link.child_type, link.child_id, link.child_key
-    obj.child_request_link = None
-    db.add(models.ApprovalAction(
-        entity_type="TEST_CYCLE", entity_id=obj.id, step_name="Request Link",
-        actor_id=current_user.id, actor_role=current_user.roles_csv,
-        decision="Request Unlinked", comments=f"Unlinked {child_type} request {child_key}",
-    ))
-    if child_type == "Functional":
-        db.add(models.ApprovalAction(
-            entity_type="FUNCTIONAL_REQUEST", entity_id=child_id, step_name="Test Execution",
-            actor_id=current_user.id, actor_role=current_user.roles_csv,
-            decision="Test Cycle Unlinked", comments=f"Unlinked test cycle {obj.cycle_key} - {obj.name}",
-        ))
-    db.commit()
-    db.refresh(obj)
-    return obj
+    raise HTTPException(
+        400,
+        "A Test Cycle link is mandatory. Replace the Functional QA Request from Edit Cycle instead.",
+    )
 
 
 @router.delete("/cycles/{cycle_id}")
@@ -1292,6 +1339,7 @@ def delete_cycle(cycle_id: int, db: Session = Depends(get_db),
     _require_active_project(db, obj.project_id)
     _require_open_cycle(obj)
     require_can_manage_execution_governance(db, obj.project_id, current_user)
+    _require_cycle_request_link_change_allowed(db, obj.child_request_link)
     executions = db.query(models.TestExecution).filter_by(cycle_id=cycle_id).all()
     is_admin_override = bool(executions) and current_user.has_role(Role.ADMIN)
     if executions and not is_admin_override:
@@ -1509,6 +1557,8 @@ def list_cycle_candidate_test_cases(
     page_size: int = Query(25, ge=5, le=100),
     search: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
+    test_type: Optional[str] = Query(None),
+    sort_order: Literal["newest", "oldest"] = Query("newest"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -1520,12 +1570,15 @@ def list_cycle_candidate_test_cases(
     """
     cycle = _get_cycle_or_404(db, cycle_id)
     require_can_execute_project(db, cycle.project_id, current_user)
-    base = _cycle_candidate_query(db, cycle, search, priority)
+    base = _cycle_candidate_query(db, cycle, search, priority, test_type)
     total = base.order_by(None).count()
     page_query = base
     if cursor is not None:
-        page_query = page_query.filter(models.TestCase.id > cursor)
-    rows = page_query.order_by(models.TestCase.id.asc()).limit(page_size + 1).all()
+        page_query = page_query.filter(
+            models.TestCase.id < cursor if sort_order == "newest" else models.TestCase.id > cursor
+        )
+    id_order = models.TestCase.id.desc() if sort_order == "newest" else models.TestCase.id.asc()
+    rows = page_query.order_by(id_order).limit(page_size + 1).all()
     has_more = len(rows) > page_size
     items = rows[:page_size]
     return {
@@ -1952,7 +2005,7 @@ def add_test_cases_from_server_selection(
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     if payload.selection_mode == "all_matching":
-        query = _cycle_candidate_query(db, cycle, payload.search, payload.priority)
+        query = _cycle_candidate_query(db, cycle, payload.search, payload.priority, payload.test_type)
         for id_batch in _in_batches(list(dict.fromkeys(payload.excluded_ids))):
             query = query.filter(~models.TestCase.id.in_(id_batch))
         selected_ids = [row[0] for row in query.with_entities(models.TestCase.id).order_by(models.TestCase.id).all()]

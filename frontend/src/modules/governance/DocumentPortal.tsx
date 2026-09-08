@@ -48,6 +48,7 @@ const CONTRIBUTOR_ROLES = [
   "DOCUMENT_PORTAL_CONTRIBUTOR",
   "DOCUMENT_PORTAL_MANAGER",
 ];
+const MANAGER_ROLE = "DOCUMENT_PORTAL_MANAGER";
 const bytes = (value: number) => {
   if (!Number.isFinite(value) || value < 0) return "—";
   if (value === 0) return "0 B";
@@ -248,6 +249,7 @@ export default function DocumentPortal() {
   const canContribute = !!user?.roles.some((role) =>
     CONTRIBUTOR_ROLES.includes(role),
   );
+  const canDelete = !!user?.roles.includes(MANAGER_ROLE);
   const [data, setData] = useState<Browse | null>(null);
   const [path, setPath] = useState("");
   const [sort, setSort] = useState<Sort>("name");
@@ -264,6 +266,8 @@ export default function DocumentPortal() {
     "folder" | "upload" | "rename" | "move" | null
   >(null);
   const [activeItem, setActiveItem] = useState<Item | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [folderName, setFolderName] = useState("");
   const [newName, setNewName] = useState("");
   const [destination, setDestination] = useState("");
@@ -692,6 +696,22 @@ export default function DocumentPortal() {
       setBusy("");
     }
   }
+  async function deleteItem() {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    setError(null);
+    try {
+      await api.del(
+        `/api/document-portal/items?path=${encodeURIComponent(pendingDelete.path)}`,
+      );
+      setPendingDelete(null);
+      await load(path);
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
   async function download(url: string, filename: string) {
     setDownloadStatus("Preparing your download…");
     setError(null);
@@ -825,7 +845,7 @@ export default function DocumentPortal() {
             )}
             <span>{isFullscreen ? "Exit full screen" : "Full screen"}</span>
           </button>
-          <span>Deletion is disabled</span>
+          <span>{canDelete ? "Manager deletion enabled" : "Deletion restricted to Document Portal Managers"}</span>
         </div>
         <form
           className="document-portal-toolbar"
@@ -1077,6 +1097,15 @@ export default function DocumentPortal() {
                               Move
                             </button>
                           </>
+                        )}
+                        {!isSearching && canDelete && (
+                          <button
+                            type="button"
+                            className="btn btn-small btn-danger"
+                            onClick={() => setPendingDelete(item)}
+                          >
+                            Delete
+                          </button>
                         )}
                       </td>
                     </tr>
@@ -1451,6 +1480,24 @@ export default function DocumentPortal() {
             </div>
           </div>
         </Modal>
+      )}
+      {pendingDelete && (
+        <ConfirmModal
+          title={`Delete “${pendingDelete.name}”?`}
+          message={
+            pendingDelete.is_folder
+              ? "This folder and all documents and subfolders inside it will be permanently deleted."
+              : "This document will be permanently deleted."
+          }
+          confirmLabel="Delete"
+          cancelLabel="Cancel"
+          busy={deleteBusy}
+          destructive
+          onConfirm={() => void deleteItem()}
+          onCancel={() => {
+            if (!deleteBusy) setPendingDelete(null);
+          }}
+        />
       )}
     </div>
   );

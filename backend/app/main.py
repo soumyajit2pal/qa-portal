@@ -94,6 +94,12 @@ with SessionLocal() as migration_db:
         backfilled_departments = departments.backfill_user_department_assignments(migration_db)
         if backfilled_departments:
             logger.info("Backfilled department_assignments for %d existing user(s)", backfilled_departments)
+        reconciled_department_references = departments.reconcile_department_references(migration_db)
+        if reconciled_department_references:
+            logger.info(
+                "Reconciled %d department reference(s) with the Department master",
+                reconciled_department_references,
+            )
     else:
         logger.info("Skipping legacy-layout migration/overdue sweeps -- another worker already holds the startup lock.")
 
@@ -397,6 +403,7 @@ def _log_file_operation(request, response) -> None:
 _DOCUMENT_PORTAL_ALLOWED_API_PATHS = {
     "/api/auth/login",
     "/api/auth/logout",
+    "/api/auth/renew",
     "/api/auth/me",
     "/api/auth/me/email",
     "/api/health",

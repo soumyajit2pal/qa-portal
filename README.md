@@ -199,8 +199,9 @@ order (highest precedence first): process environment,
 `backend/.env.<APP_ENV>`, `backend/.env`, then typed application defaults. If
 the backend-specific profile does not exist, the matching repository-root
 `.env.<APP_ENV>` file is used, allowing the same complete UAT profile to run
-under Compose or direct Uvicorn. The unprofiled root `.env` is deliberately
-not loaded by direct host runs because it may contain container-only paths.
+under Compose or direct Uvicorn. When `backend/.env` is absent, the
+unprofiled root `.env` may select `APP_ENV`; its other values are deliberately
+not loaded by direct host runs because they may contain container-only paths.
 Profile names may contain letters, numbers, underscores, and hyphens.
 
 ```bash
@@ -675,3 +676,31 @@ Key endpoint groups:
 - See [Verification status](#verification-status) above: `npm install`, `vite build`, and
   `docker build`/`docker compose up` have not been executed in the authoring environment and
   should be smoke-tested before relying on this in production.
+
+### Active-session token renewal
+
+The browser calls `POST /api/auth/renew` shortly before the access token expires
+when there has been trusted keyboard, pointer, or scroll activity within the
+last minute. A visible-tab timer checks every 15 seconds; API polling alone
+does not keep a session alive. Renewal is also checked before business API
+requests. Concurrent requests share one renewal, and a late renewal response
+cannot restore a token cleared by logout or replaced by a new login.
+
+- `ACCESS_TOKEN_EXPIRE_MINUTES` controls each access token's lifetime (default 30).
+- `SESSION_MAX_MINUTES` controls the absolute session lifetime from login
+  (default 480 / eight hours). This signed deadline is preserved at renewal.
+- Renewal requires an unexpired, correctly signed access token and an active
+  database account, and uses the user's current roles. Expired tokens require
+  another sign-in; there is no long-lived refresh credential stored in the browser.
+- After activity stops, renewal stops and the remaining access-token lifetime
+  runs out. This is not a separate exact idle-timeout counter. A sleeping tab
+  that resumes after expiry requires sign-in again.
+- Session credentials remain in sessionStorage. This implementation uses the
+  existing stateless bearer model: logout clears the browser credential but does
+  not revoke a previously copied bearer token on the server. Such tokens remain
+  usable until their expiry and cannot renew beyond the signed session deadline.
+- Deploy both frontend and backend for renewal to work. No database migration
+  is required. HTTPS remains required for deployed bearer-token authentication.
+
+Browser renewal regression checks: run `node tests/token-renewal.cjs` from
+`frontend`. Backend renewal checks are in `backend/tests/test_token_renewal.py`.

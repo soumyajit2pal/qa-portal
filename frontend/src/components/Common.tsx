@@ -167,6 +167,29 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
   );
 }
 
+export function EmptyState({
+  title = "No data available",
+  description = "There are no records to display yet.",
+  action,
+  compact = false,
+  className = "",
+}: {
+  title?: ReactNode;
+  description?: ReactNode;
+  action?: ReactNode;
+  compact?: boolean;
+  className?: string;
+}) {
+  return (
+    <div className={`common-empty-state${compact ? " compact" : ""}${className ? ` ${className}` : ""}`} role="status">
+      <span className="common-empty-state-icon" aria-hidden="true"><IconFolder width={26} height={26} /></span>
+      <strong>{title}</strong>
+      {description && <span>{description}</span>}
+      {action && <div className="common-empty-state-action">{action}</div>}
+    </div>
+  );
+}
+
 // Reported directly: while an Application Name is still sitting with the
 // Application Owner -- the FIRST of the two approval tiers, see
 // ApplicationNameBanner -- a Functional/SAST/DAST/Performance request's own
@@ -331,7 +354,7 @@ export function BarChart({
 }) {
   const entries = Object.entries(data || {}).filter(([k]) => k);
   const max = Math.max(1, ...entries.map(([, v]) => v));
-  if (entries.length === 0) return <p className="muted small">No data yet.</p>;
+  if (entries.length === 0) return <EmptyState compact title="No chart data available" description="Data will appear here when matching records are available." />;
   return (
     <div className="bar-chart">
       {entries.map(([k, v]) => {
@@ -1586,14 +1609,13 @@ export function Table<T extends Record<string, any>>({
           {filteredRows.length === 0 && (
             <tr>
               <td colSpan={visibleColumns.length}>
-                <div className="empty-state">
-                  <IconFolder width={26} height={26} />
-                  <span className="msg">
-                    {rows.length === 0
-                      ? "No records found."
-                      : "No rows match the current filters."}
-                  </span>
-                  {activeFilters.length > 0 && (
+                <EmptyState
+                  compact
+                  title={rows.length === 0 ? "No records available" : "No matching records"}
+                  description={rows.length === 0
+                    ? "There is no data to display yet."
+                    : "No rows match the selected column filters."}
+                  action={activeFilters.length > 0 ? (
                     <button
                       type="button"
                       className="btn btn-sm"
@@ -1601,8 +1623,8 @@ export function Table<T extends Record<string, any>>({
                     >
                       Clear filters
                     </button>
-                  )}
-                </div>
+                  ) : undefined}
+                />
               </td>
             </tr>
           )}

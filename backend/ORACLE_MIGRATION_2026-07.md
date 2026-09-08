@@ -5107,7 +5107,7 @@ API) shown directly above this same table.
 **Fix.** Removed the manual-entry path entirely, both sides:
 
 - `SAST.tsx`/`DAST.tsx`: removed the `addFinding` handler, the `finding`/`setFinding` form state, the
-  `canAddFinding` gate, and the "Log Finding" form itself (Issue ID / Severity / Description inputs + submit
+  `canAddFinding` gate, and the "Log Finding" form itself (Issue Group / Severity / Description inputs + submit
   button) from the Findings tab.
 - `routers/sast_dast.py`: removed the `POST /api/sast-requests/{id}/findings` and
   `POST /api/dast-requests/{id}/findings` endpoints (`add_sast_finding`/`add_dast_finding`) and the shared
@@ -5389,7 +5389,7 @@ longer read in this component (the backend still computes and returns them on `S
 case they're needed again). Matching now-dead CSS (`.security-scan-summary-grid` and its responsive rule)
 removed from `index.css`.
 
-**2. Dead manual findings table removed (`SAST.tsx` / `DAST.tsx`).** The Issue ID/Severity/Description/
+**2. Dead manual findings table removed (`SAST.tsx` / `DAST.tsx`).** The Issue Group/Severity/Description/
 Status table under the Findings tab was backed by `req.findings` (`SASTFinding`/`DASTFinding` rows), which
 has been permanently empty since manual "Log Finding" entry was removed earlier in this project ("findings
 come from the SAST DAST api, so manually add finding currently not required") -- it always rendered "No

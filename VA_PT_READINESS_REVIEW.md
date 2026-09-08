@@ -29,7 +29,7 @@ Static review and hardening covered the React frontend, FastAPI APIs, authentica
 ## Verification completed
 
 - Python compilation completed for the backend and every router.
-- Backend suite: **90 tests passed**.
+- Backend suite: **95 tests passed**.
 - Frontend TypeScript and production build completed.
 - Frontend production dependency audit: **0 vulnerabilities**.
 - Static searches found no application raw-SQL interpolation, shell execution, unsafe dynamic evaluation, or unescaped rich-text rendering path.
@@ -43,4 +43,3 @@ Static review and hardening covered the React frontend, FastAPI APIs, authentica
 5. Add malware scanning or quarantine for uploaded documents if the organization requires content inspection. The application now checks type and signature but is not an antivirus engine.
 6. Apply an edge/WAF rate limit shared across all API workers. The application login limiter is intentionally local to each worker and is a second layer, not a substitute for an edge control.
 7. Validate the deployed TLS configuration, certificate name, cipher policy, Oracle transport encryption, container image CVEs, and host patch level. These cannot be established from source code alone.
-

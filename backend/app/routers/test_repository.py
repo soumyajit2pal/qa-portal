@@ -23,6 +23,7 @@ from ..constants import (
     TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS,
 )
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
+from ..testcase_imports import TEST_CASE_IMPORT_CONTENT_FIELDS, build_test_case_import_fingerprint
 from . import jobs
 
 # PAG-005 -- every eager-load the list endpoint needs to serialize
@@ -149,6 +150,31 @@ def _qa_lead_group_ids(db: Session, author_id: Optional[int] = None) -> List[int
 # Group logic. See TEST_CASE_NEW_STATUSES in constants.py.
 _OLD_WORKFLOW_STATUSES = {"In Review", "Review Completed", "Returned"}
 
+# A return is a correction assignment to the author of the submitted
+# version. Letting the reviewer pick it up as an ordinary team edit creates
+# a maker-checker deadlock: the author cannot recommend their own work and
+# the reviewer becomes the resubmitter, so they cannot recommend it either.
+_RETURNED_CORRECTION_STATUSES = {"Returned", "Returned by QA", "Returned by QA Lead"}
+
+
+def _require_returned_correction_owner(
+    draft: Optional[models.TestCaseVersion],
+    current_user: models.User,
+    action: str = "edit",
+) -> None:
+    """Keep returned corrections with the author of the current version."""
+    if (
+        draft
+        and draft.status in _RETURNED_CORRECTION_STATUSES
+        and draft.author_id != current_user.id
+    ):
+        author_name = draft.author.full_name if draft.author else "the testcase author"
+        raise HTTPException(
+            403,
+            f"This testcase was returned to {author_name} for correction. "
+            f"Only that author can {action} and resubmit it; reviewers remain independent for the next recommendation.",
+        )
+
 
 def _lock_current_drafts(db: Session, cases: List[models.TestCase]) -> None:
     """Serialize bulk workflow decisions so the first committed action wins."""
@@ -169,10 +195,7 @@ def _lock_current_drafts(db: Session, cases: List[models.TestCase]) -> None:
 # _sync_case_mirror below, called after every state change.
 # ---------------------------------------------------------------------------
 
-_CONTENT_FIELDS = [
-    "epic_id", "cr_number", "feature_id", "user_story_id", "test_type", "module_name",
-    "test_scenario", "pre_condition", "description", "priority",
-]
+_CONTENT_FIELDS = list(TEST_CASE_IMPORT_CONTENT_FIELDS)
 
 
 def _case_workflow_action(case_id: int, current_user: models.User, decision: str,
@@ -218,31 +241,75 @@ def _current_display_version(case: models.TestCase) -> Optional[models.TestCaseV
     return case.current_draft_version or case.current_approved_version
 
 
+def _build_step_diffs(left_steps, right_steps) -> dict:
+    """Build direction-aware step differences for version comparison."""
+    left_by_number = {step.step_no: step for step in left_steps}
+    right_by_number = {step.step_no: step for step in right_steps}
+    differences = {}
+    for step_no in sorted(set(left_by_number) | set(right_by_number)):
+        left_step = left_by_number.get(step_no)
+        right_step = right_by_number.get(step_no)
+        left_value = {
+            "step_text": left_step.step_text,
+            "expected_result": left_step.expected_result,
+        } if left_step else None
+        right_value = {
+            "step_text": right_step.step_text,
+            "expected_result": right_step.expected_result,
+        } if right_step else None
+        if left_value == right_value:
+            continue
+        change_type = "added" if left_step is None else "removed" if right_step is None else "modified"
+        differences[step_no] = {
+            "change_type": change_type,
+            "left": left_value,
+            "right": right_value,
+        }
+    return differences
+
+
 def _next_provisional_version_numbers(case: models.TestCase) -> tuple:
     """Provisional version_major/minor assigned when a new Draft is first
     created -- provisional because SRS VER-004 lets the QA Lead choose a
-    major bump instead at APPROVAL time (see review_test_case), at which
-    point these get recomputed. A case with no approved baseline yet used
-    to always start at 1.0 (VER-004/original versioning comment: "a newly
-    created case starts at 1.0... stays 1.0 until first approved") --
-    ORA-00001 fix: that's only true the FIRST time. Reject is terminal but
-    does NOT clear TestCase.current_draft_version_id (see review_test_case's
-    REJECT branch), so a case whose only version so far was Rejected still
-    has "no approved baseline" yet already has a real row sitting at (1, 0)
-    in qap_test_case_versions -- editing it again (update_test_case's
-    rejected_base path / bulk_update_test_cases) would otherwise try to
-    INSERT a second row at that same (test_case_id, version_major,
-    version_minor), violating UQ_QAP_TCV_CASE_VERSION. Look at the actual
-    version history instead of inferring "nothing exists yet" from "nothing
-    approved yet" -- those are only the same thing before a first Reject."""
-    approved = case.current_approved_version
-    if approved:
-        return approved.version_major, approved.version_minor + 1
-    existing = case.versions
+    major bump at approval time. Every retained version reserves its number,
+    including rejected and superseded revisions. Allocation therefore uses
+    the highest minor already present in the approved baseline's major line,
+    rather than blindly using ``approved.minor + 1`` and colliding with a
+    historical row protected by UQ_QAP_TCV_CASE_VERSION."""
+    existing = list(case.versions)
     if not existing:
         return 1, 0
-    highest = max(existing, key=lambda v: (v.version_major, v.version_minor))
-    return highest.version_major, highest.version_minor + 1
+    approved = case.current_approved_version
+    target_major = approved.version_major if approved else max(v.version_major for v in existing)
+    used_minors = [v.version_minor for v in existing if v.version_major == target_major]
+    return target_major, max(used_minors, default=-1) + 1
+
+
+def _next_major_version_numbers(case: models.TestCase) -> tuple:
+    """Allocate a major version that cannot collide with retained history."""
+    highest_major = max((v.version_major for v in case.versions), default=0)
+    approved_major = case.current_approved_version.version_major if case.current_approved_version else 0
+    return max(highest_major, approved_major) + 1, 0
+
+
+def _lock_case_version_state(db: Session, case: models.TestCase) -> None:
+    """Serialize checkout and version-pointer changes for one testcase."""
+    db.query(models.TestCase.id).filter(models.TestCase.id == case.id).with_for_update().one()
+    # The object may have been loaded before waiting for the row lock. Drop
+    # that snapshot so the winner's checkout/current-draft pointers and full
+    # retained version history are re-read before this transaction decides.
+    db.expire(case)
+
+
+def _lock_case_version_states(db: Session, cases: List[models.TestCase]) -> None:
+    """Bulk counterpart to _lock_case_version_state, in stable lock order."""
+    case_ids = sorted({case.id for case in cases})
+    if case_ids:
+        db.query(models.TestCase.id).filter(models.TestCase.id.in_(case_ids)).order_by(
+            models.TestCase.id
+        ).with_for_update().all()
+    for case in cases:
+        db.expire(case)
 
 
 def _validate_steps(steps: List[models.TestCaseVersionStep]) -> None:
@@ -289,6 +356,25 @@ def _replace_draft_steps(db: Session, case: models.TestCase, version: models.Tes
 
     version.steps.extend(models.TestCaseVersionStep(**step.model_dump()) for step in steps)
     case.steps.extend(models.TestStep(**step.model_dump()) for step in steps)
+
+
+def _replace_case_tags(db: Session, case: models.TestCase, tags: List[str]) -> None:
+    """Replace persisted tags without violating Oracle's unique constraint.
+
+    Assigning a new relationship list can make SQLAlchemy INSERT a repeated
+    ``(test_case_id, tag)`` before it DELETEs the old row. Oracle then raises
+    ORA-00001 even when the user did not change the tags. Avoid all writes
+    when the normalized set is unchanged; otherwise force the orphan DELETEs
+    to complete before adding the replacement rows.
+    """
+    normalized = _normalize_tags(tags)
+    existing = [row.tag for row in case.tag_rows]
+    if len(existing) == len(normalized) and set(existing) == set(normalized):
+        return
+
+    case.tag_rows.clear()
+    db.flush()
+    case.tag_rows.extend(models.TestCaseTag(tag=tag) for tag in normalized)
 
 
 def _create_case_with_first_draft(
@@ -969,15 +1055,7 @@ def compare_test_case_versions(case_id: int, left: int, right: int, db: Session 
         lv, rv = getattr(left_v, field), getattr(right_v, field)
         if lv != rv:
             field_diffs[field] = {"left": lv, "right": rv}
-    left_steps = {s.step_no: s for s in left_v.steps}
-    right_steps = {s.step_no: s for s in right_v.steps}
-    step_diffs = {}
-    for step_no in sorted(set(left_steps) | set(right_steps)):
-        l, r = left_steps.get(step_no), right_steps.get(step_no)
-        l_data = {"step_text": l.step_text, "expected_result": l.expected_result} if l else None
-        r_data = {"step_text": r.step_text, "expected_result": r.expected_result} if r else None
-        if l_data != r_data:
-            step_diffs[step_no] = {"left": l_data, "right": r_data}
+    step_diffs = _build_step_diffs(left_v.steps, right_v.steps)
     return schemas.TestCaseVersionCompareOut(left=left_v, right=right_v, field_diffs=field_diffs, step_diffs=step_diffs)
 
 
@@ -995,6 +1073,20 @@ def _enforce_checkout_lock(case: models.TestCase, current_user: models.User) -> 
         )
 
 
+def _require_checkout_holder_for_edit(case: models.TestCase, current_user: models.User) -> None:
+    """Make Start editing a server-enforced prerequisite for saving."""
+    if case.checked_out_by_id != current_user.id:
+        if case.checked_out_by_id:
+            raise HTTPException(
+                423,
+                f"{case.test_case_key} is checked out by {case.checked_out_by_name}. Only that user can save changes.",
+            )
+        raise HTTPException(
+            409,
+            f"Start editing {case.test_case_key} before saving changes so the testcase is reserved to you.",
+        )
+
+
 @router.post("/test-cases/{case_id}/checkout", response_model=schemas.TestCaseOut)
 def checkout_test_case(case_id: int, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
@@ -1008,9 +1100,11 @@ def checkout_test_case(case_id: int, db: Session = Depends(get_db),
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_author_repository(db, obj.project_id, current_user)
+    _lock_case_version_state(db, obj)
     if obj.is_deleted:
         raise HTTPException(400, "This test case is in the Recycle Bin -- restore it before editing")
     draft = obj.current_draft_version
+    _require_returned_correction_owner(draft, current_user, "check it out")
     if draft and draft.status in ("In Review", "Review Completed", "Recommendation Pending", "QA Lead Approval Pending"):
         pending_stage = {
             "In Review": "Reviewer recommendation",
@@ -1044,7 +1138,9 @@ def checkout_override(case_id: int, payload: schemas.TestCaseCheckoutOverride, d
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_manage_repository_governance(current_user)
+    _lock_case_version_state(db, obj)
     draft = obj.current_draft_version
+    _require_returned_correction_owner(draft, current_user, "take over its checkout")
     if draft and draft.status in ("In Review", "Review Completed", "Recommendation Pending", "QA Lead Approval Pending"):
         raise HTTPException(409, "Checkout cannot be overridden while this test case is pending an approval decision")
     if not (payload.reason or "").strip():
@@ -1069,6 +1165,7 @@ def checkin_test_case(case_id: int, db: Session = Depends(get_db),
     delete guard itself. Checking in a case that isn't checked out at all is
     a harmless no-op rather than an error."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
+    _lock_case_version_state(db, obj)
     if obj.checked_out_by_id and obj.checked_out_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(
             423,
@@ -1103,13 +1200,15 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_author_repository(db, obj.project_id, current_user)
-    _enforce_checkout_lock(obj, current_user)
+    _lock_case_version_state(db, obj)
+    _require_checkout_holder_for_edit(obj, current_user)
     if obj.is_deleted:
         raise HTTPException(400, "This test case is in the Recycle Bin -- restore it before editing")
     if "status" in payload.model_fields_set:
         raise HTTPException(400, "Test case status is controlled by the review workflow and cannot be set directly")
 
     draft = obj.current_draft_version
+    _require_returned_correction_owner(draft, current_user)
     if draft and draft.status == "In Review":
         raise HTTPException(400, "This test case is pending Reviewer recommendation -- wait for a decision before editing again")
     if draft and draft.status == "Review Completed":
@@ -1160,7 +1259,7 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
     if "folder_id" in payload.model_fields_set:
         obj.folder_id = payload.folder_id
     if payload.tags is not None:
-        obj.tag_rows = [models.TestCaseTag(tag=tag) for tag in _normalize_tags(payload.tags)]
+        _replace_case_tags(db, obj, payload.tags)
     _sync_case_mirror(obj, draft)
     db.commit()
     db.refresh(obj)
@@ -1190,7 +1289,9 @@ def delete_test_case(case_id: int, db: Session = Depends(get_db),
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_author_repository(db, obj.project_id, current_user)
+    _lock_case_version_state(db, obj)
     _enforce_checkout_lock(obj, current_user)
+    _require_returned_correction_owner(obj.current_draft_version, current_user, "delete it")
     if obj.is_deleted:
         raise HTTPException(400, "This test case is already in the Recycle Bin")
     ever_decided = db.query(models.TestCaseVersion.id).filter(
@@ -1319,9 +1420,11 @@ def submit_test_case(case_id: int, payload: schemas.TestCaseSubmit, db: Session 
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_author_repository(db, obj.project_id, current_user)
+    _lock_case_version_state(db, obj)
     draft = obj.current_draft_version
     if not draft or draft.status not in ("Draft", "Returned", "Returned by QA", "Returned by QA Lead"):
         raise HTTPException(400, "There is no draft revision ready to submit for review")
+    _require_returned_correction_owner(draft, current_user, "submit it")
     _validate_steps(draft.steps)
     eligible = (
         _stage1_reviewer_ids(db, obj.project_id, draft.author_id) if draft.status == "Returned"
@@ -1353,6 +1456,7 @@ def bulk_submit_test_cases(project_id: int, payload: schemas.TestCaseBulkSubmit,
     _require_active_project(_get_project_or_404(db, project_id))
     require_can_author_repository(db, project_id, current_user)
     rows = _selected_project_cases(db, project_id, payload.ids)
+    _lock_case_version_states(db, rows)
     not_ready = [row.test_case_key for row in rows
                  if not row.current_draft_version
                  or row.current_draft_version.status not in
@@ -1364,6 +1468,19 @@ def bulk_submit_test_cases(project_id: int, payload: schemas.TestCaseBulkSubmit,
             400,
             f"{len(not_ready)} selected test case(s) have no draft revision ready to submit "
             f"(already In Review, Approved, or Archived): {preview}{suffix}",
+        )
+    wrong_correction_owner = [
+        row.test_case_key for row in rows
+        if row.current_draft_version.status in _RETURNED_CORRECTION_STATUSES
+        and row.current_draft_version.author_id != current_user.id
+    ]
+    if wrong_correction_owner:
+        preview = ", ".join(wrong_correction_owner[:5])
+        suffix = "…" if len(wrong_correction_owner) > 5 else ""
+        raise HTTPException(
+            403,
+            f"{len(wrong_correction_owner)} returned testcase(s) are assigned to their original authors for "
+            f"correction and cannot be submitted by you: {preview}{suffix}",
         )
     step_errors = []
     for row in rows:
@@ -1432,6 +1549,7 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
     the optional override, so it's simply always disabled, no exceptions."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
+    _lock_case_version_state(db, obj)
     draft_id = obj.current_draft_version_id
     draft = (
         db.query(models.TestCaseVersion)
@@ -1511,9 +1629,7 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             if bump == "major":
                 if not comments:
                     raise HTTPException(400, "A justification is required to approve a major version increment")
-                approved_before = obj.current_approved_version
-                draft.version_major = (approved_before.version_major + 1) if approved_before else 1
-                draft.version_minor = 0
+                draft.version_major, draft.version_minor = _next_major_version_numbers(obj)
             draft.status = "Approved"
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
@@ -1586,9 +1702,7 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             if bump == "major":
                 if not comments:
                     raise HTTPException(400, "A justification is required to approve a major version increment")
-                approved_before = obj.current_approved_version
-                draft.version_major = (approved_before.version_major + 1) if approved_before else 1
-                draft.version_minor = 0
+                draft.version_major, draft.version_minor = _next_major_version_numbers(obj)
             draft.status = "Approved"
             draft.qa_lead_decided_by_id = current_user.id
             draft.qa_lead_decided_at = models.now()
@@ -1849,11 +1963,26 @@ def bulk_update_test_cases(project_id: int, payload: schemas.TestCaseBulkUpdate,
     _require_active_project(_get_project_or_404(db, project_id))
     require_can_author_repository(db, project_id, current_user)
     rows = _selected_project_cases(db, project_id, payload.ids)
+    _lock_case_version_states(db, rows)
     changes = payload.model_fields_set - {"ids"}
     if not changes:
         raise HTTPException(400, "Choose at least one field to update")
     if "status" in changes:
         raise HTTPException(400, "Test case status is controlled by the review workflow and cannot be bulk updated")
+    wrong_correction_owner = [
+        row.test_case_key for row in rows
+        if row.current_draft_version
+        and row.current_draft_version.status in _RETURNED_CORRECTION_STATUSES
+        and row.current_draft_version.author_id != current_user.id
+    ]
+    if wrong_correction_owner:
+        preview = ", ".join(wrong_correction_owner[:5])
+        suffix = "…" if len(wrong_correction_owner) > 5 else ""
+        raise HTTPException(
+            403,
+            f"{len(wrong_correction_owner)} returned testcase(s) can only be corrected by their original "
+            f"authors: {preview}{suffix}",
+        )
     testcase_field_changes = changes.intersection({"folder_id", "priority", "test_type", "module_name", "tags"})
     # Routing is deliberately not treated as content editing. It remains
     # available while another user has the case checked out and while the
@@ -1884,7 +2013,7 @@ def bulk_update_test_cases(project_id: int, payload: schemas.TestCaseBulkUpdate,
         if "folder_id" in changes:
             row.folder_id = payload.folder_id
         if "tags" in changes:
-            row.tag_rows = [models.TestCaseTag(tag=tag) for tag in _normalize_tags(payload.tags or [])]
+            _replace_case_tags(db, row, payload.tags or [])
         if not substantive_changes:
             continue
         draft = row.current_draft_version
@@ -1936,8 +2065,23 @@ def bulk_delete_test_cases(project_id: int, payload: schemas.TestCaseBulkDelete,
     _require_active_project(_get_project_or_404(db, project_id))
     require_can_author_repository(db, project_id, current_user)
     rows = _selected_project_cases(db, project_id, payload.ids)
+    _lock_case_version_states(db, rows)
     for row in rows:
         _enforce_checkout_lock(row, current_user)
+    wrong_correction_owner = [
+        row.test_case_key for row in rows
+        if row.current_draft_version
+        and row.current_draft_version.status in _RETURNED_CORRECTION_STATUSES
+        and row.current_draft_version.author_id != current_user.id
+    ]
+    if wrong_correction_owner:
+        preview = ", ".join(wrong_correction_owner[:5])
+        suffix = "…" if len(wrong_correction_owner) > 5 else ""
+        raise HTTPException(
+            403,
+            f"{len(wrong_correction_owner)} returned testcase(s) remain assigned to their original authors "
+            f"and cannot be deleted by you: {preview}{suffix}",
+        )
     ever_decided_ids = {
         row_id for (row_id,) in db.query(models.TestCaseVersion.test_case_id).filter(
             models.TestCaseVersion.test_case_id.in_([r.id for r in rows]),
@@ -2539,21 +2683,50 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
     created_test_cases = 0
     imported_executions = 0
     skipped_rows = 0
+    duplicate_test_cases = 0
     errors: List[str] = []
     imported_source_keys: set[str] = set()
+    imported_fingerprints: set[str] = set()
+
+    # Load each existing definition in one bounded query before processing
+    # the workbook. Comparing normalized content protects historical rows
+    # created before import_fingerprint existed; the persisted fingerprint
+    # and unique constraint protect all new imports, including concurrent
+    # uploads. Recycle-bin rows are included so importing cannot bypass the
+    # governed restore/purge workflow by recreating the same testcase.
+    existing_cases = (
+        db.query(models.TestCase)
+        .filter(models.TestCase.project_id == project_id)
+        .options(selectinload(models.TestCase.steps), selectinload(models.TestCase.tag_rows))
+        .all()
+    )
+    existing_source_keys = {case.test_case_key.casefold(): case for case in existing_cases}
+    existing_fingerprints = {
+        case.import_fingerprint or build_test_case_import_fingerprint(
+            {field: getattr(case, field, None) for field in _CONTENT_FIELDS},
+            [
+                {"step_text": step.step_text, "expected_result": step.expected_result}
+                for step in case.steps
+            ],
+        ): case
+        for case in existing_cases
+    }
 
     def flush_group(case_row: dict, step_rows: List[dict], source_row: int):
-        nonlocal created_test_cases, skipped_rows
+        nonlocal created_test_cases, skipped_rows, duplicate_test_cases
         source_key = str(case_row.get("test_case_key") or "").strip()
-        if source_key and source_key.casefold() in imported_source_keys:
-            group_rows = max(1, len(step_rows))
-            end_row = source_row + group_rows - 1
-            row_label = f"Rows {source_row}-{end_row}" if end_row > source_row else f"Row {source_row}"
-            errors.append(
-                f"{row_label}: source Test Case ID '{source_key}' occurs more than once in this workbook; "
-                "the duplicate block was skipped."
-            )
+        group_rows = max(1, len(step_rows))
+        end_row = source_row + group_rows - 1
+        row_label = f"Rows {source_row}-{end_row}" if end_row > source_row else f"Row {source_row}"
+
+        def skip_duplicate(reason: str):
+            nonlocal skipped_rows, duplicate_test_cases
+            errors.append(f"{row_label}: {reason} The duplicate testcase was skipped.")
             skipped_rows += group_rows
+            duplicate_test_cases += 1
+
+        if source_key and source_key.casefold() in imported_source_keys:
+            skip_duplicate(f"source Test Case ID '{source_key}' occurs more than once in this workbook.")
             return
         if source_key:
             imported_source_keys.add(source_key.casefold())
@@ -2564,7 +2737,30 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
             if s.get("step_text") or s.get("expected_result")
         ]
         tags = _normalize_tags((case_row.get("tags") or "").split(","))
+        fingerprint = build_test_case_import_fingerprint(content, steps)
+        if fingerprint in imported_fingerprints:
+            skip_duplicate("the same testcase definition occurs more than once in this workbook.")
+            return
+        imported_fingerprints.add(fingerprint)
+
+        existing_by_key = existing_source_keys.get(source_key.casefold()) if source_key else None
+        if existing_by_key:
+            location = "the recycle bin" if existing_by_key.is_deleted else "this project"
+            skip_duplicate(
+                f"Test Case ID '{source_key}' already exists as {existing_by_key.test_case_key} in {location}."
+            )
+            return
+        existing_match = existing_fingerprints.get(fingerprint)
+        if existing_match:
+            location = "the recycle bin" if existing_match.is_deleted else "this project"
+            skip_duplicate(
+                f"this definition already exists as {existing_match.test_case_key} in {location}."
+            )
+            return
+
         tc = _create_case_with_first_draft(db, project_id, folder_id, content, tags, steps, current_user)
+        tc.import_fingerprint = fingerprint
+        existing_fingerprints[fingerprint] = tc
         source_note = f"Imported from Excel row {source_row}" + (f" (source Test Case ID: {source_key})" if source_key else "")
         db.add(_case_workflow_action(
             tc.id, current_user, "Imported as Draft",
@@ -2632,7 +2828,8 @@ async def import_test_cases(project_id: int, file: UploadFile = File(...), folde
 
     return schemas.TestCaseImportResult(
         created_test_cases=created_test_cases, imported_executions=imported_executions,
-        skipped_rows=skipped_rows, errors=errors, failure_reason=failure_reason,
+        skipped_rows=skipped_rows, duplicate_test_cases=duplicate_test_cases,
+        errors=errors, failure_reason=failure_reason,
     )
 
 

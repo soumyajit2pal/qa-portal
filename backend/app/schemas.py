@@ -344,6 +344,37 @@ class SASTComponentIn(BaseModel):
     technology_stack: Optional[str] = None
     build_number: Optional[str] = None
 
+    @field_validator("repository_url", mode="before")
+    @classmethod
+    def validate_repository_url(cls, value):
+        """Accept Git clone URLs only, with the repository's `.git` suffix.
+
+        Blank values remain valid at schema level because an unrelated QA
+        Request draft carries an unused blank SAST row. The SAST submission
+        workflow separately requires every repository field to be filled.
+        """
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return normalized
+        url_style = re.fullmatch(
+            r"(?:https?|ssh|git)://[^\s/]+/[^\s]+\.git",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        scp_style = re.fullmatch(
+            r"[^\s@/:]+@[^\s/:]+:[^\s]+\.git",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if not (url_style or scp_style):
+            raise ValueError(
+                "Repository URL must be a Git clone URL ending in .git "
+                "(for example, https://git.example.com/team/repository.git)"
+            )
+        return normalized
+
 
 class SASTComponentOut(ORMModel):
     id: int
@@ -599,6 +630,7 @@ class QARequestListOut(ORMModel):
     request_date: Optional[datetime.date] = None
     department: Optional[str] = None
     application_name: str
+    application_master_id: Optional[int] = None
     # Reported directly: "why CR number is blank, though input is provided."
     # This lightweight list schema only ever carried the legacy epic_number
     # column (kept for pre-consolidation historical rows) -- the live,
@@ -817,7 +849,6 @@ class AssignTesterIn(BaseModel):
 
 
 class StartFunctionalExecutionIn(BaseModel):
-    link_test_cycle: bool = False
     test_cycle_id: Optional[int] = None
 
 
@@ -1013,6 +1044,16 @@ class SASTUpdate(BaseModel):
     # means "leave the checklist's requester_checked flags alone".
     checked_items: Optional[List[str]] = None
 
+    @model_validator(mode="after")
+    def require_repository_urls_when_components_are_updated(self):
+        if self.components is not None:
+            for index, component in enumerate(self.components, start=1):
+                if not component.repository_url:
+                    raise ValueError(
+                        f"Repository {index} URL is required and must be a Git clone URL ending in .git"
+                    )
+        return self
+
 
 class SASTFindingIn(BaseModel):
     issue_id: Optional[str] = None
@@ -1080,11 +1121,10 @@ class SASTOut(ORMModel):
     created_at: datetime.datetime
     updated_at: datetime.datetime
     findings: List[SASTFindingOut] = []
-    # Set when this SAST request was auto-created from a QA Request that
-    # included SAST in its request types; null for standalone SAST requests
-    # raised directly through this module.
-    linked_request_type: Optional[str] = None
-    linked_request_id: Optional[int] = None
+    # Parent gateway request. SAST requests originate from a QA Request; the
+    # Test Cycle `linked_request_type` / `linked_request_id` contract does not
+    # apply here. Keep this consistent with DASTOut and PerformanceOut.
+    qa_request_id: Optional[int] = None
     qa_request: Optional[LinkedRequestRef] = None
     active_delegation: Optional[QARequestDelegationOut] = None
     # Read-only lookups (via the linked QA Request, if any) -- lets the
@@ -1444,6 +1484,7 @@ class SuppressionOut(ORMModel):
     sm_decision: Optional[str] = None
     dept_head_decision: Optional[str] = None
     security_decision: Optional[str] = None
+    needs_dept_head_reapproval: bool = False
     created_at: datetime.datetime
 
 
@@ -1575,6 +1616,7 @@ class DefectTransition(BaseModel):
     status: str
     assignee_id: Optional[int] = None
     assigned_team: Optional[str] = None
+    retest_tester_id: Optional[int] = None
     remarks: Optional[str] = None
     resolution_type: Optional[str] = None
     resolution_summary: Optional[str] = None
@@ -1605,12 +1647,8 @@ class DefectTransition(BaseModel):
     )(_limited_rich_text)
 
 
-# 2026-08 Reassignment Requirement -- dedicated endpoint/payload for changing
-# an already-assigned defect's assignee without touching status/history.
-# Deliberately separate from DefectTransition: the "Assigned" status is only
-# reachable from New/Reopened/Deferred (see defects.py's TRANSITIONS), so
-# there was previously no way to change the assignee once work was already
-# under way (In Progress/Resolved/Retest/etc).
+# Dedicated payload for changing an assigned defect's owner without changing
+# its lifecycle state or history.
 class DefectReassign(BaseModel):
     assignee_id: int
     assigned_team: Optional[str] = None
@@ -1632,12 +1670,13 @@ class DefectOut(ORMModel):
     # should be auto populated based on linked request or Failed / Blocked
     # Test Execution." See models.Defect.project_department's own docstring
     # -- the linked Test Cycle's own Project.department, used by
-    # Defects.tsx's TransitionModal to prefill the "Assigned" step's
+    # Defects.tsx's TransitionModal to prefill the Triage assignment's
     # Department field ahead of the QA Request's own department.
     project_department: Optional[str] = None
     primary_test_case_id: Optional[int] = None
     test_case_key: Optional[str] = None
     execution_id: Optional[int] = None
+    execution_assignee_id: Optional[int] = None
     linked_test_case_ids: List[int] = []
     linked_test_case_keys: List[str] = []
     # Additional executions this same governed defect has also been traced
@@ -1656,6 +1695,7 @@ class DefectOut(ORMModel):
     reported_at: datetime.datetime
     assignee_id: Optional[int] = None
     assignee_name: Optional[str] = None
+    assignee_is_requester: bool = False
     assigned_team: Optional[str] = None
     assigned_by_id: Optional[int] = None
     assigned_by_name: Optional[str] = None
@@ -1718,6 +1758,8 @@ class DefectListOut(ORMModel):
     project_id: Optional[int] = None
     test_case_key: Optional[str] = None
     execution_id: Optional[int] = None
+    execution_status: Optional[str] = None
+    execution_links: List[DefectExecutionLinkOut] = []
     application_name: str
     module_feature: str
     environment: str
@@ -2002,7 +2044,7 @@ class ApplicationSeedResult(ORMModel):
 # ---------------- Module 11: Test Management (Project Management / Test Repository / Test Execution) ----------------
 class TestProjectCreate(BaseModel):
     name: str
-    application_master_id: Optional[int] = None
+    application_master_id: int
     department: str
     description: Optional[str] = None
     owner_id: Optional[int] = None
@@ -2269,8 +2311,10 @@ class TestCaseVersionCompareOut(BaseModel):
     right: TestCaseVersionOut
     # Field name -> (left value, right value), only for fields that differ.
     field_diffs: dict
-    # Step number -> {"left": {...}|None, "right": {...}|None} for any step
-    # that was added, removed, or changed between the two versions.
+    # Step number -> {"change_type": "added"|"removed"|"modified",
+    # "left": {...}|None, "right": {...}|None}. The explicit direction
+    # prevents clients from labelling a step absent in the older version as
+    # "removed" when it was actually added in the newer version.
     step_diffs: dict
 
 
@@ -2676,6 +2720,7 @@ class TestCaseImportResult(ORMModel):
     created_test_cases: int
     imported_executions: int
     skipped_rows: int
+    duplicate_test_cases: int = 0
     errors: List[str] = []
     # Always populated when nothing was created, so the UI never has to
     # infer the primary failure from an optional row-level errors list.
@@ -2743,22 +2788,10 @@ class TestCycleCreate(BaseModel):
     # create test cycle." None means Unfiled, same convention as
     # TestCaseCreate/TestCaseModal's own folder_id.
     folder_id: Optional[int] = None
-    # Reported: "failure in test lifecycle and testcases, basically on test
-    # management" -- routers/test_execution.py::create_cycle unconditionally
-    # reads payload.linked_request_id/linked_request_type (added alongside
-    # the "Linked Child Request" feature, and correctly present on
-    # TestCycleUpdate/TestCycleOut below), but this Create schema was never
-    # updated to match -- it only had the vestigial `qa_request_id` field
-    # below, which nothing in create_cycle ever read. Since Pydantic v2's
-    # default extra="ignore" silently drops any field the frontend sent that
-    # isn't declared here, `payload.linked_request_id` didn't just come back
-    # None -- the attribute didn't exist on the model at all, so every single
-    # POST /projects/{project_id}/cycles (creating a new Test Cycle) raised
-    # AttributeError -> unhandled 500, unconditionally, whether or not a
-    # linked request was even selected. Editing an existing cycle
-    # (TestCycleUpdate) was never affected -- only creation was broken.
-    linked_request_type: Optional[str] = None
-    linked_request_id: Optional[int] = None
+    # Every execution cycle belongs to exactly one Functional QA Request.
+    # SAST, DAST, and Performance requests use their own execution workflows.
+    linked_request_type: Literal["Functional"]
+    linked_request_id: int
     # CYC-001 / LNK-003.
     cycle_type: Optional[str] = None
     environment: Optional[str] = None
@@ -2772,7 +2805,7 @@ class TestCycleUpdate(BaseModel):
     status: Optional[str] = None
     start_date: Optional[datetime.date] = None
     end_date: Optional[datetime.date] = None
-    linked_request_type: Optional[str] = None
+    linked_request_type: Optional[Literal["Functional"]] = None
     linked_request_id: Optional[int] = None
     cycle_type: Optional[str] = None
     environment: Optional[str] = None
@@ -2801,6 +2834,7 @@ class TestCycleOut(ORMModel):
     linked_request_type: Optional[str] = None
     linked_request_id: Optional[int] = None
     linked_request_key: Optional[str] = None
+    linked_request_change_allowed: bool = False
     cycle_type: Optional[str] = None
     environment: Optional[str] = None
     build: Optional[str] = None
@@ -2860,6 +2894,7 @@ class TestExecutionCandidateSelection(BaseModel):
     excluded_ids: List[int] = []
     search: Optional[str] = None
     priority: Optional[str] = None
+    test_type: Optional[str] = None
     assigned_to_id: Optional[int] = None
 
 
@@ -2957,7 +2992,8 @@ class TestRunDefectOut(ORMModel):
 
 class LinkedGovernedDefectRef(ORMModel):
     """A governed Defect (defects.py, not the free-text TestRunDefect above)
-    linked to a specific execution slot via Defect.execution_id. Reported
+    linked to a specific execution slot through its primary execution FK or
+    an additional DefectExecutionLink. Reported
     directly: while any linked defect is active (not Deferred/Closed) the
     whole execution is locked, and once failed at least once, 'Pass'/'NA'
     stay permanently blocked -- the frontend needs each linked defect's own
@@ -3120,14 +3156,53 @@ class CycleProgressOut(BaseModel):
     is_locked: bool
 
 
+class DefectQualityResolverOut(BaseModel):
+    resolver_id: int
+    resolver_name: str
+    resolved_defects: int
+    reopened_defects: int
+    reopen_events: int
+
+
+class DefectQualityItemOut(BaseModel):
+    defect_id: int
+    defect_key: str
+    title: str
+    qa_request_key: Optional[str] = None
+    project_id: int
+    project_key: str
+    project_name: str
+    application_name: str
+    module_feature: str
+    severity: str
+    status: str
+    cycle_keys: List[str] = []
+    test_case_keys: List[str] = []
+    resolved_by_id: Optional[int] = None
+    resolved_by_name: Optional[str] = None
+    reopen_count: int = 0
+    target_release: Optional[str] = None
+    updated_at: datetime.datetime
+
+
 class DefectQualityOut(BaseModel):
     project_id: int
     project_key: str
+    project_name: str
     population_note: str
     total_defect_links: int
+    total_governed_defects: int
+    open_defects: int
+    resolved_defects: int
+    reopened_defects: int
+    reopen_events: int
     by_module: List[ReportCountRow]
     by_status: List[ReportCountRow]
     retest_success_rate_pct: float
+    resolution_activity: List[DefectQualityResolverOut] = []
+    total_items: int
+    returned_items: int
+    items: List[DefectQualityItemOut] = []
 
 
 class VersionImpactItemOut(BaseModel):
@@ -3148,6 +3223,49 @@ class VersionImpactOut(BaseModel):
     total_items: int
     returned_items: int
     items: List[VersionImpactItemOut]
+
+
+class RequirementTraceabilityRowOut(BaseModel):
+    """One repository testcase in one cycle, or its uncovered repository row."""
+    row_id: str
+    test_case_id: int
+    test_case_key: str
+    test_case_version: str
+    test_case_status: str
+    epic_id: Optional[str] = None
+    cr_number: Optional[str] = None
+    feature_id: Optional[str] = None
+    user_story_id: Optional[str] = None
+    module_name: Optional[str] = None
+    test_scenario: Optional[str] = None
+    functional_request_id: Optional[int] = None
+    functional_request_key: Optional[str] = None
+    cycle_id: Optional[int] = None
+    cycle_key: Optional[str] = None
+    cycle_name: Optional[str] = None
+    cycle_status: Optional[str] = None
+    execution_id: Optional[int] = None
+    latest_result: str
+    executed_at: Optional[datetime.datetime] = None
+    run_count: int
+    defect_keys: List[str]
+    defect_statuses: List[str]
+
+
+class RequirementTraceabilityOut(BaseModel):
+    project_id: int
+    project_key: str
+    population_note: str
+    total_rows: int
+    returned_rows: int
+    total_test_cases: int
+    mapped_test_cases: int
+    unmapped_test_cases: int
+    covered_test_cases: int
+    executed_test_cases: int
+    failed_or_blocked_rows: int
+    defect_linked_rows: int
+    items: List[RequirementTraceabilityRowOut]
 
 
 class CycleStatusCountRow(BaseModel):

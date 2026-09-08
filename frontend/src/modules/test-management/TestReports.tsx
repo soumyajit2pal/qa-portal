@@ -1,16 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
-import { PageHeader, Field, ErrorText, Badge, Table } from '../../components/Common'
+import { PageHeader, Field, ErrorText, Badge, Table, EmptyState } from '../../components/Common'
+import { formatDateIST } from '../../time'
 import SearchableSelect from '../../components/SearchableSelect'
 import {
   TestProjectOut, TestCycleOut, ReportCountRow, ReportStatusCountRow,
   RepositoryHealthOut, CycleProgressOut, DefectQualityOut,
-  VersionImpactOut, ProjectPortfolioOut, PageOut,
+  VersionImpactOut, ProjectPortfolioOut, RequirementTraceabilityOut, PageOut,
 } from '../../types'
 
-type ReportTab = 'health' | 'cycle-progress' | 'defects' | 'version-impact' | 'portfolio'
+type ReportTab = 'traceability' | 'health' | 'cycle-progress' | 'defects' | 'version-impact' | 'portfolio'
 
 const TABS: { id: ReportTab; label: string; scope: 'project' | 'cycle' | 'none' }[] = [
+  { id: 'traceability', label: 'Requirements Traceability', scope: 'project' },
   { id: 'health', label: 'Repository Health', scope: 'project' },
   { id: 'cycle-progress', label: 'Cycle Progress', scope: 'cycle' },
   { id: 'defects', label: 'Defect Quality', scope: 'project' },
@@ -19,9 +22,10 @@ const TABS: { id: ReportTab; label: string; scope: 'project' | 'cycle' | 'none' 
 ]
 
 const TAB_DESCRIPTIONS: Record<ReportTab, string> = {
+  traceability: 'Epic, CR, Feature and User Story coverage through execution and defects',
   health: 'Coverage, ownership, age and execution readiness',
   'cycle-progress': 'Execution completion and assignment health',
-  defects: 'Linked-defect volume and retest outcomes',
+  defects: 'Governed defect outcomes, resolvers, reopen trends and execution traceability',
   'version-impact': 'Stale test-case versions requiring action',
   portfolio: 'Cross-project delivery and ownership trends',
 }
@@ -39,7 +43,7 @@ function CountBars({ rows, total }: { rows: { key: string; count: number }[]; to
   const max = Math.max(1, ...rows.map((r) => r.count))
   return (
     <div className="tm-report-bars">
-      {rows.length === 0 && <p className="muted small">No data.</p>}
+      {rows.length === 0 && <EmptyState compact title="No report data available" description="This chart will populate when matching project records are available." />}
       {rows.map((row) => (
         <div className="tm-report-bar-row" key={row.key}>
           <span className="tm-report-bar-label">{row.key}</span>
@@ -75,6 +79,132 @@ function Pager({ offset, limit, total, onOffset }: { offset: number; limit: numb
 }
 
 const PAGE_SIZE = 5
+
+function RequirementsTraceabilityPanel({ projectId }: { projectId: number }) {
+  const navigate = useNavigate()
+  const [data, setData] = useState<RequirementTraceabilityOut | null>(null)
+  const [search, setSearch] = useState('')
+  const [appliedSearch, setAppliedSearch] = useState('')
+  const [requirementType, setRequirementType] = useState('all')
+  const [offset, setOffset] = useState(0)
+  const [pageSize, setPageSize] = useState(PAGE_SIZE)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => { setOffset(0); setSearch(''); setAppliedSearch(''); setRequirementType('all') }, [projectId])
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true); setError(null)
+    const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset), requirement_type: requirementType })
+    if (appliedSearch) params.set('search', appliedSearch)
+    api.get<RequirementTraceabilityOut>(`/api/test-reports/projects/${projectId}/requirements-traceability?${params}`)
+      .then((result) => {
+        if (cancelled) return
+        if (offset > 0 && offset >= result.total_rows) {
+          setOffset(Math.max(0, Math.ceil(result.total_rows / pageSize) - 1) * pageSize)
+          return
+        }
+        setData(result)
+      }).catch((err) => { if (!cancelled) setError(err) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [projectId, appliedSearch, requirementType, offset, pageSize])
+
+  const applySearch = (event: React.FormEvent) => {
+    event.preventDefault()
+    setOffset(0)
+    setAppliedSearch(search.trim())
+  }
+  const exportMatrix = async () => {
+    const params = new URLSearchParams({ requirement_type: requirementType })
+    if (appliedSearch) params.set('search', appliedSearch)
+    try {
+      setError(null)
+      await api.downloadFile(
+        `/api/test-reports/projects/${projectId}/requirements-traceability/export-xlsx?${params}`,
+        'requirements-traceability-matrix.xlsx',
+      )
+    } catch (err) { setError(err) }
+  }
+  return (
+    <div className="tm-report-panel tm-rtm-panel">
+      <form className="tm-rtm-controls" onSubmit={applySearch}>
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search requirement, test case, request, cycle or defect…"
+          aria-label="Search traceability matrix"
+        />
+        <SearchableSelect
+          value={requirementType}
+          onChange={(value) => { setOffset(0); setRequirementType(value || 'all') }}
+          options={[
+            { value: 'all', label: 'All requirement mappings' },
+            { value: 'epic', label: 'Epic ID mapped' },
+            { value: 'cr', label: 'CR Number mapped' },
+            { value: 'feature', label: 'Feature ID mapped' },
+            { value: 'story', label: 'User Story ID mapped' },
+            { value: 'unmapped', label: 'Unmapped test cases' },
+          ]}
+        />
+        <button className="btn btn-primary btn-sm" type="submit">Search</button>
+        <button className="btn btn-sm" type="button" onClick={() => void exportMatrix()}>Export matrix</button>
+        {(search || appliedSearch) && <button className="btn btn-sm" type="button" onClick={() => { setSearch(''); setAppliedSearch(''); setOffset(0) }}>Clear</button>}
+      </form>
+      <ErrorText error={error} />
+      {!data && !error && <p className="muted">Loading…</p>}
+      {data && <>
+        <PopulationNote text={data.population_note} />
+        <div className="tm-report-stats-row">
+          <StatCard label="Test cases" value={data.total_test_cases} />
+          <StatCard label="Requirement mapped" value={data.mapped_test_cases} />
+          <StatCard label="Unmapped" value={data.unmapped_test_cases} />
+          <StatCard label="Added to a cycle" value={data.covered_test_cases} />
+          <StatCard label="Executed" value={data.executed_test_cases} />
+          <StatCard label="Failed / Blocked" value={data.failed_or_blocked_rows} />
+          <StatCard label="With defects" value={data.defect_linked_rows} />
+        </div>
+        {data.items.length === 0 ? (
+          <EmptyState compact title="No traceability records found" description="Change the search or requirement filter, or add requirement IDs to test cases in this project." />
+        ) : (
+          <Table
+            tableId="requirements-traceability-matrix"
+            rowKey="row_id"
+            rows={data.items}
+            server={{
+              page: Math.floor(offset / pageSize) + 1,
+              pageSize,
+              total: data.total_rows,
+              totalPages: Math.max(1, Math.ceil(data.total_rows / pageSize)),
+              hasPrevious: offset > 0,
+              hasNext: offset + pageSize < data.total_rows,
+              onPageChange: (page) => setOffset((page - 1) * pageSize),
+              onPageSizeChange: (size) => { setPageSize(size); setOffset(0) },
+              loading,
+            }}
+            columns={[
+              { key: 'requirement', header: 'Requirement', filterValue: (row) => [row.epic_id, row.cr_number, row.feature_id, row.user_story_id].filter(Boolean).join(' ') || 'Unmapped', render: (row) => (
+                <div className="tm-rtm-stack">
+                  {row.epic_id && <span><b>Epic</b>{row.epic_id}</span>}
+                  {row.cr_number && <span><b>CR</b>{row.cr_number}</span>}
+                  {row.feature_id && <span><b>Feature</b>{row.feature_id}</span>}
+                  {row.user_story_id && <span><b>Story</b>{row.user_story_id}</span>}
+                  {!row.epic_id && !row.cr_number && !row.feature_id && !row.user_story_id && <em>Unmapped</em>}
+                </div>
+              ) },
+              { key: 'test_case', header: 'Test Case', filterValue: (row) => `${row.test_case_key} v${row.test_case_version} ${row.test_case_status} ${row.module_name || ''}`, render: (row) => <div className="tm-rtm-primary"><strong>{row.test_case_key}</strong><span>v{row.test_case_version} · {row.test_case_status}</span>{row.module_name && <small>{row.module_name}</small>}</div> },
+              { key: 'functional_request_key', header: 'Functional Request', render: (row) => row.functional_request_key && row.functional_request_id ? <button className="btn btn-sm" onClick={() => navigate(`/functional-requests?openId=${row.functional_request_id}`)}>{row.functional_request_key}</button> : <span className="muted">Not linked</span> },
+              { key: 'cycle', header: 'Test Cycle', filterValue: (row) => row.cycle_key ? `${row.cycle_key} ${row.cycle_name || ''}` : 'Not in a cycle', render: (row) => row.cycle_key ? <div className="tm-rtm-primary"><strong>{row.cycle_key}</strong><span>{row.cycle_name}</span></div> : <span className="muted">Not in a cycle</span> },
+              { key: 'latest_result', header: 'Latest Result', render: (row) => <div className="tm-rtm-primary"><Badge status={row.latest_result} />{row.run_count > 0 && <span>{row.run_count} run{row.run_count === 1 ? '' : 's'}</span>}</div> },
+              { key: 'defects', header: 'Defects', filterValue: (row) => row.defect_keys.join(' ') || 'None', render: (row) => row.defect_keys.length ? <div className="tm-rtm-stack">{row.defect_keys.map((key) => <strong key={key}>{key}</strong>)}</div> : <span className="muted">None</span> },
+              { key: 'actions', header: 'Actions', filterable: false, render: (row) => <div className="tm-rtm-actions"><button className="btn btn-sm" onClick={() => navigate(`/test-repository?project=${projectId}&open=${encodeURIComponent(row.test_case_key)}`)}>Open case</button>{row.cycle_id && <button className="btn btn-sm" onClick={() => navigate(`/test-execution?project=${projectId}&cycle=${row.cycle_id}${row.execution_id ? `&execution=${row.execution_id}` : ''}`)}>Open execution</button>}</div> },
+            ]}
+          />
+        )}
+      </>}
+    </div>
+  )
+}
 
 function RepositoryHealthPanel({ projectId }: { projectId: number }) {
   const [data, setData] = useState<RepositoryHealthOut | null>(null)
@@ -159,25 +289,75 @@ function CycleProgressPanel({ projectId }: { projectId: number }) {
 }
 
 function DefectQualityPanel({ projectId }: { projectId: number }) {
+  const navigate = useNavigate()
   const [data, setData] = useState<DefectQualityOut | null>(null)
+  const [offset, setOffset] = useState(0)
+  const [resolverFilter, setResolverFilter] = useState<{ id: number; name: string; reopened: boolean } | null>(null)
+  const [resolverSearch, setResolverSearch] = useState('')
+  const [resolverPage, setResolverPage] = useState(1)
+  const [expandedResolverId, setExpandedResolverId] = useState<number | null>(null)
   const [error, setError] = useState<unknown>(null)
+  useEffect(() => { setOffset(0); setResolverFilter(null); setResolverSearch(''); setResolverPage(1); setExpandedResolverId(null) }, [projectId])
   useEffect(() => {
     setData(null)
-    api.get<DefectQualityOut>(`/api/test-reports/projects/${projectId}/defect-quality`).then(setData).catch(setError)
-  }, [projectId])
+    setError(null)
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
+    if (resolverFilter) params.set('resolver_id', String(resolverFilter.id))
+    if (resolverFilter?.reopened) params.set('reopened_only', 'true')
+    api.get<DefectQualityOut>(`/api/test-reports/projects/${projectId}/defect-quality?${params}`).then(setData).catch(setError)
+  }, [projectId, offset, resolverFilter])
+  const filterResolver = (id: number, name: string, reopened: boolean) => {
+    setOffset(0)
+    setResolverFilter({ id, name, reopened })
+  }
+  const matchingResolvers = useMemo(() => {
+    if (!data) return []
+    const needle = resolverSearch.trim().toLowerCase()
+    return needle ? data.resolution_activity.filter((item) => item.resolver_name.toLowerCase().includes(needle)) : data.resolution_activity
+  }, [data, resolverSearch])
+  const resolverPageSize = 10
+  const resolverPages = Math.max(1, Math.ceil(matchingResolvers.length / resolverPageSize))
+  const visibleResolvers = matchingResolvers.slice((resolverPage - 1) * resolverPageSize, resolverPage * resolverPageSize)
+  useEffect(() => { setResolverPage(1); setExpandedResolverId(null) }, [resolverSearch])
   if (error) return <ErrorText error={error} />
   if (!data) return <p className="muted">Loading…</p>
   return (
-    <div className="tm-report-panel">
+    <div className="tm-report-panel tm-defect-quality-report">
       <PopulationNote text={data.population_note} />
       <div className="tm-report-stats-row">
-        <StatCard label="Total defect links" value={data.total_defect_links} />
+        <StatCard label="Governed defects" value={data.total_governed_defects} />
+        <StatCard label="Open defects" value={data.open_defects} />
+        <StatCard label="Resolved history" value={data.resolved_defects} />
+        <StatCard label="Reopened defects" value={data.reopened_defects} />
+        <StatCard label="Reopen events" value={data.reopen_events} />
         <StatCard label="Retest success rate" value={`${data.retest_success_rate_pct}%`} />
       </div>
       <div className="tm-report-grid">
-        <div><h4>By Module</h4><CountBars rows={data.by_module} total={data.total_defect_links} /></div>
-        <div><h4>By Defect Status</h4><CountBars rows={data.by_status} total={data.total_defect_links} /></div>
+        <div><h4>Governed defects by module</h4><CountBars rows={data.by_module} total={data.total_governed_defects} /></div>
+        <div><h4>Governed defects by status</h4><CountBars rows={data.by_status} total={data.total_governed_defects} /></div>
       </div>
+      <section className="tm-defect-quality-section">
+        <div className="tm-defect-quality-heading"><div><span>RESOLUTION OUTCOMES</span><h4>Resolution activity</h4><p>Attributed to the user who submitted the latest audited Resolved action.</p></div><label className="tm-defect-quality-search"><span>{data.resolution_activity.length} contributors</span><input value={resolverSearch} onChange={(event) => setResolverSearch(event.target.value)} placeholder="Find contributor…" /></label></div>
+        {data.resolution_activity.length ? <><div className="tm-resolver-accordion"><div className="tm-resolver-heading"><span>Resolved by</span><span>Resolved</span><span>Reopened</span><span>Events</span><span /></div>{visibleResolvers.map((row) => { const expanded = expandedResolverId === row.resolver_id; return <div className="tm-resolver-group" key={row.resolver_id}><button type="button" className={`tm-resolver-row ${expanded ? 'is-expanded' : ''}`} aria-expanded={expanded} onClick={() => setExpandedResolverId(expanded ? null : row.resolver_id)}><span><strong>{row.resolver_name}</strong><small>Submitted the latest Resolved action</small></span><b>{row.resolved_defects}</b><b>{row.reopened_defects}</b><b>{row.reopen_events}</b><i>›</i></button><div hidden={!expanded} className="tm-resolver-actions"><div><strong>{row.resolved_defects} resolved defects</strong><span>{row.reopened_defects} reopened across {row.reopen_events} recorded event{row.reopen_events === 1 ? '' : 's'}.</span></div><button type="button" onClick={() => filterResolver(row.resolver_id, row.resolver_name, false)}>View resolved defects</button><button type="button" disabled={!row.reopened_defects} onClick={() => filterResolver(row.resolver_id, row.resolver_name, true)}>View reopened defects</button></div></div> })}</div><div className="tm-defect-quality-resolver-pager"><span>{matchingResolvers.length ? `${(resolverPage - 1) * resolverPageSize + 1}–${Math.min(resolverPage * resolverPageSize, matchingResolvers.length)} of ${matchingResolvers.length}` : 'No contributors match'}</span><div><button disabled={resolverPage === 1} onClick={() => setResolverPage((page) => Math.max(1, page - 1))}>← Previous</button><button disabled={resolverPage === resolverPages || !matchingResolvers.length} onClick={() => setResolverPage((page) => Math.min(resolverPages, page + 1))}>Next →</button></div></div></> : <EmptyState compact title="No audited resolutions yet" description="Resolution activity will appear after a governed defect reaches Resolved." />}
+      </section>
+      <section className="tm-defect-quality-section">
+        <div className="tm-defect-quality-heading"><div><span>PROJECT DEFECT REGISTER</span><h4>{resolverFilter ? `${resolverFilter.reopened ? 'Reopened defects' : 'Resolved defects'} by ${resolverFilter.name}` : `${data.project_key} · ${data.project_name}`}</h4><p>Request, project, cycle, testcase, resolution and reopen traceability in one view.</p></div>{resolverFilter && <button className="btn btn-sm" onClick={() => { setResolverFilter(null); setOffset(0) }}>Clear resolver filter</button>}</div>
+        <Table
+          tableId="test-report-defect-quality"
+          rowKey="defect_id"
+          rows={data.items}
+          onRowClick={(item) => navigate(`/defects?open=${encodeURIComponent(item.defect_key)}`)}
+          columns={[
+            { key: 'defect_key', header: 'Defect', render: (item) => <span className="tm-defect-quality-primary"><button className="link-btn" onClick={(event) => { event.stopPropagation(); navigate(`/defects?open=${encodeURIComponent(item.defect_key)}`) }}>{item.defect_key}</button><strong>{item.title}</strong><small>{item.application_name} · {item.module_feature}</small></span> },
+            { key: 'qa_request_key', header: 'Request / Project', render: (item) => <span className="tm-defect-quality-stack"><strong>{item.qa_request_key || 'Request not numbered'}</strong><span>{item.project_key} · {item.project_name}</span><small>Project database ID {item.project_id}</small></span> },
+            { key: 'cycle_keys', header: 'Execution trace', render: (item) => <span className="tm-defect-quality-stack"><strong>{item.cycle_keys.join(', ') || 'No cycle'}</strong><span>{item.test_case_keys.join(', ') || 'No testcase'}</span></span> },
+            { key: 'status', header: 'Quality state', render: (item) => <span className="tm-defect-quality-stack"><Badge status={item.status} /><span>{item.severity}</span><small>{item.target_release ? `Target ${item.target_release}` : 'No target release'}</small></span> },
+            { key: 'resolved_by_name', header: 'Resolution outcome', render: (item) => <span className="tm-defect-quality-stack"><strong>{item.resolved_by_name || 'Not resolved'}</strong><span>{item.reopen_count} reopen event{item.reopen_count === 1 ? '' : 's'}</span><small>Updated {formatDateIST(item.updated_at)}</small></span> },
+          ]}
+        />
+        {!data.items.length && <EmptyState compact title="No matching governed defects" description={resolverFilter ? 'Clear the resolver filter to return to the full project defect register.' : 'Governed defects linked to this project will appear here.'} />}
+        <Pager offset={offset} limit={PAGE_SIZE} total={data.total_items} onOffset={setOffset} />
+      </section>
     </div>
   )
 }
@@ -246,7 +426,7 @@ function ProjectPortfolioPanel() {
 export default function TestReports() {
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [projectId, setProjectId] = useState<number | ''>('')
-  const [tab, setTab] = useState<ReportTab>('health')
+  const [tab, setTab] = useState<ReportTab>('traceability')
   const [error, setError] = useState<unknown>(null)
 
   const load = useCallback(async () => {
@@ -266,7 +446,7 @@ export default function TestReports() {
       <PageHeader
         eyebrow="Test Case Management · Design · Organize · Execute · Trace"
         title="Test Reports"
-        subtitle="Operational insight across repository quality, execution, defects, versions and project delivery."
+        subtitle="Trace requirements through repository quality, execution, defects, versions and project delivery."
       />
       <section className="tm-report-workspace">
         <aside className="tm-report-navigation" aria-label="Report views">
@@ -305,6 +485,7 @@ export default function TestReports() {
           <div className="tm-report-content-body">
             {activeTab.scope !== 'none' && !projectId && <div className="tm-report-empty"><strong>Select a project</strong><span>Choose a project scope to generate this report.</span></div>}
             {activeTab.scope === 'none' && <ProjectPortfolioPanel />}
+            {projectId && tab === 'traceability' && <RequirementsTraceabilityPanel key={projectId} projectId={projectId} />}
             {projectId && tab === 'health' && <RepositoryHealthPanel projectId={projectId} />}
             {projectId && tab === 'cycle-progress' && <CycleProgressPanel projectId={projectId} />}
             {projectId && tab === 'defects' && <DefectQualityPanel projectId={projectId} />}
