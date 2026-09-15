@@ -291,7 +291,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
   // rendered after workspace B became active.
   const activeWorkspace = localStorage.getItem('active_workspace_id')
     || localStorage.getItem('qa_active_workspace_id') || ''
-  const key = method === 'GET'
+  const key = method === 'GET' && path.split('?')[0] !== '/api/auth/me'
     ? `${getToken() || ''}:${activeWorkspace}:${path}:${opts.isBlob ? 'blob' : 'json'}`
     : ''
   // Briefly reuse successful JSON reads across components and route changes.

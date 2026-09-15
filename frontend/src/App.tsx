@@ -204,37 +204,23 @@ const MyExecutions = lazy(() => import('./modules/test-management/MyExecutions')
 // SRS section 11 -- the 8 Test Management reporting views.
 const TestReports = lazy(() => import('./modules/test-management/TestReports'))
 
-// The chrome every signed-in page sits inside -- sidebar/topbar (Layout)
-// plus the two blocking pop-ups that can appear on top of any of them
-// (DepartmentPrompt, PendingApprovalsNotice). Factored out so both
-// ProtectedLayout (the normal nested-route case, below) and HelpRoute's
-// signed-in branch (still a one-off special case -- see its own comment)
-// render identically without duplicating this logic.
+// Onboarding is a standalone signed-in state. Mounting the portal behind a
+// blocking modal still runs dashboard/navigation effects and requests data
+// that the backend correctly denies until access approval is complete.
 function AuthenticatedChrome({ user, children }: { user: UserOut; children: ReactNode }) {
+  if (user.needs_department_selection) {
+    return <main className="access-pending-page" aria-label="Complete account setup"><DepartmentPrompt /></main>
+  }
+  if (isAccessApprovalPending(user)) return <AccessApprovalPending />
+  if (isLdapEmailCompletionRequired(user)) {
+    return <main className="access-pending-page" aria-label="Complete notification email"><EmailCompletionPrompt /></main>
+  }
   return (
     <RequestViewer>
-    <Layout>
-      {children}
-      {/* First-ever LDAP login: blocks interaction with the rest of the app
-          (Modal's preventBackdropClose) until the person picks their
-          department -- see models.User.needs_department_selection. Rendered
-          on top of the normal page (not instead of it) so it shows up
-          immediately after login regardless of which page they land on. */}
-      {user.needs_department_selection && <DepartmentPrompt />}
-      {/* LDAP can authenticate successfully without exposing the directory
-          email attribute. Once access is approved, do not allow a user into
-          the workflow until they provide the address that receives its
-          notifications. The backend enforces the identical condition. */}
-      {isLdapEmailCompletionRequired(user) && <EmailCompletionPrompt />}
-      {/* Reported directly: "also show one info on login if there are any
-          pending approval pending." Held back while DepartmentPrompt is
-          still up (above) so a first-ever LDAP login never stacks two
-          blocking pop-ups -- PendingApprovalsNotice itself no-ops until
-          AuthContext's justLoggedIn is true, which stays true across that
-          whole exchange, so it still fires right after DepartmentPrompt is
-          dismissed rather than being skipped entirely. */}
-      {!user.needs_department_selection && !isAccessApprovalPending(user) && !isLdapEmailCompletionRequired(user) && <PendingApprovalsNotice />}
-    </Layout>
+      <Layout>
+        {children}
+        <PendingApprovalsNotice />
+      </Layout>
     </RequestViewer>
   )
 }

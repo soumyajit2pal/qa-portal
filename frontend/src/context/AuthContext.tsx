@@ -57,7 +57,8 @@ function syncWorkspaceSelection(me: UserOut) {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserOut | null>(null)
   const [loading, setLoading] = useState(true)
-  const [justLoggedIn, setJustLoggedIn] = useState(false)
+  const [justLoggedIn, setJustLoggedIn] = useState(() => sessionStorage.getItem('qa_approved_session') === '1')
+  useEffect(() => { sessionStorage.removeItem('qa_approved_session') }, [])
 
   const loadMe = useCallback(async () => {
     if (!hasToken()) {
@@ -121,6 +122,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshUser = async () => {
     const me = await api.get<UserOut>('/api/auth/me')
     syncWorkspaceSelection(me)
+    // Approval can change roles, workspace membership and onboarding gates
+    // together. Enter a fresh application session after persisting the new
+    // workspace, rather than mounting portal pages into the provisional one.
+    if (user?.needs_role_review && !me.needs_role_review && !me.needs_department_selection) {
+      sessionStorage.setItem('qa_approved_session', '1')
+      window.location.replace('/')
+      return
+    }
     setUser(me)
   }
 

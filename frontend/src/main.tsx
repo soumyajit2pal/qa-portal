@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
+import ModuleBoundary from './components/ModuleBoundary'
 import { AuthProvider } from './context/AuthContext'
 import './index.css'
 
@@ -17,8 +18,10 @@ if (!rootEl) throw new Error('Root element #root not found')
 
 ReactDOM.createRoot(rootEl).render(
   <BrowserRouter>
+    <ModuleBoundary moduleName="Portal session">
     <AuthProvider>
       <App />
     </AuthProvider>
+    </ModuleBoundary>
   </BrowserRouter>,
 )
