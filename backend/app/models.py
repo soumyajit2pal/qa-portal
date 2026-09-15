@@ -9,7 +9,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, foreign
 from .db_base import Base
-from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES, SUPPRESSION_TERMINAL_STATUSES, Role
+from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYPES, SUPPRESSION_TERMINAL_STATUSES, REQUESTER_EQUIVALENT_ROLES, Role
 
 # Unlike SQLite/PostgreSQL/MySQL, SQLAlchemy does NOT automatically make a
 # bare `Column(Integer, primary_key=True)` self-generating on Oracle -- Oracle
@@ -207,6 +207,13 @@ class User(Base):
     # sensitive or cross-functional account) -- only a System Admin can
     # change their role(s) or active status from here on.
     admin_managed_only = Column(Boolean, default=False)
+    # Administrator-controlled presentation rule for people pickers. This is
+    # deliberately independent of roles: an Administrator may remain
+    # selectable as a superuser, while any ordinary service/shared account
+    # can be hidden without changing its permissions.
+    show_in_user_dropdowns = Column(Boolean, nullable=False, default=True)
+    # Convenience preference only; access is granted by workspace memberships.
+    preferred_qa_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True)
     created_at = Column(DateTime, default=now)
 
     qa_requests = relationship("QARequest", back_populates="requester", foreign_keys="QARequest.requester_id")
@@ -226,17 +233,32 @@ class User(Base):
         "UserDepartment", back_populates="user", cascade="all,delete-orphan",
         order_by="UserDepartment.id",
     )
+    department_unit_assignments = relationship(
+        "UserDepartmentUnit", back_populates="user", cascade="all,delete-orphan",
+        order_by="UserDepartmentUnit.id",
+    )
+    qa_workspace_memberships = relationship(
+        "QAWorkspaceMember", back_populates="user", cascade="all,delete-orphan",
+        foreign_keys="QAWorkspaceMember.user_id",
+    )
+    department_coordinator_assignments = relationship(
+        "DepartmentCoordinatorAssignment", back_populates="user", cascade="all,delete-orphan",
+        foreign_keys="DepartmentCoordinatorAssignment.user_id",
+    )
+    preferred_qa_workspace = relationship("QAWorkspace", foreign_keys=[preferred_qa_workspace_id])
 
     @property
     def roles(self) -> List[str]:
-        return [ra.role for ra in self.role_assignments]
+        from .workflow_authority import workflow_active
+        return [ra.role for ra in self.role_assignments
+                if not (workflow_active(self) and ra.role == 'ADMIN')]
 
     @property
     def roles_csv(self) -> str:
         """Snapshot of all currently-assigned roles, used when logging an
         audit action (ApprovalAction.actor_role) since a user may be acting
         under more than one role at once."""
-        return ",".join(sorted(self.roles))
+        return ",".join(sorted(ra.role for ra in self.role_assignments))
 
     def has_role(self, *roles) -> bool:
         """True if the user is an Administrator, or holds at least one of the
@@ -269,13 +291,90 @@ class User(Base):
         departments = self.departments
         return departments[0] if departments else None
 
+    @property
+    def department_units(self):
+        return [row.unit for row in self.department_unit_assignments if row.unit and row.unit.is_active]
+
+    @property
+    def department_unit_ids(self) -> List[int]:
+        return [unit.id for unit in self.department_units]
+
     def has_department(self, *departments: str) -> bool:
         """True if this user belongs to at least one of the given
         departments. The multi-department equivalent of the old
         `user.department == X` / `user.department in (...)` checks scattered
         across the app -- every one of those was rewritten to call this
         instead of comparing the single legacy column directly."""
-        return bool(set(self.departments) & set(d for d in departments if d))
+        requested = {department for department in departments if department}
+        return bool(set(self.departments) & requested)
+
+    @property
+    def qa_workspace_access(self):
+        # Older releases stored one membership row per workspace role.  The
+        # global workspace model stores roles on UserRole and needs exactly
+        # one visible membership per workspace.  Deduplicate here as a safe
+        # read-time boundary while the normalization migration is rolling out.
+        by_workspace = {}
+        role_priority = {
+            "WORKSPACE_MEMBER": 0,
+            "WORKSPACE_VIEWER": 0,
+            "PARENT_WORKSPACE_VIEWER": 1,
+            "PARENT_WORKSPACE_ADMIN": 2,
+        }
+        for membership in self.qa_workspace_memberships:
+            if not membership.is_active or not membership.workspace or not membership.workspace.is_active:
+                continue
+            current = by_workspace.get(membership.workspace_id)
+            if current is None or role_priority.get(membership.role, -1) > role_priority.get(current.role, -1):
+                by_workspace[membership.workspace_id] = membership
+        return list(by_workspace.values())
+
+    @property
+    def workspace_access(self):
+        """Public global name; qa_workspace_access remains a compatibility alias."""
+        return self.qa_workspace_access
+
+    @property
+    def department_coordinator_access(self):
+        """Active department-local-admin scopes available to this user."""
+        return [
+            assignment for assignment in self.department_coordinator_assignments
+            if assignment.is_active and assignment.workspace and assignment.workspace.is_active
+            and assignment.department and assignment.department.is_active
+        ]
+
+    @property
+    def preferred_workspace_id(self):
+        """Public global name backed by the non-destructively retained column."""
+        return self.preferred_qa_workspace_id
+
+    @property
+    def active_workspace_id(self):
+        """Workspace selected by the request resolver for this response."""
+        return getattr(self, "active_qa_workspace_id", None)
+
+    def has_qa_workspace_role(self, *roles: str, workspace_id: int | None = None,
+                              allow_admin: bool = True) -> bool:
+        if allow_admin and self.has_role("ADMIN"):
+            return True
+        memberships = [
+            membership for membership in self.qa_workspace_memberships
+            if membership.is_active
+            and membership.workspace and membership.workspace.is_active
+            and (workspace_id is None or membership.workspace_id == workspace_id)
+        ]
+        if not memberships:
+            return False
+        if not roles:
+            return True
+        # Permission Profile answers "what can this user do?"; neutral
+        # membership answers "where can they do it?". Legacy rows that stored
+        # a role directly on the membership remain accepted during rollout.
+        return self.has_role(*roles) or any(
+            membership.is_active
+            and membership.role in roles
+            for membership in memberships
+        )
 
 
 class UserRole(Base):
@@ -317,6 +416,228 @@ class Department(Base):
     name = Column(String(150), unique=True, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=now)
+
+    coordinator_assignments = relationship(
+        "DepartmentCoordinatorAssignment", back_populates="department", cascade="all,delete-orphan",
+    )
+    units = relationship(
+        "DepartmentUnit", back_populates="department", cascade="all,delete-orphan",
+        foreign_keys="DepartmentUnit.department_id", order_by="DepartmentUnit.name",
+    )
+
+
+class DepartmentUnit(Base):
+    """A team/division beneath a canonical Department; supports nested units."""
+    __tablename__ = "qap_department_units"
+    __table_args__ = (
+        UniqueConstraint("department_id", "name", name="uq_qap_dept_unit_name"),
+    )
+    id = pk_column()
+    department_id = Column(Integer, ForeignKey("qap_departments.id"), nullable=False, index=True)
+    parent_unit_id = Column(Integer, ForeignKey("qap_department_units.id"), nullable=True, index=True)
+    name = Column(String(150), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=now)
+
+    department = relationship("Department", back_populates="units", foreign_keys=[department_id])
+    parent = relationship("DepartmentUnit", remote_side=[id], back_populates="children", foreign_keys=[parent_unit_id])
+    children = relationship("DepartmentUnit", back_populates="parent", cascade="all,delete-orphan")
+
+    @property
+    def department_name(self):
+        return self.department.name if self.department else None
+
+
+class UserDepartmentUnit(Base):
+    __tablename__ = "qap_user_department_units"
+    __table_args__ = (UniqueConstraint("user_id", "unit_id", name="uq_qap_user_dept_unit"),)
+    id = pk_column()
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False, index=True)
+    unit_id = Column(Integer, ForeignKey("qap_department_units.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=now)
+
+    user = relationship("User", back_populates="department_unit_assignments")
+    unit = relationship("DepartmentUnit")
+
+
+class QAWorkspace(Base):
+    """Global tenant boundary for users, projects, work, and reporting.
+
+    The historical table/class name is retained for a non-destructive rollout.
+    Product language and all new behavior refer to this simply as Workspace.
+    """
+    __tablename__ = "qap_qa_workspaces"
+    id = pk_column()
+    workspace_key = Column(String(40), unique=True, nullable=False)
+    defect_workflow_json = Column(Text, nullable=True)
+    defect_workflow_history_json = Column(Text, nullable=True)
+
+    @property
+    def defect_workflow(self):
+        from .defect_workflow import policy
+        return policy(self.defect_workflow_json)
+
+    name = Column(String(150), unique=True, nullable=False)
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    is_default = Column(Boolean, nullable=False, default=False)
+    parent_workspace_id = Column(
+        Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True,
+    )
+    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
+
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    parent_workspace = relationship(
+        "QAWorkspace", remote_side=[id], back_populates="child_workspaces",
+        foreign_keys=[parent_workspace_id],
+    )
+    child_workspaces = relationship(
+        "QAWorkspace", back_populates="parent_workspace",
+        foreign_keys="QAWorkspace.parent_workspace_id", order_by="QAWorkspace.name",
+    )
+    members = relationship("QAWorkspaceMember", back_populates="workspace", cascade="all,delete-orphan")
+    coverage_rules = relationship("QAWorkspaceCoverage", back_populates="workspace", cascade="all,delete-orphan")
+    department_coordinators = relationship(
+        "DepartmentCoordinatorAssignment", back_populates="workspace", cascade="all,delete-orphan",
+    )
+
+    @property
+    def parent_workspace_name(self):
+        return self.parent_workspace.name if self.parent_workspace else None
+
+    @property
+    def parent_workspace_key(self):
+        return self.parent_workspace.workspace_key if self.parent_workspace else None
+
+
+class QAWorkspaceMember(Base):
+    """Global workspace boundary; user capabilities live in UserRole."""
+    __tablename__ = "qap_qa_workspace_members"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", "role", name="uq_qap_qawm_ws_user_role"),)
+    id = pk_column()
+    workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False, index=True)
+    role = Column(String(40), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=now)
+
+    workspace = relationship("QAWorkspace", back_populates="members")
+    user = relationship("User", back_populates="qa_workspace_memberships", foreign_keys=[user_id])
+
+    @property
+    def user_name(self):
+        return self.user.full_name if self.user else None
+
+    @property
+    def is_system_administrator(self):
+        return bool(self.user and self.user.has_role(Role.ADMIN))
+
+    @property
+    def workspace_name(self):
+        return self.workspace.name if self.workspace else None
+
+    @property
+    def workspace_key(self):
+        return self.workspace.workspace_key if self.workspace else None
+
+    @property
+    def parent_workspace_id(self):
+        return self.workspace.parent_workspace_id if self.workspace else None
+
+    @property
+    def parent_workspace_name(self):
+        return self.workspace.parent_workspace_name if self.workspace else None
+
+    @property
+    def parent_workspace_key(self):
+        return self.workspace.parent_workspace_key if self.workspace else None
+
+
+class DepartmentCoordinatorAssignment(Base):
+    """Grants local user administration for one department in one workspace.
+
+    This scope is independent of job-title roles. Any active user can be a
+    coordinator while their normal permission profile continues to describe
+    the operational work they may perform. An assignment on a top-level
+    workspace is inherited by its active direct children; an assignment on a
+    child applies only to that child.
+    """
+    __tablename__ = "qap_department_coordinators"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "department_id", "workspace_id", "department_unit_id",
+            name="uq_qap_dept_coord_scope",
+        ),
+    )
+    id = pk_column()
+    user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("qap_departments.id"), nullable=False, index=True)
+    workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=False, index=True)
+    department_unit_id = Column(Integer, ForeignKey("qap_department_units.id"), nullable=True, index=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
+    created_at = Column(DateTime, default=now)
+
+    user = relationship(
+        "User", back_populates="department_coordinator_assignments", foreign_keys=[user_id],
+    )
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    department = relationship("Department", back_populates="coordinator_assignments")
+    department_unit = relationship("DepartmentUnit")
+    workspace = relationship("QAWorkspace", back_populates="department_coordinators")
+
+    @property
+    def user_name(self):
+        return self.user.full_name if self.user else None
+
+    @property
+    def department_name(self):
+        return self.department.name if self.department else None
+
+    @property
+    def department_unit_name(self):
+        return self.department_unit.name if self.department_unit else None
+
+    @property
+    def workspace_name(self):
+        return self.workspace.name if self.workspace else None
+
+    @property
+    def workspace_key(self):
+        return self.workspace.workspace_key if self.workspace else None
+
+
+class QAWorkspaceCoverage(Base):
+    """Ordered routing rule. Null dimensions are wildcards."""
+    __tablename__ = "qap_qa_workspace_coverage"
+    id = pk_column()
+    workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=False, index=True)
+    department_id = Column(Integer, ForeignKey("qap_departments.id"), nullable=True, index=True)
+    department_unit_id = Column(Integer, ForeignKey("qap_department_units.id"), nullable=True, index=True)
+    application_master_id = Column(Integer, ForeignKey("qap_application_master.id"), nullable=True, index=True)
+    request_type = Column(String(80), nullable=True)
+    priority = Column(Integer, nullable=False, default=100)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=now)
+
+    workspace = relationship("QAWorkspace", back_populates="coverage_rules")
+    department = relationship("Department")
+    department_unit = relationship("DepartmentUnit")
+    application_master = relationship("ApplicationMaster")
+
+    @property
+    def department_name(self):
+        return self.department.name if self.department else None
+
+    @property
+    def department_unit_name(self):
+        return self.department_unit.name if self.department_unit else None
+
+    @property
+    def application_name(self):
+        return self.application_master.name if self.application_master else None
 
 
 class RequestTypeConfig(Base):
@@ -458,6 +779,7 @@ class QARequest(Base):
     request_id = Column(String(40), unique=True, nullable=True)
     request_date = Column(Date, default=today_ist)
     department = Column(String(150))
+    department_unit_id = Column(Integer, ForeignKey("qap_department_units.id"), nullable=True, index=True)
     application_name = Column(String(150), nullable=False)
     application_owner = Column(String(150))
     cr_number = Column(String(64))
@@ -527,12 +849,24 @@ class QARequest(Base):
     # lets the UI show the live approval status (application_master_status
     # below) and, for an SM, which ApplicationMaster row to act on.
     application_master_id = Column(Integer, ForeignKey("qap_application_master.id"), nullable=True)
+    qa_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
+    workspace_routing_status = Column(String(24), nullable=False, default="PENDING")
 
     created_at = Column(DateTime, default=now)
     updated_at = Column(DateTime, default=now, onupdate=now)
 
     requester = relationship("User", back_populates="qa_requests", foreign_keys=[requester_id])
     application_master = relationship("ApplicationMaster", foreign_keys=[application_master_id])
+    qa_workspace = relationship("QAWorkspace", foreign_keys=[qa_workspace_id])
+    department_unit = relationship("DepartmentUnit", foreign_keys=[department_unit_id])
+
+    @property
+    def qa_workspace_name(self):
+        return self.qa_workspace.name if self.qa_workspace else None
+
+    @property
+    def department_unit_name(self):
+        return self.department_unit.name if self.department_unit else None
     documents = relationship("QARequestDocument", back_populates="qa_request", cascade="all,delete-orphan")
     # Auto-created when this request's request_types include the matching
     # type (see routers/qa_requests.py::_sync_linked_child_requests) so each
@@ -728,7 +1062,7 @@ class FunctionalRequest(Base):
     risk_rating = Column(String(16))
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     department_head_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # who performed Department Head Approval
-    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # COE - Quality Assurance QA Lead assigned by Department Head
+    qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)       # QA Lead from the assigned workspace assigned by Department Head
     assigned_tester_ids = Column(String(255))     # comma-separated QA Engineer user ids (Tester Assigned step)
     signoff_id = Column(Integer, ForeignKey("qap_signoffs.id"), nullable=True)    # linked QA Clearance certificate
     # Set when auto-created from a QA Request gateway (always, for new rows --
@@ -785,6 +1119,14 @@ class FunctionalRequest(Base):
     @property
     def department(self):
         return self.qa_request.department if self.qa_request else None
+
+    @property
+    def department_unit_id(self):
+        return self.qa_request.department_unit_id if self.qa_request else None
+
+    @property
+    def department_unit_name(self):
+        return self.qa_request.department_unit_name if self.qa_request else None
 
     @property
     def application_owner(self):
@@ -949,8 +1291,8 @@ class SASTRequest(Base):
     # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # COE - Quality Assurance QA Lead assigned by the requester's Department Head for readiness,
-    # followed by the COE - Quality Assurance Security Analyst selected by that lead.
+    # QA Lead from the assigned workspace assigned by the requester's Department Head for readiness,
+    # followed by the Security Analyst from the assigned workspace selected by that lead.
     security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     report_path = Column(String(255))
@@ -992,6 +1334,14 @@ class SASTRequest(Base):
     @property
     def department(self):
         return self.qa_request.department if self.qa_request else None
+
+    @property
+    def department_unit_id(self):
+        return self.qa_request.department_unit_id if self.qa_request else None
+
+    @property
+    def department_unit_name(self):
+        return self.qa_request.department_unit_name if self.qa_request else None
 
     @property
     def application_owner(self):
@@ -1153,8 +1503,8 @@ class DASTRequest(Base):
     # RETURNED_BY_SECURITY_LEAD in that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned COE - Quality Assurance QA Lead
-    security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned COE - Quality Assurance Security Analyst
+    security_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned QA Lead from the assigned workspace
+    security_analyst_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)  # assigned Security Analyst from the assigned workspace
     report_path = Column(String(255))
     # Set when this DAST request was auto-created because a QA Request's
     # request_types included "DAST"; null for standalone DAST requests
@@ -1200,6 +1550,14 @@ class DASTRequest(Base):
     @property
     def department(self):
         return self.qa_request.department if self.qa_request else None
+
+    @property
+    def department_unit_id(self):
+        return self.qa_request.department_unit_id if self.qa_request else None
+
+    @property
+    def department_unit_name(self):
+        return self.qa_request.department_unit_name if self.qa_request else None
 
     @property
     def application_owner(self):
@@ -1413,10 +1771,10 @@ class PerformanceRequest(Base):
     # that case, never RETURNED_BY_DEPARTMENT_HEAD).
     needs_dept_head_reapproval = Column(Boolean, default=False)
     requester_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    # Existing column now represents the COE - Quality Assurance QA Lead assigned by the
+    # Existing column now represents the QA Lead from the assigned workspace assigned by the
     # requester's Department Head. Execution testers are tracked separately.
     engineer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
-    assigned_tester_ids = Column(String(255))  # comma-separated COE - Quality Assurance QA Engineer ids
+    assigned_tester_ids = Column(String(255))  # comma-separated workspace QA Engineer ids
     report_path = Column(String(255))
     # Perf tuning (2026-08) -- indexed via explicit short-named Index()
     # (ix_qap_perf_qa_req) near the end of this file, not inline index=True
@@ -1432,6 +1790,14 @@ class PerformanceRequest(Base):
     @property
     def department(self):
         return self.qa_request.department if self.qa_request else None
+
+    @property
+    def department_unit_id(self):
+        return self.qa_request.department_unit_id if self.qa_request else None
+
+    @property
+    def department_unit_name(self):
+        return self.qa_request.department_unit_name if self.qa_request else None
 
     # Same delegation pattern as department above.
     @property
@@ -1595,6 +1961,7 @@ class SuppressionRequest(Base):
     # `ix_qap_suppression_requests_department` name would exceed Oracle's
     # 30-byte identifier limit (same ORA-00972 concern noted on that block).
     department = Column(String(150))
+    qa_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True)
     application_owner = Column(String(150))
     # Exactly one of these is set, matching scan_type -- lets the suppression
     # stay traceable back to the specific scan it was raised against.
@@ -1636,6 +2003,7 @@ class SuppressionRequest(Base):
     items = relationship("SuppressionItem", back_populates="suppression_request", cascade="all,delete-orphan")
     sast_request = relationship("SASTRequest", back_populates="suppressions")
     dast_request = relationship("DASTRequest", back_populates="suppressions")
+    qa_workspace = relationship("QAWorkspace", foreign_keys=[qa_workspace_id])
 
     @property
     def linked_request(self):
@@ -1875,6 +2243,13 @@ class QASignOff(Base):
     __tablename__ = "qap_signoffs"
     id = pk_column()
     certificate_id = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["SIGNOFF"]))
+    certificate_data_json = Column(Text, nullable=True)
+
+    @property
+    def certificate_summary(self):
+        import json
+        return json.loads(self.certificate_data_json or '{}').get('current')
+
     certificate_date = Column(Date, default=today_ist)
     certificate_type = Column(String(32))
     testing_type = Column(String(16))
@@ -1891,6 +2266,7 @@ class QASignOff(Base):
     application_name = Column(String(150), nullable=False)
     application_owner = Column(String(150))
     department = Column(String(150))
+    qa_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True)
     vendor_si_partner = Column(String(150))
     technology_stack = Column(String(150))
     risk_tier = Column(String(32))
@@ -1901,11 +2277,17 @@ class QASignOff(Base):
     validity_from = Column(Date)
     validity_to = Column(Date)
 
+    known_limitations = Column(Text)
+    business_acceptance_status = Column(Text)
+    security_testing_status = Column(Text)
+    deployment_recommendation = Column(Text)
+    conditional_observations = Column(Text)
+
     exit_criteria_notes = Column(Text)
     open_defect_summary = Column(Text)
     residual_risk_notes = Column(Text)
 
-    # COE - Quality Assurance Engineer raises the certificate -> COE - Quality Assurance Lead approves it ->
+    # workspace QA Engineer raises the certificate -> workspace QA Lead approves it ->
     # Executive  gives the final approval that issues it -- see
     # constants.SIGNOFF_STATUSES. Replaces the old, much simpler Draft/Issued
     # flow (a QA Lead alone could draft and immediately sign/issue); existing
@@ -1928,7 +2310,7 @@ class QASignOff(Base):
     updated_at = Column(DateTime, default=now, onupdate=now)
 
     # Business/request department used for cross-department visibility and
-    # filtering. `department` above remains the QA approval owner (COE - Quality Assurance),
+    # filtering. `department` above remains the source department for reporting,
     # while this view-only relationship resolves the Functional Request whose
     # business ID was recorded in testing_request_id.
     source_functional_request = relationship(
@@ -1937,6 +2319,7 @@ class QASignOff(Base):
         viewonly=True,
         uselist=False,
     )
+    qa_workspace = relationship("QAWorkspace", foreign_keys=[qa_workspace_id])
 
     @property
     def request_department(self):
@@ -2020,11 +2403,13 @@ class TestProject(Base):
     project_key = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["TEST_PROJECT"]))
     name = Column(String(150), nullable=False)
     application_master_id = Column(Integer, ForeignKey("qap_application_master.id"), nullable=True)
+    qa_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     # Perf tuning (2026-08) -- indexed via explicit short-named Index()
     # (ix_qap_proj_dept) near the end of this file -- see
     # SuppressionRequest.department's own comment for why not inline
     # index=True.
     department = Column(String(150))
+    department_unit_id = Column(Integer, ForeignKey("qap_department_units.id"), nullable=True, index=True)
     description = Column(Text)
     is_active = Column(Boolean, default=True)
     # SRS PRJ-001 "owner" -- the one person routers/test_projects.py treats
@@ -2064,17 +2449,27 @@ class TestProject(Base):
     archived_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     archived_at = Column(DateTime, nullable=True)
     archived_reason = Column(Text, nullable=True)
-    # APR-001, 2026-08 "Test Approval Workflow" refactor -- project-level
-    # default Author/Reviewer/QA Lead assignment. Author isn't stored here
-    # since it's inherently per-version (TestCaseVersion.author_id, whoever
-    # created/last materially edited it); these two are the ones a project
-    # needs a *default person* for, copied onto each TestCaseVersion at
-    # submission time and reassignable per item afterward -- see
-    # TestCaseVersion.assigned_reviewer_id/assigned_qa_lead_id.
+    # Legacy compatibility fields from the short-lived individual-assignee
+    # workflow. Current test-case decisions route through the workspace QA
+    # Group and QA Lead Group.
     default_reviewer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     default_qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
 
     application_master = relationship("ApplicationMaster", foreign_keys=[application_master_id])
+    qa_workspace = relationship("QAWorkspace", foreign_keys=[qa_workspace_id])
+    department_unit = relationship("DepartmentUnit", foreign_keys=[department_unit_id])
+
+    @property
+    def application_name(self):
+        return self.application_master.name if self.application_master else None
+
+    @property
+    def qa_workspace_name(self):
+        return self.qa_workspace.name if self.qa_workspace else None
+
+    @property
+    def department_unit_name(self):
+        return self.department_unit.name if self.department_unit else None
     owner = relationship("User", foreign_keys=[owner_id])
     created_by = relationship("User", foreign_keys=[created_by_id])
     pending_requested_by = relationship("User", foreign_keys=[pending_requested_by_id])
@@ -2157,7 +2552,7 @@ class TestProjectViewGrant(Base):
     ANY PROJECT is cross departmental" -- most projects never need this;
     it's an exception for the specific ones that do.
 
-    Exactly one of `department`/`user_id` is set per row (enforced in
+    Exactly one of `department`/`user_id`/`workspace_id` is set per row (enforced in
     routers/test_projects.py, not at the DB level -- same
     application-layer-only convention as this app's other "must be exactly
     one of" rules, e.g. auth.py's department/departments payload
@@ -2189,16 +2584,20 @@ class TestProjectViewGrant(Base):
               text("(CASE WHEN department IS NOT NULL THEN project_id END)"), "department", unique=True),
         Index("uq_qap_tpvg_project_user",
               text("(CASE WHEN user_id IS NOT NULL THEN project_id END)"), "user_id", unique=True),
+        Index("uq_qap_tpvg_project_ws",
+              text("(CASE WHEN workspace_id IS NOT NULL THEN project_id END)"), "workspace_id", unique=True),
     )
     id = pk_column()
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
     department = Column(String(150), nullable=True)
     user_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True, index=True)
+    workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     granted_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     created_at = Column(DateTime, default=now)
 
     project = relationship("TestProject", foreign_keys=[project_id])
     user = relationship("User", foreign_keys=[user_id])
+    workspace = relationship("QAWorkspace", foreign_keys=[workspace_id])
     granted_by = relationship("User", foreign_keys=[granted_by_id])
 
     @property
@@ -2209,8 +2608,41 @@ class TestProjectViewGrant(Base):
     def granted_by_name(self):
         return self.granted_by.full_name if self.granted_by else None
 
+    @property
+    def workspace_name(self):
+        return self.workspace.name if self.workspace else None
 
-class TestFolder(Base):
+
+class WorkspaceOwnedContent:
+    @property
+    def origin_workspace_name(self):
+        from sqlalchemy.orm import object_session
+        db = object_session(self)
+        owner = self.origin_workspace_id or (self.project.qa_workspace_id if self.project else None)
+        if not db or owner is None:
+            return None
+        names = db.info.setdefault('content_workspace_names', {})
+        if owner not in names:
+            workspace = db.get(QAWorkspace, owner)
+            names[owner] = workspace.name if workspace else None
+        return names[owner]
+
+    @property
+    def workspace_writable(self):
+        from .workspace_service import current_workspace_id
+        from sqlalchemy.orm import object_session
+        db = object_session(self)
+        actor = db.info.get("project_workspace_actor") if db else None
+        selected = getattr(actor, "active_qa_workspace_id", None) if actor else current_workspace_id()
+        owner = self.origin_workspace_id or (self.project.qa_workspace_id if self.project else None)
+        if isinstance(actor, User):
+            from .workflow_authority import admin_department_allowed
+            if not admin_department_allowed(actor, self.project.department if self.project else None):
+                return False
+        return selected is not None and selected == owner
+
+
+class TestFolder(WorkspaceOwnedContent, Base):
     """Hierarchical folder tree within one Project's Test Repository --
     self-referential parent_id for nesting (e.g. 'Regression' > 'Login').
     A test case may sit directly under the Project with no folder at all
@@ -2218,6 +2650,7 @@ class TestFolder(Base):
     not mandatory."""
     __tablename__ = "qap_test_folders"
     id = pk_column()
+    origin_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     # Perf tuning (2026-08) -- indexed; every Test Repository folder-tree
     # query (list_folders and friends in test_repository.py) filters by
     # project_id first. TestCase.project_id already has its own composite
@@ -2239,7 +2672,7 @@ class TestFolder(Base):
         return self.created_by.full_name if self.created_by else None
 
 
-class TestCase(Base):
+class TestCase(WorkspaceOwnedContent, Base):
     """A single reusable test case's *permanent identity* in the Test
     Repository (SRS TC-001) -- project-scoped, independent of any one
     version. Columns mirror the fixed xlsx upload template plus CR
@@ -2272,6 +2705,7 @@ class TestCase(Base):
         UniqueConstraint("project_id", "import_fingerprint", name="uq_qap_tc_project_import_fp"),
     )
     id = pk_column()
+    origin_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     test_case_key = Column(String(60), unique=True, nullable=False)
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
     # SHA-256 of the normalized definition supplied by an Excel import.
@@ -2476,6 +2910,22 @@ class TestCase(Base):
         return self.current_draft_version.reviewed_by_name if self.current_draft_version else None
 
     @property
+    def assigned_reviewer_id(self):
+        return self.current_draft_version.assigned_reviewer_id if self.current_draft_version else None
+
+    @property
+    def assigned_reviewer_name(self):
+        return self.current_draft_version.assigned_reviewer_name if self.current_draft_version else None
+
+    @property
+    def assigned_qa_lead_id(self):
+        return self.current_draft_version.assigned_qa_lead_id if self.current_draft_version else None
+
+    @property
+    def assigned_qa_lead_name(self):
+        return self.current_draft_version.assigned_qa_lead_name if self.current_draft_version else None
+
+    @property
     def version(self):
         return f"{self.version_major}.{self.version_minor}"
 
@@ -2629,14 +3079,8 @@ class TestCaseVersion(Base):
     qa_lead_decided_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     qa_lead_decided_at = Column(DateTime, nullable=True)
     qa_lead_decision_comments = Column(Text, nullable=True)
-    # APR-001 -- project-level default Reviewer/QA Lead (TestProject.
-    # default_reviewer_id/default_qa_lead_id) copied here at submission
-    # time, with optional per-item reassignment afterward (see
-    # routers/test_repository.py::reassign_test_case_approvers). Drives
-    # APR-006's "current assignee" and APR-007's personal Pending Approval
-    # filtering and identifies the user who owns each stage decision.
-    # Project-role authorization remains a prerequisite, while the selected
-    # assignee is the stage-specific decision maker (Admin retains oversight).
+    # Legacy audit compatibility fields. Current submissions clear these and
+    # route to the workspace QA Group and QA Lead Group.
     assigned_reviewer_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     assigned_qa_lead_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     # TC-005 "record the source testcase/version" on clone, and reused for
@@ -2685,25 +3129,15 @@ class TestCaseVersion(Base):
     # APR-006 "current assignee" -- whichever role's action is currently
     # pending, per this version's own status. None once terminal
     # (Approved/Rejected/Archived) or while still an unsubmitted Draft.
-    # 2026-08 "Simplified Test Management Review and Approval" requirement --
-    # extended to the 4 NEW-path statuses (constants.TEST_CASE_NEW_STATUSES):
-    # "Recommendation Pending"/"QA Lead Approval Pending" have no individual
-    # assignee (group routing is authoritative), so pending_with_user_id
-    # stays None for those -- the frontend falls back to
-    # constants.ts::TEST_CASE_PENDING_WITH's group label, rendered as a
-    # clickable RoleGroupLink (QA Group/QA Lead Group) rather than a plain
-    # string, same UX as pending_with_user_id being a real person elsewhere.
-    # "Returned by QA"/"Returned by QA Lead" DO have a real pending person
-    # (the author, same as OLD "Returned") -- reported directly: "Pending
-    # with author, give details who have uploaded" was previously blank for
-    # these two NEW-path Returned statuses (only literal OLD "Returned" was
-    # handled), which fell back to the generic unclickable "Author" label
-    # with no actual name.
+    # Retained for compatibility with records created by the short-lived
+    # individual-assignee workflow. Current workflow authorization is based on
+    # workspace QA and QA Lead groups.
+    # Returned versions resolve to their author for correction.
     @property
     def pending_with_user_id(self):
-        if self.status == "In Review":
+        if self.status in ("In Review", "Recommendation Pending"):
             return self.assigned_reviewer_id
-        if self.status == "Review Completed":
+        if self.status in ("Review Completed", "QA Lead Approval Pending"):
             return self.assigned_qa_lead_id
         if self.status in ("Returned", "Returned by QA", "Returned by QA Lead"):
             return self.author_id
@@ -2711,14 +3145,10 @@ class TestCaseVersion(Base):
 
     @property
     def pending_with_user_name(self):
-        if self.status == "In Review":
-            return "QA Reviewer Group"
-        if self.status == "Review Completed":
-            return "CM QA / AGM QA"
-        if self.status == "Recommendation Pending":
-            return "QA Group"
-        if self.status == "QA Lead Approval Pending":
-            return "QA Lead Group"
+        if self.status in ("In Review", "Recommendation Pending"):
+            return self.assigned_reviewer_name
+        if self.status in ("Review Completed", "QA Lead Approval Pending"):
+            return self.assigned_qa_lead_name
         if self.status in ("Returned", "Returned by QA", "Returned by QA Lead"):
             return self.author_name
         return None
@@ -2739,7 +3169,7 @@ class TestCaseVersionStep(Base):
     version = relationship("TestCaseVersion", back_populates="steps")
 
 
-class TestCycleFolder(Base):
+class TestCycleFolder(WorkspaceOwnedContent, Base):
     """Flat (non-nested, by design) organizational folder for a Project's
     Test Cycles, plus an OPTIONAL access restriction (see
     TestCycleFolderAccess below). Unlike TestFolder (Test Repository), which
@@ -2762,6 +3192,7 @@ class TestCycleFolder(Base):
     Unfiled pseudo-folder rather than a migrated default folder)."""
     __tablename__ = "qap_test_cycle_folders"
     id = pk_column()
+    origin_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False, index=True)
     name = Column(String(150), nullable=False)
     created_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
@@ -2828,7 +3259,7 @@ class TestCycleFolderAccess(Base):
         return self.granted_by.full_name if self.granted_by else None
 
 
-class TestCycle(Base):
+class TestCycle(WorkspaceOwnedContent, Base):
     """Test Execution module -- a named run (e.g. 'Sprint 12 Regression',
     'CR-XX UAT Cycle 1') under a Project. Test cases are explicitly added to
     a cycle (creating a Not-Executed TestExecution row each) and then run
@@ -2841,6 +3272,7 @@ class TestCycle(Base):
     routers/test_execution.py instead of accepting arbitrary free text."""
     __tablename__ = "qap_test_cycles"
     id = pk_column()
+    origin_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     cycle_key = Column(String(40), unique=True, default=gen_id_default(BUSINESS_ID_PREFIXES["TEST_CYCLE"]))
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
     name = Column(String(150), nullable=False)
@@ -2893,7 +3325,7 @@ class TestCycle(Base):
         return self.owner.full_name if self.owner else None
 
 class TestCycleChildRequestLink(Base):
-    """Mandatory Functional QA Request association for a Test Cycle."""
+    """Optional Functional QA Request association for a Test Cycle."""
     __tablename__ = "qap_test_cycle_child_links"
     id = pk_column()
     cycle_id = Column(Integer, ForeignKey("qap_test_cycles.id"), nullable=False, unique=True)
@@ -3099,8 +3531,54 @@ class Defect(Base):
     defect_key = Column(String(40), unique=True, nullable=False, index=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=False)
-    status = Column(String(20), nullable=False, default="New", index=True)
-    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=False, index=True)
+    status = Column(String(40), nullable=False, default="New", index=True)
+    workflow_json = Column(Text, nullable=True)
+    workflow_state_json = Column(Text, nullable=True)
+    workflow_revision = Column(Integer, nullable=False, default=0, server_default="0")
+
+    @property
+    def modern_workflow(self):
+        return bool(self.workflow_json)
+
+    @property
+    def verified_builds(self):
+        from .defect_workflow import state, verified_for
+        if not self.workflow_json:
+            return []
+        pairs = {(e.get('environment'), e.get('build')) for e in state(self).get('history', []) if e.get('kind') == 'verification'}
+        return [{"environment": env, "build": build} for env, build in sorted(pairs) if verified_for(self, env, build)]
+
+    @property
+    def verified_execution_ids(self):
+        from .defect_workflow import verified_for
+        if not self.workflow_json:
+            return []
+        executions = ([self.execution] if self.execution else []) + [link.execution for link in self.execution_links if link.execution]
+        return list({ex.id for ex in executions if ex.cycle and verified_for(self, ex.cycle.environment, ex.cycle.build)})
+
+    @property
+    def workflow(self):
+        from .defect_workflow import policy
+        return policy(self.workflow_json) if self.workflow_json else None
+
+    @property
+    def workflow_state(self):
+        from .defect_workflow import state
+        return state(self)
+
+    @property
+    def workflow_stages(self):
+        from .defect_workflow import stages
+        return stages(self) if self.workflow_json else []
+
+    @property
+    def workflow_transitions(self):
+        from .defect_workflow import transitions
+        return transitions(self)
+
+    qa_request_id = Column(Integer, ForeignKey("qap_requests.id"), nullable=True, index=True)
+    qa_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
+    department = Column(String(150), nullable=True, index=True)
     # These three links are optional at creation time. A governed defect can
     # be opened first, then attached to a Failed/Blocked execution later.
     cycle_id = Column(Integer, ForeignKey("qap_test_cycles.id"), nullable=True, index=True)
@@ -3212,7 +3690,7 @@ class Defect(Base):
         return bool(
             self.assignee
             and (
-                self.assignee.has_role(Role.REQUESTER)
+                self.assignee.has_role(*REQUESTER_EQUIVALENT_ROLES)
                 or (
                     self.qa_request
                     and self.qa_request.requester_id == self.assignee_id
@@ -3256,7 +3734,7 @@ class Defect(Base):
     # (e.g. a defect opened standalone, not from a Failed/Blocked execution).
     @property
     def project_department(self):
-        return self.cycle.project.department if self.cycle and self.cycle.project else None
+        return self.cycle.project.department if self.cycle and self.cycle.project else self.department
 
     @property
     def test_case_key(self):

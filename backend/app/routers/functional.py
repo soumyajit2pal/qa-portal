@@ -10,10 +10,12 @@ from sqlalchemy.exc import IntegrityError
 from .. import models, pagination, schemas
 from ..database import get_db
 from ..deps import (
-    get_current_user, require_roles, require_same_department, require_not_requester,
-    dashboard_department_scope, require_department_visibility,
+    get_workflow_user as get_current_user, require_workflow_roles as require_roles, require_same_department, require_not_requester,
+    dashboard_department_scope, require_department_visibility, active_qa_workspace_scope_ids,
+    department_unit_visibility_condition, require_department_unit_visibility,
+    require_department_unit_action_scope, has_department_unit_action_scope,
 )
-from ..constants import Role, QAStatus, QA_DEPARTMENT, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, QA_REQUEST_TERMINAL_STATUSES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
+from ..constants import Role, QAStatus, FUNCTIONAL_EDITABLE_STATUSES, TESTER_REASSIGNABLE_STATUSES, QA_REQUEST_STATUS_LABELS, QA_REQUEST_TERMINAL_STATUSES, QA_REQUEST_CREATOR_ROLES, is_readiness_evidence_editable, validate_environment_promotion, validate_target_release_date, application_name_block_message
 from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
@@ -38,7 +40,7 @@ _LINKABLE_TEST_CYCLE_STATUSES = ("Draft", "Ready", "In Progress")
 # lifecycle that used to live directly on the QA Request itself:
 #
 #   Draft -> Submit -> same-department SM Approval -> same-department
-#   Department Head Approval (assigns a COE - Quality Assurance QA Lead) -> that lead starts
+#   Department Head Approval (assigns a QA Lead from the active workspace) -> that lead starts
 #   Readiness Verification -> QA Activity (Planning -> Tester
 #   Assignment -> Test Design -> Execution, with a Defect -> Waiting For Fix
 #   -> Retesting -> Regression Testing cycle) -> QA Completed -> QA Clearance
@@ -62,8 +64,11 @@ def _require(obj, expected_statuses, action: str):
         )
 
 
-def _get_or_404(db: Session, req_id: int) -> "models.FunctionalRequest":
-    obj = db.query(models.FunctionalRequest).get(req_id)
+def _get_or_404(db: Session, req_id: int, lock: bool = False) -> "models.FunctionalRequest":
+    query = db.query(models.FunctionalRequest).filter_by(id=req_id)
+    if lock:
+        query = query.populate_existing().with_for_update()
+    obj = query.first()
     if not obj:
         raise HTTPException(404, "Functional Testing Request not found")
     return obj
@@ -74,17 +79,26 @@ def _is_active_delegate(obj: "models.FunctionalRequest", user: models.User) -> b
     return bool(delegation and delegation.assigned_to_id == user.id)
 
 
-def _require_visible(obj: "models.FunctionalRequest", user: models.User) -> None:
+def _require_visible(db: Session, obj: "models.FunctionalRequest", user: models.User) -> None:
+    delegated = _is_active_delegate(obj, user)
     require_department_visibility(
         user, obj.department, requester_id=obj.requester_id,
-        delegated=_is_active_delegate(obj, user),
+        delegated=delegated,
+        entity_workspace_id=obj.qa_request.qa_workspace_id if obj.qa_request else None,
     )
+    if obj.qa_request:
+        require_department_unit_visibility(
+            db, user, obj.department, obj.qa_request.department_unit_id,
+            requester_id=obj.requester_id, delegated=delegated,
+        )
 
 
-def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str) -> models.User:
+def _it_qa_user(db: Session, user_id: Optional[int], role: str, label: str, workspace_id: int | None = None) -> models.User:
     user = db.query(models.User).get(user_id) if user_id else None
-    if not user or not user.is_active or not user.has_role(role) or not user.has_department(QA_DEPARTMENT):
-        raise HTTPException(400, f"{label} must be an active {role.replace('_', ' ').title()} from {QA_DEPARTMENT}")
+    if user and not user.show_in_user_dropdowns:
+        raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
+    if not user or not user.is_active or not user.has_qa_workspace_role(role, workspace_id=workspace_id):
+        raise HTTPException(400, f"{label} must hold {role.replace('_', ' ').title()} in this request's workspace")
     return user
 
 
@@ -107,7 +121,7 @@ def _assigned_tester_ids(obj: "models.FunctionalRequest") -> set[int]:
 
 def _require_assigned_tester(obj: "models.FunctionalRequest", user: models.User) -> None:
     if not user.has_role(Role.ADMIN) and user.id not in _assigned_tester_ids(obj):
-        raise HTTPException(403, "Only a COE - Quality Assurance QA Tester assigned by the QA Lead can perform this action")
+        raise HTTPException(403, "Only a QA tester assigned by the QA Lead can perform this action")
 
 
 # 2026-08 -- reported directly, see TESTER_REASSIGNABLE_STATUSES' own
@@ -144,7 +158,8 @@ def _require_can_reassign_tester(obj: "models.FunctionalRequest", user: models.U
         return
     if user.id in _assigned_tester_ids(obj):
         return
-    if user.has_department(QA_DEPARTMENT) and user.has_role(*reassignment.department_head_roles(QA_DEPARTMENT)):
+    workspace_id = obj.qa_request.qa_workspace_id if obj.qa_request else None
+    if user.has_qa_workspace_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA, workspace_id=workspace_id):
         return
     # 2026-08 -- reported directly: QA_LEAD is required to keep reassignment
     # rights here too, not just CHIEF_MANAGER_QA/AGM_QA. The CR's own
@@ -156,7 +171,7 @@ def _require_can_reassign_tester(obj: "models.FunctionalRequest", user: models.U
         return
     raise HTTPException(
         403,
-        "Only a currently assigned tester, a QA Lead, the QA Department Head (Chief Manager QA / AGM QA), "
+        "Only a currently assigned tester, a QA Lead, a QA Executive in the active workspace (Chief Manager QA / AGM QA), "
         "or an Administrator can reassign the tester(s) on this request",
     )
 
@@ -182,6 +197,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
         joinedload(models.FunctionalRequest.qa_request).joinedload(models.QARequest.application_master),
     )
     scope = dashboard_department_scope(current_user)
+    workspace_scope = active_qa_workspace_scope_ids(current_user)
     delegated_to_user = models.QARequest.delegations.any(and_(
         models.QARequestDelegation.target_type == "FUNCTIONAL",
         models.QARequestDelegation.target_id == models.FunctionalRequest.id,
@@ -200,7 +216,12 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
         ) > 0,
     )
     if scope is not None:
-        q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
+        organisation_scope = department_unit_visibility_condition(
+            db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
+        )
+        q = q.filter(or_(organisation_scope, delegated_to_user))
+    if workspace_scope:
+        q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
         q = q.filter(or_(named_assignee, delegated_to_user))
     q = pagination.apply_search(q, params, models.FunctionalRequest.request_id, models.QARequest.application_name)
@@ -232,7 +253,7 @@ def list_functional(params: pagination.PageParams = Depends(), requester_id: Opt
 @router.get("/{req_id}", response_model=schemas.FunctionalOut)
 def get_functional(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, req_id)
-    _require_visible(obj, current_user)
+    _require_visible(db, obj, current_user)
     return obj
 
 
@@ -285,13 +306,13 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
     "returned to requester", not "QA may edit"). Application Name/Epic
     Number/CR Number are further restricted to Admins only -- see
     _ADMIN_ONLY_FIELDS."""
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     # See _can_edit_details's own docstring below for the full permission
     # model (requester while it's theirs/returned to them; SM/Department
     # Head only while it's genuinely pending their own decision).
     if obj.status not in FUNCTIONAL_EDITABLE_STATUSES:
         raise HTTPException(400, f"Request cannot be edited while in status '{obj.status}'")
-    if not _can_edit_details(obj, current_user):
+    if not _can_edit_details(db, obj, current_user):
         raise HTTPException(403, "You do not have permission to edit this request in its current status")
     data = payload.model_dump(exclude_unset=True)
     if not current_user.has_role(Role.ADMIN):
@@ -368,8 +389,8 @@ def update_functional(req_id: int, payload: schemas.FunctionalUpdate, db: Sessio
 # ---- Requester: Draft -> Submitted -> SM Approval Pending ----
 @router.post("/{req_id}/submit", response_model=schemas.FunctionalOut)
 def submit_request(req_id: int, db: Session = Depends(get_db),
-                    current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
-    obj = _get_or_404(db, req_id)
+                    current_user: models.User = Depends(require_roles(*QA_REQUEST_CREATOR_ROLES))):
+    obj = _get_or_404(db, req_id, lock=True)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this request")
     _require(obj, QAStatus.DRAFT, "Submit")
@@ -398,7 +419,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
 
 @router.post("/{req_id}/resubmit", response_model=schemas.FunctionalOut)
 def resubmit_request(req_id: int, db: Session = Depends(get_db),
-                      current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
+                      current_user: models.User = Depends(require_roles(*QA_REQUEST_CREATOR_ROLES))):
     """Re-submits a request returned by SM, by the Department Head, or by the
     QA Lead -- or reopens one rejected by SM. Reported directly: a Rejected-
     by-SM request used to be a dead end (see QA_REQUEST_TERMINAL_STATUSES),
@@ -406,7 +427,7 @@ def resubmit_request(req_id: int, db: Session = Depends(get_db),
     rejection. It's now reopenable the same way a Return is: edit details,
     then call this endpoint to send it straight back to SM_APPROVAL_PENDING
     for a fresh decision."""
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this request")
     if obj.active_delegation:
@@ -452,8 +473,13 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
     """Checkpoint between the requester's submission and Department Head
     approval. A Return goes back to the requester for correction; a Reject
     closes the request out (SM_REJECTED, terminal)."""
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     require_same_department(current_user, obj.department)
+    require_department_unit_action_scope(
+        db, current_user, obj.department,
+        obj.qa_request.department_unit_id if obj.qa_request else None,
+    )
     require_not_requester(current_user, obj.requester_id)
     _require(obj, QAStatus.SM_APPROVAL_PENDING, "SM decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
@@ -476,9 +502,14 @@ def sm_decision(req_id: int, payload: schemas.WorkflowDecision, db: Session = De
 @router.post("/{req_id}/department-head-decision", response_model=schemas.FunctionalOut)
 def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisionIn, db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
-    """Department Head reviews the request and assigns a COE - Quality Assurance QA Lead."""
-    obj = _get_or_404(db, req_id)
+    """Department Head reviews the request and assigns a QA Lead from the active workspace."""
+    obj = _get_or_404(db, req_id, lock=True)
+    _require_visible(db, obj, current_user)
     require_same_department(current_user, obj.department)
+    require_department_unit_action_scope(
+        db, current_user, obj.department,
+        obj.qa_request.department_unit_id if obj.qa_request else None,
+    )
     require_not_requester(current_user, obj.requester_id)
     _require(obj, QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING, "Department Head decision")
     if payload.decision == "Approved" and obj.application_master_status not in (None, "APPROVED"):
@@ -505,7 +536,7 @@ def department_head_decision(req_id: int, payload: schemas.DepartmentHeadDecisio
 @router.post("/{req_id}/start-readiness-verification", response_model=schemas.FunctionalOut)
 def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
                                   current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.QA_LEAD_ASSIGNED, "Start readiness verification")
     _require_assigned_qa_lead(obj, current_user)
     obj.status = QAStatus.READINESS_VERIFICATION
@@ -518,7 +549,7 @@ def start_readiness_verification(req_id: int, db: Session = Depends(get_db),
 @router.post("/{req_id}/readiness-decision", response_model=schemas.FunctionalOut)
 def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.READINESS_VERIFICATION, "Readiness decision")
     _require_assigned_qa_lead(obj, current_user)
     if payload.decision == "Passed":
@@ -569,7 +600,7 @@ def readiness_decision(req_id: int, payload: schemas.ReadinessDecisionIn, db: Se
 @router.post("/{req_id}/begin-planning", response_model=schemas.FunctionalOut)
 def begin_planning(req_id: int, db: Session = Depends(get_db),
                     current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.QA_ACTIVITY_INITIATED, "Begin planning")
     _require_assigned_qa_lead(obj, current_user)
     obj.status = QAStatus.PLANNING
@@ -597,12 +628,12 @@ def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = De
 
     2026-08 Reassignment CR -- once this is a genuine reassignment (status
     already past PLANNING), eligibility narrows to
-    _require_can_reassign_tester (current tester / QA Department Head /
+    _require_can_reassign_tester (current tester / workspace QA Executive /
     Admin) and a reason becomes mandatory; the newly-added tester(s) are
     notified, and a dedicated "Reassigned" audit row (with previous/new
     names and the reason) is written alongside the existing history log
     entry below."""
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, TESTER_REASSIGNABLE_STATUSES, "Assign tester")
     is_initial_assignment = obj.status == QAStatus.PLANNING
     previous_ids = _assigned_tester_ids(obj)
@@ -614,7 +645,7 @@ def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = De
     if not payload.tester_ids:
         raise HTTPException(400, "At least one tester_id is required")
     unique_ids = list(dict.fromkeys(payload.tester_ids))
-    testers = [_it_qa_user(db, tester_id, Role.QA_ENGINEER, f"tester_id {tester_id}") for tester_id in unique_ids]
+    testers = [_it_qa_user(db, tester_id, Role.QA_ENGINEER, f"tester_id {tester_id}", obj.qa_request.qa_workspace_id if obj.qa_request else None) for tester_id in unique_ids]
     obj.assigned_tester_ids = ",".join(str(i) for i in unique_ids)
     if is_initial_assignment:
         obj.status = QAStatus.TESTER_ASSIGNED
@@ -650,7 +681,7 @@ def assign_tester(req_id: int, payload: schemas.AssignTesterIn, db: Session = De
 @router.post("/{req_id}/start-test-design", response_model=schemas.FunctionalOut)
 def start_test_design(req_id: int, db: Session = Depends(get_db),
                        current_user: models.User = Depends(require_roles( Role.QA_ENGINEER))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.TESTER_ASSIGNED, "Start test design")
     _require_assigned_tester(obj, current_user)
     obj.status = QAStatus.TEST_DESIGN
@@ -664,7 +695,7 @@ def start_test_design(req_id: int, db: Session = Depends(get_db),
 def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
                      db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.TEST_DESIGN, "Start execution")
     _require_assigned_tester(obj, current_user)
     # A link can be created from either side of the relationship. Resolve it
@@ -689,6 +720,9 @@ def start_execution(req_id: int, payload: schemas.StartFunctionalExecutionIn,
         if (application_master_id and cycle.project.application_master_id is not None
                 and cycle.project.application_master_id != application_master_id):
             raise HTTPException(400, "The selected test cycle is not relevant to this request's application")
+        request_workspace_id = obj.qa_request.qa_workspace_id if obj.qa_request else None
+        if (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != request_workspace_id:
+            raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
         cycle_link = db.query(models.TestCycleChildRequestLink).filter_by(cycle_id=cycle.id).first()
         if cycle_link:
             if cycle_link.child_type != "Functional" or cycle_link.child_id != obj.id:
@@ -740,6 +774,8 @@ def eligible_test_cycles(req_id: int, db: Session = Depends(get_db),
         # A Functional request without an approved Application mapping
         # cannot be paired safely with an application-bound Test Project.
         query = query.filter(False)
+    request_workspace_id = obj.qa_request.qa_workspace_id if obj.qa_request else None
+    query = query.filter(func.coalesce(models.TestCycle.origin_workspace_id, models.TestProject.qa_workspace_id) == request_workspace_id)
     cycles = query.order_by(models.TestCycle.created_at.desc()).all()
     return [{
         "id": cycle.id, "cycle_key": cycle.cycle_key, "project_id": cycle.project_id,
@@ -752,7 +788,7 @@ def eligible_test_cycles(req_id: int, db: Session = Depends(get_db),
 @router.delete("/{req_id}/test-cycles/{cycle_id}", response_model=schemas.FunctionalOut)
 def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     can_manage = (current_user.has_role(Role.ADMIN) or obj.qa_lead_id == current_user.id
                   or current_user.id in _assigned_tester_ids(obj))
     if not can_manage:
@@ -762,10 +798,15 @@ def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
     ).first()
     if not link:
         raise HTTPException(404, "This test cycle is not linked to the Functional Testing request")
-    raise HTTPException(
-        400,
-        "A Test Cycle link is mandatory. Replace the Functional QA Request from Test Lifecycle instead.",
+    require_cycle_unlinkable(obj.status)
+    db.delete(link)
+    _log(
+        db, obj.id, obj.status, current_user, "Test Cycle Unlinked",
+        f"Removed test cycle {link.cycle.cycle_key}; it remains available as a standalone cycle.",
     )
+    db.commit()
+    db.refresh(obj)
+    return obj
 
 
 # ---- Defect -> Fix -> Retest -> Regression cycle ----
@@ -783,7 +824,7 @@ def unlink_test_cycle(req_id: int, cycle_id: int, db: Session = Depends(get_db),
 @router.post("/{req_id}/raise-defect", response_model=schemas.FunctionalOut)
 def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.EXECUTION_IN_PROGRESS, "Raise defect")
     _require_assigned_tester(obj, current_user)
     raise HTTPException(
@@ -795,7 +836,7 @@ def raise_defect(req_id: int, payload: schemas.CommentIn, db: Session = Depends(
 @router.post("/{req_id}/mark-waiting-for-fix", response_model=schemas.FunctionalOut)
 def mark_waiting_for_fix(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                           current_user: models.User = Depends(require_roles(Role.QA_ENGINEER))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.DEFECT_RAISED, "Mark waiting for fix")
     _require_assigned_tester(obj, current_user)
     obj.status = QAStatus.WAITING_FOR_FIX
@@ -808,7 +849,7 @@ def mark_waiting_for_fix(req_id: int, payload: schemas.CommentIn, db: Session = 
 @router.post("/{req_id}/start-retesting", response_model=schemas.FunctionalOut)
 def start_retesting(req_id: int, payload: schemas.CommentIn, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.WAITING_FOR_FIX, "Start retesting")
     _require_assigned_tester(obj, current_user)
     obj.status = QAStatus.RETESTING
@@ -830,7 +871,7 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
     "QA request form is the gateway only"), so Functional completing has
     never depended on -- and now explicitly does not wait for -- a sibling
     request's own status."""
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, [QAStatus.EXECUTION_IN_PROGRESS, QAStatus.RETESTING], "Complete QA")
     _require_assigned_tester(obj, current_user)
 
@@ -855,7 +896,7 @@ def complete_qa(req_id: int, payload: schemas.CommentIn, db: Session = Depends(g
 def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.RequestSignoffIn(),
                      db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.QA_ENGINEER))):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.QA_COMPLETED, "Request clearance")
     # 2026-08 -- reported directly: "'Request Sign Off' button is not
     # enable[d] for QA lead ... if tester [is] no[t] available then at
@@ -900,7 +941,7 @@ def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session 
     no linked FunctionalRequest.signoff_id yet to auto-sync against) -- reachable
     only while status is still QA_SIGNOFF_PENDING, which the auto-sync above
     already moves past for every certificate it successfully links."""
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     _require(obj, QAStatus.QA_SIGNOFF_PENDING, "Confirm clearance")
     if payload.signoff_id is not None:
         cert = db.query(models.QASignOff).get(payload.signoff_id)
@@ -919,8 +960,8 @@ def confirm_signoff(req_id: int, payload: schemas.ConfirmSignoffIn, db: Session 
 @router.post("/{req_id}/requester-decision", response_model=schemas.FunctionalOut)
 def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(
-                            Role.REQUESTER, Role.BUSINESS_ANALYST, Role.APPLICATION_OWNER))):
-    obj = _get_or_404(db, req_id)
+                            *QA_REQUEST_CREATOR_ROLES, Role.APPLICATION_OWNER))):
+    obj = _get_or_404(db, req_id, lock=True)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can record this decision")
     _require(obj, QAStatus.REQUESTER_VERIFICATION, "Requester decision")
@@ -981,7 +1022,7 @@ def requester_decision(req_id: int, payload: schemas.RequesterDecisionIn, db: Se
 # ---- Readiness checklist (Ready for Testing gate) ----
 @router.get("/{req_id}/checklist", response_model=List[schemas.ChecklistItemOut])
 def get_checklist(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    _require_visible(_get_or_404(db, req_id), current_user)
+    _require_visible(db, _get_or_404(db, req_id), current_user)
     return db.query(models.ReadinessChecklistItem).filter_by(functional_request_id=req_id).all()
 
 
@@ -1025,7 +1066,7 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistI
 
 @router.get("/{req_id}/history", response_model=List[schemas.ApprovalActionOut])
 def request_history(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    _require_visible(_get_or_404(db, req_id), current_user)
+    _require_visible(db, _get_or_404(db, req_id), current_user)
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="FUNCTIONAL_REQUEST", entity_id=req_id)
             .order_by(models.ApprovalAction.created_at).all())
@@ -1038,7 +1079,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
     and its full approval/workflow history -- who submitted, approved,
     returned, signed off, etc., and when -- as one downloadable PDF."""
     obj = _get_or_404(db, req_id)
-    _require_visible(obj, current_user)
+    _require_visible(db, obj, current_user)
 
     tester_names = []
     for uid in (obj.assigned_tester_ids or "").split(","):
@@ -1108,7 +1149,7 @@ def export_functional(req_id: int, db: Session = Depends(get_db), current_user: 
 
 # ---- Supporting documents (multiple files, uploaded any time after the
 # request has been raised) -- see documents.py for the shared implementation. ----
-def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) -> bool:
+def _can_upload_documents(db: Session, obj: "models.FunctionalRequest", user: models.User) -> bool:
     """Reported directly (Document and Evidence Access Control Based on
     Workflow Stage): access follows exactly 3 stages, then locks hard --
     (1) the requester, while the request is genuinely in their own hands
@@ -1135,15 +1176,24 @@ def _can_upload_documents(obj: "models.FunctionalRequest", user: models.User) ->
         return (_is_active_delegate(obj, user)
                 or (obj.requester_id == user.id and not obj.active_delegation))
     if status == QAStatus.SM_APPROVAL_PENDING:
-        return user.has_role(Role.SM) and user.has_department(obj.department)
+        return (user.has_role(Role.SM) and user.has_department(obj.department)
+                and has_department_unit_action_scope(
+                    db, user, obj.department,
+                    obj.qa_request.department_unit_id if obj.qa_request else None,
+                ))
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
+        return (user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM)
+                and user.has_department(obj.department)
+                and has_department_unit_action_scope(
+                    db, user, obj.department,
+                    obj.qa_request.department_unit_id if obj.qa_request else None,
+                ))
     # Every QA-activity/post-approval/terminal status -- locked for everyone
     # but Admin until the request is returned to the requester above.
     return False
 
 
-def _can_edit_details(obj: "models.FunctionalRequest", user: models.User) -> bool:
+def _can_edit_details(db: Session, obj: "models.FunctionalRequest", user: models.User) -> bool:
     """Reported bug: an SM could still edit a request's own details after
     already returning it themselves (status RETURNED_BY_SM) -- a dead end,
     since only the requester/admin can ever call resubmit_request, so the SM
@@ -1172,23 +1222,32 @@ def _can_edit_details(obj: "models.FunctionalRequest", user: models.User) -> boo
         return (_is_active_delegate(obj, user)
                 or (obj.requester_id == user.id and not obj.active_delegation))
     if status == QAStatus.SM_APPROVAL_PENDING:
-        return user.has_role(Role.SM) and user.has_department(obj.department)
+        return (user.has_role(Role.SM) and user.has_department(obj.department)
+                and has_department_unit_action_scope(
+                    db, user, obj.department,
+                    obj.qa_request.department_unit_id if obj.qa_request else None,
+                ))
     if status == QAStatus.DEPARTMENT_HEAD_APPROVAL_PENDING:
-        return user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM) and user.has_department(obj.department)
+        return (user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM)
+                and user.has_department(obj.department)
+                and has_department_unit_action_scope(
+                    db, user, obj.department,
+                    obj.qa_request.department_unit_id if obj.qa_request else None,
+                ))
     return False
 
 
 @router.get("/{req_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_functional_documents(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    _require_visible(_get_or_404(db, req_id), current_user)
+    _require_visible(db, _get_or_404(db, req_id), current_user)
     return doc_store.list_documents(db, "FUNCTIONAL", req_id)
 
 
 @router.post("/{req_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def upload_functional_documents(req_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                                  current_user: models.User = Depends(get_current_user)):
-    obj = _get_or_404(db, req_id)
-    if not _can_upload_documents(obj, current_user):
+    obj = _get_or_404(db, req_id, lock=True)
+    if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the requester, central QA team, assigned tester, or the SM/Department Head currently reviewing the request can upload documents")
     return doc_store.save_documents(db, "FUNCTIONAL", req_id, obj.request_id, files, current_user.id,
                                     log_entity_type="FUNCTIONAL_REQUEST", log_entity_id=obj.id, log_actor=current_user)
@@ -1197,7 +1256,7 @@ def upload_functional_documents(req_id: int, files: List[UploadFile] = File(...)
 @router.get("/{req_id}/documents/{doc_id}/download")
 def download_functional_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
-    _require_visible(_get_or_404(db, req_id), current_user)
+    _require_visible(db, _get_or_404(db, req_id), current_user)
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL", req_id, doc_id)
     full_path = doc_store.full_path(doc)
     if not os.path.exists(full_path):
@@ -1208,9 +1267,9 @@ def download_functional_document(req_id: int, doc_id: int, db: Session = Depends
 @router.delete("/{req_id}/documents/{doc_id}")
 def delete_functional_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
                                 current_user: models.User = Depends(get_current_user)):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL", req_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(db, obj, current_user)):
         raise HTTPException(403, "Only whoever uploaded this document, or an admin, can delete it -- and only while it's still your stage")
     doc_store.delete_document(db, doc, log_entity_type="FUNCTIONAL_REQUEST", log_entity_id=req_id, log_actor=current_user)
     return {"ok": True}
@@ -1232,7 +1291,7 @@ def list_functional_checklist_documents_batch(req_id: int, db: Session = Depends
                                                current_user: models.User = Depends(get_current_user)):
     """Batched counterpart to list_functional_checklist_documents below --
     see ChecklistItemDocumentOut for why this exists."""
-    _require_visible(_get_or_404(db, req_id), current_user)
+    _require_visible(db, _get_or_404(db, req_id), current_user)
     item_ids = [row.id for row in db.query(models.ReadinessChecklistItem.id)
                 .filter_by(functional_request_id=req_id).all()]
     docs = doc_store.list_documents_for_items(db, "FUNCTIONAL_ITEM", item_ids)
@@ -1245,7 +1304,7 @@ def list_functional_checklist_documents_batch(req_id: int, db: Session = Depends
 @router.get("/{req_id}/checklist/{item_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def list_functional_checklist_documents(req_id: int, item_id: int, db: Session = Depends(get_db),
                                          current_user: models.User = Depends(get_current_user)):
-    _require_visible(_get_or_404(db, req_id), current_user)
+    _require_visible(db, _get_or_404(db, req_id), current_user)
     _functional_checklist_item_or_404(db, req_id, item_id)
     return doc_store.list_documents(db, "FUNCTIONAL_ITEM", item_id)
 
@@ -1254,11 +1313,11 @@ def list_functional_checklist_documents(req_id: int, item_id: int, db: Session =
 def upload_functional_checklist_documents(req_id: int, item_id: int, files: List[UploadFile] = File(...),
                                            db: Session = Depends(get_db),
                                            current_user: models.User = Depends(get_current_user)):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     item = _functional_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
-    if not _can_upload_documents(obj, current_user):
+    if not _can_upload_documents(db, obj, current_user):
         raise HTTPException(403, "Only the requester or this request's current stage owner can attach checklist evidence")
     return doc_store.save_documents(db, "FUNCTIONAL_ITEM", item_id,
                                     f"{obj.request_id}/checklist-{item_id}", files, current_user.id,
@@ -1270,7 +1329,7 @@ def upload_functional_checklist_documents(req_id: int, item_id: int, files: List
 def download_functional_checklist_document(req_id: int, item_id: int, doc_id: int,
                                             db: Session = Depends(get_db),
                                             current_user: models.User = Depends(get_current_user)):
-    _require_visible(_get_or_404(db, req_id), current_user)
+    _require_visible(db, _get_or_404(db, req_id), current_user)
     _functional_checklist_item_or_404(db, req_id, item_id)
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL_ITEM", item_id, doc_id)
     full_path = doc_store.full_path(doc)
@@ -1284,12 +1343,12 @@ def download_functional_checklist_document(req_id: int, item_id: int, doc_id: in
 def delete_functional_checklist_document(req_id: int, item_id: int, doc_id: int,
                                           db: Session = Depends(get_db),
                                           current_user: models.User = Depends(get_current_user)):
-    obj = _get_or_404(db, req_id)
+    obj = _get_or_404(db, req_id, lock=True)
     item = _functional_checklist_item_or_404(db, req_id, item_id)
     if not is_readiness_evidence_editable(obj.status):
         raise HTTPException(400, "Checklist evidence is locked after Department Head approval unless the request is returned for correction")
     doc = doc_store.get_document_or_404(db, "FUNCTIONAL_ITEM", item_id, doc_id)
-    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(obj, current_user)):
+    if not doc_store.can_delete_document(doc, current_user, _can_upload_documents(db, obj, current_user)):
         raise HTTPException(403, "Only whoever uploaded this evidence, or an admin, can delete it -- and only while it's still your stage")
     doc_store.delete_document(db, doc, log_entity_type="FUNCTIONAL_REQUEST", log_entity_id=obj.id,
                               log_actor=current_user, log_label=f"checklist item '{item.item}'")

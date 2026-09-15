@@ -1,7 +1,7 @@
 import datetime
 import re
 from typing import Optional, List, Dict, Literal
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator, model_validator
+from pydantic import Field, BaseModel, ConfigDict, EmailStr, field_validator, model_validator
 
 RICH_TEXT_MAX_LENGTH = 10000
 
@@ -62,6 +62,34 @@ class Token(ORMModel):
     _normalize_full_name = field_validator("full_name", mode="before")(_plain_person_name)
 
 
+class QAWorkspaceAccessOut(ORMModel):
+    id: int
+    workspace_id: int
+    role: str
+    is_active: bool
+    workspace_name: Optional[str] = None
+    workspace_key: Optional[str] = None
+    parent_workspace_id: Optional[int] = None
+    parent_workspace_name: Optional[str] = None
+    parent_workspace_key: Optional[str] = None
+
+
+class DepartmentCoordinatorOut(ORMModel):
+    id: int
+    user_id: int
+    department_id: int
+    department_unit_id: Optional[int] = None
+    workspace_id: int
+    is_active: bool
+    created_by_id: Optional[int] = None
+    created_at: datetime.datetime
+    user_name: Optional[str] = None
+    department_name: Optional[str] = None
+    department_unit_name: Optional[str] = None
+    workspace_name: Optional[str] = None
+    workspace_key: Optional[str] = None
+
+
 class UserOut(ORMModel):
     id: int
     username: str
@@ -76,6 +104,7 @@ class UserOut(ORMModel):
     # new code should read that instead.
     department: Optional[str] = None
     departments: List[str] = []
+    department_unit_ids: List[int] = []
     roles: List[str]
     login_type: str
     is_active: bool
@@ -87,6 +116,13 @@ class UserOut(ORMModel):
     # this user is hidden from Department Admin / Executive  local-admin
     # rosters and only a System Admin can reassign their role(s) or status.
     admin_managed_only: bool = False
+    show_in_user_dropdowns: bool = True
+    preferred_qa_workspace_id: Optional[int] = None
+    qa_workspace_access: List[QAWorkspaceAccessOut] = []
+    preferred_workspace_id: Optional[int] = None
+    active_workspace_id: Optional[int] = None
+    workspace_access: List[QAWorkspaceAccessOut] = []
+    department_coordinator_access: List[DepartmentCoordinatorOut] = []
 
     _normalize_full_name = field_validator("full_name", mode="before")(_plain_person_name)
 
@@ -112,9 +148,11 @@ class UserCreate(BaseModel):
     # `departments` itself isn't provided. See routers/auth.py::create_user.
     department: Optional[str] = None
     departments: Optional[List[str]] = None
+    department_unit_ids: Optional[List[int]] = None
     roles: List[str]                    # a user must be assigned at least one role
     login_type: str = "STANDARD"       # STANDARD / LDAP
     password: Optional[str] = None      # required when login_type == STANDARD; ignored for LDAP
+    show_in_user_dropdowns: bool = True
 
     @field_validator("password")
     @classmethod
@@ -135,6 +173,7 @@ class UserUpdate(BaseModel):
     email: Optional[str] = None
     department: Optional[str] = None
     departments: Optional[List[str]] = None
+    department_unit_ids: Optional[List[int]] = None
     roles: Optional[List[str]] = None
     login_type: Optional[str] = None
     is_active: Optional[bool] = None
@@ -144,6 +183,9 @@ class UserUpdate(BaseModel):
     # LocalAdminUserUpdate below, so a Department Head/Executive  can
     # never set or clear this on anyone, including themselves.
     admin_managed_only: Optional[bool] = None
+    # Controls candidate-list visibility only; it never changes roles or the
+    # Administrator superuser bypass.
+    show_in_user_dropdowns: Optional[bool] = None
 
 
 class PasswordReset(BaseModel):
@@ -158,22 +200,52 @@ class PasswordReset(BaseModel):
 
 
 class LocalAdminUserUpdate(BaseModel):
-    """Body for PATCH /api/auth/local-admin/users/{id} -- a Department Head's
-    (or Executive 's, for the QA department) deliberately narrower
-    counterpart to the Admin-only UserUpdate above. Only `roles` (constrained
-    server-side to DEPARTMENT_ADMIN_ASSIGNABLE_ROLES or
-    QA_ADMIN_ASSIGNABLE_ROLES depending on which kind of local admin is
-    calling -- see routers/auth.py::_local_admin_assignable_roles),
-    `is_active`, and the notification email may be touched this way. A
-    coordinator still cannot change a person's department, login type,
-    name, or password. See routers/auth.py::update_local_admin_user."""
+    """Narrow update for an explicitly scoped Department Coordinator.
+
+    Working roles, account status, and notification email inside the
+    coordinator's assigned scope are permitted.
+    Department, login type, protected roles, name, and password remain under
+    System Administrator control.
+    """
+    model_config = ConfigDict(extra="forbid")
     email: Optional[str] = None
     roles: Optional[List[str]] = None
     is_active: Optional[bool] = None
+    # Required when approving a first-login role review. The server verifies
+    # that the coordinator manages the user's department in this workspace.
+    workspace_id: Optional[int] = None
+
+
+class LocalAdminWorkspaceCandidateOut(ORMModel):
+    """Minimal directory record for adding a department user to a workspace."""
+    id: int
+    username: str
+    full_name: str
+    email: Optional[str] = None
+    department: Optional[str] = None
+    departments: List[str] = []
+    roles: List[str] = []
+    needs_role_review: bool = False
+    show_in_user_dropdowns: bool = True
+
+
+class LocalAdminApprovalWorkspaceOut(BaseModel):
+    """Workspace available for a coordinator's first-login approval."""
+    id: int
+    workspace_key: str
+    name: str
+    parent_workspace_id: Optional[int] = None
+    coordinator_departments: List[str] = []
+
+
+class LocalAdminWorkspaceMemberCreate(BaseModel):
+    user_id: int
+    roles: List[str] = []
 
 
 class DepartmentSelection(BaseModel):
     """Exactly one primary department chosen during first-time LDAP onboarding."""
+    model_config = ConfigDict(extra="forbid")
     department: str
 
     @field_validator("department")
@@ -266,6 +338,8 @@ class LinkedRequestRef(ORMModel):
     priority: Optional[str] = None
     risk_rating: Optional[str] = None
     risk_category: Optional[str] = None
+    department_unit_id: Optional[int] = None
+    department_unit_name: Optional[str] = None
 
 
 class LinkedSuppressionRef(ORMModel):
@@ -410,6 +484,7 @@ class DASTTargetOut(ORMModel):
 
 class QARequestCreate(BaseModel):
     department: Optional[str] = None
+    department_unit_id: Optional[int] = None
     application_name: str
     application_owner: Optional[str] = None
     cr_number: Optional[str] = None
@@ -555,6 +630,8 @@ class QARequestOut(ORMModel):
     request_id: Optional[str] = None
     request_date: Optional[datetime.date] = None
     department: Optional[str] = None
+    department_unit_id: Optional[int] = None
+    department_unit_name: Optional[str] = None
     application_name: str
     application_owner: Optional[str] = None
     cr_number: Optional[str] = None
@@ -582,6 +659,9 @@ class QARequestOut(ORMModel):
     # the UI point an SM's Approve/Reject action at the right master row.
     application_master_id: Optional[int] = None
     application_master_status: Optional[str] = None
+    qa_workspace_id: Optional[int] = None
+    qa_workspace_name: Optional[str] = None
+    workspace_routing_status: str = "PENDING"
     active_delegation: Optional[QARequestDelegationOut] = None
     # Auto-linked child requests generated because this request's
     # request_types included the matching type (see _sync_linked_child_requests).
@@ -629,8 +709,13 @@ class QARequestListOut(ORMModel):
     request_id: Optional[str] = None
     request_date: Optional[datetime.date] = None
     department: Optional[str] = None
+    department_unit_id: Optional[int] = None
+    department_unit_name: Optional[str] = None
     application_name: str
     application_master_id: Optional[int] = None
+    qa_workspace_id: Optional[int] = None
+    qa_workspace_name: Optional[str] = None
+    workspace_routing_status: str = "PENDING"
     # Reported directly: "why CR number is blank, though input is provided."
     # This lightweight list schema only ever carried the legacy epic_number
     # column (kept for pre-consolidation historical rows) -- the live,
@@ -826,7 +911,7 @@ class WorkflowDecision(BaseModel):
 
 # ---- QA Request lifecycle-specific payloads ----
 class DepartmentHeadDecisionIn(BaseModel):
-    """Department Head reviews the request and assigns its COE - Quality Assurance QA Lead."""
+    """Department Head reviews the request and assigns its QA Lead from the active workspace."""
     decision: str                          # Approved / Returned / Rejected
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
@@ -863,7 +948,7 @@ class AssignSecurityAnalystIn(BaseModel):
 
 
 class SecurityDeptHeadDecisionIn(BaseModel):
-    """SAST/DAST Department Head decision with COE - Quality Assurance QA Lead assignment."""
+    """SAST/DAST Department Head decision with QA Lead from the active workspace assignment."""
     decision: str                          # Approved / Returned / Rejected
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
@@ -876,7 +961,7 @@ class SecurityDeptHeadDecisionIn(BaseModel):
 
 
 class PerformanceDeptHeadDecisionIn(BaseModel):
-    """Performance Department Head decision with COE - Quality Assurance QA Lead assignment."""
+    """Performance Department Head decision with QA Lead from the active workspace assignment."""
     decision: str                     # Approved / Returned / Rejected
     comments: Optional[str] = None
     qa_lead_id: Optional[int] = None
@@ -1468,6 +1553,7 @@ class SuppressionOut(ORMModel):
     application_name: str
     scan_type: str
     department: Optional[str] = None
+    qa_workspace_id: Optional[int] = None
     application_owner: Optional[str] = None
     sast_request_id: Optional[int] = None
     dast_request_id: Optional[int] = None
@@ -1541,9 +1627,11 @@ class CommentCreate(BaseModel):
 
 # ---------------- Defect Management ----------------
 class DefectCreate(BaseModel):
+    application_name: Optional[str] = Field(default=None, max_length=150)
+    department: Optional[str] = Field(default=None, max_length=150)
     title: str
     description: str
-    qa_request_id: int
+    qa_request_id: Optional[int] = None
     cycle_id: Optional[int] = None
     test_case_id: Optional[int] = None
     execution_id: Optional[int] = None
@@ -1656,12 +1744,19 @@ class DefectReassign(BaseModel):
 
 
 class DefectOut(ORMModel):
+    workflow: Optional[dict] = None
+    workflow_state: dict = {}
+    workflow_revision: int = 0
+    workflow_stages: List[str] = []
+    workflow_transitions: List[str] = []
+    qa_workspace_id: Optional[int] = None
+    department: Optional[str] = None
     id: int
     defect_key: str
     title: str
     description: str
     status: str
-    qa_request_id: int
+    qa_request_id: Optional[int] = None
     qa_request_key: Optional[str] = None
     cycle_id: Optional[int] = None
     cycle_key: Optional[str] = None
@@ -1739,6 +1834,9 @@ class DefectOut(ORMModel):
 
 
 class DefectListOut(ORMModel):
+    modern_workflow: bool = False
+    resolution_type: Optional[str] = None
+    verified_builds: List[dict] = []
     """PAG-005 lightweight list schema for `GET /api/defects` -- drops the
     long free-text fields (description, steps_to_reproduce, expected/actual
     result, log/request details, resolution/root-cause/fix writeups, etc.)
@@ -1747,11 +1845,13 @@ class DefectListOut(ORMModel):
     everything the register table, the queue tabs, and every other module's
     defect pickers (TestExecution.tsx's cycle-completion gate and
     "link existing defect" modal) actually read off a row."""
+    qa_workspace_id: Optional[int] = None
+    department: Optional[str] = None
     id: int
     defect_key: str
     title: str
     status: str
-    qa_request_id: int
+    qa_request_id: Optional[int] = None
     qa_request_key: Optional[str] = None
     cycle_id: Optional[int] = None
     cycle_key: Optional[str] = None
@@ -1806,6 +1906,12 @@ class DefectDashboardOut(BaseModel):
 
 # ---------------- Module 8: QA Clearance ----------------
 class SignOffCreate(BaseModel):
+    known_limitations: Optional[str] = None
+    business_acceptance_status: Optional[str] = None
+    security_testing_status: Optional[str] = None
+    deployment_recommendation: Optional[str] = None
+    conditional_observations: Optional[str] = None
+
     certificate_type: str
     testing_type: str
     testing_request_id: Optional[str] = None
@@ -1827,11 +1933,17 @@ class SignOffCreate(BaseModel):
     residual_risk_notes: Optional[str] = None
 
     _limit_rich_text = field_validator(
-        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes"
+        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "deployment_recommendation", "conditional_observations"
     )(_limited_rich_text)
 
 
 class SignOffUpdate(BaseModel):
+    known_limitations: Optional[str] = None
+    business_acceptance_status: Optional[str] = None
+    security_testing_status: Optional[str] = None
+    deployment_recommendation: Optional[str] = None
+    conditional_observations: Optional[str] = None
+
     """Edits a certificate's own descriptive fields -- available to the
     QA requester while it's DRAFT/RETURNED_BY_*, and to the QA Lead directly
     while it sits at QA Lead approval (legacy status code
@@ -1855,11 +1967,18 @@ class SignOffUpdate(BaseModel):
     residual_risk_notes: Optional[str] = None
 
     _limit_rich_text = field_validator(
-        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes"
+        "exit_criteria_notes", "open_defect_summary", "residual_risk_notes", "known_limitations", "business_acceptance_status", "security_testing_status", "deployment_recommendation", "conditional_observations"
     )(_limited_rich_text)
 
 
 class SignOffOut(ORMModel):
+    known_limitations: Optional[str] = None
+    business_acceptance_status: Optional[str] = None
+    security_testing_status: Optional[str] = None
+    deployment_recommendation: Optional[str] = None
+    conditional_observations: Optional[str] = None
+
+    certificate_summary: Optional[dict] = None
     id: int
     certificate_id: str
     certificate_date: Optional[datetime.date] = None
@@ -1870,6 +1989,7 @@ class SignOffOut(ORMModel):
     application_name: str
     application_owner: Optional[str] = None
     department: Optional[str] = None
+    qa_workspace_id: Optional[int] = None
     request_department: Optional[str] = None
     # Delegated from the QA Request via source_functional_request -- see
     # models.QASignOff.change_description.
@@ -1904,10 +2024,31 @@ class SignOffOut(ORMModel):
 
 
 # ---------------- Module 9: Departments (Admin) ----------------
+class DepartmentUnitOut(ORMModel):
+    id: int
+    department_id: int
+    department_name: Optional[str] = None
+    parent_unit_id: Optional[int] = None
+    name: str
+    is_active: bool
+
+
 class DepartmentOut(ORMModel):
     id: int
     name: str
     is_active: bool
+    units: List[DepartmentUnitOut] = []
+
+
+class DepartmentUnitCreate(BaseModel):
+    name: str
+    parent_unit_id: Optional[int] = None
+
+
+class DepartmentUnitUpdate(BaseModel):
+    name: Optional[str] = None
+    parent_unit_id: Optional[int] = None
+    is_active: Optional[bool] = None
 
 
 class DepartmentCreate(BaseModel):
@@ -1917,6 +2058,105 @@ class DepartmentCreate(BaseModel):
 class DepartmentUpdate(BaseModel):
     name: Optional[str] = None
     is_active: Optional[bool] = None
+
+
+# ---------------- Workspaces (legacy QA-prefixed persistence names) ----------------
+class QAWorkspaceMemberOut(ORMModel):
+    id: int
+    workspace_id: int
+    user_id: int
+    role: str
+    is_active: bool
+    user_name: Optional[str] = None
+    is_system_administrator: bool = False
+    parent_workspace_id: Optional[int] = None
+    parent_workspace_name: Optional[str] = None
+    parent_workspace_key: Optional[str] = None
+
+
+class QAWorkspaceCoverageOut(ORMModel):
+    id: int
+    workspace_id: int
+    department_id: Optional[int] = None
+    department_name: Optional[str] = None
+    department_unit_id: Optional[int] = None
+    department_unit_name: Optional[str] = None
+    application_master_id: Optional[int] = None
+    application_name: Optional[str] = None
+    request_type: Optional[str] = None
+    priority: int
+    is_active: bool
+
+
+class QAWorkspaceOut(ORMModel):
+    defect_workflow: dict = {}
+    id: int
+    workspace_key: str
+    name: str
+    description: Optional[str] = None
+    is_active: bool
+    is_default: bool
+    parent_workspace_id: Optional[int] = None
+    parent_workspace_name: Optional[str] = None
+    parent_workspace_key: Optional[str] = None
+    created_by_id: Optional[int] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    members: List[QAWorkspaceMemberOut] = []
+    coverage_rules: List[QAWorkspaceCoverageOut] = []
+    department_coordinators: List[DepartmentCoordinatorOut] = []
+
+
+class QAWorkspaceCreate(BaseModel):
+    workspace_key: str
+    name: str
+    description: Optional[str] = None
+    is_active: bool = True
+    is_default: bool = False
+    parent_workspace_id: Optional[int] = None
+
+
+class QAWorkspaceUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_default: Optional[bool] = None
+    parent_workspace_id: Optional[int] = None
+
+
+class QAWorkspaceMemberInput(BaseModel):
+    user_id: int
+    # Retained for older clients that submitted workspace-scoped QA roles.
+    # New clients send no role or WORKSPACE_MEMBER; capabilities are managed
+    # once through the user's Permission Profile.
+    roles: List[str] = []
+
+
+class QAWorkspaceMembersReplace(BaseModel):
+    members: List[QAWorkspaceMemberInput]
+
+
+class DepartmentCoordinatorCreate(BaseModel):
+    user_id: int
+    department_id: int
+    department_unit_id: Optional[int] = None
+
+
+class QAWorkspaceCoverageCreate(BaseModel):
+    department_id: Optional[int] = None
+    department_unit_id: Optional[int] = None
+    application_master_id: Optional[int] = None
+    request_type: Optional[str] = None
+    priority: int = 100
+    is_active: bool = True
+
+
+class QAWorkspacePreference(BaseModel):
+    workspace_id: int
+
+
+class QAWorkspaceRouteRequest(BaseModel):
+    workspace_id: int
 
 
 # ---------------- Request Type Configuration (Admin) ----------------
@@ -2023,6 +2263,11 @@ class ApplicationMasterRenameUpdate(BaseModel):
     name: str
 
 
+class ApplicationMasterAdminCreate(BaseModel):
+    name: str
+    department: str
+
+
 class ApplicationSeedResult(ORMModel):
     """Result of an Admin bulk-seeding an xlsx of known-good Application
     Names into ApplicationMaster (see routers/applications.py::
@@ -2046,11 +2291,11 @@ class TestProjectCreate(BaseModel):
     name: str
     application_master_id: int
     department: str
+    department_unit_id: Optional[int] = None
     description: Optional[str] = None
     owner_id: Optional[int] = None
-    # APR-001 -- project-level default Reviewer/QA Lead, copied onto each
-    # TestCaseVersion at submission time (see TestCaseVersion.
-    # assigned_reviewer_id/assigned_qa_lead_id).
+    # Legacy compatibility fields from the former individual-assignee flow.
+    # Current submissions route through workspace role groups.
     default_reviewer_id: Optional[int] = None
     default_qa_lead_id: Optional[int] = None
 
@@ -2059,6 +2304,7 @@ class TestProjectUpdate(BaseModel):
     name: Optional[str] = None
     application_master_id: Optional[int] = None
     department: Optional[str] = None
+    department_unit_id: Optional[int] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
     owner_id: Optional[int] = None
@@ -2067,11 +2313,16 @@ class TestProjectUpdate(BaseModel):
 
 
 class TestProjectOut(ORMModel):
+    application_name: Optional[str] = None
     id: int
     project_key: str
     name: str
     application_master_id: Optional[int] = None
+    qa_workspace_id: Optional[int] = None
+    qa_workspace_name: Optional[str] = None
     department: Optional[str] = None
+    department_unit_id: Optional[int] = None
+    department_unit_name: Optional[str] = None
     description: Optional[str] = None
     is_active: bool
     owner_id: Optional[int] = None
@@ -2123,18 +2374,27 @@ class TestProjectViewGrantOut(ORMModel):
     department: Optional[str] = None
     user_id: Optional[int] = None
     user_name: Optional[str] = None
+    workspace_id: Optional[int] = None
+    workspace_name: Optional[str] = None
     granted_by_id: Optional[int] = None
     granted_by_name: Optional[str] = None
     created_at: datetime.datetime
 
 
 class TestProjectViewGrantCreate(BaseModel):
-    """Exactly one of `department`/`user_id` must be set -- validated in
+    """Exactly one of `department`/`user_id`/`workspace_id` must be set -- validated in
     routers/test_projects.py::create_project_view_grant, not here (mirrors
     this app's other "exactly one of" payload rules, e.g.
     auth.py's department/departments resolution)."""
     department: Optional[str] = None
     user_id: Optional[int] = None
+    workspace_id: Optional[int] = None
+
+
+class TestProjectWorkspaceOptionOut(BaseModel):
+    id: int
+    workspace_key: str
+    name: str
 
 
 class TestProjectMyAccessOut(BaseModel):
@@ -2194,6 +2454,9 @@ class TestFolderCreate(BaseModel):
 
 
 class TestFolderOut(ORMModel):
+    origin_workspace_id: Optional[int] = None
+    origin_workspace_name: Optional[str] = None
+    workspace_writable: bool = False
     id: int
     project_id: int
     parent_id: Optional[int] = None
@@ -2475,14 +2738,11 @@ class TestCaseReview(BaseModel):
 
 
 class TestCaseReassignApprovers(BaseModel):
-    """APR-001 -- optional item-level reassignment of a test case's current
-    draft version away from its project-level default Reviewer/QA Lead.
-    Both optional/independent; only fields present in model_fields_set are
-    changed (so reassigning just the Reviewer doesn't disturb the QA Lead
-    assignment, and vice versa). Passing null explicitly clears that
-    assignment back to "unassigned" (still actionable by anyone holding the
-    right project role -- see TestCaseVersion.assigned_reviewer_id's own
-    docstring; this is a routing field, not an authorization gate)."""
+    """Optional item-level override of the current version's project defaults.
+
+    The endpoint requires both assignments to remain populated because these
+    IDs are also the authorization source for the two decision stages.
+    """
     assigned_reviewer_id: Optional[int] = None
     assigned_qa_lead_id: Optional[int] = None
 
@@ -2558,6 +2818,9 @@ class TestCaseBulkPurge(BaseModel):
 
 
 class TestCaseOut(ORMModel):
+    origin_workspace_id: Optional[int] = None
+    origin_workspace_name: Optional[str] = None
+    workspace_writable: bool = False
     id: int
     test_case_key: str
     project_id: int
@@ -2592,6 +2855,10 @@ class TestCaseOut(ORMModel):
     # "Add Recommended By once recommended" -- see models.TestCase.
     # current_draft_reviewed_by_name's own docstring.
     current_draft_reviewed_by_name: Optional[str] = None
+    assigned_reviewer_id: Optional[int] = None
+    assigned_reviewer_name: Optional[str] = None
+    assigned_qa_lead_id: Optional[int] = None
+    assigned_qa_lead_name: Optional[str] = None
     created_by_id: Optional[int] = None
     created_by_name: Optional[str] = None
     created_at: datetime.datetime
@@ -2620,6 +2887,9 @@ class TestCaseOut(ORMModel):
 
 
 class TestCaseListOut(ORMModel):
+    origin_workspace_id: Optional[int] = None
+    origin_workspace_name: Optional[str] = None
+    workspace_writable: bool = False
     """PAG-005 lightweight list schema -- mirrors
     modules/test-management/TestRepository.tsx's list table exactly.
     `steps_count` replaces the full `steps` array (see models.TestCase.
@@ -2655,6 +2925,10 @@ class TestCaseListOut(ORMModel):
     # "Add Recommended By once recommended" -- see models.TestCase.
     # current_draft_reviewed_by_name's own docstring.
     current_draft_reviewed_by_name: Optional[str] = None
+    assigned_reviewer_id: Optional[int] = None
+    assigned_reviewer_name: Optional[str] = None
+    assigned_qa_lead_id: Optional[int] = None
+    assigned_qa_lead_name: Optional[str] = None
     created_by_id: Optional[int] = None
     created_by_name: Optional[str] = None
     created_at: datetime.datetime
@@ -2751,6 +3025,9 @@ class TestCycleFolderAccessOut(ORMModel):
 
 
 class TestCycleFolderOut(ORMModel):
+    origin_workspace_id: Optional[int] = None
+    origin_workspace_name: Optional[str] = None
+    workspace_writable: bool = False
     id: int
     project_id: int
     name: str
@@ -2788,15 +3065,22 @@ class TestCycleCreate(BaseModel):
     # create test cycle." None means Unfiled, same convention as
     # TestCaseCreate/TestCaseModal's own folder_id.
     folder_id: Optional[int] = None
-    # Every execution cycle belongs to exactly one Functional QA Request.
-    # SAST, DAST, and Performance requests use their own execution workflows.
-    linked_request_type: Literal["Functional"]
-    linked_request_id: int
+    # Optional: cycles may be planned and executed independently, then linked
+    # to a Functional QA Request later. Functional completion enforces the
+    # relationship when execution evidence is actually required.
+    linked_request_type: Optional[Literal["Functional"]] = None
+    linked_request_id: Optional[int] = None
     # CYC-001 / LNK-003.
     cycle_type: Optional[str] = None
     environment: Optional[str] = None
     build: Optional[str] = None
     owner_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def validate_optional_request_link(self):
+        if (self.linked_request_type is None) != (self.linked_request_id is None):
+            raise ValueError("Provide both linked request type and request, or leave both blank")
+        return self
 
 
 class TestCycleUpdate(BaseModel):
@@ -2819,8 +3103,20 @@ class TestCycleUpdate(BaseModel):
     # TestCaseModal already give Test Repository folders.
     folder_id: Optional[int] = None
 
+    @model_validator(mode="after")
+    def validate_optional_request_link(self):
+        supplied = {"linked_request_type", "linked_request_id"} & self.model_fields_set
+        if supplied and supplied != {"linked_request_type", "linked_request_id"}:
+            raise ValueError("Update both linked request type and request together")
+        if supplied and ((self.linked_request_type is None) != (self.linked_request_id is None)):
+            raise ValueError("Provide both linked request type and request, or clear both")
+        return self
+
 
 class TestCycleOut(ORMModel):
+    origin_workspace_id: Optional[int] = None
+    origin_workspace_name: Optional[str] = None
+    workspace_writable: bool = False
     id: int
     cycle_key: str
     project_id: int
@@ -2991,6 +3287,8 @@ class TestRunDefectOut(ORMModel):
 
 
 class LinkedGovernedDefectRef(ORMModel):
+    modern_workflow: bool = False
+    verified_execution_ids: List[int] = []
     """A governed Defect (defects.py, not the free-text TestRunDefect above)
     linked to a specific execution slot through its primary execution FK or
     an additional DefectExecutionLink. Reported
@@ -3351,3 +3649,33 @@ class PendingApprovalPage(BaseModel):
     has_next: bool
     has_previous: bool
     category_counts: Dict[str, int]
+
+
+class DefectWorkflowAction(BaseModel):
+    revision: int
+    status: Optional[str] = None
+    action: str = "transition"
+    production_impact: Optional[str] = None
+    assignee_id: Optional[int] = None
+    assigned_team: Optional[str] = Field(default=None, max_length=150)
+    retest_tester_id: Optional[int] = None
+    business_owner_id: Optional[int] = None
+    release_owner_id: Optional[int] = None
+    environment: Optional[str] = None
+    build: Optional[str] = Field(default=None, max_length=100)
+    remarks: Optional[str] = None
+    root_cause: Optional[str] = None
+    fix_details: Optional[str] = None
+    reference: Optional[str] = None
+    target_release: Optional[str] = Field(default=None, max_length=100)
+    review_date: Optional[datetime.date] = None
+    duplicate_defect_id: Optional[int] = None
+    regression_confirmed: bool = False
+    evidence_document_ids: List[int] = Field(default_factory=list, max_length=50)
+
+    _limit_rich_text = field_validator("remarks", "root_cause", "fix_details", "reference")(_limited_rich_text)
+
+
+class DefectLinkRequest(BaseModel):
+    qa_request_id: int
+    revision: int

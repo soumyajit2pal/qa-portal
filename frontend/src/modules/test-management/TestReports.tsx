@@ -7,16 +7,17 @@ import SearchableSelect from '../../components/SearchableSelect'
 import {
   TestProjectOut, TestCycleOut, ReportCountRow, ReportStatusCountRow,
   RepositoryHealthOut, CycleProgressOut, DefectQualityOut,
-  VersionImpactOut, ProjectPortfolioOut, RequirementTraceabilityOut, PageOut,
+  VersionImpactOut, ProjectPortfolioOut, RequirementTraceabilityOut, PageOut, DefectListOut,
 } from '../../types'
 
-type ReportTab = 'traceability' | 'health' | 'cycle-progress' | 'defects' | 'version-impact' | 'portfolio'
+type ReportTab = 'traceability' | 'health' | 'cycle-progress' | 'defects' | 'version-impact' | 'portfolio' | 'incomplete-defects'
 
 const TABS: { id: ReportTab; label: string; scope: 'project' | 'cycle' | 'none' }[] = [
   { id: 'traceability', label: 'Requirements Traceability', scope: 'project' },
   { id: 'health', label: 'Repository Health', scope: 'project' },
   { id: 'cycle-progress', label: 'Cycle Progress', scope: 'cycle' },
   { id: 'defects', label: 'Defect Quality', scope: 'project' },
+  { id: 'incomplete-defects', label: 'Incomplete Defect Traceability', scope: 'none' },
   { id: 'version-impact', label: 'Version Impact', scope: 'project' },
   { id: 'portfolio', label: 'Project Portfolio', scope: 'none' },
 ]
@@ -26,6 +27,7 @@ const TAB_DESCRIPTIONS: Record<ReportTab, string> = {
   health: 'Coverage, ownership, age and execution readiness',
   'cycle-progress': 'Execution completion and assignment health',
   defects: 'Governed defect outcomes, resolvers, reopen trends and execution traceability',
+  'incomplete-defects': 'Unlinked and partially linked defects missing an execution trail',
   'version-impact': 'Stale test-case versions requiring action',
   portfolio: 'Cross-project delivery and ownership trends',
 }
@@ -423,6 +425,46 @@ function ProjectPortfolioPanel() {
   )
 }
 
+function IncompleteDefectTraceabilityPanel() {
+  const navigate = useNavigate()
+  const [data, setData] = useState<PageOut<DefectListOut> | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  const [page, setPage] = useState(1)
+  const [search, setSearch] = useState('')
+  useEffect(() => {
+    let active = true
+    setData(null); setError(null)
+    const params = new URLSearchParams({ queue: 'incomplete-traceability', page: String(page), page_size: '25', search })
+    api.get<PageOut<DefectListOut>>(`/api/defects?${params}`)
+      .then(result => { if (active) setData(result) })
+      .catch(err => { if (active) setError(err) })
+    return () => { active = false }
+  }, [page, search])
+  return <div className="tm-report-panel">
+    <PopulationNote text="Defects within your access scope without a primary or additional execution link, including defects with no links at all. Request, cycle or testcase links alone leave execution traceability incomplete. All statuses are included; no project selection is required." />
+    <input aria-label="Search incomplete defect traceability" placeholder="Search defect, title, application or module…" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} />
+    <ErrorText error={error} />
+    {!data && !error && <p className="muted">Loading…</p>}
+    {data && <>
+      <StatCard label="Incomplete traceability" value={data.total} />
+      <Table<DefectListOut> tableId="incomplete-defect-traceability" rowKey="id" rows={data.items}
+        server={{ page: data.page, pageSize: data.page_size, total: data.total, totalPages: data.total_pages, hasNext: data.has_next, hasPrevious: data.has_previous, onPageChange: setPage }}
+        onRowClick={item => navigate(`/defects?open=${encodeURIComponent(item.defect_key)}`)}
+        columns={[
+          { key: 'defect_key', header: 'Defect', render: item => <><button className="link-btn" onClick={event => { event.stopPropagation(); navigate(`/defects?open=${encodeURIComponent(item.defect_key)}`) }}>{item.defect_key}</button><div>{item.title}</div></> },
+          { key: 'application_name', header: 'Application / Module', render: item => <>{item.application_name}<div className="muted">{item.module_feature}</div></> },
+          { key: 'status', header: 'Status', render: item => <Badge status={item.status} /> },
+          { key: 'severity', header: 'Severity' },
+          { key: 'qa_request_key', header: 'QA Request', render: item => item.qa_request_key || (item.qa_request_id ? 'Request not numbered' : 'Not linked') },
+          { key: 'cycle_key', header: 'Cycle', render: item => item.cycle_key || 'Not linked' },
+          { key: 'test_case_key', header: 'Primary testcase', render: item => item.test_case_key || 'Not linked' },
+          { key: 'execution_id', header: 'Traceability gap', render: () => <span className="badge badge-yellow">Missing execution link</span> },
+        ]} />
+      {!data.items.length && <EmptyState compact title="No matching defects with incomplete traceability" description="Defects without execution links will appear here within your access scope." />}
+    </>}
+  </div>
+}
+
 export default function TestReports() {
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [projectId, setProjectId] = useState<number | ''>('')
@@ -484,7 +526,8 @@ export default function TestReports() {
           </header>
           <div className="tm-report-content-body">
             {activeTab.scope !== 'none' && !projectId && <div className="tm-report-empty"><strong>Select a project</strong><span>Choose a project scope to generate this report.</span></div>}
-            {activeTab.scope === 'none' && <ProjectPortfolioPanel />}
+            {tab === 'portfolio' && <ProjectPortfolioPanel />}
+            {tab === 'incomplete-defects' && <IncompleteDefectTraceabilityPanel />}
             {projectId && tab === 'traceability' && <RequirementsTraceabilityPanel key={projectId} projectId={projectId} />}
             {projectId && tab === 'health' && <RepositoryHealthPanel projectId={projectId} />}
             {projectId && tab === 'cycle-progress' && <CycleProgressPanel projectId={projectId} />}

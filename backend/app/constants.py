@@ -5,7 +5,8 @@ from zoneinfo import ZoneInfo
 
 # ---- Roles (Section: User Roles table in the CR document) ----
 class Role:
-    REQUESTER = "REQUESTER"                    # Requester (Developer) - Raise Requests
+    REQUESTER = "REQUESTER"                    # Raise and own QA requests
+    DEVELOPER = "DEVELOPER"                    # Same workflow authority as Requester
     BUSINESS_ANALYST = "BUSINESS_ANALYST"       # Upload Finalised CR / User Stories
     QA_ENGINEER = "QA_ENGINEER"                 # Execute Testing
     QA_LEAD = "QA_LEAD"                         # Review & approve
@@ -32,12 +33,18 @@ class Role:
     DOCUMENT_PORTAL_MANAGER = "DOCUMENT_PORTAL_MANAGER"
 
 ALL_ROLES = [
-    Role.REQUESTER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD,
+    Role.REQUESTER, Role.DEVELOPER, Role.BUSINESS_ANALYST, Role.QA_ENGINEER, Role.QA_LEAD,
     Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.SECURITY_ANALYST,
     Role.APPLICATION_OWNER, Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM, Role.SM, Role.ADMIN,
     Role.SCALE_6_PLUS, Role.VIEW_ONLY,
     Role.DOCUMENT_PORTAL_VIEWER, Role.DOCUMENT_PORTAL_CONTRIBUTOR, Role.DOCUMENT_PORTAL_MANAGER,
 ]
+
+# Requester and Developer are deliberately identical permission profiles.
+# Business Analyst shares request intake, but remains a distinct profile so
+# reports and audit records retain the user's actual operating function.
+REQUESTER_EQUIVALENT_ROLES = (Role.REQUESTER, Role.DEVELOPER)
+QA_REQUEST_CREATOR_ROLES = (*REQUESTER_EQUIVALENT_ROLES, Role.BUSINESS_ANALYST)
 
 # Both roles grant organisation-wide visibility and may only be assigned or
 # managed by a System Administrator. Department Coordinators must not see or
@@ -56,7 +63,7 @@ def is_document_portal_only(roles) -> bool:
 
 
 DEPARTMENT_ADMIN_ASSIGNABLE_ROLES = [
-    Role.REQUESTER, Role.BUSINESS_ANALYST, Role.APPLICATION_OWNER, Role.SM,
+    Role.REQUESTER, Role.DEVELOPER, Role.BUSINESS_ANALYST, Role.APPLICATION_OWNER, Role.SM,
 ]
 QA_ADMIN_ASSIGNABLE_ROLES = [
     Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST,
@@ -89,7 +96,7 @@ QA_ADMIN_ASSIGNABLE_ROLES = [
 # of this and still enforced separately.
 DEFECT_MANAGEMENT_ROLES = [
     Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
-    Role.SECURITY_ANALYST, Role.REQUESTER, Role.BUSINESS_ANALYST,
+    Role.SECURITY_ANALYST, Role.REQUESTER, Role.DEVELOPER, Role.BUSINESS_ANALYST,
     Role.APPLICATION_OWNER,
 ]
 
@@ -106,7 +113,8 @@ LOGIN_TYPE_LABELS = {
 }
 
 ROLE_LABELS = {
-    Role.REQUESTER: "Requester (Developer) / Others",
+    Role.REQUESTER: "Requester",
+    Role.DEVELOPER: "Developer",
     Role.BUSINESS_ANALYST: "Business Analyst",
     Role.QA_ENGINEER: "QA Engineer (QA)",
     Role.QA_LEAD: "QA Lead",
@@ -132,7 +140,6 @@ ROLE_LABELS = {
 # list consumed by seed.py on first run -- nothing else should import it.
 SEED_DEPARTMENTS = [
 "IT - Software",
-"COE - Quality Assurance",
 "CBS PMO - Core Banking",
 "CBS PMO - Deposit",
 "CBS PMO - Loan",
@@ -140,6 +147,7 @@ SEED_DEPARTMENTS = [
 "CBS PMO - Remittance",
 "CBS PMO - API Interface",
 "CBS PMO - IBU (International Banking Unit)",
+"COE - Quality Assurance",
 "Other",
 ]
 
@@ -147,18 +155,6 @@ SEED_DEPARTMENTS = [
 # intentionally separate from the QA and business departments; module access
 # is still determined entirely by the assigned Document Portal role(s).
 OTHER_DEPARTMENT = "Other"
-
-# Central department that owns the QA Clearance Certificate workflow. Its
-# linked testing request may belong to any business department, but the
-# certificate itself is raised and approved entirely inside COE - Quality Assurance.
-QA_DEPARTMENT = "COE - Quality Assurance"
-
-# Single source of truth for departments eligible to appear in Test
-# Management user pickers (project owner/members, reviewer/QA Lead, cycle
-# owner) and pass runner/assignment-manager department checks. The current
-# policy is intentionally COE-only; any future expansion must be an explicit
-# governance decision rather than an implicit provider-routing feature.
-TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS = [QA_DEPARTMENT]
 
 # ---- Module 1: QA Request (gateway) / Functional Testing Request ----
 REQUEST_TYPES = [
@@ -518,7 +514,7 @@ SAST_DAST_ANALYST_REASSIGNABLE_STATUSES = [
 # assignee). Every status where obj.assignee_id is actually populated and
 # the defect is still active -- excludes New (nothing to reassign yet) and
 # the terminal Rejected/Duplicate/Closed states.
-DEFECT_REASSIGNABLE_STATUSES = ["Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred"]
+DEFECT_REASSIGNABLE_STATUSES = ["Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred", "Ready for QA", "QA Testing", "Business Acceptance", "Ready for Release", "Production Verification"]
 # Terminal states -- used to decide whether a SAST/DAST request still counts
 # as "outstanding" for dashboard/ageing purposes (see routers/dashboard.py's
 # 3W view). SM_REJECTED is deliberately NOT here -- reported directly, it's
@@ -609,8 +605,8 @@ DEFAULT_DAST_CHECKLIST_ITEMS = [
 # Auto-created from a QA Request when "Performance Testing" is one of its
 # request types, same pattern as SAST/DAST. Independent lifecycle
 # after the common Draft/SM/Department Head prefix: readiness pending (the
-# Department Head assigns a COE - Quality Assurance QA Lead) -> Readiness -> Feasibility ->
-# Planning (the QA Lead assigns COE - Quality Assurance QA Testers) -> Environment Setup -> Script
+# Department Head assigns a QA Lead from the assigned workspace) -> Readiness -> Feasibility ->
+# Planning (the QA Lead assigns QA Testers from the assigned workspace) -> Environment Setup -> Script
 # Development -> Baseline -> Load Test Execution -> Result Analysis ->
 # Defect/Fix/Retest -> Report -> Sign-off -> Requester Verification -> Closed.
 PERFORMANCE_STATUSES = [

@@ -1,5 +1,10 @@
 export const ROLE_LABELS: Record<string, string> = {
+  WORKSPACE_MEMBER: 'Member',
+  WORKSPACE_VIEWER: 'Member (legacy)',
+  PARENT_WORKSPACE_VIEWER: 'Parent Workspace Viewer',
+  PARENT_WORKSPACE_ADMIN: 'Parent Workspace Admin',
   REQUESTER: 'Requester',
+  DEVELOPER: 'Developer',
   BUSINESS_ANALYST: 'Business Analyst',
   QA_ENGINEER: 'QA Engineer (QA)',
   QA_LEAD: 'QA Lead',
@@ -46,7 +51,15 @@ export const ROLE_LABELS: Record<string, string> = {
   DOCUMENT_PORTAL_MANAGER: 'Document Portal Manager',
 }
 
-export const ALL_ROLES = Object.keys(ROLE_LABELS)
+export const ALL_ROLES = Object.keys(ROLE_LABELS).filter((role) => ![
+  'WORKSPACE_MEMBER', 'WORKSPACE_VIEWER', 'PARENT_WORKSPACE_VIEWER', 'PARENT_WORKSPACE_ADMIN',
+].includes(role))
+
+// Requester and Developer intentionally carry identical workflow authority.
+// Business Analyst shares request initiation while remaining separately
+// identifiable in user profiles, reports, and audit records.
+export const REQUESTER_EQUIVALENT_ROLES = ['REQUESTER', 'DEVELOPER'] as const
+export const QA_REQUEST_CREATOR_ROLES = [...REQUESTER_EQUIVALENT_ROLES, 'BUSINESS_ANALYST'] as const
 
 // Selection-aware wording for actions that share the same backend endpoint
 // for one or many records. The UI should call an operation "Bulk" only when
@@ -60,27 +73,16 @@ export function selectionActionPhrase(count: number, action: string): string {
   return count > 1 ? `bulk ${action}` : action
 }
 
-// Mirror backend/app/constants.py's DEPARTMENT_ADMIN_ASSIGNABLE_ROLES /
-// QA_ADMIN_ASSIGNABLE_ROLES exactly -- the working-level roles a local admin
-// may assign to users in their own department via DepartmentAdmin.tsx,
-// without needing a System Admin. Split in two (2026-08, per request) since
-// a business Department Head and the QA department's own QA Executive
-// oversee different teams: DEPARTMENT_ADMIN_ASSIGNABLE_ROLES for the former,
-// QA_ADMIN_ASSIGNABLE_ROLES for the latter (which DepartmentAdmin.tsx picks
-// between based on which kind of local admin is logged in). Both exclude
-// ADMIN and DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHIEF_MANAGER_QA/AGM_QA --
-// neither kind of local admin may mint peer department heads, QA Executive
-// approvers, or other System Admins themselves.
+// Working-level role groups available to an explicitly scoped Department
+// Coordinator. DepartmentAdmin combines both groups because QA departments
+// are configurable and must not depend on one hard-coded department name.
+// Privileged Administrator and approval-authority roles remain excluded.
 export const DEPARTMENT_ADMIN_ASSIGNABLE_ROLES: string[] = [
-  'REQUESTER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER', 'SM',
+  'REQUESTER', 'DEVELOPER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER', 'SM',
 ]
 export const QA_ADMIN_ASSIGNABLE_ROLES: string[] = [
   'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST',
 ]
-
-// QA Clearance is a COE - Quality Assurance-owned workflow even when its linked testing
-// request came from another business department.
-export const QA_DEPARTMENT = 'COE - Quality Assurance'
 
 // Mirrors backend/app/deps.py's DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES
 // exactly -- roles whose own department mapping is ignored for department-
@@ -101,8 +103,13 @@ export const DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES: string[] = [
   'VIEW_ONLY',
 ]
 
-export function isViewOnly(user?: { roles?: string[] | null } | null): boolean {
-  return !!user?.roles?.includes('VIEW_ONLY')
+export function isViewOnly(user?: RoleBearer | null): boolean {
+  if (!user) return false
+  if (user.roles?.includes('VIEW_ONLY')) return true
+  const selected = activeWorkspaceId(user)
+  return uniqueWorkspaceAccess(user).some((access) => (
+    access.workspace_id === selected && access.role === 'PARENT_WORKSPACE_VIEWER'
+  ))
 }
 
 // 2026-08 "one user can be on multiple departments" CR -- mirrors backend
@@ -116,36 +123,98 @@ export function userDepartments(user?: { departments?: string[] | null; departme
   return user.department ? [user.department] : []
 }
 
-export function hasDepartment(user: { departments?: string[] | null; department?: string | null } | null | undefined,
+/**
+ * Candidate visibility is an explicit Administrator-managed user setting.
+ * It is independent of role so Administrator accounts retain their normal
+ * superuser behaviour and may be included whenever the setting is enabled.
+ */
+export function isSelectableUser(user?: { is_active?: boolean; show_in_user_dropdowns?: boolean } | null): boolean {
+  return !!user?.is_active && user.show_in_user_dropdowns !== false
+}
+
+export interface WorkspaceAccessEntry {
+  workspace_id: number
+  is_active: boolean
+  role?: string
+  workspace_name?: string | null
+  workspace_key?: string | null
+  parent_workspace_id?: number | null
+  parent_workspace_name?: string | null
+  parent_workspace_key?: string | null
+}
+
+// Legacy workspace data can contain one row per old workspace role.  Every
+// consumer should treat those rows as one membership so switchers, badges,
+// and counts never repeat the same workspace during migration rollout.
+export function uniqueWorkspaceAccess(user?: {
+  workspace_access?: WorkspaceAccessEntry[] | null
+  qa_workspace_access?: WorkspaceAccessEntry[] | null
+} | null): WorkspaceAccessEntry[] {
+  const unique = new Map<number, WorkspaceAccessEntry>()
+  const priority: Record<string, number> = {
+    WORKSPACE_MEMBER: 0, WORKSPACE_VIEWER: 0,
+    PARENT_WORKSPACE_VIEWER: 1, PARENT_WORKSPACE_ADMIN: 2,
+  }
+  for (const access of [...(user?.workspace_access || []), ...(user?.qa_workspace_access || [])]) {
+    if (!access.is_active) continue
+    const current = unique.get(access.workspace_id)
+    if (!current || (priority[access.role || ''] || 0) > (priority[current.role || ''] || 0)) unique.set(access.workspace_id, access)
+  }
+  return [...unique.values()].sort((left, right) => {
+    const leftGroup = left.parent_workspace_name || left.workspace_name || left.workspace_key || ''
+    const rightGroup = right.parent_workspace_name || right.workspace_name || right.workspace_key || ''
+    return leftGroup.localeCompare(rightGroup)
+      || Number(!!left.parent_workspace_id) - Number(!!right.parent_workspace_id)
+      || (left.workspace_name || left.workspace_key || '').localeCompare(right.workspace_name || right.workspace_key || '')
+  })
+}
+
+export function activeWorkspaceId(user?: {
+  preferred_workspace_id?: number | null
+  preferred_qa_workspace_id?: number | null
+  workspace_access?: WorkspaceAccessEntry[] | null
+  qa_workspace_access?: WorkspaceAccessEntry[] | null
+} | null): number | null {
+  const stored = typeof window !== 'undefined' ? Number(window.localStorage.getItem('active_workspace_id')) : 0
+  const memberships = uniqueWorkspaceAccess(user)
+  if (stored && memberships.some((row) => row.workspace_id === stored)) return stored
+  const preferred = user?.preferred_workspace_id || user?.preferred_qa_workspace_id
+  if (preferred && memberships.some((row) => row.workspace_id === preferred)) return preferred
+  return memberships[0]?.workspace_id || null
+}
+
+export function hasWorkspaceMembership(user?: RoleBearer | null, workspaceId?: number | null): boolean {
+  if (!user) return false
+  const selected = workspaceId ?? activeWorkspaceId(user)
+  return selected != null && uniqueWorkspaceAccess(user).some((row) => row.workspace_id === selected)
+}
+
+/** Permission profile answers what a user can do; workspace membership answers where. */
+export function hasWorkspaceRole(user: RoleBearer | null | undefined, ...roles: string[]): boolean {
+  if (!user || !hasWorkspaceMembership(user)) return false
+  return hasWorkflowRole(user, ...roles)
+}
+
+export function hasDepartment(user: { roles?: string[] | null; departments?: string[] | null; department?: string | null; workspace_access?: WorkspaceAccessEntry[] | null; qa_workspace_access?: WorkspaceAccessEntry[] | null } | null | undefined,
   ...departments: (string | null | undefined)[]): boolean {
   const mine = new Set(userDepartments(user))
-  return departments.some((d) => d && mine.has(d))
+  return departments.some((department) => !!department && mine.has(department))
 }
 
 // Whether `user` would see any data on a page scoped the same way as QA
 // Sign-off (see dashboard_department_scope in deps.py): unrestricted by
 // role, has no department at all (nothing meaningful to scope by, same
-// fallback the backend uses), or holds QA_DEPARTMENT among their (possibly
-// several) departments.
-export function canSeeQaDepartmentOnlyData(user?: { roles?: string[]; departments?: string[] | null; department?: string | null } | null): boolean {
+// fallback the backend uses), or belongs to the active workspace.
+export function canSeeQaDepartmentOnlyData(user?: RoleBearer | null): boolean {
   if (!user) return false
   if ((user.roles || []).some((r) => DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES.includes(r))) return true
-  const departments = userDepartments(user)
-  if (!departments.length) return true
-  return hasDepartment(user, QA_DEPARTMENT)
+  return hasWorkspaceMembership(user)
 }
 
-// 2026-08 Reassignment Requirement -- mirrors backend/app/reassignment.py's
-// department_head_roles exactly: COE - Quality Assurance's own "Department
-// Head" checkpoint is CHIEF_MANAGER_QA/AGM_QA; every other department uses
-// the generic DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM pair. Needed wherever a
-// Reassign action's eligibility depends on the CURRENT ASSIGNEE's own
-// department rather than always being QA (e.g. defects, which can be routed
-// to any active department -- unlike tester/analyst/runner reassignment,
-// which are always within COE - Quality Assurance and so hardcode
-// CHIEF_MANAGER_QA/AGM_QA directly).
+// Organisational Department Heads govern business assignees. QA assignees
+// are governed separately by workspace-scoped QA Executive roles.
 export function departmentHeadRoles(department?: string | null): string[] {
-  return department === QA_DEPARTMENT ? ['CHIEF_MANAGER_QA', 'AGM_QA'] : ['DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM']
+  return ['DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM']
 }
 
 // Mirrors backend/app/reassignment.py's require_can_reassign exactly: the
@@ -192,6 +261,10 @@ export interface RoleBearer {
   // `department` (singular) is kept for compat and mirrors the backend's
   // synced-but-not-source-of-truth legacy column (primary/first-assigned).
   departments?: string[] | null
+  preferred_workspace_id?: number | null
+  preferred_qa_workspace_id?: number | null
+  workspace_access?: WorkspaceAccessEntry[] | null
+  qa_workspace_access?: WorkspaceAccessEntry[] | null
 }
 
 // A user may hold several roles at once (all active simultaneously) -- this
@@ -200,6 +273,11 @@ export function hasRole(user: RoleBearer | null | undefined, ...roles: string[])
   const userRoles = user?.roles || []
   if (userRoles.includes('ADMIN')) return true
   return roles.some((r) => userRoles.includes(r))
+}
+
+/** Workflow authority requires an explicit operational role; ADMIN grants none. */
+export function hasWorkflowRole(user: RoleBearer | null | undefined, ...roles: string[]): boolean {
+  return roles.some(role => role !== 'ADMIN' && (user?.roles || []).includes(role))
 }
 
 // Departments are now DB-backed (see backend app/models.py Department,
@@ -365,7 +443,7 @@ export const QA_EXECUTION_GROUP_ROLE = 'QA_ENGINEER'
 // role set that combination briefly meant, not for any active check.
 export const DEFECT_MANAGEMENT_ROLES: string[] = [
   'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA', 'SECURITY_ANALYST',
-  'REQUESTER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER',
+  'REQUESTER', 'DEVELOPER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER',
 ]
 
 // Statuses from which the Functional Testing Request's own descriptive
@@ -545,7 +623,7 @@ export const SAST_DAST_ANALYST_REASSIGNABLE_STATUSES: string[] = [
 // Mirrors backend/app/constants.py's DEFECT_REASSIGNABLE_STATUSES exactly --
 // every status where a defect actually has an assignee and is still active.
 // See Defects.tsx's DefectDetail (Reassign action) and ReassignDefectModal.
-export const DEFECT_REASSIGNABLE_STATUSES: string[] = ['Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+export const DEFECT_REASSIGNABLE_STATUSES: string[] = ['Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification']
 
 // SAST/DAST's own "Security Readiness" pre-scan checklists used to be
 // hardcoded here (DEFAULT_SAST_CHECKLIST_ITEMS/DEFAULT_DAST_CHECKLIST_ITEMS)
@@ -853,24 +931,15 @@ export const TEST_CASE_TYPES: string[] = [
 // in-progress draft, if any, else its approved baseline) -- see backend
 // models.py's own "Module 10" header comment.
 export const TEST_CASE_STATUSES: string[] = ['Draft', 'In Review', 'Review Completed', 'Returned', 'Approved', 'Rejected', 'Archived']
-// 2026-08 "Simplified Test Management Review and Approval" requirement --
-// OLD-path drafts already sitting at "In Review"/"Review Completed"/
-// "Returned" when this shipped keep running the pre-existing "Test Approval
-// Workflow" logic above, completely unchanged (Reviewer-tier system QA_LEAD
-// role does Stage 1, CM QA/AGM QA-only does Stage 2). Any fresh Draft
-// submission (or a NEW-vocabulary Returned status resubmitting) instead
-// routes to the QA Group (QA_ENGINEER) for Stage 1 and the QA Lead Group
-// (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA) for Stage 2 -- no individual reviewer/
-// QA-Lead assignment either way. Mirrors backend
-// constants.TEST_CASE_NEW_STATUSES exactly; see ORACLE_MIGRATION_2026-07.md
-// for the full writeup and the "new cases only" migration decision.
+// New submissions use role-group routing. Legacy labels remain available
+// for historical records that entered the earlier project-role workflow.
 export const TEST_CASE_NEW_STATUSES: string[] = [
   'Recommendation Pending', 'QA Lead Approval Pending', 'Returned by QA', 'Returned by QA Lead',
 ]
 TEST_CASE_STATUSES.push(...TEST_CASE_NEW_STATUSES)
 // Normal filters show only the workflow used by every new/current testcase.
-// The three retired individually-assigned workflow states remain in
-// TEST_CASE_STATUSES for rendering historical records and are still included
+// The legacy workflow states remain in TEST_CASE_STATUSES for rendering
+// historical records and are still included
 // by the combined Review/Final Approval queue buttons, but they no longer
 // clutter the primary status selector or duplicate current labels.
 export const TEST_CASE_CURRENT_STATUSES: string[] = [
@@ -959,17 +1028,18 @@ const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed']
 //    resolves to an existing, currently-active governed Defect, which this
 //    client-side check can't do without a round trip.
 export function executionStatusGate(
-  linkedDefects: { defect_key: string; status: string }[] | undefined,
+  linkedDefects: { defect_key: string; status: string; modern_workflow?: boolean; verified_execution_ids?: number[] }[] | undefined,
   runs: { status: string }[] | undefined,
   status: string,
   defectKeyInput?: string,
   currentStatus?: string,
+  executionId?: number,
 ): string | null {
   if (!['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed'].includes(status)) return null
-  const activeDefects = (linkedDefects || []).filter((d) => !DEFECT_RETEST_CLEAR_STATUSES.includes(d.status))
+  const activeDefects = (linkedDefects || []).filter((d) => (d.modern_workflow || !DEFECT_RETEST_CLEAR_STATUSES.includes(d.status)) && !(executionId && d.verified_execution_ids?.includes(executionId)))
   if (activeDefects.length) {
     const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
-    return `this test case previously failed and has an active linked defect (${names}). The execution status cannot be changed until all linked defects are Closed or Deferred.`
+    return `Linked defect verification does not cover this execution (${names}). Check the environment and build in Edit Cycle and verify the fix against that same environment/build. Closed status alone does not establish matching verification for a workflow defect.`
   }
   // currentStatus is a compatibility fallback for executions recorded
   // before immutable attempt history existed. A genuinely new slot is

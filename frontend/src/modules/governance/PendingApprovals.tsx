@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
 
@@ -232,7 +233,7 @@ export default function PendingApprovals() {
                           <span className="pending-approval-child-main">
                             <span className="pending-approval-child-heading">
                               <strong>{item.display_id || 'Application Name Approval'}</strong>
-                              <Badge status={item.status} label={item.status_label} />
+                              <WorkflowStatusBadge record={item} workflow={item.entity_type === "SIGNOFF" ? "signoff" : undefined} status={item.status} label={item.status_label} />
                             </span>
                             <span className="pending-approval-child-title">{item.title}</span>
                             <span className="pending-approval-child-meta">

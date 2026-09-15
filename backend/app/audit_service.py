@@ -78,11 +78,13 @@ def user_snapshot(user: models.User) -> dict:
         # `department` (kept above, still synced to the primary/first-
         # assigned department) so existing audit diffs/readers don't break.
         "departments": sorted(user.departments),
+        "department_unit_ids": sorted(user.department_unit_ids),
         "roles": sorted(user.roles),
         "login_type": user.login_type,
         "is_active": bool(user.is_active),
         "needs_role_review": bool(user.needs_role_review),
         "admin_managed_only": bool(user.admin_managed_only),
+        "show_in_user_dropdowns": bool(user.show_in_user_dropdowns),
     }
 
 

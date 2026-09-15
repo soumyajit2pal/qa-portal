@@ -223,6 +223,8 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
   const headers: Record<string, string> = {}
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
+  const activeWorkspace = localStorage.getItem('active_workspace_id') || localStorage.getItem('qa_active_workspace_id')
+  if (activeWorkspace) headers['X-Workspace-ID'] = activeWorkspace
 
   let payload: BodyInit | undefined
   if (body && !formEncoded) {
@@ -282,7 +284,16 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
 
 async function request<T = any>(path: string, opts: RequestOptions = {}): Promise<T> {
   const method = opts.method || 'GET'
-  const key = method === 'GET' ? `${getToken() || ''}:${path}:${opts.isBlob ? 'blob' : 'json'}` : ''
+  // Workspace is part of response identity. The same account can switch
+  // workspaces while staying signed in, and `/api/dashboard/*` paths do not
+  // contain that scope because it is carried in X-Workspace-ID. Without it,
+  // an in-flight or eight-second cached response from workspace A could be
+  // rendered after workspace B became active.
+  const activeWorkspace = localStorage.getItem('active_workspace_id')
+    || localStorage.getItem('qa_active_workspace_id') || ''
+  const key = method === 'GET'
+    ? `${getToken() || ''}:${activeWorkspace}:${path}:${opts.isBlob ? 'blob' : 'json'}`
+    : ''
   // Briefly reuse successful JSON reads across components and route changes.
   // Mutations clear this cache below, so saved data is never hidden behind a
   // stale entry. Blob/download responses are deliberately excluded.

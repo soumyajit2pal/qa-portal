@@ -8,12 +8,16 @@ from sqlalchemy.orm import Session
 
 from .. import models, pagination, schemas
 from ..database import get_db
+from ..project_workspace_ownership import workspace_can_contribute
+from ..workflow_authority import workflow_endpoint, is_system_admin, admin_department_allowed
 from ..deps import (
-    get_current_user, can_review_repository, can_give_final_approval,
-    can_manage_repository_governance,
+    get_workflow_user as get_current_user, active_qa_workspace_scope,
+    active_qa_workspace_scope_ids,
+    department_unit_visibility_condition,
+    can_review_repository, can_give_final_approval,
 )
 from ..constants import (
-    Role, QA_DEPARTMENT, GatewayStatus,
+    Role, GatewayStatus,
     QA_REQUEST_STATUS_LABELS, SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
     SUPPRESSION_STATUS_LABELS, APPLICATION_MASTER_STATUS_LABELS, SIGNOFF_STATUS_LABELS,
 )
@@ -34,14 +38,10 @@ router = APIRouter(prefix="/api/pending-approvals", tags=["pending-approvals"])
 # never show something the viewer isn't actually allowed to act on, and can
 # never hide something they are.
 #
-# ADMIN sees every category, org-wide, with no department/assignment
-# filtering at all -- has_role(...) already treats ADMIN as satisfying any
-# role check (see models.User.has_role), and every one of the underlying
-# decision endpoints this mirrors lets ADMIN bypass require_same_department/
-# require_not_requester/the specific-assignment checks the same way -- so an
-# Admin account already CAN act on every one of these; this list is just
-# honest about that instead of hiding items an Admin could actually open and
-# decide.
+# Administrator is not a workflow role. Both public endpoints enter the
+# workflow authority context, requiring explicit operational roles and all
+# maker-checker rules. Administrators with such roles are additionally
+# restricted to records in their own departments, including login counts.
 #
 # Deliberately NOT covered here (out of scope for this pass): Functional/
 # Performance "Requester Verification" (the requester confirming their own
@@ -113,6 +113,20 @@ def _parent_context(obj):
     return gateway.request_id, _detail_path("/qa-requests", gateway.request_id, gateway.id)
 
 
+def _suppression_team_scope_condition(db: Session, user: models.User):
+    gateway_scope = department_unit_visibility_condition(
+        db, user, models.QARequest.department, models.QARequest.department_unit_id,
+    )
+    return or_(
+        models.SuppressionRequest.sast_request.has(
+            models.SASTRequest.qa_request.has(gateway_scope),
+        ),
+        models.SuppressionRequest.dast_request.has(
+            models.DASTRequest.qa_request.has(gateway_scope),
+        ),
+    )
+
+
 def _detail_path(path: str, display_id: str, entity_id: int) -> str:
     """Build a deep link that can open an exact record, regardless of pagination.
 
@@ -152,6 +166,7 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     banner is right there to act on."""
     results: List[dict] = []
     is_admin = user.has_role(Role.ADMIN)
+    workspace_ids = active_qa_workspace_scope_ids(user)
 
     # Reported directly: "Draft requests should not appear under Pending
     # Approvals." A name only introduced by (or still attached to) a Draft
@@ -165,15 +180,17 @@ def _application_master_items(db: Session, user: models.User) -> List[dict]:
     # gateway, not just the one originally recorded on ApplicationMaster.
     # qa_request_id (see _resolve_application_name).
     def _active_gateway(app_id: int):
-        return (
-            db.query(models.QARequest)
-            .filter(
+        q = db.query(models.QARequest).filter(
                 models.QARequest.application_master_id == app_id,
                 models.QARequest.status.notin_([GatewayStatus.DRAFT, GatewayStatus.CANCELLED]),
             )
-            .order_by(models.QARequest.created_at.desc())
-            .first()
-        )
+        if workspace_ids:
+            q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
+        if not is_admin:
+            q = q.filter(department_unit_visibility_condition(
+                db, user, models.QARequest.department, models.QARequest.department_unit_id,
+            ))
+        return q.order_by(models.QARequest.created_at.desc()).first()
 
     def _gateway_path(gw) -> str:
         if gw and gw.request_id:
@@ -264,6 +281,7 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
     filter below."""
     results: List[dict] = []
     is_admin = user.has_role(Role.ADMIN)
+    workspace_ids = active_qa_workspace_scope_ids(user)
     for model, entity_type, path, module_label, labels in _SM_DEPT_HEAD_MODULES:
         if user.has_role(Role.SM):
             q = (
@@ -271,9 +289,14 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
                 .outerjoin(models.QARequest, model.qa_request_id == models.QARequest.id)
                 .filter(model.status == "SM_APPROVAL_PENDING")
             )
+            if workspace_ids:
+                q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
             if not is_admin:
+                team_scope = department_unit_visibility_condition(
+                    db, user, models.QARequest.department, models.QARequest.department_unit_id,
+                )
                 q = q.filter(
-                    or_(models.QARequest.department.in_(user.departments), models.QARequest.department.is_(None)),
+                    team_scope,
                     model.requester_id != user.id,
                 )
             for obj in q.order_by(model.created_at).all():
@@ -290,9 +313,14 @@ def _sm_dept_head_items(db: Session, user: models.User) -> List[dict]:
                 .outerjoin(models.QARequest, model.qa_request_id == models.QARequest.id)
                 .filter(model.status == "DEPARTMENT_HEAD_APPROVAL_PENDING")
             )
+            if workspace_ids:
+                q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
             if not is_admin:
+                team_scope = department_unit_visibility_condition(
+                    db, user, models.QARequest.department, models.QARequest.department_unit_id,
+                )
                 q = q.filter(
-                    or_(models.QARequest.department.in_(user.departments), models.QARequest.department.is_(None)),
+                    team_scope,
                     model.requester_id != user.id,
                 )
             for obj in q.order_by(model.created_at).all():
@@ -317,10 +345,14 @@ def _readiness_items(db: Session, user: models.User) -> List[dict]:
     if not user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return []
     results: List[dict] = []
+    workspace_ids = active_qa_workspace_scope_ids(user)
     is_admin = user.has_role(Role.ADMIN)
     for (model, entity_type, path, module_label, labels, lead_column, assigned_status,
          verification_status) in _READINESS_MODULES:
         q = db.query(model).filter(model.status.in_([assigned_status, verification_status]))
+        if workspace_ids:
+            q = q.filter(model.qa_request_id.in_(select(models.QARequest.id).where(
+                models.QARequest.qa_workspace_id.in_(workspace_ids))))
         for obj in q.order_by(model.created_at).all():
             action = "Start Readiness Verification" if obj.status == assigned_status else "Readiness Verification"
             results.append(_item(
@@ -341,14 +373,16 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
     docstring), so no department filter applies there at all, admin or not."""
     results: List[dict] = []
     is_admin = user.has_role(Role.ADMIN)
+    workspace_ids = active_qa_workspace_scope_ids(user)
 
     def _query(status: str):
-        return db.query(models.SuppressionRequest).filter(models.SuppressionRequest.status == status)
+        q = db.query(models.SuppressionRequest).filter(models.SuppressionRequest.status == status)
+        return q.filter(models.SuppressionRequest.qa_workspace_id.in_(workspace_ids)) if workspace_ids else q
 
     if user.has_role(Role.SM):
         q = _query("SM_APPROVAL_PENDING")
         if not is_admin:
-            q = q.filter(models.SuppressionRequest.department.in_(user.departments),
+            q = q.filter(_suppression_team_scope_condition(db, user),
                          models.SuppressionRequest.created_by_id != user.id)
         for obj in q.order_by(models.SuppressionRequest.created_at).all():
             results.append(_item(
@@ -361,7 +395,7 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
     if user.has_role(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM):
         q = _query("DEPARTMENT_HEAD_APPROVAL_PENDING")
         if not is_admin:
-            q = q.filter(models.SuppressionRequest.department.in_(user.departments),
+            q = q.filter(_suppression_team_scope_condition(db, user),
                          models.SuppressionRequest.created_by_id != user.id)
         for obj in q.order_by(models.SuppressionRequest.created_at).all():
             results.append(_item(
@@ -384,18 +418,21 @@ def _suppression_items(db: Session, user: models.User) -> List[dict]:
 
 
 def _signoff_items(db: Session, user: models.User) -> List[dict]:
-    """QA Clearance's own QA Lead / Executive  checkpoints -- gated by the
-    REVIEWER's own department being COE - Quality Assurance (see routers/signoff.py::
-    _require_qa_department), not by matching the certificate's own
-    (requesting) department -- unlike every SM/Department Head checkpoint
-    above."""
+    """QA Clearance checkpoints scoped to the selected workspace."""
     is_admin = user.has_role(Role.ADMIN)
-    if not user.has_department(QA_DEPARTMENT) and not is_admin:
-        return []
     results: List[dict] = []
+    workspace_id = active_qa_workspace_scope(user)
+    workspace_ids = active_qa_workspace_scope_ids(user)
+    if not is_admin and not user.has_qa_workspace_role(
+        Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+        workspace_id=workspace_id,
+    ):
+        return []
 
     def _query(status: str):
         q = db.query(models.QASignOff).filter(models.QASignOff.status == status)
+        if workspace_ids:
+            q = q.filter(models.QASignOff.qa_workspace_id.in_(workspace_ids))
         if not is_admin:
             q = q.filter(models.QASignOff.requester_id != user.id)
         return q
@@ -434,6 +471,9 @@ def _test_project_items(db: Session, user: models.User) -> List[dict]:
         return []
     results: List[dict] = []
     q = db.query(models.TestProject).filter(models.TestProject.pending_is_active.isnot(None))
+    workspace_ids = active_qa_workspace_scope_ids(user)
+    if workspace_ids:
+        q = q.filter(models.TestProject.qa_workspace_id.in_(workspace_ids))
     for obj in q.order_by(models.TestProject.pending_requested_at).all():
         action = "Reactivation" if obj.pending_is_active else "Deactivation"
         results.append(_item(
@@ -445,71 +485,61 @@ def _test_project_items(db: Session, user: models.User) -> List[dict]:
     return results
 
 
-def _qa_group_checker(db: Session, project_id: int, user: models.User) -> bool:
-    """NEW-path Stage 1 ("Recommendation Pending") eligibility -- mirrors
-    bulk_recommend_test_cases'/review_test_case's own new-path check
-    exactly: membership in the QA Group (Role.QA_ENGINEER), independent of
-    project. db/project_id kept in the signature only so this matches the
-    other checkers' call shape used by the shared loop below."""
-    return user.has_role(Role.QA_ENGINEER)
-
-
-def _qa_lead_group_checker(db: Session, project_id: int, user: models.User) -> bool:
-    """NEW-path Stage 2 ("QA Lead Approval Pending") eligibility -- mirrors
-    review_test_case's own new-path check exactly: membership in the QA
-    Lead Group (can_manage_repository_governance -- QA_LEAD/CHIEF_MANAGER_QA/
-    AGM_QA)."""
-    return can_manage_repository_governance(user)
-
-
 def _test_case_items(db: Session, user: models.User) -> List[dict]:
-    """Test Case review -- four checkpoints, covering both the OLD "Test
-    Approval Workflow" (In Review / Review Completed) and the 2026-08
-    "Simplified Test Management" NEW workflow (Recommendation Pending / QA
-    Lead Approval Pending) that superseded it for every fresh submission
-    (see ORACLE_MIGRATION_2026-07.md sections 60-62). The OLD-path pair was
-    the only one wired here originally; the NEW-path pair was missed at the
-    time of that rewrite, which silently stopped the login "pending
-    approvals" notice from ever firing for it since virtually all live
-    submissions route to the NEW path now. can_review_repository/
-    can_give_final_approval already correctly return True for system
-    QA_LEAD/Admin on every project internally, so no separate is_admin
-    short-circuit is needed the way other categories in this file use one
-    -- this file's own stated principle: "each category works out is this
-    awaiting me the exact same way its own decision endpoint already gates
-    the actual decision call," so this literally calls the same functions
-    review_test_case/bulk_recommend_test_cases/bulk_approve_test_cases call.
-    GOV-002 self-action exclusion applies to all four: the OLD path only
-    ever excludes the content author; the NEW path additionally excludes
-    whoever already performed submission (Stage 1) or the Stage 1
-    recommendation (Stage 2), matching section 62's fix to the decision
-    endpoints themselves."""
+    """Return testcase decisions available to this user's workflow group."""
     results: List[dict] = []
+    selected_workspace = getattr(user, "active_qa_workspace_id", None)
+    contribution_access = {}
     checkpoints = (
-        ("In Review", can_review_repository, "Test Case -- Stage 1 QA Review"),
-        ("Review Completed", can_give_final_approval, "Test Case -- QA Management Approval"),
-        ("Recommendation Pending", _qa_group_checker, "Test Case -- QA Recommendation (Stage 1)"),
-        ("QA Lead Approval Pending", _qa_lead_group_checker, "Test Case -- QA Lead Approval (Stage 2)"),
+        ("In Review", "Test Case -- Stage 1 QA Review"),
+        ("Review Completed", "Test Case -- QA Management Approval"),
+        ("Recommendation Pending", "Test Case -- QA Recommendation (Stage 1)"),
+        ("QA Lead Approval Pending", "Test Case -- QA Lead Approval (Stage 2)"),
     )
-    for status, checker, category in checkpoints:
+    for status, category in checkpoints:
         q = (
             db.query(models.TestCaseVersion)
             .join(models.TestCase, models.TestCaseVersion.test_case_id == models.TestCase.id)
-            .filter(models.TestCaseVersion.status == status)
+            .join(models.TestProject, models.TestCase.project_id == models.TestProject.id)
+            .filter(models.TestCaseVersion.status == status,
+                    models.TestCase.current_draft_version_id == models.TestCaseVersion.id,
+                    models.TestCase.is_deleted == False, models.TestProject.is_active == True)
         )
+        workspace_ids = active_qa_workspace_scope_ids(user)
+        if selected_workspace is not None or workspace_ids:
+            # Actions follow the content's creating workspace, not the shared
+            # project's owner or a parent workspace's read-only child scope.
+            q = q.filter(func.coalesce(models.TestCase.origin_workspace_id,
+                                      models.TestProject.qa_workspace_id).in_(
+                (selected_workspace,) if selected_workspace is not None else workspace_ids))
         for draft in q.order_by(models.TestCaseVersion.submitted_at).all():
-            if draft.author_id == user.id:
+            is_admin = user.has_role(Role.ADMIN)
+            if not is_admin and draft.author_id == user.id:
                 continue
-            if status == "Recommendation Pending" and draft.submitted_by_id == user.id:
+            if not is_admin and status == "Recommendation Pending" and draft.submitted_by_id == user.id:
                 continue
-            if status == "QA Lead Approval Pending" and user.id in (draft.submitted_by_id, draft.reviewed_by_id):
+            if not is_admin and status == "QA Lead Approval Pending" and user.id in (draft.submitted_by_id, draft.reviewed_by_id):
                 continue
             case = draft.test_case
-            if not case or not checker(db, case.project_id, user):
-                continue
-            if status == "In Review" and not user.has_role(Role.QA_LEAD):
+            if not case:
                 continue
             project = case.project
+            if not project:
+                continue
+            if selected_workspace is not None:
+                if project.id not in contribution_access:
+                    contribution_access[project.id] = workspace_can_contribute(db, project.id, user)
+                if not contribution_access[project.id]:
+                    continue
+            if not is_admin:
+                eligible = (
+                    can_review_repository(db, project.id, user) if status == "In Review"
+                    else can_give_final_approval(db, project.id, user) if status == "Review Completed"
+                    else user.has_role(Role.QA_ENGINEER) if status == "Recommendation Pending"
+                    else user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
+                )
+                if not eligible:
+                    continue
             # Reported directly: "Parent Section should be Project Name, the
             # Folder wise testcase segregation" -- Test Case items have no
             # QA Request parent, so every pending test case used to fall
@@ -540,7 +570,7 @@ def _test_case_items(db: Session, user: models.User) -> List[dict]:
     return results
 
 
-def _pending_count_statement(user: models.User):
+def _pending_count_statement(db: Session, user: models.User):
     """Count all actionable checkpoints in one database round trip.
 
     Login needs only one integer. Building the detailed feed there made its
@@ -551,19 +581,35 @@ def _pending_count_statement(user: models.User):
     """
     counts = []
     is_admin = user.has_role(Role.ADMIN)
+    workspace_ids = active_qa_workspace_scope_ids(user)
 
     def add_count(model, *conditions, join=None):
         statement = select(func.count()).select_from(model)
         if join is not None:
             target, on_clause, is_outer = join
             statement = statement.join(target, on_clause, isouter=is_outer)
-        counts.append(statement.where(*conditions))
+        scoped_conditions = list(conditions)
+        if workspace_ids:
+            if model in {models.FunctionalRequest, models.SASTRequest, models.DASTRequest, models.PerformanceRequest}:
+                scoped_conditions.append(model.qa_request_id.in_(select(models.QARequest.id).where(
+                    models.QARequest.qa_workspace_id.in_(workspace_ids))))
+            elif model in {models.SuppressionRequest, models.QASignOff, models.TestProject}:
+                scoped_conditions.append(model.qa_workspace_id.in_(workspace_ids))
+            elif model is models.TestCaseVersion:
+                scoped_conditions.append(models.TestCaseVersion.test_case.has(
+                    or_(models.TestCase.origin_workspace_id.in_(workspace_ids),
+                        (models.TestCase.origin_workspace_id.is_(None) & models.TestCase.project.has(models.TestProject.qa_workspace_id.in_(workspace_ids))))))
+        counts.append(statement.where(*scoped_conditions))
 
     active_gateway = (
         select(models.QARequest.id)
         .where(
             models.QARequest.application_master_id == models.ApplicationMaster.id,
             models.QARequest.status.notin_([GatewayStatus.DRAFT, GatewayStatus.CANCELLED]),
+            *([models.QARequest.qa_workspace_id.in_(workspace_ids)] if workspace_ids else []),
+            *([department_unit_visibility_condition(
+                db, user, models.QARequest.department, models.QARequest.department_unit_id,
+            )] if not is_admin else []),
         )
         .exists()
     )
@@ -583,7 +629,9 @@ def _pending_count_statement(user: models.User):
             conditions = [model.status == "SM_APPROVAL_PENDING"]
             if not is_admin:
                 conditions.extend([
-                    or_(models.QARequest.department.in_(user.departments), models.QARequest.department.is_(None)),
+                    department_unit_visibility_condition(
+                        db, user, models.QARequest.department, models.QARequest.department_unit_id,
+                    ),
                     model.requester_id != user.id,
                 ])
             add_count(model, *conditions, join=(models.QARequest, model.qa_request_id == models.QARequest.id, True))
@@ -591,7 +639,9 @@ def _pending_count_statement(user: models.User):
             conditions = [model.status == "DEPARTMENT_HEAD_APPROVAL_PENDING"]
             if not is_admin:
                 conditions.extend([
-                    or_(models.QARequest.department.in_(user.departments), models.QARequest.department.is_(None)),
+                    department_unit_visibility_condition(
+                        db, user, models.QARequest.department, models.QARequest.department_unit_id,
+                    ),
                     model.requester_id != user.id,
                 ])
             add_count(model, *conditions, join=(models.QARequest, model.qa_request_id == models.QARequest.id, True))
@@ -606,7 +656,7 @@ def _pending_count_statement(user: models.User):
         conditions = [models.SuppressionRequest.status == "SM_APPROVAL_PENDING"]
         if not is_admin:
             conditions.extend([
-                models.SuppressionRequest.department.in_(user.departments),
+                _suppression_team_scope_condition(db, user),
                 models.SuppressionRequest.created_by_id != user.id,
             ])
         add_count(models.SuppressionRequest, *conditions)
@@ -614,14 +664,18 @@ def _pending_count_statement(user: models.User):
         conditions = [models.SuppressionRequest.status == "DEPARTMENT_HEAD_APPROVAL_PENDING"]
         if not is_admin:
             conditions.extend([
-                models.SuppressionRequest.department.in_(user.departments),
+                _suppression_team_scope_condition(db, user),
                 models.SuppressionRequest.created_by_id != user.id,
             ])
         add_count(models.SuppressionRequest, *conditions)
     if user.has_role(Role.SECURITY_ANALYST):
         add_count(models.SuppressionRequest, models.SuppressionRequest.status == "SECURITY_TEAM_VERIFICATION")
 
-    if user.has_department(QA_DEPARTMENT) or is_admin:
+    workspace_id = active_qa_workspace_scope(user)
+    if is_admin or user.has_qa_workspace_role(
+        Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+        workspace_id=workspace_id,
+    ):
         if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
             conditions = [models.QASignOff.status == "SM_APPROVAL_PENDING"]
             if not is_admin:
@@ -639,48 +693,24 @@ def _pending_count_statement(user: models.User):
     if user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         add_count(models.TestProject, models.TestProject.pending_is_active.isnot(None))
 
-    # These permissions and maker-checker exclusions match the effective
-    # gates in _test_case_items. NULL must be handled explicitly because SQL
-    # `NULL != id` is not true, while the existing Python comparison is.
-    def test_case_count(status: str, *extra_conditions):
-        add_count(
-            models.TestCaseVersion,
-            models.TestCaseVersion.status == status,
-            or_(models.TestCaseVersion.author_id.is_(None), models.TestCaseVersion.author_id != user.id),
-            *extra_conditions,
-            join=(models.TestCase, models.TestCaseVersion.test_case_id == models.TestCase.id, False),
-        )
-
-    if user.has_role(Role.QA_LEAD):
-        test_case_count("In Review")
-    if user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA):
-        test_case_count("Review Completed")
-    if user.has_role(Role.QA_ENGINEER):
-        test_case_count(
-            "Recommendation Pending",
-            or_(models.TestCaseVersion.submitted_by_id.is_(None), models.TestCaseVersion.submitted_by_id != user.id),
-        )
-    if can_manage_repository_governance(user):
-        test_case_count(
-            "QA Lead Approval Pending",
-            or_(models.TestCaseVersion.submitted_by_id.is_(None), models.TestCaseVersion.submitted_by_id != user.id),
-            or_(models.TestCaseVersion.reviewed_by_id.is_(None), models.TestCaseVersion.reviewed_by_id != user.id),
-        )
-
     if not counts:
         return select(func.count()).select_from(models.User).where(models.User.id == -1)
     return union_all(*counts)
 
 
 @router.get("/count", response_model=schemas.PendingApprovalCount)
+@workflow_endpoint
 def count_pending_approvals(db: Session = Depends(get_db),
                             current_user: models.User = Depends(get_current_user)):
     """Fast login summary without materializing the detailed approval feed."""
-    branch_counts = db.execute(_pending_count_statement(current_user)).scalars().all()
-    return {"count": sum(int(value or 0) for value in branch_counts)}
+    if is_system_admin(current_user):
+        return {"count": len(_actionable_items(db, current_user))}
+    branch_counts = db.execute(_pending_count_statement(db, current_user)).scalars().all()
+    return {"count": sum(int(value or 0) for value in branch_counts) + len(_test_case_items(db, current_user))}
 
 
 @router.get("", response_model=schemas.PendingApprovalPage)
+@workflow_endpoint
 def list_pending_approvals(
     params: pagination.PageParams = Depends(),
     category: Optional[str] = Query(None),
@@ -688,11 +718,13 @@ def list_pending_approvals(
     current_user: models.User = Depends(get_current_user),
 ):
     """Everything genuinely awaiting the logged-in user's own decision right
-    now, across every approval checkpoint in the app -- see this module's own
-    docstring above for the full inventory and the ADMIN-sees-everything
-    reasoning. Sorted oldest-submitted-first within the combined list (the
+    now, across every approval checkpoint in the app, using explicit workflow authority. Sorted oldest-submitted-first within the combined list (the
     frontend groups by category for display, but age is what should drive
     priority within a category)."""
+    return _paginate_pending_items(_actionable_items(db, current_user), params, category)
+
+
+def _actionable_items(db, current_user):
     items = (
         _application_master_items(db, current_user)
         + _sm_dept_head_items(db, current_user)
@@ -702,4 +734,4 @@ def list_pending_approvals(
         + _test_project_items(db, current_user)
         + _test_case_items(db, current_user)
     )
-    return _paginate_pending_items(items, params, category)
+    return [item for item in items if admin_department_allowed(current_user, item["department"])]

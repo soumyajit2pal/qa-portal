@@ -1,7 +1,7 @@
 import re
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
 
 from .. import cache, models, schemas
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/departments", tags=["departments"])
 # a future schema/shape change to DepartmentOut can invalidate every
 # deployment's existing cache just by bumping it, without needing an
 # explicit flush step.
-_DEPARTMENTS_CACHE_KEY = "refdata:departments:active:v1"
+_DEPARTMENTS_CACHE_KEY = "refdata:departments:active:v2"
 _DEPARTMENTS_CACHE_TTL = 300
 
 
@@ -132,7 +132,7 @@ def list_departments(db: Session = Depends(get_db), current_user: models.User = 
     cached = cache.get_json(_DEPARTMENTS_CACHE_KEY)
     if cached is not None:
         return cached
-    rows = db.query(models.Department).filter(models.Department.is_active == True).order_by(models.Department.name).all()  # noqa: E712
+    rows = db.query(models.Department).options(selectinload(models.Department.units)).filter(models.Department.is_active == True).order_by(models.Department.name).all()  # noqa: E712
     result = [schemas.DepartmentOut.model_validate(row).model_dump(mode="json") for row in rows]
     cache.set_json(_DEPARTMENTS_CACHE_KEY, result, _DEPARTMENTS_CACHE_TTL)
     return result
@@ -141,7 +141,82 @@ def list_departments(db: Session = Depends(get_db), current_user: models.User = 
 @router.get("/all", response_model=List[schemas.DepartmentOut])
 def list_all_departments(db: Session = Depends(get_db), current_user: models.User = Depends(require_roles(Role.ADMIN))):
     """Admin section: full list including deactivated departments, for management."""
-    return db.query(models.Department).order_by(models.Department.name).all()
+    return db.query(models.Department).options(selectinload(models.Department.units)).order_by(models.Department.name).all()
+
+
+def _unit_parent(db: Session, department_id: int, parent_unit_id: int | None, unit_id: int | None = None):
+    if parent_unit_id is None:
+        return None
+    parent = db.get(models.DepartmentUnit, parent_unit_id)
+    if not parent or parent.department_id != department_id:
+        raise HTTPException(400, "Parent unit must belong to the same department")
+    if not parent.is_active:
+        raise HTTPException(400, "Parent unit must be active")
+    current = parent
+    while current is not None:
+        if unit_id is not None and current.id == unit_id:
+            raise HTTPException(400, "A department unit cannot be moved below itself or its descendant")
+        current = current.parent
+    return parent
+
+
+@router.post("/{dept_id}/units", response_model=schemas.DepartmentUnitOut)
+def create_department_unit(dept_id: int, payload: schemas.DepartmentUnitCreate,
+                           db: Session = Depends(get_db), _: models.User = Depends(require_roles(Role.ADMIN))):
+    department = db.get(models.Department, dept_id)
+    if not department or not department.is_active:
+        raise HTTPException(404, "Active department not found")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "Unit name cannot be blank")
+    _unit_parent(db, dept_id, payload.parent_unit_id)
+    if db.query(models.DepartmentUnit).filter_by(department_id=dept_id, name=name).first():
+        raise HTTPException(409, f"Unit '{name}' already exists in {department.name}")
+    row = models.DepartmentUnit(
+        department_id=dept_id, parent_unit_id=payload.parent_unit_id,
+        name=name, is_active=True,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    _invalidate_departments_cache()
+    return row
+
+
+@router.patch("/units/{unit_id}", response_model=schemas.DepartmentUnitOut)
+def update_department_unit(unit_id: int, payload: schemas.DepartmentUnitUpdate,
+                           db: Session = Depends(get_db), _: models.User = Depends(require_roles(Role.ADMIN))):
+    row = db.get(models.DepartmentUnit, unit_id)
+    if not row:
+        raise HTTPException(404, "Department unit not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "parent_unit_id" in data:
+        _unit_parent(db, row.department_id, data["parent_unit_id"], row.id)
+        row.parent_unit_id = data["parent_unit_id"]
+    if "name" in data:
+        name = (data["name"] or "").strip()
+        if not name:
+            raise HTTPException(400, "Unit name cannot be blank")
+        duplicate = db.query(models.DepartmentUnit).filter(
+            models.DepartmentUnit.department_id == row.department_id,
+            models.DepartmentUnit.name == name,
+            models.DepartmentUnit.id != row.id,
+        ).first()
+        if duplicate:
+            raise HTTPException(409, f"Unit '{name}' already exists in this department")
+        row.name = name
+    if "is_active" in data:
+        row.is_active = data["is_active"]
+        if not row.is_active:
+            pending = list(row.children)
+            while pending:
+                child = pending.pop()
+                child.is_active = False
+                pending.extend(child.children)
+    db.commit()
+    db.refresh(row)
+    _invalidate_departments_cache()
+    return row
 
 
 @router.post("", response_model=schemas.DepartmentOut)

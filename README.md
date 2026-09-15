@@ -135,7 +135,7 @@ export DATABASE_URL="oracle+oracledb://QA_PORTAL:your_password@dbhost:1521/?serv
 ```
 
 The `QA_PORTAL` user needs `CREATE TABLE`/`CREATE SEQUENCE` privileges the first time you run
-`python -m app.seed`. Existing environments must then adopt the Alembic baseline once; see
+`alembic upgrade head`. Existing environments that predate Alembic may need to adopt the baseline once; see
 [`backend/MIGRATIONS.md`](backend/MIGRATIONS.md) before applying or generating migrations.
 
 All tables are prefixed `qap_` (e.g. `qap_users`, `qap_requests`, `qap_module_documents`) so
@@ -181,10 +181,10 @@ cp .env.example .env            # shared local settings; edit DATABASE_URL / SEC
 cp .env.dev.example .env.dev    # optional development-profile overrides
 export APP_ENV=dev              # selects backend/.env.dev
 
+alembic upgrade head             # creates or upgrades the schema
 DEMO_SEED_PASSWORD='<unique temporary password>' python -m app.seed
-                                 # first empty DB only: creates tables + seeds demo data
-alembic stamp head              # first empty DB only: records the Alembic baseline
-# Existing baseline adopted: use `alembic upgrade head` on every deployment.
+                                 # seeds demo users, departments, and Default Workspace
+# Continue using `alembic upgrade head` before every deployment.
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -272,7 +272,7 @@ Seeded by `DEMO_SEED_PASSWORD='<unique temporary password>' python -m app.seed`.
 
 | Username | Role |
 |---|---|
-| `requester1` | Requester (Developer) |
+| `requester1` | Requester |
 | `ba1` | Business Analyst |
 | `qa1` | QA Engineer |
 | `qalead1` | QA Lead (CM-QA) |
@@ -561,17 +561,30 @@ Every user account has a `login_type` of either **Standard** or **LDAP**:
 
 **LDAP accounts are provisioned just-in-time, not pre-created.** An admin does *not* need to
 create an LDAP user up front. The first time someone logs in with a username the app doesn't
-recognize, it attempts an LDAP bind with the credentials they supplied; if that succeeds, a
-local `User` row is created automatically (`login_type=LDAP`, profile fields best-effort filled
-from the directory's `displayName`/`mail`/`department` attributes) and the person is logged in
-initially with the temporary default role (`DEFAULT_LDAP_PROVISION_ROLE` in
-`app/constants.py`, currently Requester). At the mandatory first-login department confirmation,
-users selecting **COE - Quality Assurance** receive **QA Engineer** as their default role;
-users selecting any other department remain **Requester**. That new account is still flagged `needs_role_review=True`
-so it shows up at the top of the Admin section's user table with a "Needs Review" badge — an
-admin then assigns the role the person actually needs, which clears the flag. If the
-credentials don't authenticate against LDAP, the login simply fails with the same
-"Invalid username or password" as any other bad login (no account is created).
+recognize, it attempts an LDAP bind with the credentials they supplied. A successful bind creates
+a local `User` row (`login_type=LDAP`, with profile fields filled from the directory when available)
+without granting an application role. The user selects a department and submits an access request,
+then remains blocked at the sign-in screen until a System Administrator or a coordinator for that
+department assigns the permitted roles and approves the request. Approval also places the user in
+the active workspace selected by the reviewer. Failed LDAP credentials return the same
+"Invalid username or password" response as any other failed sign-in and do not create an account.
+
+### Non-production mock LDAP
+
+Development and UAT can exercise the complete first-login workflow without a directory server.
+Add these settings to the active non-production environment file and restart the backend:
+
+```env
+LDAP_MOCK_ENABLED=true
+LDAP_MOCK_USERNAME_PREFIX=bmock
+LDAP_MOCK_PASSWORD=QualityOps-Mock-LDAP-2026!
+```
+
+Sign in with any new username beginning with `bmock` (for example `bmock01`) and the configured
+password. Each distinct username creates a fresh LDAP-style account and follows the real sequence:
+department selection, pending role review, Department Coordinator/System Administrator approval,
+workspace placement, and normal access. Production startup rejects mock authentication even if it
+is accidentally enabled there.
 
 The **Admin** section (visible in the sidebar only to the `admin` demo user / any account with
 the Administrator role, part of the Governance module) is a full user directory at `/admin`:

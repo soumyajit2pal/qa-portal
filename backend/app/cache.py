@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Any, Optional
 
 from .resilience import CircuitOpenError, redis_circuit
@@ -54,7 +55,8 @@ KEY_PREFIX = "qa_portal:"
 
 _client = None
 _client_lock = threading.Lock()
-_init_attempted = False
+_next_init_at = 0.0
+INIT_RETRY_SECONDS = 30.0
 _warned_unavailable = False
 
 
@@ -73,10 +75,10 @@ def _cache_failure(operation: str, exc: Exception) -> None:
 
 
 def _get_client():
-    """Lazily builds (once) and returns the redis client, or None if caching
+    """Lazily builds, with bounded retry, and returns the redis client, or None if caching
     is disabled/unconfigured/unavailable. Safe to call from any request --
     never raises."""
-    global _client, _init_attempted, _warned_unavailable
+    global _client, _warned_unavailable, _next_init_at
     if not _cache_circuit_allows():
         return None
     if _client is not None:
@@ -84,9 +86,9 @@ def _get_client():
     if not CACHE_ENABLED or not REDIS_URL:
         return None
     with _client_lock:
-        if _client is not None or _init_attempted:
+        if _client is not None or time.monotonic() < _next_init_at:
             return _client
-        _init_attempted = True
+        _next_init_at = time.monotonic() + INIT_RETRY_SECONDS
         try:
             import redis  # local import -- optional dependency, see module docstring
         except ImportError:
@@ -108,7 +110,7 @@ def _get_client():
         except Exception as exc:
             redis_circuit.record_failure()
             if not _warned_unavailable:
-                logger.warning("Redis at %s is unreachable; caching is disabled.", _masked(REDIS_URL), exc_info=True)
+                logger.warning("Redis at %s is unreachable; caching will retry.", _masked(REDIS_URL), exc_info=True)
                 _warned_unavailable = True
             return None
         logger.info("Connected to Redis for caching.")
@@ -204,29 +206,20 @@ def delete(*keys: str) -> int:
 
 
 def try_acquire_lock(key: str, ttl_seconds: int = 300) -> bool:
-    """Best-effort distributed lock (`SET key 1 NX EX ttl`) -- INF-001 runs
-    multiple API worker *processes*, so any one-time startup side effect
-    (see main.py's startup migration block) would otherwise run
-    once per worker instead of once per deployment. Returns True if the
-    caller now holds the lock (i.e. should proceed with the guarded work).
+    """Acquire a bounded Redis lock; unavailable is never permission to proceed.
 
-    Deliberately PERMISSIVE when Redis is unavailable (package missing,
-    unset, unreachable): returns True unconditionally rather than blocking
-    startup on a cache that may not be provisioned. That matches this app's
-    behavior before this lock existed (every worker just did the work), so
-    running without Redis is not made any worse -- it just loses the
-    "exactly once" guarantee, same as always. Provision Redis to get that
-    guarantee under multiple workers (see INF-001)."""
+    Long-running maintenance uses storage_lock instead, avoiding lease expiry.
+    """
     client = _get_client()
     if client is None:
-        return True
+        return False
     try:
         acquired = bool(client.set(_key(key), "1", nx=True, ex=max(1, ttl_seconds)))
         redis_circuit.record_success()
         return acquired
     except Exception as exc:
         _cache_failure("lock acquisition", exc)
-        return True
+        return False
 
 
 def delete_prefix(prefix: str) -> int:

@@ -235,7 +235,7 @@ def defect_quality(
         func.max(models.ApprovalAction.id).label("action_id"),
     ).filter(
         models.ApprovalAction.entity_type == "DEFECT",
-        models.ApprovalAction.decision == "Resolved",
+        models.ApprovalAction.decision.in_(("Resolved", "Ready for QA")),
     ).group_by(models.ApprovalAction.entity_id).subquery()
 
     terminal_statuses = {"Closed", "Rejected", "Duplicate", "Not a Defect"}
@@ -331,7 +331,7 @@ def defect_quality(
         "project_id": project_id, "project_key": project.project_key, "project_name": project.name,
         "population_note": (
             "Unique governed defects traced to this project through a primary or additional execution link. "
-            "Resolver attribution uses the latest audited Resolved action. Retest success rate uses all "
+            "Resolver attribution uses the latest audited fix handoff (Resolved or Ready for QA). Retest success rate uses all "
             "structured execution defect links where a later attempt passed."
         ),
         "total_defect_links": len(defects),

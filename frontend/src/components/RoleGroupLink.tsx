@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { Modal } from './Common'
-import { hasDepartment, userDepartments } from '../constants'
+import { hasDepartment, isSelectableUser, userDepartments } from '../constants'
 import type { UserOut } from '../types'
 
 export default function RoleGroupLink({ users, role, label, department, renderTrigger }: {
@@ -34,8 +34,13 @@ export default function RoleGroupLink({ users, role, label, department, renderTr
   const roles = useMemo(() => (Array.isArray(role) ? role : [role]), [role])
   const members = useMemo(
     () => users
-      .filter((user) => user.is_active
-        && (user.roles || []).some((r) => roles.includes(r))
+      .filter((user) => isSelectableUser(user)
+        // This modal describes actual group membership, so use exact stored
+        // roles. Authorization helpers intentionally treat Administrator as
+        // every role and some workflows grant executive overrides; neither
+        // should make those users appear as members of a group they were not
+        // assigned to.
+        && roles.some((candidateRole) => (user.roles || []).includes(candidateRole))
         && (!department || hasDepartment(user, department)))
       .sort((a, b) => a.full_name.localeCompare(b.full_name)),
     [users, roles, department],

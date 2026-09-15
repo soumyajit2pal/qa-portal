@@ -1,3 +1,4 @@
+from ..deps import get_workflow_user, require_workflow_roles
 import io
 from typing import List, Optional
 
@@ -8,7 +9,11 @@ import openpyxl
 
 from .. import cache, models, schemas
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_same_department
+from ..deps import (
+    get_current_user, require_roles, require_same_department,
+    require_department_visibility, require_department_unit_action_scope,
+    department_unit_visibility_condition, active_qa_workspace_scope_ids,
+)
 from ..constants import Role, GatewayStatus
 # _finalize_child_requests is the same child-creation step submit_request
 # uses for the immediate (no approval needed) case -- reused here for the
@@ -159,6 +164,79 @@ def list_application_names(db: Session = Depends(get_db), current_user: models.U
     return result
 
 
+@router.post("", response_model=schemas.ApplicationMasterOut, status_code=201)
+def create_approved_application_name(
+    payload: schemas.ApplicationMasterAdminCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    """Add one known-good Application Name directly to the approved master.
+
+    This is the single-record counterpart to the Admin Excel seed. It uses
+    the same normalization and pending-name behavior, but requires an active
+    owning department so a manually entered record is complete at creation.
+    """
+    name = payload.name.strip().upper()
+    if not name:
+        raise HTTPException(400, "Application name is required")
+    if len(name) > 150:
+        raise HTTPException(400, "Application name must be 150 characters or fewer")
+
+    department = payload.department.strip()
+    if not department:
+        raise HTTPException(400, "Owning department is required")
+    active_department = (db.query(models.Department)
+                         .filter(models.Department.name == department,
+                                 models.Department.is_active == True)  # noqa: E712 - Oracle boolean column
+                         .first())
+    if not active_department:
+        raise HTTPException(400, "Select an active department from the system department list")
+
+    existing = (db.query(models.ApplicationMaster)
+                .filter(models.ApplicationMaster.name == name)
+                .first())
+    if existing:
+        if existing.status == "APPROVED":
+            raise HTTPException(409, f"Application name '{name}' already exists")
+        if existing.status == "REJECTED":
+            raise HTTPException(
+                409,
+                f"Application name '{name}' was previously rejected and cannot be reinstated here",
+            )
+
+        comment = f"Approved via Admin manual entry by {current_user.full_name}"
+        existing.department = active_department.name
+        _approve_pending_application_name(db, existing, current_user, comment)
+        _log_application_name_decision(
+            db, existing, "Application Owner", "Approved", current_user, comment,
+        )
+        db.commit()
+        db.refresh(existing)
+        _invalidate_approved_names_cache()
+        return existing
+
+    now = models.now()
+    comment = f"Added via Admin manual entry by {current_user.full_name}"
+    application = models.ApplicationMaster(
+        name=name,
+        status="APPROVED",
+        department=active_department.name,
+        requested_by_id=current_user.id,
+        qa_request_id=None,
+        app_owner_decided_by_id=current_user.id,
+        app_owner_decided_at=now,
+        app_owner_comments=comment,
+        decided_by_id=current_user.id,
+        decided_at=now,
+        comments=comment,
+    )
+    db.add(application)
+    db.commit()
+    db.refresh(application)
+    _invalidate_approved_names_cache()
+    return application
+
+
 @router.patch("/{app_id}/department", response_model=schemas.ApplicationMasterOut)
 def update_application_department(
     app_id: int,
@@ -275,9 +353,16 @@ def list_pending_app_owner_names(db: Session = Depends(get_db),
     SASTOut/DASTOut/PerformanceOut), not this list. ADMIN sees every
     department's pending names; an Application Owner only sees their own
     department's."""
-    q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
+    q = db.query(models.ApplicationMaster).outerjoin(
+        models.QARequest, models.ApplicationMaster.qa_request_id == models.QARequest.id,
+    ).filter(models.ApplicationMaster.status == "PENDING_APP_OWNER")
     if not current_user.has_role(Role.ADMIN, Role.VIEW_ONLY):
-        q = q.filter(models.ApplicationMaster.department.in_(current_user.departments))
+        q = q.filter(department_unit_visibility_condition(
+            db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
+        ))
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
     return q.order_by(models.ApplicationMaster.created_at).all()
 
 
@@ -293,15 +378,22 @@ def list_pending_application_names(db: Session = Depends(get_db),
     every department's pending names; an SM only sees their own department's
     (same require_same_department scoping as the decision endpoint below,
     applied here as a filter instead of a hard error)."""
-    q = db.query(models.ApplicationMaster).filter(models.ApplicationMaster.status == "PENDING_SM")
+    q = db.query(models.ApplicationMaster).outerjoin(
+        models.QARequest, models.ApplicationMaster.qa_request_id == models.QARequest.id,
+    ).filter(models.ApplicationMaster.status == "PENDING_SM")
     if not current_user.has_role(Role.ADMIN, Role.VIEW_ONLY):
-        q = q.filter(models.ApplicationMaster.department.in_(current_user.departments))
+        q = q.filter(department_unit_visibility_condition(
+            db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
+        ))
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
     return q.order_by(models.ApplicationMaster.created_at).all()
 
 
 @router.post("/{app_id}/app-owner-decision", response_model=schemas.ApplicationMasterOut)
 def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecision, db: Session = Depends(get_db),
-                           current_user: models.User = Depends(require_roles(Role.APPLICATION_OWNER))):
+                           current_user: models.User = Depends(require_workflow_roles(Role.APPLICATION_OWNER))):
     """Single-tier Application Name approval (2026-08 v2). Reported directly:
     "only application owner approval required, no SM involvement. if
     application owner approved then automatically come to SM for readiness
@@ -340,7 +432,15 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
     obj = db.query(models.ApplicationMaster).get(app_id)
     if not obj:
         raise HTTPException(404, "Application name not found")
+    require_department_visibility(
+        current_user, obj.department,
+        entity_workspace_id=obj.qa_request.qa_workspace_id if obj.qa_request else None,
+    )
     require_same_department(current_user, obj.department)
+    require_department_unit_action_scope(
+        db, current_user, obj.department,
+        obj.qa_request.department_unit_id if obj.qa_request else None,
+    )
     if obj.status != "PENDING_APP_OWNER":
         raise HTTPException(
             400,
@@ -404,7 +504,7 @@ def decide_app_owner_name(app_id: int, payload: schemas.ApplicationMasterDecisio
 
 @router.post("/{app_id}/decision", response_model=schemas.ApplicationMasterOut)
 def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecision, db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(Role.SM))):
+                             current_user: models.User = Depends(require_workflow_roles(Role.SM))):
     """LEGACY-ONLY as of 2026-08 v2 (see decide_app_owner_name's own
     docstring -- reported directly: "only application owner approval
     required, no SM involvement"). Application Owner approval is now
@@ -425,7 +525,15 @@ def decide_application_name(app_id: int, payload: schemas.ApplicationMasterDecis
     obj = db.query(models.ApplicationMaster).get(app_id)
     if not obj:
         raise HTTPException(404, "Application name not found")
+    require_department_visibility(
+        current_user, obj.department,
+        entity_workspace_id=obj.qa_request.qa_workspace_id if obj.qa_request else None,
+    )
     require_same_department(current_user, obj.department)
+    require_department_unit_action_scope(
+        db, current_user, obj.department,
+        obj.qa_request.department_unit_id if obj.qa_request else None,
+    )
     if obj.status == "PENDING_APP_OWNER":
         raise HTTPException(
             400,

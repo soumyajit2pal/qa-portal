@@ -95,18 +95,22 @@ const MANUAL_TOPICS: ManualTopic[] = [
 
 const ROLE_ROWS = [
   ['Requester', 'Raise QA requests; add request details and evidence; correct returned requests; confirm completion.', 'Own requests and returned actions.'],
+  ['Developer', 'Same portal authority as Requester: raise and own QA requests, correct returned work, and confirm completion.', 'Own requests and returned actions.'],
   ['Business Analyst', 'Raise QA requests and provide business or requirement context.', 'Request initiation.'],
   ['Application Owner', 'Approve or reject a newly proposed application name for the same department.', 'Same-department application-name decisions.'],
   ['SM', 'Review the requester’s submission before Department Head review.', 'Same department; cannot approve their own request.'],
-  ['Chief Manager / AGM – Department', 'Approve or return a request and assign a COE - Quality Assurance QA Lead.', 'Business department checkpoint; Department Coordinator access.'],
-  ['QA Engineer (QA)', 'Author test cases, execute assigned work, record results, link defects, and raise QA Clearance.', 'COE - Quality Assurance working role.'],
+  ['Chief Manager / AGM – Department', 'Approve or return a request and assign a QA Lead.', 'Business department approval role. Local administration is assigned separately.'],
+  ['QA Engineer (QA)', 'Author test cases, execute assigned work, record results, link defects, and raise QA Clearance.', 'QA role within an assigned workspace.'],
   ['QA Lead', 'Verify readiness, assign QA/Security work, review test cases, manage testing, and approve QA Clearance.', 'Cross-department QA delivery role.'],
-  ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'COE - Quality Assurance security delivery role.'],
-  ['Chief Manager / AGM – COE', 'Approve QA Clearance and coordinate QA-team working roles.', 'COE - Quality Assurance governance role; Department Coordinator access.'],
+  ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'Security QA role within an assigned workspace.'],
+  ['Chief Manager / AGM – QA', 'Approve QA Clearance and provide executive QA oversight.', 'QA governance role. Local administration is assigned separately.'],
+  ['Scale 6+', 'Browse organisation-wide governed data with the privileged visibility granted by a System Administrator.', 'Confidential system role; workspace membership and workflow authority remain separately controlled.'],
   ['View Only', 'Browse organisation-wide requests, testing records, dashboards, and reports without changing workflow data.', 'Cross-department read access; Document Portal requires a separate Document Portal role.'],
-  ['Document Portal Viewer', 'Browse, search, and download files or folder/selection ZIP files.', 'Document Portal only when this is the account’s only role.'],
-  ['Document Portal Contributor', 'Viewer capabilities plus create folders, upload, rename, and move documents.', 'Document Portal only when this is the account’s only role; deletion is disabled.'],
-  ['Document Portal Manager', 'Same controlled repository capabilities as Contributor in the current portal.', 'Document Portal only when this is the account’s only role; deletion is disabled.'],
+  ['Parent Workspace Viewer', 'View the parent and every active direct child without changing business or workspace data.', 'Assigned on one non-default top-level workspace.'],
+  ['Parent Workspace Admin', 'View every active direct child and manage its direct members.', 'Workspace names, hierarchy, status, routing, and coordinator assignments remain under System Administrator control.'],
+  ['Document Portal Viewer', 'Browse, search, and download files or folder/selection ZIP files.', 'May be combined with a portal business role; a dedicated account opens directly in Document Portal.'],
+  ['Document Portal Contributor', 'Viewer capabilities plus create folders, upload, rename, and move documents.', 'May be combined with a portal business role; deletion remains restricted to Managers.'],
+  ['Document Portal Manager', 'Contributor capabilities plus delete documents and folders.', 'May be combined with a portal business role.'],
   ['Administrator', 'Manage all accounts, departments, privileged roles, checklist configuration, and system-wide access.', 'System-wide; assign only when operationally required.'],
 ]
 
@@ -295,7 +299,7 @@ export default function Help() {
               </div>
               <div className="help-rule-grid">
                 <article><strong>Business approvals</strong><p>SM and Department Head decisions are normally limited to the requester’s department.</p></article>
-                <article><strong>QA delivery</strong><p>QA Lead, QA Engineer, and Security Analyst work across requester departments but are governed as the COE - Quality Assurance team.</p></article>
+                <article><strong>QA delivery</strong><p>QA Lead, QA Engineer, and Security Analyst work across requester departments but work within the currently selected workspace.</p></article>
                 <article><strong>Assigned work</strong><p>Some actions require both the correct role and assignment to that request, test case, or execution.</p></article>
                 <article><strong>Self-approval</strong><p>Holding an approval role does not allow a user to approve a request they created where separation of duties is enforced.</p></article>
               </div>
@@ -325,14 +329,14 @@ export default function Help() {
               <h3 className="help-subheading">Who manages which roles?</h3>
               <div className="help-card-grid three">
                 <article><IconUsers /><h3>System Administrator</h3><p>Creates accounts; changes departments; assigns Administrator, Department Head, and Executive  roles; manages protected accounts.</p></article>
-                <article><IconApprove /><h3>Business Department Coordinator</h3><p>A Department Head can assign Requester, Business Analyst, Application Owner, and SM roles to users in their own department.</p></article>
-                <article><IconShield /><h3>QA Department Coordinator</h3><p>An Executive  can assign QA Engineer, QA Lead, and Security Analyst roles to users mapped to COE - Quality Assurance.</p></article>
+                <article><IconApprove /><h3>Department Coordinator</h3><p>Reviews first-login access requests for an assigned department and manages working roles for its existing workspace members. An assignment on a parent workspace also applies in its active children.</p></article>
+                <article><IconShield /><h3>Scoped control</h3><p>Coordinators cannot change departments, workspace structure, protected roles, or ordinary workspace membership.</p></article>
               </div>
               <h3 className="help-subheading">SOP: create or change user access</h3>
               <SopSteps items={[
                 { title: 'Validate the access request', text: 'Confirm the user’s identity, department, employment status, requested responsibilities, approver, and effective period.' },
-                { title: 'Find or create the account', text: 'System Administrators use Users & Access. Department Coordinators search their department roster and manage an existing eligible user.' },
-                { title: 'Set the correct department', text: 'Department mapping must be correct before roles are assigned. Business approvals use this mapping; QA delivery roles must be mapped to COE - Quality Assurance.' },
+                { title: 'Review first-login requests', text: 'After a new LDAP user selects a department, its Coordinator sees the request under Pending role reviews. Select at least one permitted role and an eligible destination workspace, then approve to place the user there and release the login gate. A coordinator assigned at a parent workspace may choose that parent or any active child; a child-only coordinator remains limited to that child.' },
+                { title: 'Set the correct department', text: 'Department mapping controls business approvals. QA delivery additionally requires the appropriate permission profile and workspace membership.' },
                 { title: 'Assign all required roles', text: 'Select every approved role chip. Existing roles outside a Department Coordinator’s assignable scope are preserved and cannot be removed from that page.' },
                 { title: 'Apply document-only access deliberately', text: 'Only a System Administrator assigns Document Portal Viewer, Contributor, or Manager. An account holding only document roles is limited to Document Portal; other navigation routes show an access message.' },
                 { title: 'Confirm and verify', text: 'Review the confirmation, save, then search for the user again and verify department, roles, login type, and Active status.' },
@@ -397,10 +401,10 @@ export default function Help() {
               <Workflow label="Suppression / false positive" steps={['Requester', 'SM', 'Department Head', 'Security verification', 'Done / Rejected']} />
               <Workflow label="QA Clearance" steps={['QA Engineer raises', 'QA Lead approves', 'Executive approves', 'Issued']} />
               <div className="help-rule-grid">
-                <article><strong>Functional</strong><p>The Department Head assigns a COE - Quality Assurance QA Lead. The QA Lead verifies readiness and assigns one or more QA Testers.</p></article>
-                <article><strong>Performance</strong><p>The Department Head assigns COE - Quality Assurance for readiness; QA owns planning, execution, analysis, reporting, and clearance.</p></article>
-                <article><strong>SAST / DAST</strong><p>The QA Lead performs Security Readiness and assigns a COE - Quality Assurance Security Analyst for scan execution and findings.</p></article>
-                <article><strong>QA Clearance</strong><p>Only COE - Quality Assurance can raise the request. It follows QA Engineer → QA Lead → Executive , with no SM stage.</p></article>
+                <article><strong>Functional</strong><p>The Department Head assigns a QA Lead from the active workspace. The QA Lead verifies readiness and assigns one or more QA Testers.</p></article>
+                <article><strong>Performance</strong><p>The Department Head sends the request to the active workspace QA team; QA owns planning, execution, analysis, reporting, and clearance.</p></article>
+                <article><strong>SAST / DAST</strong><p>The QA Lead performs Security Readiness and assigns a Security Analyst from the active workspace for scan execution and findings.</p></article>
+                <article><strong>QA Clearance</strong><p>Only users with an eligible QA role in the active workspace can raise the request. It follows QA Engineer → QA Lead → Executive , with no SM stage.</p></article>
               </div>
             </ManualSection>
           )}
@@ -454,7 +458,7 @@ export default function Help() {
                 { title: 'Enter repository details consistently', text: 'For SAST repository scope, enter each repository as its own structured row with Repository URL, Branch, Commit ID, Technology Stack, and Build Number. Use Add repository only when the project spans more than one repository.' },
                 { title: 'Review import results', text: 'The completion dialog identifies created and skipped rows and gives a reason for each issue. The uploaded xlsx is parsed in memory; the source workbook is not retained in document storage.' },
                 { title: 'Submit for QA recommendation', text: 'A new or materially updated testcase moves to Pending QA Recommendation and cannot be used in a cycle until final approval.' },
-                { title: 'Two-stage group approval', text: 'Stage 1 is shared by the eligible QA Group except the author. After recommendation, Stage 2 moves to the QA Lead Group for final approval, return, or rejection. The status filter shows this current workflow; retired reviewer-assignment statuses remain visible only on historical records.' },
+                { title: 'Two-stage group approval', text: 'Stage 1 is shared by eligible QA Group members except the author or submitter. After recommendation, Stage 2 moves to the QA Lead Group for final approval, return, or rejection. An Administrator can intervene to recover a blocked workflow.' },
                 { title: 'Use check-out for editing', text: 'Check Out reserves the case so others know it is being edited. Save the work, then Check In to release the editing reservation.' },
                 { title: 'Maintain in bulk', text: 'Use tags to filter matching test cases. Bulk update can change Test Type, Folder, Module Name, and Priority. Confirm the selected count before bulk update or delete.' },
               ]} />
@@ -480,19 +484,19 @@ export default function Help() {
               <h3 className="help-subheading">Execution SOP</h3>
               <SopSteps items={[
                 { title: 'Organize cycles into folders', text: 'Create a Test Cycle Folder to group related cycles, then create cycles under it (or leave a cycle Unfiled). A folder starts open to everyone with project access; use Manage Access to restrict it to specific departments and/or users—once at least one grant exists, only those departments/users (plus QA Lead Group, QA Engineer, the project owner, and the folder’s creator) can see that folder and its cycles. Folder deletion requires the same governance-tier role as other destructive QA Lead Group actions, and only an empty folder can be deleted.' },
-                { title: 'Create or edit a test cycle', text: 'Choose an active project and provide the mandatory start and end dates. You can also define the cycle scope, place it in a folder, and optionally link it to a child Functional, SAST, DAST, or Performance request ID. Existing cycles can be edited.' },
+                { title: 'Create or edit a test cycle', text: 'Choose an active project and provide the mandatory start and end dates. You can define the cycle scope, place it in a folder, and run it as a standalone cycle. Linking a Functional QA Request is optional and can be done later.' },
                 { title: 'Add approved test cases', text: 'Open Add Test Cases to load approved candidates on demand. Search and move through cursor-based pages, select individual rows, or use Select all matching. Already-linked and unapproved cases are excluded by the database.' },
                 { title: 'Mark the cycle ready', text: 'A cycle can move from Draft to Ready once it has at least one approved testcase and valid dates. Testcases do not all need to be assigned at this stage.' },
-                { title: 'Assign runners', text: 'While the cycle is Ready, assign each testcase before its execution attempt. Any COE - Quality Assurance QA Engineer or QA Lead can assign or reassign cases to an eligible active QA Engineer or QA Lead.' },
+                { title: 'Assign runners', text: 'While the cycle is Ready, assign each testcase before its execution attempt. Existing Test Management permissions determine who can assign or reassign cases; the selected runner must be an eligible active QA Engineer in the workspace.' },
                 { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. An In Progress cycle can be blocked with a mandatory reason and resumed. Completion remains blocked until every testcase has an execution result; Completed is final.' },
                 { title: 'Execute an attempt', text: 'While the cycle is In Progress, the assigned runner opens the test case, reviews all repository details, and records status, actual result, comments, and evidence.' },
                 { title: 'Use rich Actual Result', text: 'Format text, add bullets, paste images, or upload supported images. Keep results specific enough for another person to reproduce.' },
                 { title: 'Link defects', text: 'For Fail or Blocked outcomes, add the defect reference and explain the observed behavior. Use a new execution attempt for retest history rather than overwriting evidence. Link existing defect also accepts a governed defect that already has a primary execution elsewhere -- it is added as an additional trace on this execution too, without moving its original link.' },
                 { title: 'Operate in bulk', text: 'Use bulk assignment, execution, or removal after checking the confirmation summary. Adding more than 500 testcases, Excel imports, and lifecycle/repository exports run as background jobs so the page does not wait on one long API request.' },
-                { title: 'Maintain request links', text: 'Link or unlink a child request from either Functional Request details or Test Lifecycle while the cycle remains active.' },
+                { title: 'Maintain request links', text: 'A standalone cycle can be linked to a Functional QA Request from either Functional Request details or Test Lifecycle. Before Functional execution starts, the link can also be changed or removed. Once execution starts, the link is locked to preserve traceability.' },
               ]} />
               <Callout title="My Executions is a QA-only personal queue">
-                My Executions is visible only to users in the COE - Quality Assurance group. It shows the signed-in user’s assigned execution items; use Open cycle for the full cycle context. Non-QA users do not see the menu and cannot open the route.
+                My Executions is visible only to users with an execution role in the active workspace. It shows the signed-in user’s assigned execution items; use Open cycle for the full cycle context. Non-QA users do not see the menu and cannot open the route.
               </Callout>
               <h3 className="help-subheading">Assignment and reassignment control</h3>
               <ul className="help-check-list">
@@ -669,7 +673,7 @@ export default function Help() {
                 <div><strong>404 popup / page</strong><span>The record does not exist, was removed, or the ID/route is incorrect.</span><span>Search the full TQA ID, verify the module, and confirm the record still exists.</span></div>
                 <div><strong>Import skipped or failed</strong><span>Duplicate, invalid, missing, unsupported, or unapproved data.</span><span>Open the issue summary and correct each row using its displayed reason; do not retry unchanged data.</span></div>
                 <div><strong>Upload path error</strong><span>The deployment-controlled upload path is not absolute, writable, or mounted for the backend container.</span><span>Ask the platform administrator to verify UPLOAD_STORAGE_ROOT and the Docker volume/bind mount; this path is not changed from the portal UI.</span></div>
-                <div><strong>Cannot execute</strong><span>Test case is unapproved, project inactive, or runner not assigned.</span><span>Approve the case, reactivate the project if authorized, and assign a COE - Quality Assurance runner.</span></div>
+                <div><strong>Cannot execute</strong><span>Test case is unapproved, project inactive, or runner not assigned.</span><span>Approve the case, reactivate the project if authorized, and assign a runner from the active workspace.</span></div>
               </div>
               <Callout title="Excel import storage">
                 Test-case import workbooks are read in memory and are not retained under the configured upload path. Documents, checklist evidence, execution images, and other retained attachments use the active Admin-configured upload root.

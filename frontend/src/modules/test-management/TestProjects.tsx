@@ -5,10 +5,11 @@ import { formatDateIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { hasRole, QA_LEAD_GROUP_ROLES } from '../../constants'
+import UserAssignSelect from '../../components/UserAssignSelect'
+import { hasRole, isSelectableUser, QA_LEAD_GROUP_ROLES } from '../../constants'
 import {
   ApplicationMasterOut, TestProjectOut, TestProjectSummaryCountsOut, ApprovalActionOut, DepartmentOut,
-  UserOut, PageOut, TestProjectViewGrantOut,
+  UserOut, PageOut, TestProjectViewGrantOut, TestProjectWorkspaceOptionOut,
 } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
@@ -104,11 +105,11 @@ function NewProjectModal({ applications, departments, users, currentUserId, onCl
             who can add/remove other members. Defaults to whoever is creating
             the project. */}
         <Field label="Owner">
-          <SearchableSelect
+          <UserAssignSelect
             value={ownerId === '' ? '' : String(ownerId)}
             onChange={(v) => setOwnerId(v ? Number(v) : '')}
             placeholder="-- Select owner --"
-            options={users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))}
+            users={users.filter(isSelectableUser)}
           />
         </Field>
         <Field label="Description">
@@ -197,11 +198,11 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
           {applicationId !== '' && <small className="muted">Department is controlled by the selected Application.</small>}
         </Field>
         <Field label="Owner">
-          <SearchableSelect
+          <UserAssignSelect
             value={ownerId === '' ? '' : String(ownerId)}
             onChange={(v) => setOwnerId(v ? Number(v) : '')}
             placeholder="-- Select owner --"
-            options={users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))}
+            users={users.filter(isSelectableUser)}
           />
         </Field>
         <Field label="Description">
@@ -234,10 +235,12 @@ function ManageViewAccessModal({ project, departments, onClose }: {
 }) {
   const [grants, setGrants] = useState<TestProjectViewGrantOut[]>([])
   const [allUsers, setAllUsers] = useState<UserOut[]>([])
+  const [workspaces, setWorkspaces] = useState<TestProjectWorkspaceOptionOut[]>([])
   const [loaded, setLoaded] = useState(false)
-  const [grantType, setGrantType] = useState<'department' | 'user'>('department')
+  const [grantType, setGrantType] = useState<'department' | 'user' | 'workspace'>('department')
   const [department, setDepartment] = useState('')
   const [userId, setUserId] = useState('')
+  const [workspaceId, setWorkspaceId] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
 
@@ -248,7 +251,8 @@ function ManageViewAccessModal({ project, departments, onClose }: {
       // list this page otherwise uses -- the whole point of a view grant is
       // reaching someone OUTSIDE the project's own department.
       api.get<UserOut[]>('/api/auth/users'),
-    ]).then(([g, u]) => { setGrants(g); setAllUsers(u); setLoaded(true) }).catch((err) => { setError(err); setLoaded(true) })
+      api.get<TestProjectWorkspaceOptionOut[]>(`/api/test-projects/${project.id}/view-access-workspaces`),
+    ]).then(([g, u, w]) => { setGrants(g); setAllUsers(u); setWorkspaces(w); setLoaded(true) }).catch((err) => { setError(err); setLoaded(true) })
   }, [project.id])
 
   async function addGrant(e: React.FormEvent) {
@@ -256,14 +260,16 @@ function ManageViewAccessModal({ project, departments, onClose }: {
     setError(null)
     if (grantType === 'department' && !department) { setError(new Error('Select a department')); return }
     if (grantType === 'user' && !userId) { setError(new Error('Select a user')); return }
+    if (grantType === 'workspace' && !workspaceId) { setError(new Error('Select a workspace')); return }
     setBusy(true)
     try {
       const created = await api.post<TestProjectViewGrantOut>(`/api/test-projects/${project.id}/view-access`, {
         department: grantType === 'department' ? department : null,
         user_id: grantType === 'user' ? Number(userId) : null,
+        workspace_id: grantType === 'workspace' ? Number(workspaceId) : null,
       })
       setGrants((prev) => [...prev, created])
-      setDepartment(''); setUserId('')
+      setDepartment(''); setUserId(''); setWorkspaceId('')
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
@@ -282,27 +288,26 @@ function ManageViewAccessModal({ project, departments, onClose }: {
   // rather than letting the request round-trip just to show that error.
   const grantedDepartments = new Set(grants.filter((g) => g.department).map((g) => g.department))
   const grantedUserIds = new Set(grants.filter((g) => g.user_id != null).map((g) => g.user_id))
+  const grantedWorkspaceIds = new Set(grants.filter((g) => g.workspace_id != null).map((g) => g.workspace_id))
   const departmentOptions = departments.filter((d) => d.name !== project.department && !grantedDepartments.has(d.name))
-  const userOptions = allUsers.filter((u) => u.is_active && !grantedUserIds.has(u.id)
+  const userOptions = allUsers.filter((u) => isSelectableUser(u) && !grantedUserIds.has(u.id)
     && !(u.departments && u.departments.length ? u.departments : (u.department ? [u.department] : [])).includes(project.department || ''))
+  const workspaceOptions = workspaces.filter((workspace) => !grantedWorkspaceIds.has(workspace.id))
 
   return (
-    <Modal title={`View access — ${project.project_key}`} onClose={onClose}>
+    <Modal title={`Project sharing — ${project.project_key}`} onClose={onClose}>
       <p className="muted small">
-        Everyone in <strong>{project.department || 'this project\'s department'}</strong> already has full access.
-        Grant read-only visibility (Test Execution, Test Repository, Test Reports, and Defects) to another
-        department or a specific user -- useful when this project is cross-departmental and another team just
-        needs to know its status.
+        Sharing with a workspace lets eligible users create test cases and cycles. Each workspace can change only its own records; other workspaces’ records remain read-only. Sharing with an individual user or department grants viewing access only.
       </p>
       {!loaded ? <p className="muted">Loading...</p> : (
         <div className="tm-view-access-list">
-          {grants.length === 0 && <p className="muted small">No view-only access granted yet.</p>}
+          {grants.length === 0 && <p className="muted small">No access granted yet.</p>}
           {grants.map((grant) => (
             <div key={grant.id} className="tm-view-access-row">
               <span>
-                {grant.department ? <><strong>{grant.department}</strong> <small className="muted">(department)</small></> : (
-                  <><strong>{grant.user_name || `User #${grant.user_id}`}</strong> <small className="muted">(user)</small></>
-                )}
+                {grant.department ? <><strong>{grant.department}</strong> <small className="muted">(department)</small></>
+                  : grant.workspace_id ? <><strong>{grant.workspace_name || `Workspace #${grant.workspace_id}`}</strong> <small className="muted">(workspace)</small></>
+                  : <><strong>{grant.user_name || `User #${grant.user_id}`}</strong> <small className="muted">(user)</small></>}
               </span>
               <button type="button" className="btn btn-sm btn-danger" disabled={busy} onClick={() => removeGrant(grant)}>Remove</button>
             </div>
@@ -313,14 +318,19 @@ function ManageViewAccessModal({ project, departments, onClose }: {
         <div className="pill-tabs" style={{ marginBottom: 10 }}>
           <button type="button" className={grantType === 'department' ? 'active' : ''} onClick={() => setGrantType('department')}>Department</button>
           <button type="button" className={grantType === 'user' ? 'active' : ''} onClick={() => setGrantType('user')}>Particular user</button>
+          <button type="button" className={grantType === 'workspace' ? 'active' : ''} onClick={() => setGrantType('workspace')}>Workspace</button>
         </div>
         {grantType === 'department' ? (
           <Field label="Department">
             <SearchableSelect value={department} onChange={setDepartment} placeholder="Select department…" options={departmentOptions.map((d) => ({ value: d.name, label: d.name }))} />
           </Field>
-        ) : (
+        ) : grantType === 'user' ? (
           <Field label="User">
-            <SearchableSelect value={userId} onChange={setUserId} placeholder="Select user…" options={userOptions.map((u) => ({ value: String(u.id), label: `${u.full_name} (${u.department || 'no department'})` }))} />
+            <UserAssignSelect value={userId} onChange={setUserId} placeholder="Select user…" users={userOptions} />
+          </Field>
+        ) : (
+          <Field label="Workspace">
+            <SearchableSelect value={workspaceId} onChange={setWorkspaceId} placeholder="Select workspace…" options={workspaceOptions.map((workspace) => ({ value: String(workspace.id), label: `${workspace.name} (${workspace.workspace_key})` }))} />
           </Field>
         )}
         <ErrorText error={error} />
@@ -461,7 +471,7 @@ export default function TestProjects() {
         api.get<ApplicationMasterOut[]>('/api/application-names'),
         api.get<DepartmentOut[]>('/api/departments'),
         // Test Management-scoped picker -- see constants.
-        // TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS on the backend; do not swap
+        // the selected workspace on the backend; do not swap
         // this back to the app-wide /api/auth/users list.
         api.get<UserOut[]>('/api/test-projects/eligible-users'),
         api.get<TestProjectSummaryCountsOut[]>('/api/test-projects/summary-counts?include_inactive=true'),
@@ -604,10 +614,10 @@ export default function TestProjects() {
               <span className="tm-project-key">{project.project_key}</span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 {project.shared_with_you && (
-                  <span className="badge badge-blue" title="The project owner or an authorized project manager shared view access with you or your department.">Shared with you</span>
+                  <span className="badge badge-blue" title="The project owner or an authorized project manager shared view access with you, your department, or your active workspace.">Shared with you</span>
                 )}
                 {project.view_only && (
-                  <span className="badge badge-gray" title="You can see this project's Test Execution/Repository/Reports/Defects, but only a Department Head, QA Lead, or Admin from its own department can manage it.">View only</span>
+                  <span className="badge badge-gray" title="You can see this project's Test Execution/Repository/Reports/Defects, but only a Department Head, QA Lead, or Admin from its own department can manage it.">Project settings read-only</span>
                 )}
                 <Badge status={project.is_archived ? 'Archived' : project.is_active ? 'Active' : 'Inactive'} />
               </span>
@@ -619,8 +629,6 @@ export default function TestProjects() {
               <div><strong>{summaries[project.id]?.cycles ?? '—'}</strong><span>Test cycles</span></div>
               <div><strong>{project.department || '—'}</strong><span>Department</span></div>
               <div><strong>{project.owner_name || '—'}</strong><span>Owner</span></div>
-              <div><strong>{project.default_reviewer_name || '—'}</strong><span>Default Reviewer</span></div>
-              <div><strong>{project.default_qa_lead_name || '—'}</strong><span>Default CM-QA</span></div>
             </div>
             {project.is_archived && (
               <div className="info-banner">
@@ -646,7 +654,7 @@ export default function TestProjects() {
                     <button onClick={() => setEditProject(project)}>Edit project</button>
                   )}
                   {!project.view_only && canEditProjectDetails(user, project) && (
-                    <button onClick={() => setViewAccessProject(project)}>View access…</button>
+                    <button onClick={() => setViewAccessProject(project)}>Share project…</button>
                   )}
                   {!project.is_archived && !project.view_only && (project.pending_is_active != null ? (
                     canReview && (

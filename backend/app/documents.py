@@ -6,6 +6,9 @@ Performance/Suppression/Sign-off and rich comment images so each supports upload
 documents after the request has been raised, without repeating the same
 storage/table plumbing 6 times -- see models.RequestDocument for the shared
 table and why its (module, request_id) keying is collision-safe."""
+import json
+from pathlib import Path
+import logging
 import os
 import shutil
 import uuid
@@ -91,37 +94,55 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
     os.makedirs(request_dir, exist_ok=True)
 
     created = []
-    for f in files:
-        original_name = os.path.basename(f.filename or "unnamed_file")
-        dest_path = os.path.join(request_dir, original_name)
-        if os.path.exists(dest_path):
-            stem, ext = os.path.splitext(original_name)
-            original_name = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
+    written_paths = []
+    try:
+        for f in files:
+            original_name = os.path.basename(f.filename or "unnamed_file")
             dest_path = os.path.join(request_dir, original_name)
+            if os.path.exists(dest_path):
+                stem, ext = os.path.splitext(original_name)
+                original_name = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
+                dest_path = os.path.join(request_dir, original_name)
 
-        with open(dest_path, "wb") as out:
-            shutil.copyfileobj(f.file, out)
+            with open(dest_path, "xb") as out:
+                written_paths.append(dest_path)
+                shutil.copyfileobj(f.file, out)
 
-        doc = models.RequestDocument(
-            module=module, request_id=request_id,
-            file_name=f.filename or original_name,
-            stored_path=os.path.join(folder_name, module, original_name),
-            content_type=f.content_type,
-            file_size=os.path.getsize(dest_path),
-            uploaded_by_id=uploaded_by_id,
-        )
-        db.add(doc)
-        created.append(doc)
+            doc = models.RequestDocument(
+                module=module, request_id=request_id,
+                file_name=f.filename or original_name,
+                stored_path=os.path.join(folder_name, module, original_name),
+                content_type=f.content_type,
+                file_size=os.path.getsize(dest_path),
+                uploaded_by_id=uploaded_by_id,
+            )
+            db.add(doc)
+            created.append(doc)
 
-    if created:
-        names = ", ".join(d.file_name for d in created)
-        suffix = f" to {log_label}" if log_label else ""
-        _log_document_action(
-            db, log_entity_type, log_entity_id, log_actor, "Uploaded",
-            f"Uploaded {len(created)} file{'s' if len(created) != 1 else ''}{suffix}: {names}",
-        )
+        if created:
+            names = ", ".join(d.file_name for d in created)
+            suffix = f" to {log_label}" if log_label else ""
+            _log_document_action(
+                db, log_entity_type, log_entity_id, log_actor, "Uploaded",
+                f"Uploaded {len(created)} file{'s' if len(created) != 1 else ''}{suffix}: {names}",
+            )
 
-    db.commit()
+        db.commit()
+    except Exception:
+        # A lost connection can make the commit outcome uncertain. Remove
+        # bytes only after the database confirms no committed row uses them.
+        try:
+            db.rollback()
+            for path in written_paths:
+                stored_path = os.path.relpath(path, upload_root)
+                if db.query(models.RequestDocument).filter_by(stored_path=stored_path).first() is None:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        logging.getLogger(__name__).exception("Could not clean up failed upload %s", path)
+        except Exception:
+            logging.getLogger(__name__).exception("Upload outcome uncertain; preserving files for reconciliation")
+        raise
     for d in created:
         db.refresh(d)
     return created
@@ -237,10 +258,37 @@ def delete_document(db: Session, doc: models.RequestDocument,
     an "Removed" ApprovalAction. file_name is captured before the row is
     deleted so the log message still names the file afterward."""
     path = full_path(doc)
-    if os.path.exists(path):
-        os.remove(path)
+    journal_dir = Path(get_upload_root()) / '.document-deletions'
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    journal = journal_dir / (uuid.uuid4().hex + '.json')
+    # Persist intent first. Recovery checks the DB row before deleting bytes,
+    # so a crash before commit cannot destroy an existing document.
+    with journal.open('x') as handle:
+        json.dump({'id': doc.id, 'stored_path': doc.stored_path}, handle)
     file_name = doc.file_name
     db.delete(doc)
     suffix = f" from {log_label}" if log_label else ""
     _log_document_action(db, log_entity_type, log_entity_id, log_actor, "Removed", f"Removed {file_name}{suffix}")
     db.commit()
+    try:
+        Path(path).unlink(missing_ok=True)
+        journal.unlink(missing_ok=True)
+    except OSError:
+        logging.getLogger(__name__).exception("Committed document deletion queued for cleanup: %s", path)
+
+
+def cleanup_deleted_documents(db: Session) -> int:
+    """Recover committed file deletions after a crash or temporary I/O failure."""
+    cleaned = 0
+    for journal in (Path(get_upload_root()) / '.document-deletions').glob('*.json'):
+        try:
+            data = json.loads(journal.read_text())
+            if db.get(models.RequestDocument, data['id']) is not None:
+                continue  # The delete did not commit (or is still in flight).
+            path = resolve_upload_path(data['stored_path'])
+            Path(path).unlink(missing_ok=True)
+            journal.unlink(missing_ok=True)
+            cleaned += 1
+        except (OSError, ValueError, KeyError):
+            logging.getLogger(__name__).exception("Document cleanup deferred: %s", journal)
+    return cleaned

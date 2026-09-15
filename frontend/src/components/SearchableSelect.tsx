@@ -11,6 +11,7 @@ export interface SearchableSelectOption {
 interface SearchableSelectProps {
   value: string
   onChange: (value: string) => void
+  ariaLabel?: string
   // Either a flat list of strings (value and label are the same -- e.g.
   // Department) or {value, label} pairs for anything id-keyed (e.g. a
   // Test Project/Folder picker, where the option's real value is a numeric
@@ -47,7 +48,7 @@ function normalize(options: string[] | SearchableSelectOption[]): SearchableSele
 // Short, fixed-size enums (Priority, Risk, Status, Environment and the like)
 // use `searchable={false}` so they keep this same visual and interaction
 // pattern without displaying an unnecessary search field.
-export default function SearchableSelect({ value, onChange, options, placeholder, disabled, searchable = true, autoOpen = false, style }: SearchableSelectProps) {
+export default function SearchableSelect({ value, onChange, options, ariaLabel, placeholder, disabled, searchable = true, autoOpen = false, style }: SearchableSelectProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [panelPos, setPanelPos] = useState<PanelPos>({ top: 0, bottom: 'auto', left: 0, width: 0 })
@@ -141,6 +142,8 @@ export default function SearchableSelect({ value, onChange, options, placeholder
         ref={triggerRef}
         type="button"
         className="searchable-select-trigger"
+        aria-label={ariaLabel || placeholder || 'Select option'}
+        aria-expanded={open}
         title={current?.label}
         disabled={disabled}
         onClick={toggleOpen}

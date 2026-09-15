@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from './WorkflowStatusBadge'
 import React, { useId, useState } from 'react'
 import { DashboardAttentionOut } from '../types'
 import { Badge } from './Common'
@@ -57,7 +58,7 @@ export default function ActiveProjectsBrowser({ data, loading, onLoad, onOpen, f
               <section id={panelId} hidden={!expanded} className="ap-inline-requests" aria-label={`Requests for ${project.project_id}`}>
                 {(project.linked_requests || []).map((request) => <div className="ap-request" key={request.id}>
                   <strong>{request.request_id}</strong>
-                  <Badge status={request.status} />
+                  <WorkflowStatusBadge record={project} status={request.status} />
                   <button type="button" className="ap-open-request" disabled={loading}
                     aria-label={`Open request ${request.request_id}`} title={`Open ${request.request_id}`}
                     onClick={() => onOpen(request.route)}>Open <IconArrowRight /></button>

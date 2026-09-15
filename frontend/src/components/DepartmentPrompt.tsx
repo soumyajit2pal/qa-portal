@@ -55,11 +55,12 @@ export default function DepartmentPrompt() {
       <p className="muted small" style={{ marginTop: -4, marginBottom: 16 }}>
         Hi {user?.full_name || 'there'} — this is your first time signing in. Select your department below so an
         Administrator or Department Coordinator can review your access request and assign the correct role. Choose
-        only your primary department. If you work across departments, an Administrator can add secondary departments later.
+        only your home department. Your workspace controls which projects and records you can access; an Administrator
+        can add you to another workspace when needed.
       </p>
       <form onSubmit={save}>
         <section className="ldap-department-picker">
-          <header><div><small>Organisation access</small><h3>Select your primary department</h3><p>You can choose one department during first-time setup.</p></div><strong>{selected ? '1 selected' : 'Required'}</strong></header>
+          <header><div><small>Organisation profile</small><h3>Select your home department</h3><p>This records your organisation unit for approvals. Your workspace controls data access.</p></div><strong>{selected ? '1 selected' : 'Required'}</strong></header>
           <label><IconSearch width={15} height={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search departments…" /></label>
           <div className="ldap-department-options">{visibleDepartments.map((department) => {
             const isSelected = selected === department.name

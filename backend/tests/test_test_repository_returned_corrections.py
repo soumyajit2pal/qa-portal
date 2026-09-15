@@ -44,7 +44,7 @@ def test_non_returned_draft_keeps_existing_team_editing_behavior():
     _require_returned_correction_owner(draft, SimpleNamespace(id=22))
 
 
-def test_author_resubmission_makes_returning_reviewer_eligible_again():
+def test_author_resubmission_returns_work_to_role_group():
     author_id = 11
     returning_reviewer_id = 22
     draft_values = {field: None for field in _CONTENT_FIELDS}
@@ -60,8 +60,8 @@ def test_author_resubmission_makes_returning_reviewer_eligible_again():
         qa_lead_decided_by_id=None,
         qa_lead_decided_at=None,
         qa_lead_decision_comments=None,
-        assigned_reviewer_id=None,
-        assigned_qa_lead_id=None,
+        assigned_reviewer_id=22,
+        assigned_qa_lead_id=33,
         version_major=1,
         version_minor=0,
         **draft_values,
@@ -84,3 +84,5 @@ def test_author_resubmission_makes_returning_reviewer_eligible_again():
     assert draft.reviewed_by_id is None
     assert case.checked_out_by_id is None
     assert returning_reviewer_id not in {draft.author_id, draft.submitted_by_id}
+    assert draft.assigned_reviewer_id is None
+    assert draft.assigned_qa_lead_id is None

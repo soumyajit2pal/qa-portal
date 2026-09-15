@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../components/WorkflowStatusBadge'
 import { useRequestNavigation } from '../hooks/useRequestNavigation'
 import React, { useCallback, useEffect, useState } from "react";
 import {useLocation} from "react-router-dom"
@@ -12,13 +13,14 @@ import {
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
 import { GATEWAY_PENDING_WITH } from "../constants";
-import { QARequestListOut, QARequestOut, UserOut } from "../types";
+import { QARequestListOut, QARequestOut, UserOut, QAWorkspaceOut } from "../types";
 import { classificationSummary, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
 import { RequestDetail } from "./RequestDetail";
 import ClearableSearchInput from "../components/ClearableSearchInput";
 import RaisedHistoryFilter from "../components/RaisedHistoryFilter";
 import { usePaginatedList } from "../hooks/usePaginatedList";
+import { useAuth } from "../context/AuthContext";
 
 type LinkedRequestKind = "Functional QA" | "SAST" | "DAST" | "Performance" | "Clearance";
 
@@ -63,10 +65,12 @@ function linkedRequestsFor(row: QARequestListOut): LinkedRequestSearchResult[] {
 // (RequestDetail). See ./buildSteps.ts, ./validation.ts and ./steps/* for how
 // the wizard itself is put together.
 export default function QARequests() {
+  const { user } = useAuth();
   const location = useLocation();
   const navigate = useRequestNavigation();
   const searchParams = new URLSearchParams(location.search);
   const [users, setUsers] = useState<UserOut[]>([]);
+  const [workspaces, setWorkspaces] = useState<QAWorkspaceOut[]>([]);
   const [assignedOnly, setAssignedOnly] = useState(false);
   const [raisedHistory, setRaisedHistory] = useState({ from: "", to: "" });
   const [search, setSearch] = useState(
@@ -114,7 +118,8 @@ export default function QARequests() {
 
   useEffect(() => {
     api.get<UserOut[]>("/api/auth/users").then(setUsers).catch(setError);
-  }, []);
+    if (user?.roles.includes('ADMIN')) api.get<QAWorkspaceOut[]>('/api/workspaces').then(setWorkspaces).catch(setError);
+  }, [user?.id]);
 
   // Keep statuses current without asking users to refresh the browser. A
   // successful mutation in this tab updates immediately; a conservative
@@ -319,6 +324,34 @@ export default function QARequests() {
             },
             { key: "application_name", header: "Application" },
             {
+              key: "department",
+              header: "Department scope",
+              render: (r) => r.department || '—',
+              filterValue: (r) => r.department || '',
+            },
+            {
+              key: "qa_workspace",
+              header: "Workspace",
+              render: (r) => {
+                const needsRouting = !r.qa_workspace_id || ['PENDING', 'AMBIGUOUS', 'ROUTING_REQUIRED'].includes(r.workspace_routing_status);
+                if (needsRouting && user?.roles.includes('ADMIN')) return <select
+                  aria-label={`Move ${r.request_id || `Draft ${r.id}`} to workspace`}
+                  defaultValue=""
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={async (event) => {
+                    event.stopPropagation();
+                    if (!event.target.value) return;
+                    try {
+                      await api.patch(`/api/workspaces/requests/${r.id}/route`, { workspace_id: Number(event.target.value) });
+                      reload();
+                    } catch (err) { setError(err); }
+                  }}
+                ><option value="">Routing required…</option>{workspaces.filter((workspace) => workspace.is_active).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select>;
+                return <span className={`badge ${needsRouting ? 'badge-yellow' : 'badge-blue'}`}>{r.qa_workspace_name || 'Routing required'}</span>;
+              },
+              filterValue: (r) => r.qa_workspace_name || r.workspace_routing_status,
+            },
+            {
               key: "cr_number",
               header: "CR Number/EPIC Number",
               // Reported directly: "why CR number is blank, though input is
@@ -350,8 +383,9 @@ export default function QARequests() {
                 return (
                   <div className="cr-linked-records">
                     {linked.map((item) => (
-                      <button
-                        type="button"
+                      <div
+                        role="button" tabIndex={0}
+                        onKeyDown={event => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); event.currentTarget.click() } }}
                         className="cr-linked-record"
                         key={item.key}
                         onClick={(event) => openLinkedRequest(event, item)}
@@ -359,8 +393,8 @@ export default function QARequests() {
                       >
                         <span>{item.kind}</span>
                         <strong>{item.request.request_id}</strong>
-                        <Badge status={item.request.status} />
-                      </button>
+                        <WorkflowStatusBadge record={r} status={item.request.status} />
+                      </div>
                     ))}
                   </div>
                 );
@@ -394,7 +428,7 @@ export default function QARequests() {
             {
               key: "status",
               header: "Status",
-              render: (r) => <Badge status={r.status} />,
+              render: (r) => <WorkflowStatusBadge record={r} status={r.status} />,
             },
             {
               key: "pending_with",

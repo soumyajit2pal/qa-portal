@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
-import { hasRole } from '../constants'
+import { hasWorkflowRole as hasRole } from '../constants'
 import { ErrorText } from './Common'
 
 interface Props {

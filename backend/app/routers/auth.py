@@ -6,7 +6,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from jose import JWTError
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import func
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -16,13 +16,16 @@ from ..audit_service import snapshot_changes, user_snapshot, write_audit
 from ..auth import (
     verify_password, create_access_token, ldap_authenticate, ldap_authenticate_with_profile, LDAPAuthError,
 )
-from ..deps import get_current_user, require_roles, oauth2_scheme
+from ..deps import (
+    get_current_user, require_roles, oauth2_scheme, active_qa_workspace_scope,
+    active_qa_workspace_scope_ids,
+)
 from ..auth import renew_access_token
 from ..constants import (
     Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES,
     DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES, CONFIDENTIAL_ROLES,
     DOCUMENT_PORTAL_ROLES,
-    QA_DEPARTMENT, OTHER_DEPARTMENT,
+    OTHER_DEPARTMENT,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -188,6 +191,8 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         )
         db.add(user)
         try:
+            from ..workspace_service import ensure_default_workspace_membership
+            ensure_default_workspace_membership(db, user)
             db.commit()
             db.refresh(user)
             just_provisioned = True
@@ -347,6 +352,7 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
     _validate_department(db, primary_department)
     before = user_snapshot(current_user)
     _set_user_departments(db, current_user, [primary_department])
+    _set_user_department_units(db, current_user, [])
     current_user.needs_department_selection = False
 
     db.commit()
@@ -367,7 +373,8 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
 
 
 @router.get("/users", response_model=list[schemas.UserOut])
-def list_users(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def list_users(all_workspaces: bool = False, db: Session = Depends(get_db),
+               current_user: models.User = Depends(get_current_user)):
     """Active users only -- used throughout the app for pickers (assign tester, etc.).
     Reachable by any logged-in user, so CONFIDENTIAL_ROLES are redacted from
     every row unless the caller is an Admin -- see _redact_confidential_roles.
@@ -381,7 +388,22 @@ def list_users(db: Session = Depends(get_db), current_user: models.User = Depend
     `/api/application-names`) that were never paginated either -- see
     `list_all_users` below for the actual browsable Admin Users table this
     is not."""
-    rows = db.query(models.User).filter(models.User.is_active == True).order_by(models.User.full_name).all()  # noqa: E712
+    q = db.query(models.User).filter(models.User.is_active == True)  # noqa: E712
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if all_workspaces and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, "Only an Administrator can list users across workspaces")
+    if workspace_ids and not all_workspaces:
+        member_ids = select(models.QAWorkspaceMember.user_id).where(
+            models.QAWorkspaceMember.workspace_id.in_(workspace_ids),
+            models.QAWorkspaceMember.is_active == True,  # noqa: E712
+        )
+        requester_ids = select(models.QARequest.requester_id).where(
+            models.QARequest.qa_workspace_id.in_(workspace_ids),
+            models.QARequest.requester_id.isnot(None),
+        )
+        q = q.filter(or_(models.User.id == current_user.id,
+                         models.User.id.in_(member_ids), models.User.id.in_(requester_ids)))
+    rows = q.order_by(models.User.full_name).all()
     return [_redact_confidential_roles(u, current_user) for u in rows]
 
 
@@ -521,6 +543,34 @@ def _set_user_departments(db: Session, user: models.User, departments: list) -> 
     db.expire(user, ["department_assignments"])
 
 
+def _validated_department_units(db: Session, unit_ids: list[int] | None, departments: list[str]):
+    ids = list(dict.fromkeys(unit_ids or []))
+    if not ids:
+        return []
+    rows = db.query(models.DepartmentUnit).join(models.Department).filter(
+        models.DepartmentUnit.id.in_(ids),
+        models.DepartmentUnit.is_active == True,  # noqa: E712
+        models.Department.is_active == True,  # noqa: E712
+    ).all()
+    if {row.id for row in rows} != set(ids):
+        raise HTTPException(400, "One or more selected department units are invalid or inactive")
+    invalid = [row.name for row in rows if row.department.name not in departments]
+    if invalid:
+        raise HTTPException(400, "Department units must belong to one of the user's assigned departments")
+    by_id = {row.id: row for row in rows}
+    return [by_id[value] for value in ids]
+
+
+def _set_user_department_units(db: Session, user: models.User, units) -> None:
+    for assignment in list(user.department_unit_assignments):
+        db.delete(assignment)
+    db.flush()
+    for unit in units:
+        db.add(models.UserDepartmentUnit(user_id=user.id, unit_id=unit.id))
+    db.flush()
+    db.expire(user, ["department_unit_assignments"])
+
+
 @router.post("/users", response_model=schemas.UserOut)
 def create_user(payload: schemas.UserCreate, request: Request, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.ADMIN))):
@@ -533,6 +583,7 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
     _validate_roles(payload.roles)
     roles = _dedupe_roles(payload.roles)
     departments = _validate_departments(db, _resolve_departments_payload(payload.department, payload.departments))
+    units = _validated_department_units(db, payload.department_unit_ids, departments)
     login_type = payload.login_type or LoginType.STANDARD
     if login_type not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{login_type}'")
@@ -542,12 +593,17 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
     user = models.User(
         username=payload.username, full_name=payload.full_name, email=payload.email,
         department=departments[0] if departments else None, login_type=login_type,
+        show_in_user_dropdowns=payload.show_in_user_dropdowns,
         role_assignments=[models.UserRole(role=r) for r in roles],
         department_assignments=[models.UserDepartment(department=d) for d in departments],
         hashed_password=hash_password(payload.password) if login_type == LoginType.STANDARD else None,
     )
     db.add(user)
     db.flush()
+    if payload.department_unit_ids is not None:
+        _set_user_department_units(db, user, units)
+    from ..workspace_service import ensure_default_workspace_membership
+    ensure_default_workspace_membership(db, user)
     db.commit()
     db.refresh(user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_CREATED", actor=current_user,
@@ -595,12 +651,17 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
     # with department_assignments.
     raw_department = data.pop("department", _UNSET)
     raw_departments = data.pop("departments", _UNSET)
+    raw_unit_ids = data.pop("department_unit_ids", _UNSET)
     new_departments = None
     if raw_departments is not _UNSET:
         new_departments = _validate_departments(db, raw_departments)
     elif raw_department is not _UNSET:
         new_departments = _validate_departments(db, [raw_department] if raw_department else [])
-    # Role assignment is exact.  Being mapped to COE - Quality Assurance is
+    effective_departments = new_departments if new_departments is not None else user.departments
+    new_units = None
+    if raw_unit_ids is not _UNSET:
+        new_units = _validated_department_units(db, raw_unit_ids, effective_departments)
+    # Role assignment is exact.  Workspace membership is
     # an organisational scope, not an implicit grant of QA Engineer or
     # Document Portal access.  This lets an administrator assign an
     # executive-only role (for example AGM - QA) without silently expanding
@@ -615,6 +676,8 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
         setattr(user, k, v)
     if new_departments is not None:
         _set_user_departments(db, user, new_departments)
+    if new_units is not None:
+        _set_user_department_units(db, user, new_units)
     if set(effective_roles) != set(user.roles):
         # Replace the full set of role assignments (not a merge/append).
         # Delete the old rows and flush *before* adding the new ones -- if we
@@ -634,8 +697,17 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
         # An explicit role assignment is exactly the review action the
         # "needs_role_review" flag (set on auto-provisioned LDAP accounts) is
         # waiting for.
+        if effective_roles:
+            user.needs_role_review = False
+    # Re-submitting an already present provisional role is still an explicit
+    # Administrator approval. The review flag, rather than role difference,
+    # is the authoritative onboarding gate.
+    if new_roles is not None and effective_roles:
         user.needs_role_review = False
 
+    if user.is_active:
+        from ..workspace_service import ensure_default_workspace_membership
+        ensure_default_workspace_membership(db, user)
     db.commit()
     db.refresh(user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_ACCESS_UPDATED", actor=current_user,
@@ -668,24 +740,145 @@ def reset_password(user_id: int, payload: schemas.PasswordReset, request: Reques
     return user
 
 
-# ---- Local admin: a Department Head (business departments) or an Executive
-# COE (the QA department) managing their own department's users -- see
-# constants.DEPARTMENT_ADMIN_ASSIGNABLE_ROLES/QA_ADMIN_ASSIGNABLE_ROLES --
-# reduces sole dependency on a System Admin for routine role assignment
-# within one department. Two deliberately narrow endpoints, not a widened
-# version of the Admin-only ones above: a local admin can only ever see/
-# touch users already mapped to their own department, can only assign
-# their own kind's working-level role subset (a business Department Head
-# gets DEPARTMENT_ADMIN_ASSIGNABLE_ROLES; a QA Executive -- who is mapped
-# to constants.QA_DEPARTMENT same as every other QA staffer, so the
-# department-scoping below already confines them to QA -- gets
-# QA_ADMIN_ASSIGNABLE_ROLES instead), can never touch ADMIN/
-# DEPARTMENT_HEAD_CM/DEPARTMENT_HEAD_AGM/CHIEF_MANAGER_QA/AGM_QA on anyone
-# (including roles a target user already holds outside their own assignable
-# subset -- see the "preserved" logic below, which protects the OTHER kind
-# of local admin's roles too), and can never edit their own account this
-# way.
-def _require_own_department_target(current_user: models.User, target: models.User) -> None:
+# ---- Department Coordinator local administration -------------------------
+# The grant is an explicit (user, department, workspace) assignment managed
+# by a System Admin. It is intentionally independent of job title: CM/AGM
+# roles no longer imply local-admin access, and any user may be assigned.
+def _coordinator_assignments_for_active_workspace(
+    db: Session,
+    current_user: models.User,
+) -> list[models.DepartmentCoordinatorAssignment]:
+    workspace_id = getattr(current_user, "active_qa_workspace_id", None)
+    workspace = db.get(models.QAWorkspace, workspace_id) if workspace_id is not None else None
+    if workspace is None or not workspace.is_active:
+        return []
+    applicable_workspace_ids = {workspace.id}
+    if workspace.parent_workspace_id is not None:
+        applicable_workspace_ids.add(workspace.parent_workspace_id)
+    return [
+        assignment for assignment in current_user.department_coordinator_access
+        if assignment.is_active and assignment.workspace_id in applicable_workspace_ids
+    ]
+
+
+def _coordinator_department_names(db: Session, current_user: models.User) -> list[str]:
+    return list(dict.fromkeys(
+        assignment.department_name
+        for assignment in _coordinator_assignments_for_active_workspace(db, current_user)
+        if assignment.department_name
+    ))
+
+
+def _require_department_coordinator(db: Session, current_user: models.User) -> list[str]:
+    departments = _coordinator_department_names(db, current_user)
+    if not departments:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not a Department Coordinator in the active workspace",
+        )
+    return departments
+
+
+def _coordinator_scope_allows(db: Session, current_user: models.User, target: models.User) -> bool:
+    for assignment in _coordinator_assignments_for_active_workspace(db, current_user):
+        if not assignment.department_name:
+            continue
+        if target.has_department(assignment.department_name):
+            return True
+    return False
+
+
+def _coordinator_approval_workspace_rows(
+    db: Session,
+    current_user: models.User,
+) -> list[dict]:
+    """Return direct coordinator workspaces and their active descendants."""
+    assignments = [
+        assignment for assignment in current_user.department_coordinator_access
+        if assignment.is_active and assignment.department_name
+    ]
+    direct_departments: dict[int, set[str]] = defaultdict(set)
+    for assignment in assignments:
+        direct_departments[assignment.workspace_id].add(assignment.department_name)
+    if not direct_departments:
+        return []
+
+    workspaces = db.query(models.QAWorkspace).filter(
+        models.QAWorkspace.is_active == True,  # noqa: E712
+    ).order_by(models.QAWorkspace.name).all()
+    by_id = {workspace.id: workspace for workspace in workspaces}
+    result: list[dict] = []
+    for workspace in workspaces:
+        departments: set[str] = set()
+        current = workspace
+        visited: set[int] = set()
+        while current is not None and current.id not in visited:
+            visited.add(current.id)
+            departments.update(direct_departments.get(current.id, set()))
+            current = by_id.get(current.parent_workspace_id)
+        if departments:
+            result.append({
+                "id": workspace.id,
+                "workspace_key": workspace.workspace_key,
+                "name": workspace.name,
+                "parent_workspace_id": workspace.parent_workspace_id,
+                "coordinator_departments": sorted(departments),
+            })
+    return result
+
+
+def _coordinator_can_place_user_in_workspace(
+    db: Session,
+    current_user: models.User,
+    target: models.User,
+    workspace_id: int,
+) -> bool:
+    """Validate an explicit first-login workspace choice.
+
+    A coordinator may approve into any active workspace where they hold an
+    active coordinator assignment for one of the target user's departments.
+    The choice is not inferred from the page's currently selected workspace.
+    """
+    return any(
+        row["id"] == workspace_id
+        and any(target.has_department(department) for department in row["coordinator_departments"])
+        for row in _coordinator_approval_workspace_rows(db, current_user)
+    )
+
+
+def _coordinator_can_manage_unit(current_user: models.User, unit: models.DepartmentUnit) -> bool:
+    """Return whether a unit sits inside one of the coordinator's active scopes."""
+    workspace_id = getattr(current_user, "active_qa_workspace_id", None)
+    lineage: set[int] = set()
+    current = unit
+    while current and current.id not in lineage:
+        lineage.add(current.id)
+        current = current.parent
+    return any(
+        assignment.workspace_id == workspace_id
+        and assignment.department_id == unit.department_id
+        and (assignment.department_unit_id is None or assignment.department_unit_id in lineage)
+        for assignment in current_user.department_coordinator_access
+    )
+
+
+def _coordinator_has_department_scope(current_user: models.User, department_id: int) -> bool:
+    workspace_id = getattr(current_user, "active_qa_workspace_id", None)
+    return any(
+        assignment.workspace_id == workspace_id
+        and assignment.department_id == department_id
+        and assignment.department_unit_id is None
+        for assignment in current_user.department_coordinator_access
+    )
+
+
+def _require_managed_department_target(
+    db: Session,
+    current_user: models.User,
+    target: models.User,
+    *,
+    require_workspace_membership: bool,
+) -> None:
     if target.id == current_user.id:
         raise HTTPException(status_code=403, detail="You cannot manage your own account here")
     if "ADMIN" in target.roles:
@@ -700,43 +893,79 @@ def _require_own_department_target(current_user: models.User, target: models.Use
     if target.admin_managed_only:
         raise HTTPException(status_code=403,
                              detail="This account is managed by a System Admin only")
-    if not current_user.departments:
-        raise HTTPException(status_code=403, detail="Your own profile has no department set")
-    # 2026-08 "one user can be on multiple departments" CR -- a local admin
-    # who now belongs to several departments may manage a target user mapped
-    # to ANY of them (not just their first/primary one), and the target
-    # itself may also belong to several departments -- any overlap is
-    # sufficient, same rule as reassignment.py's Department Head check.
-    if not target.has_department(*current_user.departments):
+    managed_departments = _require_department_coordinator(db, current_user)
+    workspace_id = getattr(current_user, "active_qa_workspace_id", None)
+    if require_workspace_membership and not any(
+        membership.workspace_id == workspace_id for membership in target.qa_workspace_access
+    ):
         raise HTTPException(
             status_code=403,
-            detail=f"You can only manage users mapped to one of your own departments "
-                   f"({', '.join(current_user.departments)}).",
+            detail="You can only manage users who belong to the active workspace",
+        )
+    if not _coordinator_scope_allows(db, current_user, target):
+        raise HTTPException(
+            status_code=403,
+            detail=f"You can only manage users in your assigned coordinator scope "
+                   f"({', '.join(managed_departments)}).",
         )
 
 
-def _local_admin_assignable_roles(current_user: models.User) -> list:
-    """Which role subset this particular local admin may assign -- the
-    QA Executive (QA department's own local admin) gets QA_ADMIN_ASSIGNABLE_ROLES,
-    every other local admin (a business Department Head) gets
-    DEPARTMENT_ADMIN_ASSIGNABLE_ROLES. Checked by role rather than by
-    department string so it stays correct even if QA_DEPARTMENT's exact
-    value ever changes. Deliberately checks `.roles` directly rather than
-    `has_role()` -- `has_role()` always returns True for an Administrator
-    account regardless of which role(s) it's asked about, which would
-    wrongly hand an Admin who somehow hits this endpoint the QA subset."""
-    if any(role in current_user.roles for role in (
-        Role.CHIEF_MANAGER_QA, Role.AGM_QA,
-    )):
-        return QA_ADMIN_ASSIGNABLE_ROLES
-    return DEPARTMENT_ADMIN_ASSIGNABLE_ROLES
+def _require_own_department_target(db: Session, current_user: models.User, target: models.User) -> None:
+    _require_managed_department_target(
+        db, current_user, target, require_workspace_membership=True,
+    )
+
+
+def _local_admin_assignable_roles(current_user: models.User, target: models.User, db: Session = None) -> list[str]:
+    """Non-privileged roles available inside the explicit managed scope.
+
+    QA teams may have any department name, so role availability cannot depend
+    on one hard-coded COE department label. The target guard has already
+    proved department/workspace scope before this helper is called.
+    """
+    if db is not None:
+        import json
+        setting = db.query(models.SystemSetting).filter_by(key='coordinator_assignable_roles').first()
+        if setting is not None:
+            return [role for role in json.loads(setting.value) if role in ALL_ROLES and role not in {Role.ADMIN, *CONFIDENTIAL_ROLES}]
+    return list(dict.fromkeys(
+        DEPARTMENT_ADMIN_ASSIGNABLE_ROLES + QA_ADMIN_ASSIGNABLE_ROLES
+    ))
+
+
+@router.get('/local-admin/assignable-roles', response_model=list[str])
+def coordinator_assignable_roles(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    if Role.ADMIN not in current_user.roles:
+        _require_department_coordinator(db, current_user)
+    return _local_admin_assignable_roles(current_user, current_user, db)
+
+
+@router.put('/local-admin/assignable-roles', response_model=list[str])
+def configure_coordinator_roles(roles: list[str], request: Request, db: Session = Depends(get_db),
+                                current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    import json
+    if Role.ADMIN not in current_user.roles:
+        raise HTTPException(403, 'Only System Admin can configure coordinator roles')
+    if any(role not in ALL_ROLES or role in {Role.ADMIN, *CONFIDENTIAL_ROLES} for role in roles):
+        raise HTTPException(400, 'Choose valid roles. Administrator and confidential roles cannot be delegated.')
+    selected = list(dict.fromkeys(roles))
+    before = _local_admin_assignable_roles(current_user, current_user, db)
+    setting = db.query(models.SystemSetting).filter_by(key='coordinator_assignable_roles').first()
+    if setting is None:
+        setting = models.SystemSetting(key='coordinator_assignable_roles', value=json.dumps(selected))
+        db.add(setting)
+    else:
+        setting.value = json.dumps(selected)
+    db.commit()
+    write_audit(db, actor=current_user, event_type='ACCESS_MANAGEMENT', action='COORDINATOR_ROLE_POLICY_UPDATED', request=request,
+                target_type='SYSTEM_SETTING', target_name='Coordinator assignable roles',
+                details={'before': before, 'after': selected})
+    return selected
 
 
 @router.get("/local-admin/users", response_model=list[schemas.UserOut])
 def list_local_admin_users(db: Session = Depends(get_db),
-                            current_user: models.User = Depends(require_roles(
-                                Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
-                                Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
+                            current_user: models.User = Depends(get_current_user)):
     """Every user mapped to the local admin's own department (any status,
     so a previously-disabled account can be re-activated too), excluding
     their own account, any Administrator accounts, any account flagged
@@ -750,15 +979,24 @@ def list_local_admin_users(db: Session = Depends(get_db),
     an org-wide directory -- naturally bounded the same way Test Cycles/
     Test Projects and Pending Approvals were left alone elsewhere in this
     rollout, rather than the unbounded-growth case pagination exists for."""
-    if not current_user.departments:
-        raise HTTPException(status_code=400, detail="Your own profile has no department set")
-    # 2026-08 CR -- union of every department this local admin belongs to,
-    # not just their primary one (mirrors _require_own_department_target).
+    managed_departments = _require_department_coordinator(db, current_user)
+    workspace_id = getattr(current_user, "active_qa_workspace_id", None)
+    workspace_member_ids = select(models.QAWorkspaceMember.user_id).where(
+        models.QAWorkspaceMember.workspace_id == workspace_id,
+        models.QAWorkspaceMember.is_active == True,  # noqa: E712
+    )
     rows = (
         db.query(models.User)
         .filter(
-            models.User.department_assignments.any(
-                models.UserDepartment.department.in_(current_user.departments)
+            or_(
+                models.User.id.in_(workspace_member_ids),
+                models.User.needs_role_review == True,  # noqa: E712
+            ),
+            or_(
+                models.User.department.in_(managed_departments),
+                models.User.department_assignments.any(
+                    models.UserDepartment.department.in_(managed_departments)
+                ),
             ),
             models.User.id != current_user.id,
         )
@@ -769,19 +1007,64 @@ def list_local_admin_users(db: Session = Depends(get_db),
         u for u in rows
         if "ADMIN" not in u.roles and not u.admin_managed_only
         and not any(r in u.roles for r in CONFIDENTIAL_ROLES)
+        and _coordinator_scope_allows(db, current_user, u)
     ]
+
+
+@router.get(
+    "/local-admin/workspace-candidates",
+    response_model=list[schemas.LocalAdminWorkspaceCandidateOut],
+)
+def list_local_admin_workspace_candidates(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_department_coordinator(db, current_user)
+    return []
+
+
+@router.get(
+    "/local-admin/approval-workspaces",
+    response_model=list[schemas.LocalAdminApprovalWorkspaceOut],
+)
+def list_local_admin_approval_workspaces(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Eligible onboarding destinations for this coordinator.
+
+    A parent-level coordinator assignment covers the parent and all active
+    descendants. A child-level assignment remains limited to that child.
+    """
+    _require_department_coordinator(db, current_user)
+    return _coordinator_approval_workspace_rows(db, current_user)
+
+
+@router.post("/local-admin/workspace-members", response_model=schemas.UserOut)
+def add_local_admin_workspace_member(
+    payload: schemas.LocalAdminWorkspaceMemberCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    _require_department_coordinator(db, current_user)
+    raise HTTPException(
+        status_code=403,
+        detail="Workspace membership is managed by a System Administrator or Parent Workspace Admin",
+    )
 
 
 @router.patch("/local-admin/users/{user_id}", response_model=schemas.UserOut)
 def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate, request: Request,
                              db: Session = Depends(get_db),
-                             current_user: models.User = Depends(require_roles(
-                                 Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM,
-                                 Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
+                             current_user: models.User = Depends(get_current_user)):
     user = db.query(models.User).get(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    _require_own_department_target(current_user, user)
+    was_pending_review = bool(user.needs_role_review)
+    _require_managed_department_target(
+        db, current_user, user, require_workspace_membership=not was_pending_review,
+    )
     before = user_snapshot(user)
 
     # A valid notification address is operational contact data, not an
@@ -789,11 +1072,16 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
     # for people in their own department, under the same scope/protected-user
     # restrictions as role and activation changes above.
     updates = payload.model_dump(exclude_unset=True)
+    if payload.workspace_id is not None and not (was_pending_review and payload.roles is not None):
+        raise HTTPException(
+            status_code=400,
+            detail="A destination workspace can be selected only while approving a first-login access request",
+        )
     if "email" in updates:
         user.email = (updates["email"] or "").strip() or None
 
     if payload.roles is not None:
-        assignable = _local_admin_assignable_roles(current_user)
+        assignable = _local_admin_assignable_roles(current_user, user, db)
         invalid = [r for r in payload.roles if r not in assignable]
         if invalid:
             raise HTTPException(
@@ -808,6 +1096,17 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
         # e.g. SM) -- otherwise this would silently strip them, since the
         # assignable subset submitted here is only ever a partial view of
         # ALL_ROLES.
+        if was_pending_review and not payload.roles:
+            raise HTTPException(status_code=400, detail="Select at least one role to approve this access request")
+        if was_pending_review and payload.workspace_id is None:
+            raise HTTPException(status_code=400, detail="Select a destination workspace to approve this access request")
+        if was_pending_review and not _coordinator_can_place_user_in_workspace(
+            db, current_user, user, payload.workspace_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot approve this user into the selected workspace",
+            )
         preserved = [r for r in user.roles if r not in assignable]
         new_roles = list(dict.fromkeys(preserved + payload.roles))
         for ra in list(user.role_assignments):
@@ -815,7 +1114,30 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
         db.flush()
         for r in new_roles:
             db.add(models.UserRole(user_id=user.id, role=r))
-        user.needs_role_review = False
+        if new_roles:
+            user.needs_role_review = False
+
+        # Role review is an onboarding approval, not ordinary workspace
+        # membership administration. The coordinator explicitly chooses a
+        # permitted destination; later membership changes remain with
+        # Parent/System Admin.
+        if was_pending_review:
+            workspace_id = payload.workspace_id
+            membership = db.query(models.QAWorkspaceMember).filter(
+                models.QAWorkspaceMember.workspace_id == workspace_id,
+                models.QAWorkspaceMember.user_id == user.id,
+            ).first()
+            if membership is None:
+                db.add(models.QAWorkspaceMember(
+                    workspace_id=workspace_id, user_id=user.id,
+                    role="WORKSPACE_MEMBER", is_active=True,
+                ))
+            else:
+                membership.role = "WORKSPACE_MEMBER"
+                membership.is_active = True
+            from ..workspace_service import remove_default_membership_after_assignment
+            remove_default_membership_after_assignment(db, user, workspace_id)
+            user.preferred_qa_workspace_id = workspace_id
 
     if payload.is_active is not None:
         user.is_active = payload.is_active
@@ -826,5 +1148,6 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
                 actor=current_user, request=request, status_code=200, target_type="USER",
                 target_id=user.id, target_name=user.full_name,
                 details={"changes": snapshot_changes(before, user_snapshot(user)),
-                         "scope": ", ".join(current_user.departments)})
+                         "scope": ", ".join(_coordinator_department_names(db, current_user)),
+                         "approved_workspace_id": payload.workspace_id if was_pending_review else None})
     return user

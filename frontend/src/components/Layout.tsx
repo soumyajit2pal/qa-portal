@@ -1,9 +1,10 @@
 import { useRequestNavigation } from '../hooks/useRequestNavigation'
+import { api } from '../api'
 import React, { useEffect, useState, useRef, ReactNode } from 'react'
 import {NavLink, useLocation} from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS, hasRole, hasDepartment, QA_DEPARTMENT } from '../constants'
-import { UserOut } from '../types'
+import { ROLE_LABELS, QA_REQUEST_CREATOR_ROLES, hasRole, hasWorkspaceRole, uniqueWorkspaceAccess, WorkspaceAccessEntry } from '../constants'
+import { QAWorkspaceOut, UserOut } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
   IconCertificate, IconApprove, IconChart, IconSearch, IconWorkflow,
@@ -11,6 +12,7 @@ import {
   IconHelp,
 } from './Icons'
 import ClearableSearchInput from './ClearableSearchInput'
+import SearchableSelect from './SearchableSelect'
 
 interface NavItem {
   to: string
@@ -27,7 +29,7 @@ interface NavGroup {
 // Governance / Administration) rather than one long flat list -- with 8+
 // destinations a flat list stops reading as a hierarchy, so grouping gives
 // the sidebar a clearer information architecture.
-function navGroups(user: UserOut | null): NavGroup[] {
+function navGroups(user: UserOut | null, workspaceOptions: WorkspaceAccessEntry[]): NavGroup[] {
   const groups: NavGroup[] = [
     {
       label: 'Overview',
@@ -79,7 +81,7 @@ function navGroups(user: UserOut | null): NavGroup[] {
         // SRS EXE-002 "My Executions" -- the signed-in user's own actionable
         // items across every authorized project, one cross-project view
         // instead of hunting through each project's own Test Execution page.
-        ...(hasDepartment(user, QA_DEPARTMENT)
+        ...(hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
           ? [{ to: '/my-executions', label: 'My Executions', icon: IconCheckCircle }]
           : []),
         // SRS section 11 -- the 5 reporting views (repository health, cycle
@@ -122,14 +124,24 @@ function navGroups(user: UserOut | null): NavGroup[] {
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
     adminItems.push({ to: '/request-type-config', label: 'Request Type Config', icon: IconEdit })
   }
+  if (uniqueWorkspaceAccess(user).some((access) => access.role === 'PARENT_WORKSPACE_ADMIN')) {
+    adminItems.push({ to: '/workspace-admin', label: 'Workspace Members', icon: IconUsers })
+  }
   // Do not show the narrower Department Coordinator workspace merely because
   // `hasRole` grants Administrators its usual superuser shortcut. System
   // Admins belong in Users & Access, where every department and role is
   // available; this page is deliberately limited to a coordinator's own
   // department and was producing a misleading 403 for Admin accounts.
-  const isDepartmentCoordinator = (user?.roles || []).some((role) => [
-    'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'CHIEF_MANAGER_QA', 'AGM_QA',
-  ].includes(role))
+  const selectedWorkspaceId = Number(
+    localStorage.getItem('active_workspace_id') || localStorage.getItem('qa_active_workspace_id'),
+  ) || user?.preferred_workspace_id || user?.preferred_qa_workspace_id
+  const selectedWorkspace = workspaceOptions.find((workspace) => workspace.workspace_id === selectedWorkspaceId)
+  const isDepartmentCoordinator = (user?.department_coordinator_access || []).some(
+    (assignment) => assignment.is_active && (
+      assignment.workspace_id === selectedWorkspaceId
+      || assignment.workspace_id === selectedWorkspace?.parent_workspace_id
+    ),
+  )
   if (isDepartmentCoordinator) {
     adminItems.push({ to: '/department-admin', label: 'Department Coordinator', icon: IconUsers })
   }
@@ -179,7 +191,7 @@ function initials(name?: string | null): string {
 }
 
 export default function Layout({ children }: { children?: ReactNode }) {
-  const { user, logout } = useAuth()
+  const { user, logout, refreshUser } = useAuth()
   const location = useLocation()
   const navigate = useRequestNavigation()
   const [search, setSearch] = useState('')
@@ -204,8 +216,69 @@ export default function Layout({ children }: { children?: ReactNode }) {
   // on mobile).
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const userMenuRef = useRef<HTMLDivElement>(null)
+  const [workspaceSwitching, setWorkspaceSwitching] = useState(false)
+  const [workspaceSwitchError, setWorkspaceSwitchError] = useState('')
+  const [workspaceDirectory, setWorkspaceDirectory] = useState<QAWorkspaceOut[]>([])
+  const directWorkspaceAccess = uniqueWorkspaceAccess(user)
+  const workspaceOptions: WorkspaceAccessEntry[] = workspaceDirectory.length
+    ? workspaceDirectory.map((workspace) => {
+        const direct = directWorkspaceAccess.find((access) => access.workspace_id === workspace.id)
+        return {
+          workspace_id: workspace.id,
+          is_active: workspace.is_active,
+          role: direct?.role || 'WORKSPACE_MEMBER',
+          workspace_name: workspace.name,
+          workspace_key: workspace.workspace_key,
+          parent_workspace_id: workspace.parent_workspace_id,
+          parent_workspace_name: workspace.parent_workspace_name,
+          parent_workspace_key: workspace.parent_workspace_key,
+        }
+      })
+    : directWorkspaceAccess
 
-  const groups = navGroups(user)
+  useEffect(() => {
+    if (!user) { setWorkspaceDirectory([]); return }
+    void api.get<QAWorkspaceOut[]>('/api/workspaces')
+      .then(setWorkspaceDirectory)
+      .catch(() => setWorkspaceDirectory([]))
+  }, [user?.id])
+
+  useEffect(() => {
+    if (user && !workspaceDirectory.length) return
+    const memberships = workspaceOptions
+    if (!memberships.length) {
+      localStorage.removeItem('active_workspace_id')
+      localStorage.removeItem('qa_active_workspace_id')
+      return
+    }
+    const preferred = user?.preferred_workspace_id || user?.preferred_qa_workspace_id
+    const current = Number(localStorage.getItem('active_workspace_id') || localStorage.getItem('qa_active_workspace_id'))
+    const selected = memberships.some((row) => row.workspace_id === current)
+      ? current
+      : (memberships.some((row) => row.workspace_id === preferred) ? preferred : memberships[0].workspace_id)
+    localStorage.setItem('active_workspace_id', String(selected))
+    localStorage.removeItem('qa_active_workspace_id')
+  }, [user?.id, user?.preferred_workspace_id, user?.preferred_qa_workspace_id, workspaceDirectory])
+
+  async function selectWorkspace(workspaceId: number) {
+    if (!workspaceId || workspaceSwitching) return
+    setWorkspaceSwitching(true)
+    setWorkspaceSwitchError('')
+    try {
+      // Persist permission first. If it fails, keep the current tenant header
+      // intact so the rest of the page does not start issuing forbidden calls.
+      await api.patch('/api/workspaces/preference/current', { workspace_id: workspaceId })
+      localStorage.setItem('active_workspace_id', String(workspaceId))
+      // Every mounted page may own independent cached queries. A full reload
+      // makes the workspace change atomic: no old-workspace card can remain.
+      window.location.reload()
+    } catch (error) {
+      setWorkspaceSwitchError(error instanceof Error ? error.message : 'Workspace could not be changed')
+      setWorkspaceSwitching(false)
+    }
+  }
+
+  const groups = navGroups(user, workspaceOptions)
   const activeGroup = groups.find((group) => group.items.some((item) => (
     item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to)
   )))
@@ -419,7 +492,26 @@ export default function Layout({ children }: { children?: ReactNode }) {
             <kbd>⌘ K</kbd>
           </form>
           <div className="right-group">
-            {hasRole(user, 'REQUESTER', 'BUSINESS_ANALYST') && (
+            {workspaceOptions.length > 0 && (
+              <div className="qa-workspace-switcher" title="Active workspace">
+                <span>Workspace</span>
+                <SearchableSelect
+                  ariaLabel="Active workspace"
+                  value={String(Number(localStorage.getItem('active_workspace_id')) || user?.preferred_workspace_id || user?.preferred_qa_workspace_id || workspaceOptions[0]?.workspace_id || '')}
+                  onChange={(value) => void selectWorkspace(Number(value))}
+                  options={workspaceOptions.map((row) => ({
+                    value: String(row.workspace_id),
+                    label: row.parent_workspace_name
+                      ? `${row.parent_workspace_name} › ${row.workspace_name || row.workspace_key}`
+                      : (row.workspace_name || row.workspace_key || `Workspace ${row.workspace_id}`),
+                  }))}
+                  searchable={workspaceOptions.length > 8}
+                  disabled={workspaceSwitching}
+                />
+                {workspaceSwitchError && <small className="workspace-switch-error" role="alert">{workspaceSwitchError}</small>}
+              </div>
+            )}
+            {hasRole(user, ...QA_REQUEST_CREATOR_ROLES) && (
               <button className="btn btn-primary btn-sm" onClick={() => navigate('/qa-requests', { state: { openNew: true } })}>
                 <IconPlus width={14} height={14} /> New QA request
               </button>

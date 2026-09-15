@@ -1,11 +1,37 @@
 import inspect
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.dialects import oracle
 
 from app import models
 from app.routers import defects, test_reports
+
+
+def _defect_creator():
+    return SimpleNamespace(has_role=lambda *_roles: True)
+
+
+def test_execution_defect_link_checks_the_cycle_project_workspace(monkeypatch):
+    monkeypatch.setattr(defects, "dashboard_department_scope", lambda _user: None)
+    monkeypatch.setattr(defects, "active_qa_workspace_scope_ids", lambda _user: {21})
+    cycle = SimpleNamespace(origin_workspace_id=None, project=SimpleNamespace(qa_workspace_id=21, department="QA"))
+
+    defects._require_execution_link_access(object(), cycle, _defect_creator())
+
+
+def test_execution_defect_link_rejects_a_cycle_outside_workspace_scope(monkeypatch):
+    monkeypatch.setattr(defects, "dashboard_department_scope", lambda _user: None)
+    monkeypatch.setattr(defects, "active_qa_workspace_scope_ids", lambda _user: {21})
+    cycle = SimpleNamespace(origin_workspace_id=None, project=SimpleNamespace(qa_workspace_id=22, department="QA"))
+
+    with pytest.raises(HTTPException) as raised:
+        defects._require_execution_link_access(object(), cycle, _defect_creator())
+
+    assert raised.value.status_code == 404
+    assert raised.value.detail == "Test Cycle not found in the active workspace"
 
 
 def test_defect_status_filter_has_one_multi_value_owner():
@@ -86,3 +112,23 @@ def test_defect_quality_trace_includes_every_linked_testcase():
 
     assert cycles == ["TQA-CYCLE-10", "TQA-CYCLE-20"]
     assert testcases == ["TQA-TC-1", "TQA-TC-2", "TQA-TC-3"]
+
+
+def test_incomplete_traceability_includes_unlinked_but_excludes_additional_links(monkeypatch):
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+    from app import pagination
+
+    engine = create_engine('sqlite://')
+    with Session(engine) as db:
+        db.execute(text('CREATE TABLE qap_defects (id INTEGER PRIMARY KEY, execution_id INTEGER, department TEXT)'))
+        db.execute(text('CREATE TABLE qap_defect_execution_links (id INTEGER PRIMARY KEY, defect_id INTEGER, execution_id INTEGER)'))
+        db.execute(text("INSERT INTO qap_defects VALUES (1, NULL, 'QA'), (2, 100, 'QA'), (3, NULL, 'QA'), (4, NULL, 'Other')"))
+        db.execute(text('INSERT INTO qap_defect_execution_links VALUES (1, 3, 200)'))
+        # Preserve an access-scope predicate while exercising the actual list filter.
+        monkeypatch.setattr(defects, '_scoped_defects', lambda session, user: session.query(models.Defect).filter(models.Defect.department == 'QA'))
+        monkeypatch.setattr(pagination, 'paginate', lambda query, params: db.execute(select(models.Defect.id).where(query.whereclause)).scalars().all())
+        monkeypatch.setattr(pagination, 'to_page_response', lambda result, params: result)
+        params = SimpleNamespace(search=None, status=None, sort_by=None, sort_order='desc')
+        result = defects.list_defects(queue='incomplete-traceability', params=params, db=db, current_user=SimpleNamespace(id=1))
+        assert result == [1]

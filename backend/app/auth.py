@@ -1,11 +1,13 @@
 import os
 import datetime
 import uuid
+import hmac
+import ssl
 
 import bcrypt
 from jose import jwt
 from jose import JWTError
-from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE
+from ldap3 import Server, Connection, SIMPLE, SUBTREE, BASE, Tls
 from ldap3.core.exceptions import LDAPException
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.utils.dn import escape_rdn
@@ -122,6 +124,31 @@ class LDAPAuthError(Exception):
     exception, so it maps to the same 401 a Standard login would give)."""
 
 
+def _mock_ldap_profile(username: str, password: str):
+    """Non-production LDAP substitute that exercises real onboarding.
+
+    A matching username is treated exactly like a successful directory bind;
+    the login router still performs just-in-time provisioning, department
+    selection, role review, workspace placement and every normal access gate.
+    """
+    if not settings.ldap_mock_enabled:
+        return None, False
+    prefix = settings.ldap_mock_username_prefix.strip().casefold()
+    if not username.casefold().startswith(prefix):
+        return None, False
+    valid = bool(password) and hmac.compare_digest(password, settings.ldap_mock_password)
+    if not valid:
+        return None, True
+    suffix = username[len(prefix):].strip("-_. ")
+    display_suffix = suffix.replace("-", " ").replace("_", " ").strip().title()
+    return {
+        "dn": f"mock:{username}",
+        "full_name": f"Mock LDAP {display_suffix or username}",
+        "email": f"{username}@mock-ldap.test",
+        "department": None,
+    }, True
+
+
 def _first_attr(entry, name):
     try:
         val = entry[name].value
@@ -136,15 +163,21 @@ def _ldap_bind_and_fetch(username: str, password: str):
     {"dn": ..., "full_name": ..., "email": ..., "department": ...}
     -- profile fields are best-effort and may be None depending on what the
     directory exposes / which binding strategy is configured."""
+    mock_profile, handled_by_mock = _mock_ldap_profile(username, password)
+    if handled_by_mock:
+        return mock_profile
     if not LDAP_SERVER_URI:
         raise LDAPAuthError("LDAP_SERVER_URI is not configured on the server")
     if settings.app_env in {"uat", "prod", "production"} and not LDAP_USE_SSL:
         raise LDAPAuthError("LDAP_USE_SSL must be enabled outside development")
+    if LDAP_USE_SSL and LDAP_SERVER_URI.lower().startswith("ldap://"):
+        raise LDAPAuthError("Use an ldaps:// URI or hostname when LDAP_USE_SSL is enabled")
     if not password:
         return None
 
     try:
-        server = Server(LDAP_SERVER_URI, use_ssl=LDAP_USE_SSL, get_info=None)
+        tls = Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=os.getenv("LDAP_CA_CERTS_FILE") or None)
+        server = Server(LDAP_SERVER_URI, use_ssl=LDAP_USE_SSL, tls=tls, get_info=None)
 
         if LDAP_BIND_DN and LDAP_BASE_DN:
             # Strategy 1: service-account search (grabs profile attributes for

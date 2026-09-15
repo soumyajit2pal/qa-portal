@@ -1,6 +1,6 @@
 """
-Seeds exactly one user per role -- no sample QA requests, test cases, SAST/
-DAST requests, or other dummy records. Run with:
+Seeds baseline users for the operational workflow roles -- no sample QA
+requests, test cases, SAST/DAST requests, or other dummy records. Run with:
 
     python -m app.seed
 """
@@ -13,11 +13,11 @@ from .constants import Role, LoginType, SEED_DEPARTMENTS
 
 DEMO_PASSWORD = os.getenv("DEMO_SEED_PASSWORD", "")
 
-# (username, full_name, role, department) -- one user per role, in the exact
-# order of the role list.
+# (username, full_name, role, department) -- ordered by workflow responsibility.
 DEMO_USERS = [
     ("requester1", "Requester 1", Role.REQUESTER, "IT - Software"),
     ("requester2", "Requester 2", Role.REQUESTER, "IT - Software"),
+    ("developer1", "Developer 1", Role.DEVELOPER, "IT - Software"),
     ("ba1", "BA 1", Role.BUSINESS_ANALYST, "IT - Software"),
     ("qa1", "QA 1", Role.QA_ENGINEER, "COE - Quality Assurance"),
     ("qa2", "QA 2", Role.QA_ENGINEER, "COE - Quality Assurance"),
@@ -28,30 +28,50 @@ DEMO_USERS = [
     ("depthead2", "Department Head AGM 1", Role.DEPARTMENT_HEAD_AGM, "IT - Software"),
     ("sm1", "SM 1", Role.SM, "IT - Software"),
     ("sm2", "SM 2", Role.SM, "IT - Software"),
-    ("admin", "Administrator", Role.ADMIN, "COE - Quality Assurance"),
+    ("admin", "Administrator", Role.ADMIN, "Other"),
 ]
 
 def _seed_departments(db):
-    if db.query(models.Department).count() > 0:
-        return
+    existing_names = {
+        row.name.strip().casefold()
+        for row in db.query(models.Department).all()
+        if row.name and row.name.strip()
+    }
+    added = 0
     for name in SEED_DEPARTMENTS:
-        db.add(models.Department(name=name, is_active=True))
+        if name.strip().casefold() not in existing_names:
+            db.add(models.Department(name=name, is_active=True))
+            existing_names.add(name.strip().casefold())
+            added += 1
     db.commit()
-    print(f"Seeded {len(SEED_DEPARTMENTS)} departments.")
+    print(f"Department seed complete: {added} added, {len(SEED_DEPARTMENTS) - added} already present.")
 
 
-# def _normalize_legacy_demo_names(db):
-#     """Removes the old request-specific suffix from seeded display names
-#     without overwriting any name an administrator has already customized."""
-#     changed = 0
-#     for username, (legacy_name, display_name) in LEGACY_DEMO_NAMES.items():
-#         user = db.query(models.User).filter_by(username=username, full_name=legacy_name).first()
-#         if user:
-#             user.full_name = display_name
-#             changed += 1
-#     if changed:
-#         db.commit()
-#         print(f"Updated {changed} legacy demo display name(s).")
+def _seed_default_workspace(db):
+    workspace = db.query(models.QAWorkspace).filter(
+        models.QAWorkspace.workspace_key == "DEFAULT",
+    ).first()
+    if not workspace:
+        workspace = models.QAWorkspace(
+            workspace_key="DEFAULT", name="Default Workspace",
+            description="Default workspace for first-time users", is_active=True, is_default=True,
+        )
+        db.add(workspace); db.flush()
+    else:
+        workspace.name = "Default Workspace"
+        workspace.description = "Default workspace for first-time users"
+        workspace.is_active = True
+    db.query(models.QAWorkspace).filter(models.QAWorkspace.id != workspace.id).update(
+        {models.QAWorkspace.is_default: False}, synchronize_session=False,
+    )
+    workspace.is_default = True
+
+    # Only System Administrators are seeded as required members. Other users
+    # receive this workspace when they first authenticate, through
+    # ensure_default_workspace_membership().
+    from .workspace_service import ensure_administrator_workspace_memberships
+    ensure_administrator_workspace_memberships(db, workspace=workspace)
+    db.commit()
 
 
 def run():
@@ -66,27 +86,25 @@ def run():
         # that re-running against a DB that already has users (but predates
         # the Department table) still backfills the department list.
         _seed_departments(db)
-        # _normalize_legacy_demo_names(db)
-
+ 
         if db.query(models.User).count() > 0:
             print("Users already seeded — skipping new-user creation.")
-            return
-
-        for username, full_name, role, dept in DEMO_USERS:
-            db.add(models.User(
-                username=username, full_name=full_name, department=dept,
-                role_assignments=[models.UserRole(role=role)],
-                department_assignments=[models.UserDepartment(department=dept)] if dept else [],
-                email=f"{username}@bankofmaharashtra.bank.in",
-                login_type=LoginType.STANDARD,
-                hashed_password=hash_password(DEMO_PASSWORD),
-            ))
-        db.commit()
-
-        print("Seed complete.")
-        print(f"Demo users (password for all: {DEMO_PASSWORD}):")
-        for username, full_name, role, dept in DEMO_USERS:
-            print(f"  {username:14s} | {role:20s} | {full_name}")
+        else:
+            for username, full_name, role, dept in DEMO_USERS:
+                db.add(models.User(
+                    username=username, full_name=full_name, department=dept,
+                    role_assignments=[models.UserRole(role=role)],
+                    department_assignments=[models.UserDepartment(department=dept)] if dept else [],
+                    email=f"{username}@bankofmaharashtra.bank.in",
+                    login_type=LoginType.STANDARD,
+                    hashed_password=hash_password(DEMO_PASSWORD),
+                ))
+            db.commit()
+            print("Seed complete.")
+            print(f"Demo users (password for all: {DEMO_PASSWORD}):")
+            for username, full_name, role, dept in DEMO_USERS:
+                print(f"  {username:14s} | {role:20s} | {full_name}")
+        _seed_default_workspace(db)
     finally:
         db.close()
 

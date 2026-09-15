@@ -87,7 +87,7 @@ class SecurityInsightDetailsTests(unittest.TestCase):
             result = dashboard.security_insight_details("sast", "vulnerabilities", "",
                 SimpleNamespace(page=1, page_size=5), "2026-09-01", "2026-09-03", Mock(), Mock())
         self.assertEqual(period.call_args.args[-2:], ("2026-09-01", "2026-09-03"))
-        self.assertEqual(scoped.call_args.args[-1], ["IT"])
+        self.assertEqual(scoped.call_args.args[2], ["IT"])
         self.assertEqual(scans.call_args.args[-1], [1])
         self.assertEqual(result["total"], 7)
 

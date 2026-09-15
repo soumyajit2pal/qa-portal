@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import React, { useEffect, useState, useCallback } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
@@ -39,12 +40,13 @@ import {
   RISK_RATINGS,
   DEPLOYMENT_ENVIRONMENTS,
   CHANGE_TYPES,
-  hasRole,
+  hasWorkflowRole as hasRole,
   hasDepartment,
+  hasWorkspaceRole,
+  isViewOnly,
   validTargetPromotionOptions,
   validEnvironmentPromotion,
   canManageReadinessEvidence,
-  QA_DEPARTMENT,
   SIGNOFF_STATUS_LABELS,
 } from "../../constants";
 import {
@@ -126,7 +128,7 @@ function FunctionalFormModal({
   // inside it need their own explicit identity+status check (see
   // canManageReadinessEvidence's isOwner param) rather than assuming the
   // status alone means this particular viewer may attach/remove evidence.
-  const viewOnlyModal = !!user?.roles?.includes("VIEW_ONLY");
+  const viewOnlyModal = isViewOnly(user);
   const isActiveDelegateModal = !viewOnlyModal && editing.active_delegation?.status === "ACTIVE" && editing.active_delegation.assigned_to_id === user?.id;
   const isRequesterModal = isActiveDelegateModal || isAdmin || (
     !viewOnlyModal && editing.requester_id === user?.id && !editing.active_delegation
@@ -850,14 +852,14 @@ export function FunctionalDetail({
   }
 
   const qaLeads = users.filter((u) =>
-    u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes("QA_LEAD")
+    u.is_active && hasWorkspaceRole(u, "QA_LEAD")
   );
   const testers = users.filter((u) =>
-    u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes("QA_ENGINEER")
+    u.is_active && hasWorkspaceRole(u, "QA_ENGINEER")
   );
 
   const isAdmin = hasRole(user, "ADMIN");
-  const viewOnly = !!user?.roles?.includes("VIEW_ONLY");
+  const viewOnly = isViewOnly(user);
   const isRequester = (!viewOnly && req.requester_id === user?.id) || isAdmin;
   const isActiveDelegate = !viewOnly && req.active_delegation?.status === "ACTIVE" && req.active_delegation.assigned_to_id === user?.id;
   const requesterInputEditor = isActiveDelegate || isAdmin || (isRequester && !req.active_delegation);
@@ -999,7 +1001,7 @@ export function FunctionalDetail({
   // the first assignment). Mirrors functional.py's
   // _require_can_reassign_tester exactly.
   const isQADepartmentHead =
-    isAdmin || (hasRole(user, "CHIEF_MANAGER_QA", "AGM_QA") && hasDepartment(user, QA_DEPARTMENT));
+    isAdmin || (hasWorkspaceRole(user, "CHIEF_MANAGER_QA", "AGM_QA"));
   const canReassignTester = isAssignedTester || isQADepartmentHead || hasRole(user, "QA_LEAD");
   const canAssignTester =
     (isInitialTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignTester) &&
@@ -1027,7 +1029,8 @@ export function FunctionalDetail({
     isAssignedTester && status === "TESTER_ASSIGNED";
   const canStartExecution =
     isAssignedTester && status === "TEST_DESIGN";
-  // Defects are raised and retested from the mandatory Test Cycle. The old
+  // Functional execution requires a linked Test Cycle. Defects are raised
+  // and retested from that cycle. The old
   // Functional Raise Defect entry point is retired; the remaining legacy
   // status actions only let records already in those states finish.
   const hasLinkedCycle = (req.linked_test_cycles?.length ?? 0) > 0;
@@ -1068,7 +1071,7 @@ export function FunctionalDetail({
   // isn't available to.
   const canRequestSignoff =
     (isAssignedTester || isAssignedQALead) &&
-    (hasRole(user, "ADMIN") || hasDepartment(user, QA_DEPARTMENT)) &&
+    hasWorkspaceRole(user, "QA_ENGINEER", "QA_LEAD", "CHIEF_MANAGER_QA", "AGM_QA") &&
     status === "QA_COMPLETED";
   // "Confirm Sign-off" (a manual QA Lead click) removed -- the linked
   // certificate reaching ISSUED now auto-advances this request straight to
@@ -1138,7 +1141,7 @@ export function FunctionalDetail({
 
           <DetailSection title="Status">
             <DetailField label="Status">
-              <Badge status={req.status} label={applicationNameAwareStatusLabel(req.status, req.application_master_status)} />
+              <WorkflowStatusBadge record={req} status={req.status} label={applicationNameAwareStatusLabel(req.status, req.application_master_status)} />
               {req.needs_dept_head_reapproval && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
                   Department Head re-approval required after changes
@@ -1263,7 +1266,7 @@ export function FunctionalDetail({
                 <Link className="linked-cycle-link" to={`/signoff?open=${req.signoff_certificate_id}`}>
                   <strong>{req.signoff_certificate_id}</strong>
                 </Link>{" "}
-                · <Badge status={req.signoff_certificate_status} label={(req.signoff_certificate_status && SIGNOFF_STATUS_LABELS[req.signoff_certificate_status]) || req.signoff_certificate_status} />
+                · <WorkflowStatusBadge record={req} workflow="signoff" status={req.signoff_certificate_status} label={(req.signoff_certificate_status && SIGNOFF_STATUS_LABELS[req.signoff_certificate_status]) || req.signoff_certificate_status} />
               </DetailField>
             </DetailSection>
           )}
@@ -2001,7 +2004,7 @@ export default function Functional() {
             {
               key: "status",
               header: "Status",
-              render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} />,
+              render: (r) => <WorkflowStatusBadge record={r} status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} />,
             },
             {
               key: "pending_with",

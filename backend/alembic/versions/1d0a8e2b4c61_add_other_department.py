@@ -21,13 +21,15 @@ def upgrade() -> None:
     # squashed out: none of their tables or columns exist in the final schema.
     op.execute("DELETE FROM qap_user_roles WHERE role = 'DEPARTMENT_QA'")
 
-    # Idempotent for environments where an Administrator may already have
-    # added this department manually. `Other` is a neutral organisational
-    # home for document-only accounts; actual module access remains enforced
-    # exclusively by the assigned Document Portal role(s).
+    # Compatibility backfill for populated installations only. On an empty
+    # schema, seed.py owns organisation data and creates this department.
+    # Idempotent where an Administrator already added it manually.
     op.execute("""
         MERGE INTO qap_departments target
-        USING (SELECT 'Other' AS name FROM dual) source
+        USING (
+          SELECT 'Other' AS name FROM dual
+          WHERE EXISTS (SELECT 1 FROM qap_users)
+        ) source
         ON (target.name = source.name)
         WHEN NOT MATCHED THEN
           INSERT (name, is_active) VALUES (source.name, 1)

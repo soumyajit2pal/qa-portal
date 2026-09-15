@@ -10,12 +10,22 @@ from app.schemas import TestCycleCreate as CycleCreateSchema, TestCycleUpdate as
 
 
 class FunctionalExecutionCycleRequirementTests(unittest.TestCase):
-    def test_cycle_creation_requires_a_functional_request_link(self):
+    def test_cycle_creation_allows_a_standalone_cycle(self):
+        cycle = CycleCreateSchema(
+            name="Regression",
+            start_date=datetime.date(2026, 9, 5),
+            end_date=datetime.date(2026, 9, 6),
+        )
+        self.assertIsNone(cycle.linked_request_id)
+        self.assertIsNone(cycle.linked_request_type)
+
+    def test_cycle_creation_requires_a_complete_optional_link_pair(self):
         with self.assertRaises(ValidationError):
             CycleCreateSchema(
                 name="Regression",
                 start_date=datetime.date(2026, 9, 5),
                 end_date=datetime.date(2026, 9, 6),
+                linked_request_id=12,
             )
 
     def test_cycle_creation_rejects_non_functional_request_types(self):

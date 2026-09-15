@@ -1,14 +1,14 @@
 import datetime
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import case, func, or_
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import models
 from ..database import get_db
 from ..deps import (
     get_current_user, dashboard_department_scope, resolve_entity_department,
-    viewable_project_ids,
+    resolve_entity_workspace_id, active_qa_workspace_scope_ids, viewable_project_ids,
 )
 from ..constants import QAStatus, GatewayStatus, REQUEST_TYPES, Role
 from ..pdf_export import (
@@ -64,6 +64,9 @@ def _visible_qa_requests(db: Session, current_user: models.User, date_from: str 
     helper directly or applies the equivalent join/filter for its own model,
     so no report can surface another department's data."""
     q = db.query(models.QARequest)
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
     if not current_user.has_role(Role.ADMIN):
         q = q.filter(or_(
             models.QARequest.status.notin_(_GATEWAY_PRIVATE_STATUSES),
@@ -85,16 +88,8 @@ def _visible_test_projects(db: Session, current_user: models.User, date_from: st
 
 def _visible_defects(db: Session, current_user: models.User, date_from: str | None = None, date_to: str | None = None):
     """Report-centre equivalent of Defect Management's visibility scope."""
-    q = db.query(models.Defect)
-    scope = dashboard_department_scope(current_user)
-    if scope is not None:
-        project_ids = viewable_project_ids(db, current_user)
-        q = (q.join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
-             .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
-             .filter(or_(
-                 models.QARequest.department.in_(scope),
-                 models.TestCycle.project_id.in_(project_ids or []),
-             )))
+    from .defects import _scoped_defects
+    q = _scoped_defects(db, current_user)
     return _in_period(q, models.Defect.reported_at, date_from, date_to)
 
 
@@ -103,6 +98,14 @@ def _user_name_map(db: Session, ids) -> dict[int, str]:
     if not clean_ids:
         return {}
     return {user.id: user.full_name for user in db.query(models.User).filter(models.User.id.in_(clean_ids)).all()}
+
+
+def _workspace_child(query, model, current_user: models.User):
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if not workspace_ids:
+        return query
+    return query.filter(model.qa_request_id.in_(select(models.QARequest.id).where(
+        models.QARequest.qa_workspace_id.in_(workspace_ids))))
 
 
 # ---------------- 4.10.1 Operational Reports ----------------
@@ -163,11 +166,11 @@ def functional_request_register(date_from: str | None = None, date_to: str | Non
     Functional Requests screen, so an export cannot expose another
     department's requests.
     """
-    q = (db.query(models.FunctionalRequest)
+    q = _workspace_child((db.query(models.FunctionalRequest)
          .join(models.QARequest,
                models.FunctionalRequest.qa_request_id == models.QARequest.id,
                isouter=True)
-         .options(joinedload(models.FunctionalRequest.qa_request)))
+         .options(joinedload(models.FunctionalRequest.qa_request))), models.FunctionalRequest, current_user)
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         # FunctionalRequest.department is a delegated property, hence the
@@ -366,7 +369,7 @@ def sast_scan_report(date_from: str | None = None, date_to: str | None = None, d
     # as list_sast in routers/sast_dast.py -- standalone SAST requests (no
     # qa_request_id) are excluded by this inner join for a scoped user, same
     # as they already resolve to department=None today.
-    q = db.query(models.SASTRequest)
+    q = _workspace_child(db.query(models.SASTRequest), models.SASTRequest, current_user)
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         q = q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
@@ -386,7 +389,7 @@ def sast_scan_report(date_from: str | None = None, date_to: str | None = None, d
 @router.get("/dast-scan")
 def dast_scan_report(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     # See sast_scan_report's matching comment just above -- identical reasoning.
-    q = db.query(models.DASTRequest)
+    q = _workspace_child(db.query(models.DASTRequest), models.DASTRequest, current_user)
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         q = q.join(models.QARequest, models.DASTRequest.qa_request_id == models.QARequest.id) \
@@ -410,7 +413,7 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
     keeps spreadsheet totals accurate when users aggregate the export.
     """
     request_model = models.SASTRequest if kind == "SAST" else models.DASTRequest
-    request_query = db.query(request_model)
+    request_query = _workspace_child(db.query(request_model), request_model, current_user)
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         request_query = (
@@ -521,7 +524,7 @@ def dast_observation_history(date_from: str | None = None, date_to: str | None =
 
 @router.get("/performance-testing")
 def performance_testing_report(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    q = db.query(models.PerformanceRequest).options(joinedload(models.PerformanceRequest.qa_request))
+    q = _workspace_child(db.query(models.PerformanceRequest).options(joinedload(models.PerformanceRequest.qa_request)), models.PerformanceRequest, current_user)
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         q = (q.join(models.QARequest, models.PerformanceRequest.qa_request_id == models.QARequest.id)
@@ -563,6 +566,8 @@ def _security_severity_counts(db: Session, current_user: models.User, date_from:
     scope = dashboard_department_scope(current_user)
     sast_q = db.query(models.SASTRequest.id)
     dast_q = db.query(models.DASTRequest.id)
+    sast_q = _workspace_child(sast_q, models.SASTRequest, current_user)
+    dast_q = _workspace_child(dast_q, models.DASTRequest, current_user)
     if scope is not None:
         sast_q = sast_q.join(models.QARequest, models.SASTRequest.qa_request_id == models.QARequest.id) \
                         .filter(models.QARequest.department.in_(scope))
@@ -597,6 +602,9 @@ def suppression_register(date_from: str | None = None, date_to: str | None = Non
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         q = q.filter(models.SuppressionRequest.department.in_(scope))
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        q = q.filter(models.SuppressionRequest.qa_workspace_id.in_(workspace_ids))
     rows = _in_period(q, models.SuppressionRequest.created_at, date_from, date_to).all()
     out = []
     for s in rows:
@@ -679,6 +687,9 @@ def qa_signoff_register(date_from: str | None = None, date_to: str | None = None
                     models.FunctionalRequest.request_id == models.QASignOff.testing_request_id)
              .join(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id)
              .filter(models.QARequest.department.in_(scope)))
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        q = q.filter(models.QASignOff.qa_workspace_id.in_(workspace_ids))
     rows = _in_period(q, models.QASignOff.created_at, date_from, date_to).order_by(models.QASignOff.created_at.desc()).all()
     names = _user_name_map(db, [
         user_id for item in rows
@@ -719,6 +730,9 @@ def audit_evidence(date_from: str | None = None, date_to: str | None = None, db:
     scope = dashboard_department_scope(current_user)
     if scope is not None:
         rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        rows = [r for r in rows if resolve_entity_workspace_id(db, r.entity_type, r.entity_id) in workspace_ids]
     names = _user_name_map(db, [row.actor_id for row in rows])
     out = []
     for a in rows:

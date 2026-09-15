@@ -11,26 +11,24 @@ import openpyxl
 from .. import models, schemas, pagination
 from ..database import get_db, SessionLocal
 from ..deps import (
-    get_current_user, require_roles, get_or_404,
+    get_workflow_user as get_current_user, require_workflow_roles as require_roles, get_or_404,
     require_can_author_repository, require_can_review_repository, require_can_give_final_approval,
     require_can_manage_repository_governance,
-    can_review_repository,
     get_project_or_404 as _get_project_or_404,
     require_project_visibility,
 )
 from ..constants import (
     Role, TEST_CASE_PRIORITIES, TEST_CASE_STATUSES,
-    TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS,
 )
+from ..workspace_service import selectable_workspace_ids
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from ..testcase_imports import TEST_CASE_IMPORT_CONTENT_FIELDS, build_test_case_import_fingerprint
 from . import jobs
 
 # PAG-005 -- every eager-load the list endpoint needs to serialize
 # TestCaseListOut without an N+1: folder/created_by/checked_out_by are
-# simple one-to-one FKs; current_draft_version is itself joined one level
-# further to whichever of assigned_reviewer/assigned_qa_lead/author its own
-# pending_with_user_name property reads (see models.TestCaseVersion); tags
+# simple one-to-one FKs; current_draft_version also loads its author and
+# legacy assignee relations for older records; tags
 # are a real one-to-many table, selectinload'd (a second batched query, not
 # a join that would multiply the case row count).
 _LIST_CASE_EAGER_LOADS = [
@@ -58,98 +56,16 @@ router = APIRouter(prefix="/api/test-repository", tags=["test-management"])
 # the Repository, per direct product decision -- Admin always bypasses via
 # require_roles. CHIEF_MANAGER_QA/AGM_QA also included (comment previously
 # didn't mention them, though the tuple already did) -- both hold identical
-# Author-tier standing here, same as Stage 2 approval (_stage2_approver_ids).
+# author-tier standing here.
 _AUTHOR_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
-
-
-def _stage1_reviewer_ids(db: Session, project_id: int, author_id: Optional[int] = None) -> List[int]:
-    """OLD-path only (see TEST_CASE_NEW_STATUSES comment in constants.py) --
-    all active members of the QA Lead group, excluding the author. Kept
-    exactly as-is so drafts already sitting at "In Review" when the 2026-08
-    "Simplified Test Management" change shipped keep working unchanged."""
-    users = db.query(models.User).filter(
-        # Oracle stores SQLAlchemy Boolean as NUMBER(1); `.is_(True)` emits
-        # `IS 1`, which Oracle rejects with ORA-00908. Equality emits `= 1`.
-        models.User.is_active == 1,
-        # 2026-08 "one user can be on multiple departments" CR -- membership
-        # via the department_assignments join table, not the legacy column.
-        models.User.department_assignments.any(
-            models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
-        ),
-    ).all()
-    return [
-        user.id for user in users
-        if user.id != author_id and Role.QA_LEAD in set(user.roles)
-    ]
-
-
-def _stage2_approver_ids(db: Session, author_id: Optional[int] = None) -> List[int]:
-    """OLD-path only -- all active CM QA and AGM QA users; either one may
-    complete Stage 2. Kept exactly as-is for drafts already sitting at
-    "Review Completed" -- see _stage1_reviewer_ids' own comment."""
-    users = db.query(models.User).filter(
-        models.User.is_active == 1,
-        # 2026-08 "one user can be on multiple departments" CR -- membership
-        # via the department_assignments join table, not the legacy column.
-        models.User.department_assignments.any(
-            models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
-        ),
-    ).all()
-    return [
-        user.id for user in users
-        if user.id != author_id and set(user.roles).intersection({Role.CHIEF_MANAGER_QA, Role.AGM_QA})
-    ]
-
-
-def _qa_group_ids(db: Session, author_id: Optional[int] = None) -> List[int]:
-    """NEW-path Stage 1 (Recommendation) -- "Any eligible QA member can
-    recommend the test case" per the Simplified Test Management requirement,
-    section 2's "QA Group" row. Mapped onto Role.QA_ENGINEER (confirmed via
-    AskUserQuestion), excluding the author (GOV-002 maker-checker)."""
-    users = db.query(models.User).filter(
-        models.User.is_active == 1,
-        # 2026-08 "one user can be on multiple departments" CR -- membership
-        # via the department_assignments join table, not the legacy column.
-        models.User.department_assignments.any(
-            models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
-        ),
-    ).all()
-    return [
-        user.id for user in users
-        if user.id != author_id and Role.QA_ENGINEER in set(user.roles)
-    ]
-
-
-def _qa_lead_group_ids(db: Session, author_id: Optional[int] = None) -> List[int]:
-    """NEW-path Stage 2 (Final Approval) -- "Any eligible QA Lead can
-    approve" per the Simplified Test Management requirement, section 2's "QA
-    Lead Group" row. Mapped onto QA_LEAD/CHIEF_MANAGER_QA/AGM_QA (confirmed
-    via AskUserQuestion -- the same Executive-bypass group used for QA-Lead-
-    gated actions elsewhere, see ORACLE_MIGRATION_2026-07.md section 59),
-    excluding the author."""
-    users = db.query(models.User).filter(
-        models.User.is_active == 1,
-        # 2026-08 "one user can be on multiple departments" CR -- membership
-        # via the department_assignments join table, not the legacy column.
-        models.User.department_assignments.any(
-            models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
-        ),
-    ).all()
-    return [
-        user.id for user in users
-        if user.id != author_id
-        and set(user.roles).intersection({Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA})
-    ]
 
 
 # Drafts already sitting in one of these OLD-vocabulary statuses when the
 # Simplified Test Management change shipped keep running the pre-existing,
 # untouched individually-routed logic to completion -- "new cases only" per
 # AskUserQuestion. Anything else (a fresh Draft submission, or a NEW-
-# vocabulary Returned status resubmitting) uses the new QA Group/QA Lead
-# Group logic. See TEST_CASE_NEW_STATUSES in constants.py.
-_OLD_WORKFLOW_STATUSES = {"In Review", "Review Completed", "Returned"}
-
+# vocabulary Returned status resubmitting) uses the newer labels. Assignment
+# and authorization are identical for both vocabularies.
 # A return is a correction assignment to the author of the submitted
 # version. Letting the reviewer pick it up as an ordinary team edit creates
 # a maker-checker deadlock: the author cannot recommend their own work and
@@ -509,7 +425,7 @@ def delete_folder(folder_id: int, db: Session = Depends(get_db),
     require_can_manage_repository_governance in deps.py)."""
     obj = get_or_404(db, models.TestFolder, folder_id, "Folder")
     _require_active_project(_get_project_or_404(db, obj.project_id))
-    require_can_manage_repository_governance(current_user)
+    require_can_manage_repository_governance(current_user, db, obj.project_id)
     has_children = db.query(models.TestFolder).filter_by(parent_id=folder_id).first()
     has_cases = db.query(models.TestCase).filter_by(folder_id=folder_id).first()
     if has_children or has_cases:
@@ -957,15 +873,22 @@ def queue_test_repository_export(
     project = _get_project_or_404(db, project_id)
     filename = f"{project.project_key}_test_repository.xlsx"
     user_id = current_user.id
+    actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
 
     def build(job_id: str):
         with SessionLocal() as worker_db:
             worker_user = worker_db.query(models.User).get(user_id)
             if not worker_user:
                 raise RuntimeError("The user who started this export no longer exists")
-            jobs.update(job_id, progress=15)
-            response = export_test_repository(project_id, worker_db, worker_user)
-            return asyncio.run(jobs.save_streaming_response(job_id, response, filename))
+            worker_user.active_qa_workspace_id = actor_workspace_id
+            from ..workflow_authority import workflow_context
+            with workflow_context(worker_user):
+                from ..project_workspace_ownership import bind_actor
+                bind_actor(worker_db, worker_user)
+                worker_db.info['workflow_actor'] = worker_user
+                jobs.update(job_id, progress=15)
+                response = export_test_repository(project_id, worker_db, worker_user)
+                return asyncio.run(jobs.save_streaming_response(job_id, response, filename))
 
     return jobs.enqueue(background_tasks, "TEST_REPOSITORY_EXPORT", user_id, build)
 
@@ -1137,7 +1060,7 @@ def checkout_override(case_id: int, payload: schemas.TestCaseCheckoutOverride, d
     reason is given."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
-    require_can_manage_repository_governance(current_user)
+    require_can_manage_repository_governance(current_user, db, obj.project_id)
     _lock_case_version_state(db, obj)
     draft = obj.current_draft_version
     _require_returned_correction_owner(draft, current_user, "take over its checkout")
@@ -1322,46 +1245,6 @@ def delete_test_case(case_id: int, db: Session = Depends(get_db),
     return obj
 
 
-def _validate_stage2_assignee(db: Session, drafts: List[models.TestCaseVersion],
-                              qa_lead_id: int, prohibited_ids: Optional[set] = None) -> models.User:
-    qa_lead = db.query(models.User).get(qa_lead_id)
-    if not qa_lead or not qa_lead.is_active:
-        raise HTTPException(400, "Select an active QA Lead (Stage 2)")
-    if not qa_lead.has_department(*TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
-        raise HTTPException(
-            400,
-            f"Selected approvers must be mapped to one of: {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)}",
-        )
-    # Bug found via debugging pass: this rejected AGM_QA outright, directly
-    # contradicting _stage2_approver_ids just above ("All active CM QA and
-    # AGM QA users; either one may complete Stage 2") -- an AGM_QA-only user
-    # could be picked in the UI (eligible-users isn't role-filtered) and get
-    # a 400 here on save. AGM_QA now accepted here too, matching the rest of
-    # this file's own Stage 2 semantics.
-    if not qa_lead.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
-        raise HTTPException(400, "Stage 2 must be assigned to a QA Lead, Chief Manager - QA, or AGM - QA")
-    blocked_ids = {draft.author_id for draft in drafts}
-    blocked_ids.update(prohibited_ids or set())
-    if qa_lead_id in blocked_ids:
-        raise HTTPException(400, "The Stage 2 QA Lead must be different from the testcase author and Stage 1 Reviewer")
-    return qa_lead
-
-
-def _validate_submission_assignees(db: Session, drafts: List[models.TestCaseVersion],
-                                   reviewer_id: int, qa_lead_id: int) -> None:
-    reviewer = db.query(models.User).get(reviewer_id)
-    if not reviewer or not reviewer.is_active:
-        raise HTTPException(400, "Select an active Reviewer (Stage 1)")
-    if not reviewer.has_department(*TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
-        raise HTTPException(
-            400,
-            f"Selected approvers must be mapped to one of: {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)}",
-        )
-    if reviewer_id in {draft.author_id for draft in drafts}:
-        raise HTTPException(400, "A testcase author cannot also be selected as its Stage 1 Reviewer")
-    _validate_stage2_assignee(db, drafts, qa_lead_id, prohibited_ids={reviewer_id})
-
-
 def _submit_draft(db: Session, case: models.TestCase, draft: models.TestCaseVersion,
                   current_user: models.User, note: Optional[str], extra_comment: Optional[str] = None) -> None:
     """Shared by submit_test_case (single) and bulk_submit_test_cases below --
@@ -1369,14 +1252,8 @@ def _submit_draft(db: Session, case: models.TestCase, draft: models.TestCaseVers
     syncs the mirror, and writes the audit event. Caller has already
     validated the draft is ready (status check + _validate_steps).
 
-    Routes to whichever workflow this specific draft belongs to (see
-    _OLD_WORKFLOW_STATUSES above): a draft already returned under the OLD,
-    generic "Returned" status restarts at OLD-path "In Review" exactly as
-    before. Everything else -- a fresh Draft never submitted, or a NEW-path
-    "Returned by QA"/"Returned by QA Lead" resubmitting -- moves to NEW-path
-    "Recommendation Pending" and is routed to the QA Group, not an
-    individually-assigned Reviewer (2026-08 "Simplified Test Management
-    Review and Approval" requirement)."""
+    A legacy generic "Returned" draft restarts at "In Review"; newer drafts
+    use "Recommendation Pending" and route to the corresponding role group."""
     was_returned = draft.status in ("Returned", "Returned by QA", "Returned by QA Lead")
     previous_state = draft.status
     is_old_path = previous_state == "Returned"
@@ -1392,10 +1269,6 @@ def _submit_draft(db: Session, case: models.TestCase, draft: models.TestCaseVers
     draft.qa_lead_decided_by_id = None
     draft.qa_lead_decided_at = None
     draft.qa_lead_decision_comments = None
-    # Group routing is authoritative -- no individually-assigned Reviewer/QA
-    # Lead in either workflow's submission path (TM's "4.3 No Reviewer
-    # Selection"). Legacy per-version assignments are cleared so they cannot
-    # strand a review with an unavailable employee.
     draft.assigned_reviewer_id = None
     draft.assigned_qa_lead_id = None
     case.checked_out_by_id = None
@@ -1411,14 +1284,26 @@ def _submit_draft(db: Session, case: models.TestCase, draft: models.TestCaseVers
     ))
 
 
+def _require_stage_group_user(db: Session, project: models.TestProject, current_user: models.User, *, stage: int) -> None:
+    """Require workspace access and membership in the stage's role group."""
+    if current_user.has_role(Role.ADMIN):
+        return
+    from ..project_workspace_ownership import workspace_can_contribute
+    if not workspace_can_contribute(db, project.id, current_user):
+        raise HTTPException(403, "Your active workspace cannot contribute to this project")
+    roles = (Role.QA_ENGINEER,) if stage == 1 else (Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
+    if not current_user.has_role(*roles):
+        label = "QA Group" if stage == 1 else "QA Lead Group"
+        raise HTTPException(403, f"This decision is available only to the {label}")
+
+
 @router.post("/test-cases/{case_id}/submit", response_model=schemas.TestCaseOut)
 def submit_test_case(case_id: int, payload: schemas.TestCaseSubmit, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    """REV-001 -- submits the current Draft/Rework-Required version for QA
-    Lead review. Validates completeness (TC-003), releases the checkout,
-    and records author/timestamp/optional note."""
+    """Submit the current draft to the QA Group for recommendation."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
-    _require_active_project(_get_project_or_404(db, obj.project_id))
+    project = _get_project_or_404(db, obj.project_id)
+    _require_active_project(project)
     require_can_author_repository(db, obj.project_id, current_user)
     _lock_case_version_state(db, obj)
     draft = obj.current_draft_version
@@ -1426,12 +1311,6 @@ def submit_test_case(case_id: int, payload: schemas.TestCaseSubmit, db: Session 
         raise HTTPException(400, "There is no draft revision ready to submit for review")
     _require_returned_correction_owner(draft, current_user, "submit it")
     _validate_steps(draft.steps)
-    eligible = (
-        _stage1_reviewer_ids(db, obj.project_id, draft.author_id) if draft.status == "Returned"
-        else _qa_group_ids(db, draft.author_id)
-    )
-    if not eligible:
-        raise HTTPException(400, "No eligible QA reviewer is configured -- assign at least one active QA_ENGINEER")
     _submit_draft(db, obj, draft, current_user, payload.note)
     db.commit()
     db.refresh(obj)
@@ -1453,7 +1332,8 @@ def bulk_submit_test_cases(project_id: int, payload: schemas.TestCaseBulkSubmit,
     checkout (matching submit_test_case's own single-case behavior, which
     has never required one either -- submitting simply clears any existing
     checkout as part of the same action)."""
-    _require_active_project(_get_project_or_404(db, project_id))
+    project = _get_project_or_404(db, project_id)
+    _require_active_project(project)
     require_can_author_repository(db, project_id, current_user)
     rows = _selected_project_cases(db, project_id, payload.ids)
     _lock_case_version_states(db, rows)
@@ -1492,16 +1372,9 @@ def bulk_submit_test_cases(project_id: int, payload: schemas.TestCaseBulkSubmit,
         preview = "; ".join(step_errors[:5])
         suffix = "…" if len(step_errors) > 5 else ""
         raise HTTPException(400, f"Fix these before submitting: {preview}{suffix}")
-    unavailable = [row.test_case_key for row in rows if not (
-        _stage1_reviewer_ids(db, project_id, row.current_draft_version.author_id)
-        if row.current_draft_version.status == "Returned"
-        else _qa_group_ids(db, row.current_draft_version.author_id)
-    )]
-    if unavailable:
-        raise HTTPException(400, "No eligible QA reviewer is configured for: " + ", ".join(unavailable[:5]))
     for row in rows:
         _submit_draft(db, row, row.current_draft_version, current_user, payload.note,
-                      extra_comment="Submitted to the shared QA reviewer queue (bulk submit).")
+                      extra_comment="Submitted to the QA Group (bulk submit).")
     db.commit()
     for row in rows:
         db.refresh(row)
@@ -1511,44 +1384,10 @@ def bulk_submit_test_cases(project_id: int, payload: schemas.TestCaseBulkSubmit,
 @router.post("/test-cases/{case_id}/review", response_model=schemas.TestCaseOut)
 def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    """One endpoint, four possible stages, gated and validated differently
-    depending on which stage the target draft is currently sitting in (see
-    schemas.TestCaseReview's own docstring for the full decision vocabulary
-    per stage). OLD-path drafts already sitting at "In Review"/"Review
-    Completed" when the 2026-08 "Simplified Test Management Review and
-    Approval" requirement shipped keep running the pre-existing "Test
-    Approval Workflow" refactor logic below, completely unchanged:
-      "In Review"        -- Reviewer-tier acts (system QA_LEAD role):
-                             RECOMMEND -> "Review Completed"; RETURN -> "Returned" (comment mandatory).
-      "Review Completed" -- QA-Lead-tier acts (require_can_give_final_approval,
-                             CM QA/AGM QA only, deliberately narrower than
-                             Reviewer-tier -- see its own docstring in
-                             deps.py): APPROVE -> "Approved" (the only
-                             decision that activates the version for
-                             cycles); RETURN -> "Returned" (comment mandatory);
-                             REJECT -> "Rejected", terminal (comment mandatory).
-    NEW-path drafts (any fresh Draft submission, or a NEW-vocabulary Returned
-    status resubmitting) instead route to the QA Group / QA Lead Group --
-    see TEST_CASE_NEW_STATUSES in constants.py and ORACLE_MIGRATION_2026-07.md
-    for the reported requirement and the "new cases only" migration decision:
-      "Recommendation Pending"   -- any active QA_ENGINEER ("QA Group"),
-                                    excluding the author: RECOMMEND ->
-                                    "QA Lead Approval Pending"; RETURN ->
-                                    "Returned by QA" (comment mandatory);
-                                    REJECT -> "Rejected", terminal (comment
-                                    mandatory).
-      "QA Lead Approval Pending" -- any active member of the QA Lead Group
-                                    (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA),
-                                    excluding the author: APPROVE ->
-                                    "Approved"; RETURN -> "Returned by QA
-                                    Lead" (comment mandatory); REJECT ->
-                                    "Rejected", terminal (comment mandatory).
-    GOV-002 maker-checker: the author of THIS draft version may not act on
-    it at any stage, regardless of role -- section 11 "Emergency
-    self-approval shall be disabled by default," and this app doesn't build
-    the optional override, so it's simply always disabled, no exceptions."""
+    """Record a QA Group or QA Lead Group decision on a pending draft."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
-    _require_active_project(_get_project_or_404(db, obj.project_id))
+    project = _get_project_or_404(db, obj.project_id)
+    _require_active_project(project)
     _lock_case_version_state(db, obj)
     draft_id = obj.current_draft_version_id
     draft = (
@@ -1561,7 +1400,8 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
     _pending_statuses = ("In Review", "Review Completed", "Recommendation Pending", "QA Lead Approval Pending")
     if not draft or draft.status not in _pending_statuses:
         raise HTTPException(409, "This review or approval has already been completed by another authorized user")
-    if draft.author_id == current_user.id:
+    is_administrator = current_user.has_role(Role.ADMIN)
+    if not is_administrator and draft.author_id == current_user.id:
         raise HTTPException(403, "GOV-002: the author of a draft version may not act on their own work")
     # 2026-08 "Simplified Test Management" GOV-002 gap closed -- reported
     # directly: Tester 2 (not the draft's author) submitted Tester 1's
@@ -1571,11 +1411,11 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
     # who actually performed the submit action or an earlier stage's
     # decision. Maker-checker means nobody acts twice on the same draft's
     # forward progress, regardless of whether they authored its content.
-    # NEW-path only (see _OLD_WORKFLOW_STATUSES above) -- OLD-path GOV-002
-    # stays exactly the single author_id check it always was.
-    if draft.status == "Recommendation Pending" and draft.submitted_by_id == current_user.id:
+    # The newer status vocabulary records the submitter separately, so also
+    # prevent that user from making the next decision.
+    if not is_administrator and draft.status == "Recommendation Pending" and draft.submitted_by_id == current_user.id:
         raise HTTPException(403, "GOV-002: you submitted this draft for review and cannot record its Stage 1 decision")
-    if draft.status == "QA Lead Approval Pending" and current_user.id in (draft.submitted_by_id, draft.reviewed_by_id):
+    if not is_administrator and draft.status == "QA Lead Approval Pending" and current_user.id in (draft.submitted_by_id, draft.reviewed_by_id):
         raise HTTPException(
             403, "GOV-002: you already acted on this draft at an earlier stage and cannot record its Stage 2 decision"
         )
@@ -1584,14 +1424,10 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
     previous_state = draft.status
 
     if draft.status == "Recommendation Pending":
-        if not current_user.has_role(Role.QA_ENGINEER):
-            raise HTTPException(403, "Stage 1 recommendation is available only to the QA Group")
+        _require_stage_group_user(db, project, current_user, stage=1)
         if decision not in {"RECOMMEND", "RETURN", "REJECT"}:
             raise HTTPException(400, "Decision must be RECOMMEND, RETURN, or REJECT while pending QA recommendation")
         if decision == "RECOMMEND":
-            management_ids = _qa_lead_group_ids(db, draft.author_id)
-            if not management_ids:
-                raise HTTPException(400, "No active QA Lead Group approver is configured")
             draft.status = "QA Lead Approval Pending"
             draft.reviewed_by_id = current_user.id
             draft.reviewed_at = models.now()
@@ -1618,8 +1454,7 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             _sync_case_mirror(obj, draft)
             action = "Rejected"
     elif draft.status == "QA Lead Approval Pending":
-        if not current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
-            raise HTTPException(403, "Final approval is available only to the QA Lead Group")
+        _require_stage_group_user(db, project, current_user, stage=2)
         if decision not in {"APPROVE", "RETURN", "REJECT"}:
             raise HTTPException(400, "Decision must be APPROVE, RETURN, or REJECT while pending QA Lead approval")
         if decision == "APPROVE":
@@ -1658,14 +1493,10 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
             _sync_case_mirror(obj, draft)
             action = "Rejected"
     elif draft.status == "In Review":
-        if not current_user.has_role(Role.QA_LEAD):
-            raise HTTPException(403, "Stage 1 review is available only to the QA Lead group")
+        require_can_review_repository(db, obj.project_id, current_user)
         if decision not in {"RECOMMEND", "APPROVE", "RETURN", "REJECT"}:
             raise HTTPException(400, "Decision must be APPROVE, RETURN, or REJECT while pending Stage 1 QA review")
         if decision in {"RECOMMEND", "APPROVE"}:
-            management_ids = _stage2_approver_ids(db, draft.author_id)
-            if not management_ids:
-                raise HTTPException(400, "No active CM QA or AGM QA approver is configured")
             draft.status = "Review Completed"
             draft.reviewed_by_id = current_user.id
             draft.reviewed_at = models.now()
@@ -1737,14 +1568,6 @@ def review_test_case(case_id: int, payload: schemas.TestCaseReview, db: Session 
     return obj
 
 
-@router.patch("/test-cases/{case_id}/approvers", response_model=schemas.TestCaseOut)
-def reassign_test_case_approvers(case_id: int, payload: schemas.TestCaseReassignApprovers,
-                                 db: Session = Depends(get_db),
-                                 current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    """Retained temporarily for older clients; individual routing is disabled."""
-    raise HTTPException(409, "Individual reviewer assignment is disabled; test cases use automatic role-based group routing")
-
-
 @router.post("/test-cases/{case_id}/archive", response_model=schemas.TestCaseOut)
 def archive_test_case(case_id: int, payload: schemas.TestCaseArchive, db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
@@ -1757,7 +1580,7 @@ def archive_test_case(case_id: int, payload: schemas.TestCaseArchive, db: Sessio
     membership carve-out (require_can_manage_repository_governance)."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
-    require_can_manage_repository_governance(current_user)
+    require_can_manage_repository_governance(current_user, db, obj.project_id)
     approved = obj.current_approved_version
     if not approved:
         raise HTTPException(400, "This test case has no approved version to archive")
@@ -1785,7 +1608,7 @@ def restore_test_case(case_id: int, db: Session = Depends(get_db),
     membership carve-out (require_can_manage_repository_governance)."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
-    require_can_manage_repository_governance(current_user)
+    require_can_manage_repository_governance(current_user, db, obj.project_id)
     approved = obj.current_approved_version
     if not approved or approved.status != "Archived":
         raise HTTPException(400, "This test case's approved version is not archived")
@@ -1816,7 +1639,7 @@ def bulk_archive_test_cases(project_id: int, payload: schemas.TestCaseBulkArchiv
     rejects them, since selecting one for "Archive" in the first place
     would be a frontend eligibility bug."""
     _require_active_project(_get_project_or_404(db, project_id))
-    require_can_manage_repository_governance(current_user)
+    require_can_manage_repository_governance(current_user, db, project_id)
     reason = payload.reason.strip()
     if not reason:
         raise HTTPException(400, "An archive reason is required")
@@ -1858,7 +1681,7 @@ def bulk_restore_test_cases(project_id: int, payload: schemas.TestCaseBulkRestor
     from the Archive view that got restored by someone else a moment
     earlier shouldn't block the rest of the batch."""
     _require_active_project(_get_project_or_404(db, project_id))
-    require_can_manage_repository_governance(current_user)
+    require_can_manage_repository_governance(current_user, db, project_id)
     rows = _selected_project_cases(db, project_id, payload.ids)
     restorable_rows = [row for row in rows
                        if row.current_approved_version and row.current_approved_version.status == "Archived"]
@@ -2211,7 +2034,7 @@ def purge_test_case(case_id: int, db: Session = Depends(get_db),
     delete_test_case first."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
-    require_can_manage_repository_governance(current_user)
+    require_can_manage_repository_governance(current_user, db, obj.project_id)
     if not obj.is_deleted:
         raise HTTPException(400, "This test case is not in the Recycle Bin -- delete it first")
     # Logged before the delete -- entity_id on ApprovalAction is a plain
@@ -2233,7 +2056,7 @@ def bulk_purge_test_cases(project_id: int, payload: schemas.TestCaseBulkPurge,
     also permanent. Powers the Recycle Bin view's "Empty selected"/"Empty
     Recycle Bin" action."""
     _require_active_project(_get_project_or_404(db, project_id))
-    require_can_manage_repository_governance(current_user)
+    require_can_manage_repository_governance(current_user, db, project_id)
     rows = _selected_project_cases(db, project_id, payload.ids, include_deleted=True)
     not_deleted = [row.test_case_key for row in rows if not row.is_deleted]
     if not_deleted:
@@ -2253,25 +2076,9 @@ def bulk_purge_test_cases(project_id: int, payload: schemas.TestCaseBulkPurge,
 def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprove,
                             db: Session = Depends(get_db),
                             current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    """QA-Lead-tier bulk FINAL decision (2026-08 Approval Workflow refactor)
-    -- approves several "Review Completed" draft versions in one atomic
-    decision (always a minor-version approval -- use the single-case review
-    endpoint for a major bump, which needs its own per-case justification).
-    Reachable by system QA Lead/Admin always, or a QA Engineer holding
-    project role Project Lead on this project (OLD-path rows, "Review
-    Completed") -- require_can_give_final_approval does that check. NEW-path
-    rows ("QA Lead Approval Pending") instead require membership in the QA
-    Lead Group (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA), same as the single-case
-    review endpoint's NEW-path Stage 2 branch -- see TEST_CASE_NEW_STATUSES
-    in constants.py. The whole selection must be homogeneously one path or
-    the other (validated below) so a single "who is allowed to do this"
-    check always applies to the entire batch, same all-or-nothing convention
-    as every other validation this endpoint runs before committing anything.
-    See bulk_recommend_test_cases below for the Stage-1 bulk equivalent.
-    One approver message is deliberately reused for every case-specific
-    audit row, so each testcase retains a complete history without asking
-    the lead to repeat the same message."""
-    _require_active_project(_get_project_or_404(db, project_id))
+    """Approve several pending drafts atomically at the QA Lead stage."""
+    project = _get_project_or_404(db, project_id)
+    _require_active_project(project)
     rows = _selected_project_cases(db, project_id, payload.ids)
     _lock_current_drafts(db, rows)
     operation_label = "Bulk approval" if len(rows) > 1 else "Approval"
@@ -2294,15 +2101,15 @@ def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprov
     if len(statuses_present) > 1:
         raise HTTPException(
             400,
-            f"{operation_label} stopped because the selection mixes OLD-workflow (\"Review Completed\") and "
-            "NEW-workflow (\"QA Lead Approval Pending\") test cases -- select one group at a time.",
+            f"{operation_label} stopped because the selection mixes \"Review Completed\" and "
+            "\"QA Lead Approval Pending\" test cases; select one status at a time.",
         )
     is_old_path = statuses_present == {"Review Completed"}
     if is_old_path:
         require_can_give_final_approval(db, project_id, current_user)
-    elif not current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
-        raise HTTPException(403, "Final approval is available only to the QA Lead Group")
-    self_authored = [row.test_case_key for row in rows if row.current_draft_version.author_id == current_user.id]
+    else:
+        _require_stage_group_user(db, project, current_user, stage=2)
+    self_authored = [] if current_user.has_role(Role.ADMIN) else [row.test_case_key for row in rows if row.current_draft_version.author_id == current_user.id]
     if self_authored:
         preview = ", ".join(self_authored[:5])
         raise HTTPException(
@@ -2314,7 +2121,7 @@ def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprov
     # endpoint, same reported gap) -- also block whoever submitted or
     # Stage-1-recommended a row from being its own Stage 2 approver, not just
     # whoever authored its content. OLD-path GOV-002 stays author-only.
-    if not is_old_path:
+    if not is_old_path and not current_user.has_role(Role.ADMIN):
         self_acted = [row.test_case_key for row in rows
                       if current_user.id in (row.current_draft_version.submitted_by_id,
                                               row.current_draft_version.reviewed_by_id)]
@@ -2347,18 +2154,9 @@ def bulk_approve_test_cases(project_id: int, payload: schemas.TestCaseBulkApprov
 def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkRecommend,
                               db: Session = Depends(get_db),
                               current_user: models.User = Depends(require_roles(*_AUTHOR_ROLES))):
-    """Stage-1-tier bulk equivalent of bulk_approve_test_cases above --
-    recommends several pending draft versions for QA Lead final approval in
-    one atomic decision. OLD-path rows ("In Review") require system QA
-    Lead/Admin, or a QA Engineer holding project role Reviewer/Project
-    Lead/Owner on this project (require_can_review_repository). NEW-path
-    rows ("Recommendation Pending") instead require membership in the QA
-    Group (QA_ENGINEER), same as the single-case review endpoint's NEW-path
-    Stage 1 branch -- see TEST_CASE_NEW_STATUSES in constants.py. The whole
-    selection must be homogeneously one path or the other (validated below),
-    same reasoning as bulk_approve_test_cases above. comments is optional
-    (APR-004: recommendation comments aren't mandatory, unlike return/reject)."""
-    _require_active_project(_get_project_or_404(db, project_id))
+    """Recommend several pending drafts atomically at the QA Group stage."""
+    project = _get_project_or_404(db, project_id)
+    _require_active_project(project)
     rows = _selected_project_cases(db, project_id, payload.ids)
     _lock_current_drafts(db, rows)
     operation_label = "Bulk recommendation" if len(rows) > 1 else "Recommendation"
@@ -2379,15 +2177,15 @@ def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkReco
     if len(statuses_present) > 1:
         raise HTTPException(
             400,
-            f"{operation_label} stopped because the selection mixes OLD-workflow (\"In Review\") and "
-            "NEW-workflow (\"Recommendation Pending\") test cases -- select one group at a time.",
+            f"{operation_label} stopped because the selection mixes \"In Review\" and "
+            "\"Recommendation Pending\" test cases; select one status at a time.",
         )
     is_old_path = statuses_present == {"In Review"}
     if is_old_path:
         require_can_review_repository(db, project_id, current_user)
-    elif not current_user.has_role(Role.QA_ENGINEER):
-        raise HTTPException(403, "Stage 1 recommendation is available only to the QA Group")
-    self_authored = [row.test_case_key for row in rows if row.current_draft_version.author_id == current_user.id]
+    else:
+        _require_stage_group_user(db, project, current_user, stage=1)
+    self_authored = [] if current_user.has_role(Role.ADMIN) else [row.test_case_key for row in rows if row.current_draft_version.author_id == current_user.id]
     if self_authored:
         preview = ", ".join(self_authored[:5])
         raise HTTPException(
@@ -2399,7 +2197,7 @@ def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkReco
     # was then immediately able to recommend the very item they'd just
     # submitted, since this check only ever looked at author_id. OLD-path
     # GOV-002 stays author-only.
-    if not is_old_path:
+    if not is_old_path and not current_user.has_role(Role.ADMIN):
         self_submitted = [row.test_case_key for row in rows
                            if row.current_draft_version.submitted_by_id == current_user.id]
         if self_submitted:
@@ -2409,14 +2207,10 @@ def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkReco
                 f"GOV-002: you submitted the pending draft on {len(self_submitted)} selected test case(s) and "
                 f"cannot also record its Stage 1 decision: {preview}",
             )
-    management_ids = _stage2_approver_ids(db) if is_old_path else _qa_lead_group_ids(db)
-    if not management_ids:
-        raise HTTPException(400, "No active QA Lead Group approver is configured")
     previous_state = "In Review" if is_old_path else "Recommendation Pending"
     new_state = "Review Completed" if is_old_path else "QA Lead Approval Pending"
     for row in rows:
         draft = row.current_draft_version
-        draft.assigned_qa_lead_id = None
         draft.status = new_state
         draft.reviewed_by_id = current_user.id
         draft.reviewed_at = models.now()
@@ -2435,14 +2229,7 @@ def bulk_recommend_test_cases(project_id: int, payload: schemas.TestCaseBulkReco
 
 def _bulk_new_path_decision_rows(db: Session, project_id: int, payload_ids: List[int],
                                   current_user: models.User, action_label: str) -> List[models.TestCase]:
-    """Shared validation for bulk_return_test_cases/bulk_reject_test_cases
-    below -- both are NEW-workflow-only (see their own docstrings), so this
-    factors out the parts identical to bulk_recommend_test_cases/
-    bulk_approve_test_cases above minus the OLD-path branch: selection must
-    be entirely one NEW-path checkpoint ("Recommendation Pending" or "QA
-    Lead Approval Pending"), the caller must hold the matching group role,
-    and GOV-002 excludes the author plus whoever already acted at an earlier
-    stage (submitter for Stage 1, submitter+Stage-1-reviewer for Stage 2)."""
+    """Validate a QA Group/QA Lead Group bulk action at one workflow stage."""
     rows = _selected_project_cases(db, project_id, payload_ids)
     _lock_current_drafts(db, rows)
     operation_label = f"Bulk {action_label}" if len(rows) > 1 else action_label.capitalize()
@@ -2455,7 +2242,7 @@ def _bulk_new_path_decision_rows(db: Session, project_id: int, payload_ids: List
         raise HTTPException(
             400,
             f"{operation_label} stopped because {len(not_pending)} selected test case(s) are not pending "
-            f"a QA Group/QA Lead Group decision: {preview}{suffix}",
+            f"a reviewer or QA Lead decision: {preview}{suffix}",
         )
     statuses_present = {row.current_draft_version.status for row in rows}
     if len(statuses_present) > 1:
@@ -2465,11 +2252,9 @@ def _bulk_new_path_decision_rows(db: Session, project_id: int, payload_ids: List
             f"Stage 2 (\"QA Lead Approval Pending\") test cases -- select one stage at a time.",
         )
     is_stage1 = statuses_present == {"Recommendation Pending"}
-    if is_stage1 and not current_user.has_role(Role.QA_ENGINEER):
-        raise HTTPException(403, "Stage 1 decisions are available only to the QA Group")
-    if not is_stage1 and not current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
-        raise HTTPException(403, "Stage 2 decisions are available only to the QA Lead Group")
-    self_authored = [row.test_case_key for row in rows if row.current_draft_version.author_id == current_user.id]
+    project = _get_project_or_404(db, project_id)
+    _require_stage_group_user(db, project, current_user, stage=1 if is_stage1 else 2)
+    self_authored = [] if current_user.has_role(Role.ADMIN) else [row.test_case_key for row in rows if row.current_draft_version.author_id == current_user.id]
     if self_authored:
         preview = ", ".join(self_authored[:5])
         raise HTTPException(
@@ -2477,7 +2262,9 @@ def _bulk_new_path_decision_rows(db: Session, project_id: int, payload_ids: List
             f"GOV-002: you authored the pending draft on {len(self_authored)} selected test case(s) and cannot "
             f"{action_label} your own work: {preview}",
         )
-    if is_stage1:
+    if current_user.has_role(Role.ADMIN):
+        self_acted = []
+    elif is_stage1:
         self_acted = [row.test_case_key for row in rows if row.current_draft_version.submitted_by_id == current_user.id]
     else:
         self_acted = [row.test_case_key for row in rows
@@ -2850,21 +2637,28 @@ async def queue_test_case_import(
         raise HTTPException(400, "The uploaded Excel file is empty")
     filename = os.path.basename(file.filename or "testcases.xlsx")
     user_id = current_user.id
+    actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
 
     def process(job_id: str):
         with SessionLocal() as worker_db:
             worker_user = worker_db.query(models.User).get(user_id)
             if not worker_user:
                 raise RuntimeError("The user who started this import no longer exists")
-            jobs.update(job_id, progress=15)
-            upload = UploadFile(filename=filename, file=io.BytesIO(raw))
-            result = asyncio.run(import_test_cases(
-                project_id,
-                upload,
-                folder_id,
-                worker_db,
-                worker_user,
-            ))
-            return result.model_dump(mode="json")
+            worker_user.active_qa_workspace_id = actor_workspace_id
+            from ..workflow_authority import workflow_context
+            with workflow_context(worker_user):
+                from ..project_workspace_ownership import bind_actor
+                bind_actor(worker_db, worker_user)
+                worker_db.info['workflow_actor'] = worker_user
+                jobs.update(job_id, progress=15)
+                upload = UploadFile(filename=filename, file=io.BytesIO(raw))
+                result = asyncio.run(import_test_cases(
+                    project_id,
+                    upload,
+                    folder_id,
+                    worker_db,
+                    worker_user,
+                ))
+                return result.model_dump(mode="json")
 
     return jobs.enqueue(background_tasks, "TESTCASE_XLSX_IMPORT", user_id, process)

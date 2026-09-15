@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { formatDateIST, formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
-import { hasRole, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
+import { hasWorkflowRole as hasRole, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
 import { EmptyState, ErrorText, Field, Modal, Table, TableColumn } from '../../components/Common'
 import { SecurityScanResultOut, SecurityScanSummaryOut, SuppressionOut } from '../../types'
 

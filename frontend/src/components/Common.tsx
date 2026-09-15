@@ -451,7 +451,9 @@ export function Modal({
     }
   }
 
-  function handleBackdropClick() {
+  function handleBackdropClick(event: React.MouseEvent) {
+    // Portals retain React event bubbling; never activate the underlying row.
+    event.stopPropagation();
     // Drawers hold record details and forms, so an outside click must never
     // dismiss them. They stay open until the user deliberately uses Close.
     // Centered dialogs retain their existing opt-in backdrop behaviour.
@@ -463,8 +465,10 @@ export function Modal({
     setTimeout(() => setShake(false), 320);
   }
 
+  // Mount outside cards/tables: transformed or clipped ancestors otherwise
+  // constrain fixed overlays to the card instead of the viewport.
   if (variant === "dialog") {
-    return (
+    return createPortal(
       <div
         className="modal-overlay modal-overlay-center"
         onClick={handleBackdropClick}
@@ -490,10 +494,11 @@ export function Modal({
           </div>
           <div className="drawer-body">{children}</div>
         </div>
-      </div>
+      </div>,
+      document.body
     );
   }
-  return (
+  return createPortal(
     <div
       className={`modal-overlay ${expanded ? "modal-overlay-expanded" : ""}`}
       onClick={handleBackdropClick}
@@ -534,7 +539,8 @@ export function Modal({
         </div>
         <div className="drawer-body">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -1244,6 +1250,11 @@ interface TableProps<T> {
   // Optional stable identifier for pages containing multiple similar tables.
   // When omitted, the route and column keys form the preference key.
   tableId?: string;
+  // Reset client-side pagination when an external search or tab changes.
+  // The table cannot infer this from rows.length when two searches happen
+  // to return the same number of records.
+  resetKey?: unknown;
+  showColumnControls?: boolean;
   // See TableServerPagination above. Omitted (the default): Table behaves
   // exactly as before, filtering/paginating `rows` entirely client-side.
   server?: TableServerPagination;
@@ -1258,6 +1269,8 @@ export function Table<T extends Record<string, any>>({
   onRowClick,
   pageSize = 5,
   tableId,
+  resetKey,
+  showColumnControls = true,
   server,
 }: TableProps<T>) {
   // Each column can hold several exact values. Different columns are still
@@ -1494,7 +1507,7 @@ export function Table<T extends Record<string, any>>({
   useEffect(() => {
     if (server) return;
     setPage(1);
-  }, [filters, rows.length, server]);
+  }, [filters, rows.length, resetKey, server]);
 
   const totalPages = server ? Math.max(1, server.totalPages) : Math.max(1, Math.ceil(filteredRows.length / pageSize));
   // Clamp separately from the reset above -- covers the case where `page`
@@ -1529,7 +1542,7 @@ export function Table<T extends Record<string, any>>({
           <strong>{recordCount.toLocaleString()} record{recordCount === 1 ? "" : "s"}</strong>
           {activeFilters.length > 0 && <span>{visibleRecordCount.toLocaleString()} matching current filters</span>}
         </div>
-        <div className="table-column-controls" ref={columnsTriggerRef}>
+        {showColumnControls && <div className="table-column-controls" ref={columnsTriggerRef}>
           <button
             type="button"
             className="table-columns-trigger"
@@ -1538,8 +1551,8 @@ export function Table<T extends Record<string, any>>({
           >
             Columns <span>{visibleColumns.length}/{availableColumns.length}</span>
           </button>
-        </div>
-        {columnsOpen && createPortal(
+        </div>}
+        {showColumnControls && columnsOpen && createPortal(
           <div
             className="table-columns-panel"
             ref={columnsPanelRef}

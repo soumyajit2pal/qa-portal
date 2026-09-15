@@ -9,6 +9,18 @@ class _Query:
     def __init__(self, record):
         self.record = record
 
+    def filter_by(self, **kwargs):
+        return self
+
+    def populate_existing(self):
+        return self
+
+    def with_for_update(self):
+        return self
+
+    def first(self):
+        return self.get(None)
+
     def get(self, _record_id):
         return self.record
 

@@ -72,3 +72,15 @@ def require_cycles_completed(cycles) -> None:
             "Mark QA Complete requires every linked Test Cycle to reach Completed first. "
             f"Still open: {names}",
         )
+
+
+def require_request_execution_started(request) -> None:
+    """The linked request must enter execution before its cycle can start."""
+    from .constants import QAStatus, QA_REQUEST_STATUS_LABELS
+    if request.status != QAStatus.EXECUTION_IN_PROGRESS:
+        label = QA_REQUEST_STATUS_LABELS.get(request.status, request.status or "Unknown")
+        raise HTTPException(
+            400,
+            f"Cannot start this Test Cycle. Linked request {request.request_id} is {label}. "
+            "Start execution on the linked request first; its status must be Execution In Progress.",
+        )

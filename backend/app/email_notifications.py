@@ -8,6 +8,7 @@ import datetime
 import logging
 import os
 import smtplib
+import ssl
 import threading
 import time
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from sqlalchemy import event, or_
 from sqlalchemy.orm import Session as SASession, joinedload
 
 from . import models
-from .constants import QA_DEPARTMENT, Role
+from .constants import Role
 from .database import SessionLocal
 from .resilience import CircuitOpenError, smtp_circuit
 
@@ -75,9 +76,10 @@ def _send_message(message: EmailMessage, settings: dict) -> None:
     """Send one prepared message through the configured SMTP transport."""
     smtp_class = smtplib.SMTP_SSL if settings["ssl"] else smtplib.SMTP
     try:
-        with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"]) as client:
+        with smtp_class(settings["host"], settings["port"], timeout=settings["timeout"],
+                        **({"context": ssl.create_default_context(cafile=os.getenv("SMTP_CA_CERTS_FILE") or None)} if settings["ssl"] else {})) as client:
             if settings["starttls"]:
-                client.starttls()
+                client.starttls(context=ssl.create_default_context(cafile=os.getenv("SMTP_CA_CERTS_FILE") or None))
             if settings["username"]:
                 client.login(settings["username"], settings["password"])
             client.send_message(message)
@@ -458,7 +460,7 @@ def _target(action: models.ApprovalAction, db: SASession):
         "SAST": models.SASTRequest, "DAST": models.DASTRequest,
         "PERFORMANCE": models.PerformanceRequest, "SUPPRESSION": models.SuppressionRequest,
         "SIGNOFF": models.QASignOff, "DEFECT": models.Defect,
-        "TEST_PROJECT": models.TestProject, "TEST_CASE": models.TestCase,
+        "TEST_PROJECT": models.TestProject, "TEST_CASE": models.TestCase, "TEST_CYCLE": models.TestCycle, "TEST_EXECUTION": models.TestExecution,
     }
     model = mapping.get(action.entity_type)
     return db.get(model, action.entity_id) if model else None
@@ -473,8 +475,11 @@ def _department(target) -> str | None:
     project = getattr(target, "project", None)
     if project and project.department:
         return project.department
-    parent = getattr(target, "qa_request", None)
-    return parent.department if parent else None
+    for relationship in ("cycle", "test_case", "qa_request"):
+        parent = getattr(target, relationship, None)
+        if parent is not None:
+            return _department(parent)
+    return None
 
 
 def _requester_user_ids(target) -> set[int]:
@@ -565,6 +570,45 @@ def _role_user_ids(db: SASession, roles: set[str], department: str | None) -> se
     return {user.id for user in users if not department or user.has_department(department)}
 
 
+def _target_workspace_id(target) -> int | None:
+    """Find the persisted Workspace for gateway, child and test entities."""
+    origin = getattr(target, "origin_workspace_id", None)
+    if origin:
+        return origin
+    cycle = getattr(target, "cycle", None)
+    if cycle is not None:
+        return _target_workspace_id(cycle)
+    direct = getattr(target, "qa_workspace_id", None)
+    if direct:
+        return direct
+    qa_request = getattr(target, "qa_request", None)
+    if qa_request and getattr(qa_request, "qa_workspace_id", None):
+        return qa_request.qa_workspace_id
+    project = getattr(target, "project", None)
+    if project and getattr(project, "qa_workspace_id", None):
+        return project.qa_workspace_id
+    for relationship in ("sast_request", "dast_request"):
+        parent = getattr(target, relationship, None)
+        if parent is not None:
+            return _target_workspace_id(parent)
+    test_case = getattr(target, "test_case", None)
+    if test_case and getattr(test_case, "project", None):
+        return _target_workspace_id(test_case)
+    return None
+
+
+def _workspace_role_user_ids(db: SASession, workspace_id: int, roles: set[str]) -> set[int]:
+    rows = db.query(models.QAWorkspaceMember.user_id).join(models.User).join(
+        models.UserRole, models.UserRole.user_id == models.User.id,
+    ).filter(
+        models.QAWorkspaceMember.workspace_id == workspace_id,
+        models.QAWorkspaceMember.is_active == True,  # noqa: E712
+        models.User.is_active == True,  # noqa: E712
+        models.UserRole.role.in_(roles),
+    ).distinct().all()
+    return {row[0] for row in rows}
+
+
 def _user_ids(value) -> set[int]:
     """Return a safe, de-duplicated set from a persisted assignee field.
 
@@ -604,6 +648,18 @@ def _assigned_user_route(target) -> NotificationRoute | None:
     """
     status = str(getattr(target, "status", "") or "").upper()
 
+    if isinstance(target, models.TestExecution):
+        if target.cycle and target.cycle.status == "In Progress" and status in {"NOT EXECUTED", "FAIL", "BLOCKED"}:
+            return NotificationRoute(_user_ids(target.assigned_to_id), "Assigned QA Tester", True,
+                "Review this outstanding testcase execution and its linked defects.")
+        return None
+
+    if isinstance(target, models.TestCase) and status == "IN REVIEW":
+        reviewer = getattr(target, "assigned_reviewer_id", None)
+        if reviewer:
+            return NotificationRoute({reviewer}, "Assigned Reviewer", True,
+                "Your testcase review is required. Open the testcase to record your decision.")
+
     if isinstance(target, models.FunctionalRequest) and status in {
         "TESTER_ASSIGNED", "TEST_DESIGN", "EXECUTION_IN_PROGRESS", "RETESTING",
     }:
@@ -636,29 +692,12 @@ def _assigned_user_route(target) -> NotificationRoute | None:
                 "You have been assigned security-testing work. Open the record to continue the workflow.",
             )
 
-    if isinstance(target, models.TestCase):
-        draft = target.current_draft_version
-        if draft and status == "IN REVIEW":
-            recipients = _user_ids(draft.assigned_reviewer_id)
-            if recipients:
-                return NotificationRoute(
-                    recipients, "Assigned QA Reviewer", True,
-                    "You have been assigned this test case for review.",
-                )
-        if draft and status == "REVIEW COMPLETED":
-            recipients = _user_ids(draft.assigned_qa_lead_id)
-            if recipients:
-                return NotificationRoute(
-                    recipients, "Assigned QA Lead", True,
-                    "You have been assigned this test case for final QA approval.",
-                )
-
     return None
 
 
 _DEFECT_QA_ROUTING_STATUSES = {"NEW"}
 _DEFECT_OWNER_STATUSES = {"TRIAGED", "ASSIGNED", "IN PROGRESS", "REOPENED"}
-_DEFECT_RETEST_STATUSES = {"RESOLVED", "RETEST"}
+_DEFECT_RETEST_STATUSES = {"RESOLVED", "RETEST", "READY FOR QA", "QA TESTING"}
 _DEFECT_PAUSED_STATUSES = {"DEFERRED"}
 _DEFECT_OUTCOME_STATUSES = {"REJECTED", "DUPLICATE", "NOT A DEFECT", "CLOSED"}
 
@@ -676,7 +715,8 @@ def _defect_notification_route(db: SASession, target: models.Defect) -> Notifica
     status = str(getattr(target, "status", "") or "").upper()
     if status in _DEFECT_QA_ROUTING_STATUSES:
         roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
-        recipients = _role_user_ids(db, roles, None)
+        workspace = _target_workspace_id(target)
+        recipients = _workspace_role_user_ids(db, workspace, roles) if workspace else set()
         if recipients:
             return NotificationRoute(
                 recipients, "QA Defect Team", True,
@@ -701,6 +741,11 @@ def _defect_notification_route(db: SASession, target: models.Defect) -> Notifica
                 "This defect is ready for retest activity or a retest decision.",
             )
         return None
+    if status in {"BUSINESS ACCEPTANCE", "READY FOR RELEASE", "PRODUCTION VERIFICATION"}:
+        field = "business_owner_id" if status == "BUSINESS ACCEPTANCE" else "release_owner_id"
+        return NotificationRoute(_user_ids(getattr(target, field, None)),
+            "Business Owner" if field == "business_owner_id" else "Release Owner", True,
+            "You own the next verification or release action. Open the defect to continue.")
     if status in _DEFECT_PAUSED_STATUSES:
         recipients = _user_ids(getattr(target, "assignee_id", None))
         recipients.update(_user_ids(getattr(target, "reporter_id", None)))
@@ -757,6 +802,10 @@ def _is_workflow_transition(action: models.ApprovalAction) -> bool:
     if action.entity_type == "DEFECT" and action.new_state \
             and action.previous_state != action.new_state:
         return True
+    if action.entity_type == "TEST_CYCLE" and action.decision == "Created":
+        return True
+    if action.entity_type == "TEST_CYCLE" and action.new_state and action.previous_state != action.new_state:
+        return True
     decision = (action.decision or "").strip().lower()
     # SAST/DAST have several legitimate hand-off labels that contain none of
     # the generic verbs below (Finding Validation, Awaiting Fix, Rescanning,
@@ -781,7 +830,61 @@ def _is_workflow_transition(action: models.ApprovalAction) -> bool:
     ))
 
 
-def _notification_route(db: SASession, action: models.ApprovalAction, target) -> NotificationRoute | None:
+def _notification_route(db, action, target):
+    route = _unfiltered_notification_route(db, action, target)
+    if not route or not target:
+        return route
+    if getattr(target, "is_deleted", False):
+        return None
+    from .workspace_service import selectable_workspace_ids, inherited_workspace_access_mode
+    from .workflow_authority import admin_department_allowed
+    workspace = _target_workspace_id(target)
+    department = _department(target)
+    roles = _next_approver_roles(target)
+    department_scoped = bool(roles & {Role.SM, Role.DEPARTMENT_HEAD_CM,
+                                     Role.DEPARTMENT_HEAD_AGM, Role.APPLICATION_OWNER})
+    recipients = set()
+    for uid in route.recipient_ids:
+        user = db.get(models.User, uid)
+        if not user or not user.is_active:
+            continue
+        if workspace and workspace not in selectable_workspace_ids(db, user):
+            continue
+        if route.action_required:
+            if Role.VIEW_ONLY in user.roles:
+                continue
+            if workspace and inherited_workspace_access_mode(db, user, workspace) == 'PARENT_VIEWER':
+                continue
+            if isinstance(target, models.TestCycle):
+                if not set(user.roles).intersection({Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA}):
+                    continue
+            if isinstance(target, models.TestExecution) and Role.QA_ENGINEER not in user.roles:
+                continue
+            if roles and not set(user.roles).intersection(roles):
+                continue
+            action_department = department
+            if isinstance(target, models.Defect) and uid == target.assignee_id:
+                action_department = target.assigned_team or department
+            if isinstance(target, models.Defect) and workspace:
+                from .defect_assignment import assignment_error
+                status = target.status.upper()
+                field = ('assignee_id' if status in _DEFECT_OWNER_STATUSES else
+                         'retest_tester_id' if status in _DEFECT_RETEST_STATUSES else
+                         'business_owner_id' if status == 'BUSINESS ACCEPTANCE' else
+                         'release_owner_id' if status in {'READY FOR RELEASE', 'PRODUCTION VERIFICATION'} else None)
+                if field and assignment_error(db, target, user, field, target.assigned_team):
+                    continue
+            if not admin_department_allowed(user, action_department):
+                continue
+            if department_scoped and (not department or not user.has_department(department)):
+                continue
+            if department_scoped and uid in _requester_user_ids(target):
+                continue
+        recipients.add(uid)
+    return NotificationRoute(recipients, route.recipient_label, route.action_required, route.instruction)
+
+
+def _unfiltered_notification_route(db: SASession, action: models.ApprovalAction, target) -> NotificationRoute | None:
     """Route each workflow transition to its *next* responsible party.
 
     This deliberately does not copy every stakeholder on every message.
@@ -818,6 +921,13 @@ def _notification_route(db: SASession, action: models.ApprovalAction, target) ->
         )
         return None
 
+    if isinstance(target, models.TestCycle):
+        if target.status in {"Completed", "Cancelled"}:
+            return NotificationRoute(_user_ids(target.owner_id) | _requester_user_ids(target),
+                "Cycle Stakeholder", False, "The test cycle has reached an outcome. Review its results and history.")
+        return NotificationRoute(_user_ids(target.owner_id), "Cycle Owner", True,
+            "You own this test cycle. Review its current status and continue the lifecycle.")
+
     assigned_route = _assigned_user_route(target)
     if assigned_route:
         logger.info(
@@ -828,13 +938,18 @@ def _notification_route(db: SASession, action: models.ApprovalAction, target) ->
 
     roles = _next_approver_roles(target)
     if roles:
-        department = QA_DEPARTMENT if isinstance(target, models.TestCase) else _department(target)
-        # The assigned group is the notification owner.  Department scope is
-        # still enforced by the action endpoints themselves, but must not
-        # suppress a group notification merely because a member's primary
-        # department differs from the request.  That was the reason an
-        # otherwise active SM group could receive no email at all.
-        recipients = _role_user_ids(db, roles, None)
+        department = _department(target)
+        # Resolve workspace membership first. The shared route filter then
+        # applies department and workflow authority before anything is queued.
+        workspace_id = _target_workspace_id(target)
+        recipients = (
+            _workspace_role_user_ids(db, workspace_id, roles)
+            if workspace_id else _role_user_ids(db, roles, None)
+        )
+        from .workflow_authority import admin_department_allowed
+        recipients = {recipient_id for recipient_id in recipients
+                      if (recipient := db.get(models.User, recipient_id)) is not None
+                      and admin_department_allowed(recipient, department)}
         logger.info(
             "SMTP workflow route evaluated reference=%s status=%s owner=group roles=%s request_department=%s eligible_recipient_count=%s",
             reference, getattr(target, "status", None), ",".join(sorted(roles)), department or "<any>", len(recipients),
@@ -876,7 +991,7 @@ def _route(action: models.ApprovalAction) -> str:
         "QA_REQUEST": "/qa-requests", "FUNCTIONAL_REQUEST": "/functional-requests",
         "SAST": "/sast", "DAST": "/dast", "PERFORMANCE": "/performance",
         "SUPPRESSION": "/suppression", "SIGNOFF": "/signoff", "DEFECT": "/defects",
-        "TEST_PROJECT": "/test-projects", "TEST_CASE": "/test-repository",
+        "TEST_PROJECT": "/test-projects", "TEST_CASE": "/test-repository", "TEST_CYCLE": "/test-execution", "TEST_EXECUTION": "/test-execution",
     }
     return routes.get(action.entity_type, "/approvals")
 
@@ -886,7 +1001,7 @@ def _portal_reference(action: models.ApprovalAction, target) -> str:
     if target:
         for field in (
             "request_id", "suppression_id", "certificate_id", "defect_key",
-            "project_key", "test_case_key",
+            "project_key", "test_case_key", "cycle_key",
         ):
             value = getattr(target, field, None)
             if value:
@@ -901,6 +1016,10 @@ def _portal_link(action: models.ApprovalAction, reference: str) -> str:
     route = _route(action)
     if route == "/approvals":
         return route
+    if action.entity_type == "TEST_CYCLE":
+        return f"{route}?cycle={action.entity_id}"
+    if action.entity_type == "TEST_EXECUTION":
+        return f"{route}?execution={action.entity_id}"
     return f"{route}?open={quote(reference, safe='')}&openId={action.entity_id}"
 
 
@@ -940,7 +1059,7 @@ def _queue_for_action(db: SASession, action: models.ApprovalAction) -> int:
     recipient_ids = route.recipient_ids - {action.actor_id}
     if not recipient_ids:
         logger.info(
-            "SMTP workflow notification skipped reference=%s reason=actor_is_only_recipient actor_id=%s",
+            "SMTP workflow notification skipped reference=%s reason=no_eligible_recipient_other_than_actor actor_id=%s",
             reference, action.actor_id,
         )
         return 0
@@ -1201,6 +1320,10 @@ def deliver_pending_async() -> None:
         global _delivery_worker_running, _delivery_rerun_requested
         while True:
             try:
+                if time.monotonic() - last_sla_check >= 3600:
+                    from .sla_notifications import queue_breaches
+                    queue_breaches()
+                    last_sla_check = time.monotonic()
                 deliver_pending()
             except Exception:
                 logger.exception("SMTP outbox delivery worker failed")
@@ -1222,6 +1345,7 @@ def start_outbox_poller() -> None:
     _poller_started = True
 
     def _poll() -> None:
+        last_sla_check = 0.0
         while _enabled():
             try:
                 deliver_pending()

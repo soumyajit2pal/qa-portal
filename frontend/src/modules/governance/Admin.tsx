@@ -1,11 +1,51 @@
+import WorkspaceDefectWorkflow from '../../components/WorkspaceDefectWorkflow'
 import React, { useEffect, useState, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
 import { useAuth } from '../../context/AuthContext'
-import { Card, Table, Modal, Field, ErrorText, PageHeader } from '../../components/Common'
-import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole } from '../../constants'
-import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch } from '../../components/Icons'
-import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult } from '../../types'
+import { Card, Table, Modal, Field, ErrorText, PageHeader, type TableColumn } from '../../components/Common'
+import { ROLE_LABELS, ALL_ROLES, LOGIN_TYPES, LOGIN_TYPE_LABELS, hasRole, isSelectableUser, uniqueWorkspaceAccess } from '../../constants'
+import { IconPlus, IconLock, IconWarning, IconCheckCircle, IconSearch, IconUsers } from '../../components/Icons'
+import { UserOut, UserSummaryOut, DepartmentOut, ApplicationMasterOut, ApplicationSeedResult, QAWorkspaceOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import SearchableSelect from '../../components/SearchableSelect'
+import UserAssignSelect from '../../components/UserAssignSelect'
+import ClearableSearchInput from '../../components/ClearableSearchInput'
+
+function CoordinatorRolePolicy() {
+  const [roles, setRoles] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [saved, setSaved] = useState(false)
+  const options = ALL_ROLES.filter(role => !['ADMIN', 'SCALE_6_PLUS', 'VIEW_ONLY'].includes(role))
+  useEffect(() => {
+    let active = true
+    api.get<string[]>('/api/auth/local-admin/assignable-roles')
+      .then(value => { if (active) { setRoles(value); setLoading(false) } })
+      .catch(err => { if (active) setError(err) })
+    return () => { active = false }
+  }, [])
+  async function save() {
+    setBusy(true); setError(null); setSaved(false)
+    try {
+      const value = await api.put<string[]>('/api/auth/local-admin/assignable-roles', roles)
+      setRoles(value); setSaved(true)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+  return <section className="workflow-panel"><h4>Roles coordinators may assign</h4>
+    <p>This system-wide setting applies to all department coordinators. Their department and workspace access boundaries still apply. Administrator and confidential roles remain System Admin only.</p>
+    <p className="muted small">Removing a role here prevents future coordinator assignments; it does not remove roles already assigned to users. An empty selection disables role assignment by coordinators.</p>
+    <ErrorText error={error} />
+    {loading ? <p>Loading role policy…</p> : <><RoleChipSelect value={roles} roles={options} disabled={busy} onChange={value => { setRoles(value); setSaved(false) }} /><button type="button" className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save coordinator role policy'}</button></>}
+    {saved && <p role="status">Role policy saved. Coordinators will see the updated choices when they reopen their user management page.</p>}
+  </section>
+}
+
+type AdminSection = 'users' | 'departments' | 'workspaces' | 'applications' | 'email'
+type WorkspacePanel = 'members' | 'administrators' | 'settings'
+type WorkspaceMemberView = 'current' | 'add'
+const ADMIN_SECTIONS: AdminSection[] = ['users', 'departments', 'workspaces', 'applications', 'email']
 
 // Shared by every page that needs a department picker -- departments are
 // DB-backed now (see backend app/models.py Department / routers/departments.py)
@@ -100,8 +140,8 @@ export function DepartmentChipSelect({ value, onChange, disabled, options }: {
   )
 }
 
-function CreateUserModal({ onClose, onCreated, departmentOptions }: {
-  onClose: () => void; onCreated: (u: UserOut) => void; departmentOptions: string[]
+function CreateUserModal({ onClose, onCreated, departmentOptions, departmentRows }: {
+  onClose: () => void; onCreated: (u: UserOut) => void; departmentOptions: string[]; departmentRows: DepartmentOut[]
 }) {
   const [form, setForm] = useState<CreateUserForm>(EMPTY_FORM)
   const [departments, setDepartments] = useState<string[]>([])
@@ -143,12 +183,10 @@ function CreateUserModal({ onClose, onCreated, departmentOptions }: {
         <Field label="Role(s) * — a user may hold more than one">
           <RoleChipSelect value={form.roles} onChange={(v) => set('roles', v)} />
         </Field>
-        <p className="muted small">View Only grants organisation-wide read access. Document Portal remains separate and appears only when a Document Portal role is also assigned.</p>
+        <p className="muted small">Roles define what the user can do. Add the user to one or more workspaces to define where those roles apply. Document Portal permissions remain separate.</p>
         <div className="form-row" style={{ marginTop: 12 }}>
           <Field label="Login Type">
-            <select value={form.login_type} onChange={(e) => set('login_type', e.target.value)}>
-              {LOGIN_TYPES.map((t) => <option key={t} value={t}>{LOGIN_TYPE_LABELS[t]}</option>)}
-            </select>
+            <SearchableSelect ariaLabel="Login type" value={form.login_type} onChange={(value) => set('login_type', value)} options={LOGIN_TYPES.map((type) => ({ value: type, label: LOGIN_TYPE_LABELS[type] }))} searchable={false} />
           </Field>
         </div>
         {form.login_type === 'STANDARD' ? (
@@ -206,13 +244,14 @@ function ResetPasswordModal({ userRow, onClose, onDone }: { userRow: UserOut; on
   )
 }
 
-function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onClose, onDone }: {
-  userRow: UserOut; currentUserId: number; departmentOptions: string[]; onClose: () => void; onDone: () => void
+function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, departmentRows, onClose, onDone }: {
+  userRow: UserOut; currentUserId: number; departmentOptions: string[]; departmentRows: DepartmentOut[]; onClose: () => void; onDone: () => void
 }) {
   const [email, setEmail] = useState(userRow.email || '')
   const [departments, setDepartments] = useState<string[]>(userRow.departments?.length ? userRow.departments : (userRow.department ? [userRow.department] : []))
   const [roles, setRoles] = useState<string[]>(userRow.roles || [])
   const [adminManagedOnly, setAdminManagedOnly] = useState(!!userRow.admin_managed_only)
+  const [showInUserDropdowns, setShowInUserDropdowns] = useState(userRow.show_in_user_dropdowns !== false)
   const [active, setActive] = useState(userRow.is_active)
   const [departmentSearch, setDepartmentSearch] = useState('')
   const [busy, setBusy] = useState(false)
@@ -223,13 +262,16 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
     if (!roles.length) { setError(new Error('Select at least one role')); return }
     setBusy(true); setError(null)
     try {
-      await api.patch(`/api/auth/users/${userRow.id}`, { email: email.trim() || null, departments, roles, admin_managed_only: adminManagedOnly, is_active: active })
+      await api.patch(`/api/auth/users/${userRow.id}`, { email: email.trim() || null, departments, roles, admin_managed_only: adminManagedOnly, show_in_user_dropdowns: showInUserDropdowns, is_active: active })
       onDone()
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
   function toggleDepartment(department: string) {
-    setDepartments((values) => values.includes(department) ? values.filter((value) => value !== department) : [...values, department])
+    setDepartments((values) => {
+      const next = values.includes(department) ? values.filter((value) => value !== department) : [...values, department]
+      return next
+    })
   }
 
   function makePrimary(department: string) {
@@ -244,6 +286,7 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
   }
 
   const visibleDepartments = departmentOptions.filter((department) => department.toLowerCase().includes(departmentSearch.trim().toLowerCase()))
+  const workspaceAccess = uniqueWorkspaceAccess(userRow)
 
   return <Modal title={`Manage access — ${userRow.full_name}`} onClose={onClose}>
     <form onSubmit={save} className="access-manage-form">
@@ -266,15 +309,23 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, onCl
         </div>
       </section>
       <section className="access-picker-panel">
-        <header><div><small>02 · Permission profile</small><h3>Roles</h3><p>Assign the responsibilities this user can perform.</p></div><strong>{roles.length} selected</strong></header>
+        <header><div><small>02 · Permission profile</small><h3>Roles</h3><p>Choose what this user can do in every workspace they can access.</p></div><strong>{roles.length} selected</strong></header>
         {isOwnAdminAccount && <p className="muted small">Your own Administrator access is protected. Only another Administrator can remove it or deactivate this account.</p>}
-        <p className="muted small">View Only provides organisation-wide request visibility without workflow changes. Assign a dedicated Document Portal role separately if repository access is required.</p>
+        <p className="muted small">Roles do not grant access to another workspace. Workspace membership controls which workspace data the user can see.</p>
         <div className="access-role-options">{ALL_ROLES.map((role) => {
           const protectedSelfRole = isOwnAdminAccount && (role === 'ADMIN' || role === 'VIEW_ONLY')
           return <label className={`${roles.includes(role) ? 'selected' : ''} ${protectedSelfRole ? 'disabled' : ''}`} key={role} title={protectedSelfRole ? 'Another Administrator must change your Administrator access.' : undefined}><input type="checkbox" checked={roles.includes(role)} disabled={busy || protectedSelfRole} onChange={() => toggleRole(role)} /><span>{ROLE_LABELS[role] || role}</span></label>
         })}</div>
       </section>
+      <section className="access-picker-panel access-workspace-summary">
+        <header><div><small>03 · Workspace access</small><h3>Where these roles apply</h3><p>Manage membership from the Workspaces section. This screen manages the permission profile only.</p></div><strong>{workspaceAccess.filter((row) => row.is_active).length} workspace{workspaceAccess.filter((row) => row.is_active).length === 1 ? '' : 's'}</strong></header>
+        <div className="access-workspace-badges">
+          {workspaceAccess.filter((row) => row.is_active).map((row) => <span key={row.workspace_id}>{row.workspace_name || row.workspace_key}</span>)}
+          {!workspaceAccess.some((row) => row.is_active) && <span className="empty">No workspace access</span>}
+        </div>
+      </section>
       <div className="access-manage-controls">
+        <label><input type="checkbox" checked={showInUserDropdowns} onChange={(event) => setShowInUserDropdowns(event.target.checked)} disabled={busy} /><span><strong>Show in assignment dropdowns</strong><small>Allow this account to be selected for workflow and ownership assignments.</small></span></label>
         <label><input type="checkbox" checked={adminManagedOnly} onChange={(event) => setAdminManagedOnly(event.target.checked)} disabled={busy} /><span><strong>Admin-managed account</strong><small>Hide from local department coordinator rosters.</small></span></label>
         <label title={isOwnAdminAccount ? 'Another Administrator must deactivate your account.' : undefined}><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} disabled={busy || isOwnAdminAccount} /><span><strong>Active account</strong><small>{isOwnAdminAccount ? 'Another Administrator must deactivate your account.' : 'User can sign in and access permitted modules.'}</small></span></label>
       </div>
@@ -326,22 +377,22 @@ function DepartmentManagerCard({ departments, onChanged }: { departments: Depart
 
   return (
     <Card title="Departments">
-      <p className="muted small" style={{ marginTop: -4, marginBottom: 12 }}>
-        Departments picked throughout the portal (user mapping, QA Request form, etc.) come from this
-        list — deactivating one keeps existing records intact but hides it from new pickers.
+      <ErrorText error={error} />
+      <section className="organization-panel">
+      <p className="muted small">
+        Create the main business departments used across users, requests, and approvals. Inactive departments remain on historical records.
       </p>
-      <form onSubmit={addDepartment} style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+      <form onSubmit={addDepartment} className="organization-create-row">
         <input
           style={{ flex: 1 }}
-          placeholder="New department name..."
+          placeholder="Department name…"
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
         />
         <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !newName.trim()}>
-          <IconPlus width={13} height={13} /> Add
+          <IconPlus width={13} height={13} /> Add department
         </button>
       </form>
-      <ErrorText error={error} />
       <Table
         rowKey="id"
         columns={[
@@ -358,6 +409,7 @@ function DepartmentManagerCard({ departments, onChanged }: { departments: Depart
         ]}
         rows={departments}
       />
+      </section>
     </Card>
   )
 }
@@ -371,6 +423,10 @@ function DepartmentManagerCard({ departments, onChanged }: { departments: Depart
 // the master list one at a time via a requester typing "Other" on the QA
 // Request wizard and waiting on Application Owner review.
 function ApplicationSeedCard({ departmentOptions, departments }: { departmentOptions: string[]; departments: DepartmentOut[] }) {
+  const [newApplicationName, setNewApplicationName] = useState('')
+  const [newApplicationDepartment, setNewApplicationDepartment] = useState('')
+  const [creatingApplication, setCreatingApplication] = useState(false)
+  const [createSuccess, setCreateSuccess] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [downloadingTemplate, setDownloadingTemplate] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -404,6 +460,30 @@ function ApplicationSeedCard({ departmentOptions, departments }: { departmentOpt
   }, [])
 
   useEffect(() => { loadApplications() }, [loadApplications])
+
+  async function createApplication(e: React.FormEvent) {
+    e.preventDefault()
+    const name = newApplicationName.trim()
+    if (!name) { setError(new Error('Enter an application name')); return }
+    if (!newApplicationDepartment) { setError(new Error('Select the owning department')); return }
+    setCreatingApplication(true)
+    setCreateSuccess('')
+    setError(null)
+    try {
+      const created = await api.post<ApplicationMasterOut>('/api/application-names', {
+        name,
+        department: newApplicationDepartment,
+      })
+      await loadApplications()
+      setNewApplicationName('')
+      setNewApplicationDepartment('')
+      setCreateSuccess(`${created.name} was added to the approved application master.`)
+    } catch (err) {
+      setError(err)
+    } finally {
+      setCreatingApplication(false)
+    }
+  }
 
   async function updateDepartment(application: ApplicationMasterOut) {
     const department = draftDepartments[application.id] || ''
@@ -450,6 +530,7 @@ function ApplicationSeedCard({ departmentOptions, departments }: { departmentOpt
       const res = await api.uploadForm<ApplicationSeedResult>('/api/application-names/bulk-seed', { file })
       setResult(res)
       setFile(null)
+      if (res.created || res.approved_existing) await loadApplications()
     } catch (err) {
       setError(err)
     } finally {
@@ -458,7 +539,55 @@ function ApplicationSeedCard({ departmentOptions, departments }: { departmentOpt
   }
 
   return (
-    <Card title="Application Names — Bulk Seed from Excel">
+    <Card title="Application Names" subtitle="Maintain the approved application list used across requests and test management.">
+      <section className="application-create-section">
+        <div className="application-create-heading">
+          <div>
+            <small>Add one application</small>
+            <h3>New application name</h3>
+            <p>Add a known application directly to the approved master list.</p>
+          </div>
+        </div>
+        <form className="application-create-form" onSubmit={createApplication}>
+          <Field label="Application name *">
+            <input
+              value={newApplicationName}
+              onChange={(event) => { setNewApplicationName(event.target.value); setCreateSuccess('') }}
+              placeholder="e.g. MOBILE BANKING"
+              maxLength={150}
+              disabled={creatingApplication}
+            />
+          </Field>
+          <Field label="Owning department *">
+            <SearchableSelect
+              ariaLabel="Owning department"
+              value={newApplicationDepartment}
+              onChange={(value) => { setNewApplicationDepartment(value); setCreateSuccess('') }}
+              options={departmentOptions.map((department) => ({ value: department, label: department }))}
+              placeholder="Select department"
+              disabled={creatingApplication}
+            />
+          </Field>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={creatingApplication || !newApplicationName.trim() || !newApplicationDepartment}
+          >
+            <IconPlus width={15} height={15} />
+            {creatingApplication ? 'Adding…' : 'Add application'}
+          </button>
+        </form>
+        {createSuccess && <div className="document-upload-summary application-create-success" role="status"><strong>✓ {createSuccess}</strong></div>}
+        <ErrorText error={error} />
+      </section>
+
+      <section className="application-bulk-section">
+        <div className="application-create-heading">
+          <div>
+            <small>Add many applications</small>
+            <h3>Bulk seed from Excel</h3>
+          </div>
+        </div>
       <p className="muted small" style={{ marginTop: -4, marginBottom: 12 }}>
         Upload a spreadsheet of known-good Application Names to seed them straight into the master list at
         Approved — skips the usual Application Owner review, since an Admin bulk upload is asserting these are
@@ -480,7 +609,6 @@ function ApplicationSeedCard({ departmentOptions, departments }: { departmentOpt
           {busy ? 'Seeding…' : 'Upload & Seed'}
         </button>
       </form>
-      <ErrorText error={error} />
       {result && (
         <div className="access-summary" aria-label="Application name seed result" style={{ marginBottom: 12 }}>
           <div><small>Created</small><strong>{result.created}</strong><span>New Approved names</span></div>
@@ -506,6 +634,7 @@ function ApplicationSeedCard({ departmentOptions, departments }: { departmentOpt
           <ul>{result.errors.map((message, idx) => <li key={idx}>{message}</li>)}</ul>
         </div>
       )}
+      </section>
       <div className="application-department-manager">
         <div className="application-department-head">
           <div><small>Existing application master</small><h3>Application departments</h3><p>Assign or correct the owning department for an application already available in the system.</p></div>
@@ -542,11 +671,13 @@ function ApplicationSeedCard({ departmentOptions, departments }: { departmentOpt
                 {renamingApplicationId === application.id ? 'Renaming…' : 'Rename'}
               </button>
               {renamedApplicationId === application.id && <span className="application-department-saved">✓ Renamed</span>}
-              <select value={selected} onChange={(event) => { setDraftDepartments((values) => ({ ...values, [application.id]: event.target.value })); setSavedApplicationId(null) }}>
-                <option value="">Select department</option>
-                {selected && deptIsInactive && <option value={selected}>{selected} (Inactive)</option>}
-                {departmentOptions.map((department) => <option key={department} value={department}>{department}</option>)}
-              </select>
+              <SearchableSelect
+                ariaLabel={`Department for ${application.name}`}
+                value={selected}
+                onChange={(value) => { setDraftDepartments((values) => ({ ...values, [application.id]: value })); setSavedApplicationId(null) }}
+                options={[{ value: '', label: 'Select department' }, ...(selected && deptIsInactive ? [{ value: selected, label: `${selected} (Inactive)` }] : []), ...departmentOptions.map((department) => ({ value: department, label: department }))]}
+                placeholder="Select department"
+              />
               <button type="button" className="btn btn-sm btn-primary" disabled={!selected || unchanged || savingApplicationId === application.id} onClick={() => updateDepartment(application)}>
                 {savingApplicationId === application.id ? 'Updating…' : 'Update'}
               </button>
@@ -607,8 +738,470 @@ function TestEmailCard({ defaultRecipient }: { defaultRecipient?: string | null 
   )
 }
 
+function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user: UserOut) => void; departments: DepartmentOut[] }) {
+  const [showCreateWorkspace, setShowCreateWorkspace] = useState(false)
+  const [workspaces, setWorkspaces] = useState<QAWorkspaceOut[]>([])
+  const [users, setUsers] = useState<UserOut[]>([])
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [name, setName] = useState('')
+  const [key, setKey] = useState('')
+  const [parentWorkspaceId, setParentWorkspaceId] = useState('')
+  const [candidateSearch, setCandidateSearch] = useState('')
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([])
+  const [candidateWorkspaceAccess, setCandidateWorkspaceAccess] = useState<Record<number, string>>({})
+  const [coordinatorUserId, setCoordinatorUserId] = useState('')
+  const [coordinatorDepartmentId, setCoordinatorDepartmentId] = useState('')
+  const [memberSearch, setMemberSearch] = useState('')
+  const [memberView, setMemberView] = useState<WorkspaceMemberView>('current')
+  const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>('members')
+  const [editName, setEditName] = useState('')
+  const [editDescription, setEditDescription] = useState('')
+  const [editParentId, setEditParentId] = useState('')
+  const [editingHierarchy, setEditingHierarchy] = useState(false)
+  const [editActive, setEditActive] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const [workspaceRows, userRows] = await Promise.all([
+        api.get<QAWorkspaceOut[]>('/api/workspaces'),
+        api.get<UserOut[]>('/api/auth/users?all_workspaces=true'),
+      ])
+      setWorkspaces(workspaceRows)
+      setUsers(userRows)
+      setSelectedId((current) => current && workspaceRows.some((row) => row.id === current) ? current : workspaceRows[0]?.id || null)
+    } catch (err) { setError(err) }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  const selected = workspaces.find((row) => row.id === selectedId) || null
+  useEffect(() => {
+    if (!selected) return
+    setEditName(selected.name)
+    setEditDescription(selected.description || '')
+    setEditParentId(selected.parent_workspace_id ? String(selected.parent_workspace_id) : '')
+    setEditingHierarchy(false)
+    setEditActive(selected.is_active)
+  }, [selected])
+  const rootWorkspaces = workspaces.filter((workspace) => !workspace.parent_workspace_id)
+  const orderedWorkspaces = rootWorkspaces.flatMap((root) => [
+    root,
+    ...workspaces.filter((workspace) => workspace.parent_workspace_id === root.id),
+  ])
+  const listedWorkspaceIds = new Set(orderedWorkspaces.map((workspace) => workspace.id))
+  orderedWorkspaces.push(...workspaces.filter((workspace) => !listedWorkspaceIds.has(workspace.id)))
+  const directGroupedMembers = groupedMembers()
+  const parentWorkspace = selected?.parent_workspace_id
+    ? workspaces.find((workspace) => workspace.id === selected.parent_workspace_id) || null
+    : null
+  const directCoordinators = (selected?.department_coordinators || []).filter((row) => row.is_active)
+  const inheritedParentCoordinators = (parentWorkspace?.department_coordinators || [])
+    .filter((row) => row.is_active)
+    .filter((row) => !directCoordinators.some((direct) => (
+      direct.user_id === row.user_id && direct.department_id === row.department_id
+    )))
+  const visibleCoordinators = [
+    ...directCoordinators.map((assignment) => ({ assignment, inherited: false })),
+    ...inheritedParentCoordinators.map((assignment) => ({ assignment, inherited: true })),
+  ]
+  const inheritedParentMembers = (() => {
+    const rows = new Map<number, string[]>()
+    for (const member of parentWorkspace?.members || []) {
+      if (member.is_active && (member.role === 'PARENT_WORKSPACE_VIEWER' || member.role === 'PARENT_WORKSPACE_ADMIN')) {
+        rows.set(member.user_id, [...(rows.get(member.user_id) || []), member.role])
+      }
+    }
+    return [...rows].map(([user_id, roles]) => ({ user_id, roles }))
+  })()
+  const inheritedParentIds = new Set(inheritedParentMembers.map((member) => member.user_id))
+  const members = directGroupedMembers.map((member) => ({
+    ...member,
+    user: users.find((user) => user.id === member.user_id),
+    isSystemAdministrator: (selected?.members || []).some(
+      (row) => row.user_id === member.user_id && row.is_system_administrator,
+    ),
+    isInheritedParentAccess: inheritedParentIds.has(member.user_id),
+  })).concat(inheritedParentMembers
+    .filter((member) => !directGroupedMembers.some((direct) => direct.user_id === member.user_id))
+    .map((member) => ({
+      ...member,
+      user: users.find((user) => user.id === member.user_id),
+      isSystemAdministrator: false,
+      isInheritedParentAccess: true,
+    })))
+  const memberNeedle = memberSearch.trim().toLowerCase()
+  const filteredMembers = members.filter(({ user }) => !memberNeedle || [
+    user?.full_name, user?.username, user?.department, ...(user?.departments || []),
+    ...(user?.roles || []).map((role) => ROLE_LABELS[role] || role),
+  ].some((value) => value?.toLowerCase().includes(memberNeedle)))
+  const currentMemberIds = new Set(members.map((member) => member.user_id))
+  const candidateNeedle = candidateSearch.trim().toLowerCase()
+  const memberCandidates = users
+    .filter((user) => isSelectableUser(user) && !currentMemberIds.has(user.id))
+    .filter((user) => !candidateNeedle || [
+      user.full_name, user.username, user.department, ...(user.departments || []),
+      ...(user.roles || []).map((role) => ROLE_LABELS[role] || role),
+    ].some((value) => value?.toLowerCase().includes(candidateNeedle)))
+    .sort((left, right) => left.full_name.localeCompare(right.full_name))
+  const selectedCandidateSet = new Set(selectedCandidateIds)
+  const allCandidatesSelected = memberCandidates.length > 0
+    && memberCandidates.every((user) => selectedCandidateSet.has(user.id))
+  const coordinatorUsers = users.filter(isSelectableUser)
+  const selectedCoordinator = users.find((user) => String(user.id) === coordinatorUserId)
+  const coordinatorDepartmentNames = selectedCoordinator
+    ? (selectedCoordinator.departments?.length
+      ? selectedCoordinator.departments
+      : (selectedCoordinator.department ? [selectedCoordinator.department] : []))
+    : []
+  const coordinatorDepartments = departments.filter((department) => (
+    department.is_active && coordinatorDepartmentNames.includes(department.name)
+  ))
+  const coordinatorDepartment = coordinatorDepartments.find(
+    (department) => String(department.id) === coordinatorDepartmentId,
+  )
+  const coordinatorDepartmentOptions = coordinatorDepartments.map((department) => ({
+    value: String(department.id), label: department.name,
+  }))
+
+  function selectCoordinator(userId: string) {
+    setCoordinatorUserId(userId)
+    const user = users.find((candidate) => String(candidate.id) === userId)
+    const assignedNames = user?.departments?.length
+      ? user.departments
+      : (user?.department ? [user.department] : [])
+    const assignedDepartments = departments.filter((department) => (
+      department.is_active && assignedNames.includes(department.name)
+    ))
+    const primaryDepartment = assignedDepartments.find(
+      (department) => department.name === user?.department,
+    ) || assignedDepartments[0]
+    setCoordinatorDepartmentId(primaryDepartment ? String(primaryDepartment.id) : '')
+  }
+
+  function selectWorkspace(workspace: QAWorkspaceOut) {
+    // Reset the settings draft at the same time as the selected row. Waiting
+    // for an effect left one render where the previous workspace's parent was
+    // displayed, which could make a top-level workspace appear to belong to
+    // whichever parent had been viewed immediately before it.
+    setSelectedId(workspace.id)
+    setEditName(workspace.name)
+    setEditDescription(workspace.description || '')
+    setEditParentId(workspace.parent_workspace_id ? String(workspace.parent_workspace_id) : '')
+    setEditingHierarchy(false)
+    setEditActive(workspace.is_active)
+    setWorkspacePanel('members')
+    setMemberView('current')
+    setCandidateSearch('')
+    setSelectedCandidateIds([])
+    setCandidateWorkspaceAccess({})
+    setCoordinatorUserId('')
+    setCoordinatorDepartmentId('')
+  }
+
+  async function createWorkspace(event: React.FormEvent) {
+    event.preventDefault(); setBusy(true); setError(null)
+    try {
+      await api.post('/api/workspaces', { workspace_key: key, name, parent_workspace_id: parentWorkspaceId ? Number(parentWorkspaceId) : null, is_active: true })
+      setName(''); setKey(''); setParentWorkspaceId(''); setShowCreateWorkspace(false); await load()
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  async function replaceMembers(next: { user_id: number; roles: string[] }[]) {
+    if (!selected) return
+    setBusy(true); setError(null)
+    try { await api.put(`/api/workspaces/${selected.id}/members`, { members: next }); await load() }
+    catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  function groupedMembers() {
+    const grouped = new Map<number, string[]>()
+    for (const row of selected?.members || []) grouped.set(row.user_id, [...(grouped.get(row.user_id) || []), row.role])
+    // Older databases can contain both WORKSPACE_MEMBER and a parent access
+    // role for the same person. The table already presents their effective
+    // access as one value; submit that same normalized value so an unrelated
+    // legacy duplicate cannot block adding another member. A successful save
+    // also rewrites the workspace memberships into the one-row invariant.
+    return [...grouped].map(([user_id, roles]) => ({
+      user_id,
+      roles: [workspaceAccessRole(roles)],
+    }))
+  }
+
+  function workspaceAccessRole(roles: string[]) {
+    if (roles.includes('PARENT_WORKSPACE_ADMIN')) return 'PARENT_WORKSPACE_ADMIN'
+    if (roles.includes('PARENT_WORKSPACE_VIEWER')) return 'PARENT_WORKSPACE_VIEWER'
+    return 'WORKSPACE_MEMBER'
+  }
+
+  async function setWorkspaceAccessRole(userId: number, role: string) {
+    const next = groupedMembers().map((member) => (
+      member.user_id === userId ? { ...member, roles: [role] } : member
+    ))
+    await replaceMembers(next)
+  }
+
+  function toggleCandidate(userId: number) {
+    setSelectedCandidateIds((current) => current.includes(userId)
+      ? current.filter((id) => id !== userId)
+      : [...current, userId])
+  }
+
+  function setCandidateAccess(userId: number, role: string) {
+    setCandidateWorkspaceAccess((current) => ({ ...current, [userId]: role }))
+    setSelectedCandidateIds((current) => current.includes(userId) ? current : [...current, userId])
+  }
+
+  function toggleAllCandidates() {
+    const candidateIds = memberCandidates.map((user) => user.id)
+    setSelectedCandidateIds((current) => {
+      if (candidateIds.length && candidateIds.every((id) => current.includes(id))) {
+        return current.filter((id) => !candidateIds.includes(id))
+      }
+      return [...new Set([...current, ...candidateIds])]
+    })
+  }
+
+  async function addSelectedMembers() {
+    if (!selectedCandidateIds.length || !selected) return
+    const next = groupedMembers()
+    for (const userId of selectedCandidateIds) {
+      if (!next.some((entry) => entry.user_id === userId)) {
+        next.push({ user_id: userId, roles: [candidateWorkspaceAccess[userId] || 'WORKSPACE_MEMBER'] })
+      }
+    }
+    await replaceMembers(next)
+    setSelectedCandidateIds([])
+    setCandidateWorkspaceAccess({})
+    setCandidateSearch('')
+    setMemberView('current')
+  }
+
+  async function addCoordinator() {
+    if (!selected || !coordinatorUserId || !coordinatorDepartment) return
+    setBusy(true); setError(null)
+    try {
+      await api.post(`/api/workspaces/${selected.id}/department-coordinators`, {
+        user_id: Number(coordinatorUserId), department_id: coordinatorDepartment.id,
+      })
+      setCoordinatorUserId(''); setCoordinatorDepartmentId(''); await load()
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  async function removeCoordinator(assignmentId: number) {
+    if (!selected) return
+    setBusy(true); setError(null)
+    try { await api.del(`/api/workspaces/${selected.id}/department-coordinators/${assignmentId}`); await load() }
+    catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  async function saveWorkspaceSettings(event: React.FormEvent) {
+    event.preventDefault()
+    if (!selected || !editName.trim()) return
+    setBusy(true); setError(null)
+    try {
+      await api.patch(`/api/workspaces/${selected.id}`, {
+        name: editName.trim(), description: editDescription.trim() || null,
+        parent_workspace_id: editParentId ? Number(editParentId) : null,
+        is_active: editActive,
+      })
+      setEditingHierarchy(false)
+      await load()
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  const candidateColumns: TableColumn<UserOut>[] = [
+    {
+      key: 'selection',
+      header: <input type="checkbox" aria-label="Select all matching users" checked={allCandidatesSelected} disabled={!memberCandidates.length} onChange={toggleAllCandidates} />,
+      filterable: false,
+      render: (user) => <input type="checkbox" aria-label={`Select ${user.full_name}`} checked={selectedCandidateSet.has(user.id)} onChange={() => toggleCandidate(user.id)} />,
+    },
+    {
+      key: 'full_name', header: 'User', filterable: false,
+      render: (user) => <span className="workspace-table-identity"><strong>{user.full_name}</strong><small>{user.username}</small><small>{(user.departments?.length ? user.departments : (user.department ? [user.department] : [])).join(', ') || 'No department'}</small></span>,
+    },
+    {
+      key: 'roles', header: 'Permission profile', filterable: false,
+      render: (user) => user.roles.map((role) => ROLE_LABELS[role] || role).join(' · ') || 'Awaiting role assignment',
+    },
+    {
+      key: 'workspace_access', header: 'Workspace access', filterable: false,
+      render: (user) => !selected?.parent_workspace_id && !selected?.is_default
+        ? <SearchableSelect ariaLabel={`Workspace access for ${user.full_name}`} searchable={false} value={candidateWorkspaceAccess[user.id] || 'WORKSPACE_MEMBER'} onChange={(role) => setCandidateAccess(user.id, role)} options={[
+          { value: 'WORKSPACE_MEMBER', label: 'This workspace only' },
+          { value: 'PARENT_WORKSPACE_VIEWER', label: 'Parent Workspace Viewer' },
+          { value: 'PARENT_WORKSPACE_ADMIN', label: 'Parent Workspace Admin' },
+        ]} />
+        : <span className="workspace-access-label">Direct member</span>,
+    },
+  ]
+
+  type WorkspaceMemberRow = (typeof members)[number]
+  const currentMemberColumns: TableColumn<WorkspaceMemberRow>[] = [
+    {
+      key: 'member', header: 'Member', filterable: false,
+      render: (member) => <span className="workspace-table-identity"><strong>{member.user?.full_name || `User ${member.user_id}`}</strong><small>{member.user?.username || 'Unknown user'}</small><small>{(member.user?.departments?.length ? member.user.departments : (member.user?.department ? [member.user.department] : [])).join(', ') || 'No department'}</small></span>,
+    },
+    {
+      key: 'roles', header: 'Permission profile', filterable: false,
+      render: (member) => (member.user?.roles || []).map((role) => ROLE_LABELS[role] || role).join(' · ') || 'Awaiting role assignment',
+    },
+    {
+      key: 'workspace_access', header: 'Workspace access', filterable: false,
+      render: (member) => !selected?.parent_workspace_id && !selected?.is_default && !member.isSystemAdministrator
+        ? <SearchableSelect ariaLabel={`Parent workspace permission for ${member.user?.full_name || `user ${member.user_id}`}`} searchable={false} value={workspaceAccessRole(member.roles)} onChange={(role) => void setWorkspaceAccessRole(member.user_id, role)} disabled={busy} options={[
+          { value: 'WORKSPACE_MEMBER', label: 'This workspace only' },
+          { value: 'PARENT_WORKSPACE_VIEWER', label: 'Parent Workspace Viewer' },
+          { value: 'PARENT_WORKSPACE_ADMIN', label: 'Parent Workspace Admin' },
+        ]} />
+        : <span className={`workspace-access-label ${member.isInheritedParentAccess ? 'inherited' : ''}`}>{member.isSystemAdministrator ? 'System-wide administrator' : member.isInheritedParentAccess ? 'Inherited from parent' : 'Direct member'}</span>,
+    },
+    {
+      key: 'actions', header: 'Actions', filterable: false,
+      render: (member) => <div className="workspace-member-actions">
+        {member.user && <button type="button" className="btn btn-sm" title="Manage permission profile" onClick={() => onManageUser(member.user!)}>Permissions</button>}
+        {member.isSystemAdministrator
+          ? <span className="badge badge-blue" title="System Administrators belong to every workspace">Required</span>
+          : member.isInheritedParentAccess
+            ? <button type="button" className="btn btn-sm inherited-member-lock" disabled title="Change this user’s permission on the parent workspace">Inherited</button>
+            : <button type="button" className="btn btn-sm workspace-remove-member" aria-label={`Remove ${member.user?.full_name || 'user'} from workspace`} disabled={busy} onClick={() => void replaceMembers(groupedMembers().filter((row) => row.user_id !== member.user_id))}>Remove</button>}
+      </div>,
+    },
+  ]
+
+  return <div className="qa-workspace-admin">
+    <ErrorText error={error} />
+    <div className="card qa-workspace-intro">
+      <div><small>WORKSPACE HIERARCHY</small><h3>Organize access around real operating teams</h3><p>Create a parent for consolidated oversight and child workspaces for separate projects, requests, testing, defects, and reports.</p></div>
+      <button type="button" className="btn btn-primary" onClick={() => setShowCreateWorkspace(true)}><IconPlus width={14} /> New workspace</button>
+    </div>
+    <div className="qa-workspace-grid">
+      <aside className="card qa-workspace-list">
+        {orderedWorkspaces.map((workspace) => <button type="button" key={workspace.id} className={`${workspace.id === selectedId ? 'active' : ''} ${workspace.parent_workspace_id ? 'child' : 'parent'}`} onClick={() => selectWorkspace(workspace)}>
+          <span><strong>{workspace.name}</strong><small>{workspace.parent_workspace_id ? `Child of ${workspace.parent_workspace_name || 'parent workspace'}` : 'Parent workspace'} · {workspace.workspace_key}</small></span>
+          {(() => { const count = new Set(workspace.members.map((member) => member.user_id)).size; return <em>{count} {count === 1 ? 'member' : 'members'}</em> })()}
+        </button>)}
+        {!workspaces.length && <p className="muted">Create the first workspace to organise users and work.</p>}
+      </aside>
+      {selected && <main className="card qa-workspace-detail">
+        <header><div><small>{selected.parent_workspace_name ? `${selected.parent_workspace_name} / ` : ''}{selected.workspace_key}</small><h3>{selected.name}</h3><p>{selected.parent_workspace_id ? 'Independent child workspace with its own membership and operational records.' : 'Parent workspace for direct work and consolidated visibility across accessible children.'}</p></div>
+          {selected.is_default && <span className="badge badge-blue">Default workspace</span>}
+        </header>
+        <nav className="workspace-detail-tabs" aria-label={`${selected.name} settings`}>
+          <button type="button" className={workspacePanel === 'members' ? 'active' : ''} aria-current={workspacePanel === 'members' ? 'page' : undefined} onClick={() => setWorkspacePanel('members')}><strong>Members</strong><small>{members.length} people with access</small></button>
+          <button type="button" className={workspacePanel === 'administrators' ? 'active' : ''} aria-current={workspacePanel === 'administrators' ? 'page' : undefined} onClick={() => setWorkspacePanel('administrators')}><strong>Local admins</strong><small>{visibleCoordinators.length} department assignments</small></button>
+          <button type="button" className={workspacePanel === 'settings' ? 'active' : ''} aria-current={workspacePanel === 'settings' ? 'page' : undefined} onClick={() => setWorkspacePanel('settings')}><strong>Settings</strong><small>Name, parent, and status</small></button>
+        </nav>
+        {workspacePanel === 'members' && <section className="workspace-members-section">
+          <div className="workspace-members-heading">
+            <div><h4>Workspace members</h4><p className="muted small">Control who can enter this workspace and how far their access extends.</p></div>
+            <div className="workspace-members-view-tabs" role="tablist" aria-label="Workspace member views">
+              <button type="button" role="tab" aria-selected={memberView === 'current'} className={memberView === 'current' ? 'active' : ''} onClick={() => setMemberView('current')}>Current <span>{members.length}</span></button>
+              <button type="button" role="tab" aria-selected={memberView === 'add'} className={memberView === 'add' ? 'active' : ''} onClick={() => setMemberView('add')}><IconPlus width={13} /> Add members <span>{memberCandidates.length}</span></button>
+            </div>
+          </div>
+          {!selected.parent_workspace_id && !selected.is_default && <details className="workspace-access-help">
+            <summary>How parent workspace access works</summary>
+            <div className="parent-access-guide" aria-label="Parent workspace permission guide">
+              <div><strong>This workspace only</strong><span>Access to this parent only.</span></div>
+              <div><strong>Parent Workspace Viewer</strong><span>Read-only access to this parent and every active child.</span></div>
+              <div><strong>Parent Workspace Admin</strong><span>Can view children and manage their membership.</span></div>
+            </div>
+          </details>}
+          {memberView === 'add' ? <div className="workspace-add-members-panel" role="tabpanel">
+            <div className="workspace-member-toolbar"><div><strong>Add members</strong><small>Choose access in the table, select users, then add once.</small></div><ClearableSearchInput value={candidateSearch} onChange={(event) => setCandidateSearch(event.target.value)} onClear={() => setCandidateSearch('')} placeholder="Search name, username, department, or role…" clearLabel="Clear available user search" /></div>
+            <div className="workspace-bulk-action-bar">
+              <span><strong>{selectedCandidateIds.length}</strong> selected</span>
+              {selectedCandidateIds.length > 0 && <button type="button" className="workspace-clear-selection" onClick={() => setSelectedCandidateIds([])}>Clear</button>}
+              <button type="button" className="btn btn-primary" disabled={busy || !selectedCandidateIds.length} onClick={() => void addSelectedMembers()}><IconPlus width={14} /> {busy ? 'Adding…' : `Add ${selectedCandidateIds.length || ''} member${selectedCandidateIds.length === 1 ? '' : 's'}`}</button>
+            </div>
+            <div className="workspace-member-data-table"><Table<UserOut> tableId="workspace-member-candidates" columns={candidateColumns} rows={memberCandidates} rowKey="id" pageSize={5} resetKey={`${selected.id}:${candidateSearch}`} showColumnControls={false} /></div>
+            {!memberCandidates.length && <p className="muted small workspace-member-result-note">{candidateSearch.trim() ? 'No available users match this search.' : 'All active users already have access to this workspace.'}</p>}
+          </div> : <div className="workspace-current-members-panel" role="tabpanel">
+            <div className="workspace-member-toolbar"><div><strong>Current members</strong><small>Update workspace access or open a member's permission profile.</small></div><ClearableSearchInput value={memberSearch} onChange={(event) => setMemberSearch(event.target.value)} onClear={() => setMemberSearch('')} placeholder="Search members or roles…" clearLabel="Clear member search" /></div>
+            <div className="workspace-member-data-table"><Table<WorkspaceMemberRow> tableId="workspace-current-members" columns={currentMemberColumns} rows={filteredMembers} rowKey="user_id" pageSize={5} resetKey={`${selected.id}:${memberSearch}`} showColumnControls={false} /></div>
+            {!filteredMembers.length && <p className="muted small workspace-member-result-note">No workspace members match this search.</p>}
+          </div>}
+        </section>}
+        {workspacePanel === 'administrators' && <section><h4>Local administrators</h4>
+          <CoordinatorRolePolicy />
+          <p className="muted small">Let a trusted person administer users from one department inside this workspace.</p>
+          <p className="workspace-instruction"><strong>Access boundary:</strong> an assignment on a parent also applies in every active child. An assignment made directly on a child stays in that child.</p>
+          <div className="qa-workspace-form-row workspace-coordinator-add">
+            <Field label="Coordinator *"><UserAssignSelect value={coordinatorUserId} onChange={selectCoordinator} users={coordinatorUsers} placeholder="Select user…" /></Field>
+            <Field label="Manages users in">
+              {coordinatorDepartments.length > 1
+                ? <SearchableSelect value={coordinatorDepartmentId} onChange={setCoordinatorDepartmentId} options={coordinatorDepartmentOptions} placeholder="Select managed department…" />
+                : <input
+                    value={coordinatorUserId ? (coordinatorDepartment?.name || 'No active department assigned') : 'Select a coordinator first'}
+                    readOnly
+                    aria-readonly="true"
+                    title="Automatically taken from the coordinator’s department"
+                  />}
+              <small className="workspace-derived-field-note">{coordinatorDepartments.length > 1 ? 'Primary department selected by default. Choose another assigned department if needed.' : 'Automatically taken from the coordinator’s department.'}</small>
+            </Field>
+            <button type="button" className="btn btn-primary" disabled={busy || !coordinatorUserId || !coordinatorDepartment} onClick={() => void addCoordinator()}><IconPlus width={14} /> Assign</button>
+          </div>
+          {coordinatorUserId && !coordinatorDepartment && <p className="muted small workspace-coordinator-scope-note">Assign an active department to this user before making them a local administrator.</p>}
+          <div className="qa-workspace-chips workspace-coordinator-list">
+            {visibleCoordinators.map(({ assignment, inherited }) => <div key={`${inherited ? 'parent' : 'direct'}-${assignment.id}`}>
+              <span className="workspace-member-identity"><strong>{assignment.user_name || `User ${assignment.user_id}`}</strong><small>{assignment.department_name || 'Department'} · {inherited ? `Inherited from ${parentWorkspace?.name || 'parent'}` : 'This workspace'}</small></span>
+              <span className={`badge ${inherited ? '' : 'badge-blue'}`}>{inherited ? 'Inherited local admin' : 'Department Coordinator'}</span>
+              {users.find((user) => user.id === assignment.user_id) && <button type="button" className="workspace-manage-access" onClick={() => onManageUser(users.find((user) => user.id === assignment.user_id)!)}>Manage permissions</button>}
+              {inherited
+                ? <button type="button" className="btn btn-sm inherited-member-lock" disabled title="Remove or change this assignment on the parent workspace">Inherited</button>
+                : <button type="button" disabled={busy} aria-label={`Remove ${assignment.user_name || 'user'} as department coordinator`} onClick={() => void removeCoordinator(assignment.id)}>Remove</button>}
+            </div>)}
+          </div>
+          {!visibleCoordinators.length && <p className="muted small workspace-no-members">No local administrators assigned.</p>}
+        </section>}
+        {workspacePanel === 'settings' && <section><WorkspaceDefectWorkflow key={selected.id} workspace={selected} /><h4>Workspace settings</h4>
+          <p className="muted small">Review the workspace identity and its current place in the organisation.</p>
+          <form onSubmit={saveWorkspaceSettings} className="workspace-settings-form">
+            <Field label="Workspace name *"><input value={editName} onChange={(event) => setEditName(event.target.value)} disabled={selected.is_default} required /></Field>
+            <div className="workspace-hierarchy-summary">
+              <span><small>Current hierarchy</small><strong>{selected.parent_workspace_id ? `Child of ${selected.parent_workspace_name || 'parent workspace'}` : 'Top-level workspace'}</strong><em>{selected.parent_workspace_id ? 'Members and records remain separate from the parent.' : 'This workspace is independent and may contain child workspaces.'}</em></span>
+              {!selected.is_default && <button type="button" className="btn btn-sm" disabled={workspaces.some((workspace) => workspace.parent_workspace_id === selected.id)} onClick={() => setEditingHierarchy(true)}>{selected.parent_workspace_id ? 'Change hierarchy' : 'Move under workspace'}</button>}
+            </div>
+            {editingHierarchy && <div className="workspace-hierarchy-editor">
+              <Field label="Place this workspace under">
+                <SearchableSelect value={editParentId} onChange={setEditParentId} options={[
+                  { value: '', label: 'No parent — keep as top-level' },
+                  ...rootWorkspaces.filter((workspace) => workspace.id !== selected.id && !workspace.is_default).map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
+                ]} placeholder="Choose a parent workspace" />
+              </Field>
+              <p className="muted small">Changing this controls consolidated visibility. It does not merge members or records.</p>
+              <button type="button" className="btn btn-sm" onClick={() => { setEditParentId(selected.parent_workspace_id ? String(selected.parent_workspace_id) : ''); setEditingHierarchy(false) }}>Cancel hierarchy change</button>
+            </div>}
+            {workspaces.some((workspace) => workspace.parent_workspace_id === selected.id) && <small className="muted">This workspace already has children. Move or remove them before placing this workspace under another parent.</small>}
+            <Field label="Description"><textarea value={editDescription} onChange={(event) => setEditDescription(event.target.value)} rows={3} placeholder="What work belongs in this workspace?" /></Field>
+            <label className="workspace-active-toggle"><input type="checkbox" checked={editActive} onChange={(event) => setEditActive(event.target.checked)} disabled={selected.is_default} /><span><strong>Active workspace</strong><small>Inactive workspaces cannot be selected. Existing records remain retained.</small></span></label>
+            <button type="submit" className="btn btn-primary" disabled={busy || !editName.trim()}>{busy ? 'Saving…' : 'Save settings'}</button>
+          </form>
+        </section>}
+      </main>}
+    </div>
+    {showCreateWorkspace && <Modal title="Create workspace" onClose={() => setShowCreateWorkspace(false)}>
+      <p className="muted small">Choose a parent only when this workspace needs separate members and records under a larger business area.</p>
+      <form onSubmit={createWorkspace}>
+        <Field label="Parent workspace">
+          <SearchableSelect value={parentWorkspaceId} onChange={setParentWorkspaceId} searchable={rootWorkspaces.length > 8} placeholder="No parent — create a top-level workspace" options={[
+            { value: '', label: 'No parent — top-level workspace' },
+            ...rootWorkspaces.filter((workspace) => !workspace.is_default).map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
+          ]} />
+          <small className="muted">Leave empty for a top-level workspace. Only one parent-child level is supported.</small>
+        </Field>
+        <Field label="Workspace name *"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Example: DBD Quality Assurance" required /></Field>
+        <Field label="Short key *"><input value={key} onChange={(event) => setKey(event.target.value.toUpperCase())} placeholder="Example: DBD-QA" required /><small className="muted">A short, unique code used to identify the workspace.</small></Field>
+        <div className="modal-actions"><button type="button" className="btn" onClick={() => setShowCreateWorkspace(false)}>Cancel</button><button className="btn btn-primary" disabled={busy}>{busy ? 'Creating…' : 'Create workspace'}</button></div>
+      </form>
+    </Modal>}
+  </div>
+}
+
 export default function Admin() {
   const { user } = useAuth()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
   const [summary, setSummary] = useState<UserSummaryOut | null>(null)
   const [error, setError] = useState<unknown>(null)
@@ -619,7 +1212,7 @@ export default function Admin() {
   const [userSearch, setUserSearch] = useState('')
   const [accountFilter, setAccountFilter] = useState<'ALL' | 'ACTIVE' | 'DISABLED' | 'REVIEW'>('ALL')
   const [loginFilter, setLoginFilter] = useState<'ALL' | 'STANDARD' | 'LDAP'>('ALL')
-  const [section, setSection] = useState<'users' | 'departments' | 'applications' | 'email'>('users')
+  const [workspaceRevision, setWorkspaceRevision] = useState(0)
 
   // SRS 7.2 pagination rollout -- the user directory is now server-paginated
   // and server-filtered (search/account status/login type all become query
@@ -657,6 +1250,21 @@ export default function Admin() {
   const ldapCount = summary?.ldap_count || 0
   const departmentOptions = departments.filter((d) => d.is_active).map((d) => d.name)
   const hasUserFilters = !!userSearch.trim() || accountFilter !== 'ALL' || loginFilter !== 'ALL'
+  const requestedSection = searchParams.get('section') as AdminSection | null
+  const section: AdminSection = requestedSection && ADMIN_SECTIONS.includes(requestedSection) ? requestedSection : 'users'
+  const sectionMeta: Record<AdminSection, { title: string; subtitle: string; count?: number }> = {
+    users: { title: 'People', subtitle: 'Create accounts and update roles, department scope, login method, and account status.', count: summary?.total || 0 },
+    departments: { title: 'Organization', subtitle: 'Maintain department names used for identity, ownership, and approvals.', count: departments.length },
+    workspaces: { title: 'Workspaces', subtitle: 'Control membership, local administration, and where new requests are routed.' },
+    applications: { title: 'Application directory', subtitle: 'Maintain approved application names and their owning departments.' },
+    email: { title: 'Email diagnostics', subtitle: 'Send a test message to verify the configured email service.' },
+  }
+  function setSection(next: AdminSection) {
+    const nextParams = new URLSearchParams(searchParams)
+    if (next === 'users') nextParams.delete('section')
+    else nextParams.set('section', next)
+    setSearchParams(nextParams)
+  }
 
   useEffect(() => { loadDepartments() }, [loadDepartments])
 
@@ -688,21 +1296,10 @@ export default function Admin() {
   return (
     <div className="access-page">
       <ErrorText error={error} />
-      {section === 'users' && reviewCount > 0 && (
-        <div className="alert-banner">
-          <div className="icon-wrap"><IconWarning width={16} height={16} /></div>
-          <div className="body">
-            <div className="title">{reviewCount} account{reviewCount > 1 ? 's' : ''} need role review</div>
-            <div className="sub">
-              A new LDAP user requires access review — assign or confirm the
-              correct role below to complete the review and clear the flag.
-            </div>
-          </div>
-        </div>
-      )}
       <PageHeader
-        title="Users & Access" count={summary?.total || 0}
-        subtitle="Create accounts, control role and department access, and manage Standard or LDAP authentication from one workspace."
+        eyebrow="Administration"
+        title={sectionMeta[section].title} count={sectionMeta[section].count}
+        subtitle={sectionMeta[section].subtitle}
         actions={section === 'users' ? (
           <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
             <IconPlus width={14} height={14} /> Create User
@@ -710,14 +1307,31 @@ export default function Admin() {
         ) : undefined}
       />
 
-      <nav className="access-workspace-nav" aria-label="Administration sections">
-        <button type="button" className={section === 'users' ? 'active' : ''} onClick={() => setSection('users')}><IconLock /><span><strong>User Directory</strong><small>Accounts, roles and access</small></span><em>{summary?.total || 0}</em></button>
-        <button type="button" className={section === 'departments' ? 'active' : ''} onClick={() => setSection('departments')}><IconPlus /><span><strong>Departments</strong><small>Organisation structure</small></span><em>{departments.length}</em></button>
-        <button type="button" className={section === 'applications' ? 'active' : ''} onClick={() => setSection('applications')}><IconCheckCircle /><span><strong>Application Data</strong><small>Approved-name bulk setup</small></span></button>
-        <button type="button" className={section === 'email' ? 'active' : ''} onClick={() => setSection('email')}><IconCheckCircle /><span><strong>Email Test</strong><small>Verify SMTP delivery</small></span></button>
-      </nav>
+      <div className="admin-navigation-shell">
+        <nav className="admin-primary-nav" aria-label="Primary administration sections">
+          <button type="button" className={section === 'users' ? 'active' : ''} aria-current={section === 'users' ? 'page' : undefined} onClick={() => setSection('users')}><IconLock /><span><strong>People</strong><small>Accounts and permissions</small></span><em>{summary?.total || 0}</em></button>
+          <button type="button" className={section === 'departments' ? 'active' : ''} aria-current={section === 'departments' ? 'page' : undefined} onClick={() => setSection('departments')}><IconPlus /><span><strong>Organization</strong><small>Department directory</small></span><em>{departments.length}</em></button>
+          <button type="button" className={section === 'workspaces' ? 'active' : ''} aria-current={section === 'workspaces' ? 'page' : undefined} onClick={() => setSection('workspaces')}><IconUsers /><span><strong>Workspaces</strong><small>Hierarchy and data access</small></span></button>
+        </nav>
+        <div className="admin-system-tools">
+          <span><strong>System tools</strong><small>Occasional setup and checks</small></span>
+          <SearchableSelect ariaLabel="Choose a system administration tool" searchable={false} value={section === 'applications' || section === 'email' ? section : ''} onChange={(value) => value && setSection(value as AdminSection)} placeholder="Choose a tool…" options={[
+            { value: 'applications', label: 'Application directory' },
+            { value: 'email', label: 'Email diagnostics' },
+          ]} />
+        </div>
+      </div>
 
       {section === 'users' && <div className="access-workspace-panel">
+      {reviewCount > 0 && (
+        <div className="alert-banner">
+          <div className="icon-wrap"><IconWarning width={16} height={16} /></div>
+          <div className="body">
+            <div className="title">{reviewCount} account{reviewCount > 1 ? 's' : ''} need role review</div>
+            <div className="sub">Confirm each person’s roles and access scope to complete their account review.</div>
+          </div>
+        </div>
+      )}
       <div className="access-summary" aria-label="User account summary">
         <div><small>Total accounts</small><strong>{summary?.total || 0}</strong><span>All provisioned users</span></div>
         <div><small>Active accounts</small><strong>{activeCount}</strong><span>Can access the portal</span></div>
@@ -731,27 +1345,13 @@ export default function Admin() {
           <strong>{total} shown</strong>
         </div>
         <div className="access-user-toolbar">
-          <label className="access-user-search">
-            <IconSearch width={16} height={16} />
-            <input
-              aria-label="Search users by name, username, or email"
-              value={userSearch}
-              onChange={(event) => setUserSearch(event.target.value)}
-              placeholder="Search by user name, username, email, or department…"
-            />
-            {userSearch && <button type="button" aria-label="Clear user search" onClick={() => setUserSearch('')}>×</button>}
-          </label>
-          <select aria-label="Filter by account status" value={accountFilter} onChange={(event) => setAccountFilter(event.target.value as typeof accountFilter)}>
-            <option value="ALL">All account statuses</option>
-            <option value="ACTIVE">Active accounts</option>
-            <option value="DISABLED">Disabled accounts</option>
-            <option value="REVIEW">Needs role review</option>
-          </select>
-          <select aria-label="Filter by login type" value={loginFilter} onChange={(event) => setLoginFilter(event.target.value as typeof loginFilter)}>
-            <option value="ALL">All login types</option>
-            <option value="STANDARD">Standard</option>
-            <option value="LDAP">LDAP</option>
-          </select>
+          <ClearableSearchInput aria-label="Search users by name, username, or email" wrapperClassName="access-user-search" value={userSearch} onChange={(event) => setUserSearch(event.target.value)} onClear={() => setUserSearch('')} clearLabel="Clear user search" placeholder="Search by user name, username, email, or department…" />
+          <SearchableSelect ariaLabel="Filter by account status" value={accountFilter} onChange={(value) => setAccountFilter(value as typeof accountFilter)} searchable={false} style={{ minWidth: 180 }} options={[
+            { value: 'ALL', label: 'All account statuses' }, { value: 'ACTIVE', label: 'Active accounts' }, { value: 'DISABLED', label: 'Disabled accounts' }, { value: 'REVIEW', label: 'Needs role review' },
+          ]} />
+          <SearchableSelect ariaLabel="Filter by login type" value={loginFilter} onChange={(value) => setLoginFilter(value as typeof loginFilter)} searchable={false} style={{ minWidth: 150 }} options={[
+            { value: 'ALL', label: 'All login types' }, { value: 'STANDARD', label: 'Standard' }, { value: 'LDAP', label: 'LDAP' },
+          ]} />
           {hasUserFilters && <button type="button" className="btn btn-sm" onClick={() => { setUserSearch(''); setAccountFilter('ALL'); setLoginFilter('ALL') }}>Clear filters</button>}
         </div>
         <Table
@@ -767,13 +1367,17 @@ export default function Admin() {
                     {u.needs_role_review && <span className="badge badge-yellow">Needs Review</span>}
                   </strong>
                   <span>@{u.username}</span>
+                  <label className="access-user-dropdown-toggle" title="Control whether this user appears in workflow and ownership dropdowns">
+                    <input type="checkbox" checked={u.show_in_user_dropdowns !== false} disabled={savingId === u.id} onChange={(event) => void patchUser(u.id, { show_in_user_dropdowns: event.target.checked })} />
+                    <small>Show in dropdowns</small>
+                  </label>
                   {u.email && <small>{u.email}</small>}
                 </div>
               </div>
             ), filterValue: (u) => `${u.full_name} ${u.username} ${u.email || ''}` },
             { key: 'department', header: 'Access scope', render: (u) => {
               const values = u.departments?.length ? u.departments : (u.department ? [u.department] : [])
-              return <div className="access-scope-summary"><strong>{values[0] || 'No department'}</strong>{values.length > 1 && <span>+{values.length - 1} additional</span>}<small>Primary department</small></div>
+              return <div className="access-scope-summary"><strong>{values[0] || 'No department'}</strong>{values.length > 1 && <span>+{values.length - 1} additional</span>}<small>Organization profile</small></div>
             }, filterValue: (u) => (u.departments && u.departments.length ? u.departments : (u.department ? [u.department] : [])).join(' ') },
             { key: 'roles', header: 'Roles', render: (u) => (
               <div className="access-role-summary">{(u.roles || []).slice(0, 2).map((role) => <span key={role}>{ROLE_LABELS[role] || role}</span>)}{(u.roles || []).length > 2 && <small>+{(u.roles || []).length - 2} more</small>}</div>
@@ -804,6 +1408,10 @@ export default function Admin() {
         <DepartmentManagerCard departments={departments} onChanged={loadDepartments} />
       </div>}
 
+      {section === 'workspaces' && <div className="access-workspace-panel access-departments-section">
+        <QAWorkspaceManager key={workspaceRevision} onManageUser={setAccessTarget} departments={departments} />
+      </div>}
+
       {section === 'applications' && <div className="access-workspace-panel access-departments-section">
         <ApplicationSeedCard departmentOptions={departmentOptions} departments={departments} />
       </div>}
@@ -817,9 +1425,10 @@ export default function Admin() {
           onClose={() => setShowCreate(false)}
           onCreated={() => { setShowCreate(false); refreshUsers() }}
           departmentOptions={departmentOptions}
+          departmentRows={departments}
         />
       )}
-      {accessTarget && <ManageUserAccessModal userRow={accessTarget} currentUserId={user!.id} departmentOptions={departmentOptions} onClose={() => setAccessTarget(null)} onDone={() => { setAccessTarget(null); refreshUsers() }} />}
+      {accessTarget && <ManageUserAccessModal userRow={accessTarget} currentUserId={user!.id} departmentOptions={departmentOptions} departmentRows={departments} onClose={() => setAccessTarget(null)} onDone={() => { setAccessTarget(null); refreshUsers(); setWorkspaceRevision((revision) => revision + 1) }} />}
       {resetTarget && (
         <ResetPasswordModal
           userRow={resetTarget}

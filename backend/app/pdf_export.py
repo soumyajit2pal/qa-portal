@@ -32,7 +32,7 @@ _styles = getSampleStyleSheet()
 _section_title_style = ParagraphStyle(
     "DetailSectionTitle", parent=_styles["Heading3"],
     spaceBefore=14, spaceAfter=7, textColor=colors.HexColor("#173f48"), fontSize=11,
-    leading=14,
+    leading=14, keepWithNext=True,
 )
 _meta_style = ParagraphStyle("DetailMeta", parent=_styles["Normal"], textColor=colors.HexColor("#62777c"), fontSize=8.5, leading=11)
 _body_style = ParagraphStyle("DetailBody", parent=_styles["Normal"], fontSize=8.5, leading=11, textColor=colors.HexColor("#314f56"), splitLongWords=True)
@@ -410,6 +410,7 @@ def _rich_field_block(label: str, value: RichTextValue, available_width: float) 
         [[Paragraph(_safe_text(label), _label_style)]],
         colWidths=[available_width], splitByRow=1, splitInRow=1, hAlign="LEFT",
     )
+    label_table.keepWithNext = True
     label_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f3f6f7")),
         ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cddcdf")),

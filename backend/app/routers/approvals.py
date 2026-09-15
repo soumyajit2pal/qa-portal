@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 from .. import models, schemas, pagination
 from ..database import get_db
 from ..deps import (
-    get_current_user, require_roles, dashboard_department_scope,
-    resolve_entity_department, require_department_visibility, viewable_project_ids,
+    get_workflow_user as get_current_user, require_workflow_roles as require_roles, dashboard_department_scope,
+    resolve_entity_department, resolve_entity_workspace_id, require_entity_workspace_visibility,
+    require_department_visibility, viewable_project_ids, active_qa_workspace_scope_ids,
 )
 from .. import documents as doc_store
 from ..constants import GatewayStatus, Role
@@ -121,7 +122,22 @@ def _filtered_approval_rows(db: Session, current_user: models.User, entity_type:
                 rows = [r for r in rows if not (r.entity_type == "QA_REQUEST" and r.entity_id in hidden_ids)]
     scope = dashboard_department_scope(current_user)
     if scope is not None:
-        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope]
+        from ..workflow_authority import record_department
+        rows = [r for r in rows if resolve_entity_department(db, r.entity_type, r.entity_id) in scope
+                or (r.entity_type == 'DEFECT' and record_department(db, r, current_user)[1] in scope)]
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        visibility = {}
+        def visible(row):
+            key = (row.entity_type, row.entity_id)
+            if key not in visibility:
+                try:
+                    require_entity_workspace_visibility(db, current_user, *key)
+                    visibility[key] = True
+                except HTTPException:
+                    visibility[key] = False
+            return visibility[key]
+        rows = [r for r in rows if visible(r)]
     return rows[:500]
 
 
@@ -175,6 +191,7 @@ def list_assignment_history(
 ):
     """Return normalized assignee tenures for management/audit reporting."""
     normalized_type = entity_type.strip().upper()
+    require_entity_workspace_visibility(db, current_user, normalized_type, entity_id)
     department = _assignment_entity_department(db, normalized_type, entity_id)
     if department is None:
         raise HTTPException(404, "Assignment-history entity not found")
@@ -260,12 +277,17 @@ def _comment_target_or_404(db: Session, entity_type: str, entity_id: int, curren
     obj = db.query(model).get(entity_id)
     if not obj:
         raise HTTPException(404, "Record not found")
+    if normalized_type == "DEFECT":
+        from .defects import _get_visible
+        _get_visible(entity_id, db, current_user)
+        return normalized_type
     if normalized_type in {"TEST_PROJECT", "TEST_CASE", "TEST_CYCLE"}:
         project_id = obj.id if normalized_type == "TEST_PROJECT" else obj.project_id
         visible_ids = viewable_project_ids(db, current_user)
         if visible_ids is not None and project_id not in visible_ids:
             raise HTTPException(403, "You do not have access to this record")
     else:
+        require_entity_workspace_visibility(db, current_user, normalized_type, entity_id)
         requester_id = getattr(obj, "requester_id", None) or getattr(obj, "created_by_id", None)
         require_department_visibility(
             current_user, resolve_entity_department(db, normalized_type, entity_id),

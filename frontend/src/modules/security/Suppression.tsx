@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import {useSearchParams} from 'react-router-dom'
@@ -6,7 +7,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisionButtons, WorkflowDecisionPanel, RequestDocuments } from '../../components/Common'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
-import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_TERMINAL_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, hasRole, hasDepartment } from '../../constants'
+import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_TERMINAL_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, QA_REQUEST_CREATOR_ROLES, hasWorkflowRole as hasRole, hasDepartment, isViewOnly } from '../../constants'
 import { SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import InfoModal from '../../components/InfoModal'
@@ -588,7 +589,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
-  const viewOnly = !!user?.roles?.includes('VIEW_ONLY')
+  const viewOnly = isViewOnly(user)
   const isRequester = (!viewOnly && sup.created_by_id === user?.id) || hasRole(user, 'ADMIN')
   const status = sup.status
   // SM/Department Head approvals are department-scoped -- see the comment in
@@ -647,7 +648,7 @@ export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: Sup
       {tab === 'overview' && (
         <div>
           <div className="grid grid-2">
-            <div><strong>Status:</strong> <Badge status={status} label={SUPPRESSION_STATUS_LABELS[status] || status} /></div>
+            <div><strong>Status:</strong> <WorkflowStatusBadge record={sup} status={status} label={SUPPRESSION_STATUS_LABELS[status] || status} /></div>
             <div><strong>Scan Type:</strong> {sup.scan_type}</div>
             <div>
               <strong>{sup.scan_type} Request ID:</strong> {sup.linked_request?.request_id || '—'}
@@ -876,7 +877,7 @@ export default function Suppression() {
   // require_roles), so anyone without one of those two roles can never
   // legitimately be a `requester_id` on a SAST/DAST request -- same
   // role gate, reused here instead of a bespoke one. Admin still bypasses.
-  const canInitiateSuppression = hasRole(user, 'REQUESTER', 'BUSINESS_ANALYST', 'ADMIN')
+  const canInitiateSuppression = hasRole(user, ...QA_REQUEST_CREATOR_ROLES, 'ADMIN')
 
   return (
     <div>
@@ -898,7 +899,7 @@ export default function Suppression() {
           { key: 'findings', header: 'Findings', render: (r) => r.items.length, filterValue: (r) => String(r.items.length) },
           { key: 'severity', header: 'Worst Severity', render: (r) => worstSeverity(r.items) || '—', filterValue: (r) => worstSeverity(r.items) || '' },
           { key: 'status', header: 'Status', render: (r) => (
-            <Badge status={r.status} label={SUPPRESSION_STATUS_LABELS[r.status] || r.status} />
+            <WorkflowStatusBadge record={r} status={r.status} label={SUPPRESSION_STATUS_LABELS[r.status] || r.status} />
           ), filterValue: (r) => `${r.status} ${SUPPRESSION_STATUS_LABELS[r.status] || ''}` },
           { key: 'pending_with', header: 'Pending With', render: (r) => SUPPRESSION_PENDING_WITH[r.status] || '—', filterValue: (r) => SUPPRESSION_PENDING_WITH[r.status] || '' },
         ]} rows={rows} />

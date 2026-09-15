@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
@@ -13,8 +14,8 @@ import RoleGroupLink from '../../components/RoleGroupLink'
 import RequestDelegation from '../../components/RequestDelegation'
 import {
   PRIORITIES, RISK_RATINGS, ENVIRONMENTS, DEPLOYMENT_ENVIRONMENTS,
-  PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasRole, hasDepartment, canManageReadinessEvidence,
-  QA_DEPARTMENT, PERFORMANCE_PENDING_WITH, QA_EXECUTION_GROUP_ROLE,
+  PERFORMANCE_REQUEST_TYPES, CHANGE_TYPES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceRole, isViewOnly, canManageReadinessEvidence,
+  PERFORMANCE_PENDING_WITH, QA_EXECUTION_GROUP_ROLE,
   PERFORMANCE_TESTER_REASSIGNABLE_STATUSES,
 } from '../../constants'
 import { PerformanceOut, PerformanceListOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut, RequestDocumentOut } from '../../types'
@@ -61,7 +62,7 @@ function PerformanceFormModal({ onClose, onSaved, editing, documentsByItem, relo
   // Same identity check as the detail view's isRequester/canSMDecide/
   // canDeptHeadDecide -- this modal only opens via canEditDetails, but the
   // checklist evidence controls inside it need their own explicit check.
-  const viewOnlyModal = !!user?.roles?.includes('VIEW_ONLY')
+  const viewOnlyModal = isViewOnly(user)
   const isActiveDelegateModal = !viewOnlyModal && editing.active_delegation?.status === 'ACTIVE' && editing.active_delegation.assigned_to_id === user?.id
   const isRequesterModal = isActiveDelegateModal || isAdmin || (!viewOnlyModal && editing.requester_id === user?.id && !editing.active_delegation)
   const sameDeptModal = hasDepartment(user, editing.department)
@@ -346,7 +347,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
     } catch (err) { setError(err) }
   }
 
-  const viewOnly = !!user?.roles?.includes('VIEW_ONLY')
+  const viewOnly = isViewOnly(user)
   const isRequester = (!viewOnly && req.requester_id === user?.id) || hasRole(user, 'ADMIN')
   const status = req.status
   const sameDept = hasDepartment(user, req.department)
@@ -359,8 +360,8 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
   const assignedTesterIds = new Set((req.assigned_tester_ids || '').split(',').filter(Boolean).map(Number))
   const isAssignedTester = isAdmin || (hasRole(user, 'QA_ENGINEER') && !!user?.id && assignedTesterIds.has(user.id))
   const isExecutionOwner = isAssignedQALead || isAssignedTester
-  const qaLeads = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_LEAD'))
-  const testers = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_ENGINEER'))
+  const qaLeads = users.filter((u) => u.is_active && hasWorkspaceRole(u, 'QA_LEAD'))
+  const testers = users.filter((u) => u.is_active && hasWorkspaceRole(u, 'QA_ENGINEER'))
 
   // Edit access -- see the matching (and more detailed) comment in
   // SAST.tsx's canEditDetails for the full reasoning; same rule here.
@@ -456,7 +457,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
   // rights too, restoring parity with isAssignedQALead (which already gates
   // the first assignment). Mirrors performance.py's
   // _require_can_reassign_performance_tester exactly.
-  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
+  const isQADepartmentHead = isAdmin || (hasWorkspaceRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA'))
   const canReassignPerformanceTester = isAssignedTester || isQADepartmentHead || hasRole(user, 'QA_LEAD')
   const canCompletePlanning =
     (isInitialPerformanceTesterAssignment ? isAssignedQALead || isAssignedTester : canReassignPerformanceTester) &&
@@ -502,7 +503,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
         <>
           <DetailSection title="Status">
             <DetailField label="Status">
-              <Badge status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status)} />
+              <WorkflowStatusBadge record={req} status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status)} />
               {req.needs_dept_head_reapproval && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
                   Department Head re-approval required after changes
@@ -894,7 +895,7 @@ export default function Performance() {
           { key: 'engineer_id', header: 'Assigned Group', render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '—', filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
-          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
+          { key: 'status', header: 'Status', render: (r) => <WorkflowStatusBadge record={r} status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status)} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (PERFORMANCE_PENDING_WITH[r.status] || '—'), filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (PERFORMANCE_PENDING_WITH[r.status] || '') },
           { key: 'source', header: 'Source', render: (r) => (
             r.qa_request ? (

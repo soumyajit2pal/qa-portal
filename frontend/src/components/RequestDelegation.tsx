@@ -1,10 +1,11 @@
 import React, { useMemo, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
-import { hasRole } from '../constants'
+import { hasWorkflowRole as hasRole, isViewOnly } from '../constants'
 import { QARequestDelegationOut, UserOut } from '../types'
 import { ErrorText, Field, Modal } from './Common'
 import UserAssignSelect from './UserAssignSelect'
+import { isSelectableUser } from '../constants'
 
 export type DelegationTarget = 'QA_REQUEST' | 'FUNCTIONAL' | 'SAST' | 'DAST' | 'PERFORMANCE'
 
@@ -62,7 +63,7 @@ export function requestDelegationCapabilities(
 ) {
   const parentId = targetType === 'QA_REQUEST' ? request.id : request.qa_request?.id
   const active = request.active_delegation?.status === 'ACTIVE' ? request.active_delegation : null
-  const canManage = (!user?.roles?.includes('VIEW_ONLY') && request.requester_id === user?.id) || hasRole(user, 'ADMIN')
+  const canManage = (!isViewOnly(user) && request.requester_id === user?.id) || hasRole(user, 'ADMIN')
   return {
     parentId,
     active,
@@ -91,7 +92,7 @@ export default function RequestDelegation<T extends DelegatableRequest>({
   const { parentId, active, canAssign, canReturn, canRecall } = requestDelegationCapabilities(targetType, request, user)
 
   const candidates = useMemo(
-    () => users.filter((candidate) => candidate.is_active && candidate.id !== request.requester_id),
+    () => users.filter((candidate) => isSelectableUser(candidate) && candidate.id !== request.requester_id),
     [request.requester_id, users],
   )
 

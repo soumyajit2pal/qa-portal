@@ -114,6 +114,9 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = ""
     trusted_hosts: str = "localhost,127.0.0.1,backend,document_portal"
     domain_name: str = ""
+    ldap_mock_enabled: bool = False
+    ldap_mock_password: str = ""
+    ldap_mock_username_prefix: str = "bmock"
 
     @field_validator("app_env")
     @classmethod
@@ -129,6 +132,13 @@ class Settings(BaseSettings):
         if self.app_env in {"uat", "prod", "production"}:
             if not self.database_url:
                 raise ValueError("DATABASE_URL is required outside development")
+        if self.app_env in {"prod", "production"} and self.ldap_mock_enabled:
+            raise ValueError("LDAP mock authentication cannot be enabled in production")
+        if self.ldap_mock_enabled:
+            if len(self.ldap_mock_password) < 12:
+                raise ValueError("LDAP_MOCK_PASSWORD must contain at least 12 characters")
+            if not self.ldap_mock_username_prefix.strip():
+                raise ValueError("LDAP_MOCK_USERNAME_PREFIX is required when LDAP mock authentication is enabled")
         return self
 
     @property

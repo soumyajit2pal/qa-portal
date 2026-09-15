@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../components/WorkflowStatusBadge'
 import { useRequestNavigation } from '../hooks/useRequestNavigation'
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, HttpError } from "../api";
@@ -21,8 +22,9 @@ import {
   GATEWAY_EDITABLE_STATUSES,
   GATEWAY_STATUS_LABELS,
   FUNCTIONAL_BUCKET_TYPES,
-  hasRole,
+  hasWorkflowRole as hasRole,
   hasDepartment,
+  isViewOnly,
 } from "../constants";
 import { useChecklistTemplate } from "./steps/useChecklistTemplate";
 import {
@@ -225,7 +227,7 @@ export function RequestDetail({
   }
 
   const isAdmin = hasRole(user, "ADMIN");
-  const viewOnly = !!user?.roles?.includes("VIEW_ONLY");
+  const viewOnly = isViewOnly(user);
   const ownsRequest = !viewOnly && req.requester_id === user?.id;
   const isRequester = ownsRequest || isAdmin;
   const activeDelegation = req.active_delegation;
@@ -562,7 +564,7 @@ export function RequestDetail({
 
           <DetailSection title="Status">
             <DetailField label="Status">
-              <Badge status={req.status} />
+              <WorkflowStatusBadge record={req} status={req.status} />
             </DetailField>
             <DetailField label="Priority / Risk (per type)">
               {classificationSummary(req)}
@@ -612,28 +614,11 @@ export function RequestDetail({
                 )}
               {req.status !== "DRAFT" &&
                 req.application_master_status === "PENDING_APP_OWNER" && (
-                  <RoleGroupLink
-                    users={users}
-                    role="APPLICATION_OWNER"
-                    label="Application Owner"
-                    department={req.department}
-                    renderTrigger={(_count, onClick) => (
-                      <button
-                        type="button"
-                        className="badge badge-yellow"
-                        style={{ marginLeft: 8, cursor: "pointer", border: "none", font: "inherit", fontWeight: 600 }}
-                        onClick={onClick}
-                      >
-                        Application Owner Approval Pending
-                      </button>
-                    )}
-                  />
+                  <WorkflowStatusBadge record={req} status="SM_APPROVAL_PENDING" label="Application Owner Approval Pending" />
                 )}
               {req.status !== "DRAFT" &&
                 req.application_master_status === "PENDING_SM" && (
-                  <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
-                    Pending SM Approval
-                  </span>
+                  <WorkflowStatusBadge record={req} status="SM_APPROVAL_PENDING" label="Pending SM Approval" />
                 )}
               {req.application_master_status === "REJECTED" && (
                 <span className="badge badge-red" style={{ marginLeft: 8 }}>
@@ -710,7 +695,7 @@ export function RequestDetail({
                     // application_master_status (each delegates it from
                     // `self.qa_request.application_master_status` on the
                     // backend) -- no need for a per-row value.
-                    render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, req.application_master_status)} />,
+                    render: (r) => <WorkflowStatusBadge record={req} status={r.status} label={applicationNameAwareStatusLabel(r.status, req.application_master_status)} />,
                   },
                 ]}
                 rows={linkedRows}

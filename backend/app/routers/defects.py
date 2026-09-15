@@ -1,26 +1,27 @@
 import os
+import json
+from ..defect_workflow import policy
 from collections import Counter
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import documents as doc_store
 from .. import models, schemas, pagination
 from ..constants import (
     ENVIRONMENTS, Role, DEFECT_REASSIGNABLE_STATUSES,
-    TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS,
 )
 from ..database import get_db
-from ..deps import get_current_user, dashboard_department_scope, viewable_project_ids
+from ..deps import get_workflow_user as get_current_user, dashboard_department_scope, viewable_project_ids, active_qa_workspace_scope_ids
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
 from .. import reassignment
 
 router = APIRouter(prefix="/api/defects", tags=["defect-management"])
 
-STATUSES = ("New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect", "Closed")
+STATUSES = ("Ready for QA", "QA Testing", "Business Acceptance", "Ready for Release", "Production Verification", "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect", "Closed")
 SEVERITIES = ("Critical", "High", "Medium", "Low")
 PRIORITIES = ("P1 – Immediate", "P2 – High", "P3 – Medium", "P4 – Low")
 RESOLUTION_TYPES = (
@@ -28,6 +29,9 @@ RESOLUTION_TYPES = (
     "Environment Issue Resolved", "Cannot Reproduce", "Working as Designed", "Other",
 )
 TRANSITIONS = {
+    # Modern states use defect_workflow.transitions; never enter through the legacy API.
+    "Ready for QA": set(), "QA Testing": set(), "Business Acceptance": set(),
+    "Ready for Release": set(), "Production Verification": set(),
     # 2026-08 -- reported directly, with a full defect lifecycle diagram: a
     # New/Open defect should pass through an explicit "Triaged" checkpoint
     # (reviewed, validated, prioritized) before any disposition is made --
@@ -53,7 +57,7 @@ TRANSITIONS = {
 }
 CREATE_ROLES = (
     Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
-    Role.SECURITY_ANALYST, Role.REQUESTER, Role.BUSINESS_ANALYST,
+    Role.SECURITY_ANALYST, Role.REQUESTER, Role.DEVELOPER, Role.BUSINESS_ANALYST,
     Role.APPLICATION_OWNER,
 )
 # 2026-08 -- reported directly, then corrected same day: "other than QA
@@ -94,40 +98,31 @@ def _get_visible(defect_id: int, db: Session, current_user: models.User) -> mode
 
 
 def _scoped_defects(db: Session, current_user: models.User):
-    """Loophole fix: every OTHER list endpoint in this app applies
-    dashboard_department_scope (see that function's own docstring in
-    deps.py) so a department-scoped role only ever sees its own
-    department's records -- this module's list/dashboard/export endpoints
-    had no such scoping at all, so any authenticated user (Requester,
-    Business Analyst, Application Owner -- not just QA staff) could browse
-    every governed defect in the entire org, including steps to reproduce,
-    API endpoints, and log details for defects completely unrelated to
-    them. Defect has no department column of its own (unlike QARequest/
-    TestProject/etc.), so this joins through its always-present
-    qa_request_id to get one, mirroring how approvals.py/reports.py already
-    do the same join-based scoping for cross-entity feeds.
+    """Keep standalone and request-linked defects inside workspace/department scope.
 
-    2026-08 "view-only access to department/user" CR, parity decision
-    (reported directly: a project view-access grant recipient should also
-    see that project's Defects, "the complete picture of that project's
-    status," not just its Test Execution/Repository/Reports) -- widened to
-    an OR: a defect is also in scope if it's linked (via cycle_id -- not
-    every defect has one; opened first, then attached to a Failed/Blocked
-    execution later, see models.Defect's own column comment) to a Test
-    Cycle whose Project is one of viewable_project_ids' grant-widened set.
-    A defect with no cycle_id simply can't match this second branch and
-    falls back to the QARequest.department check alone, same as before this
-    CR existed."""
-    q = db.query(models.Defect)
+    Direct ownership is authoritative. Request context is a compatibility
+    fallback for historical rows; project visibility grants retain their
+    existing access to linked defects.
+    """
+    q = (
+        db.query(models.Defect)
+        .outerjoin(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
+        .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
+    )
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    project_ids = viewable_project_ids(db, current_user)
+    if workspace_ids:
+        q = q.filter(or_(
+            func.coalesce(models.Defect.qa_workspace_id, models.QARequest.qa_workspace_id).in_(workspace_ids),
+            models.TestCycle.project_id.in_(project_ids or []),
+        ))
     scope = dashboard_department_scope(current_user)
     if scope is not None:
-        project_ids = viewable_project_ids(db, current_user)
-        q = q.join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id) \
-             .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id) \
-             .filter(or_(
-                 models.QARequest.department.in_(scope),
-                 models.TestCycle.project_id.in_(project_ids or []),
-             ))
+        q = q.filter(or_(
+            func.coalesce(models.Defect.department, models.QARequest.department).in_(scope),
+            and_(models.Defect.assignee_id == current_user.id, models.Defect.assigned_team.in_(scope)),
+            models.TestCycle.project_id.in_(project_ids or []),
+        ))
     return q
 
 
@@ -147,6 +142,9 @@ def _can_touch_defect(db: Session, obj: models.Defect, user: models.User) -> boo
         or obj.assignee_id == user.id
         or _is_assignee_department_head(db, obj, user)
         or obj.retest_tester_id == user.id
+        or user.id in {obj.workflow_state.get('business_owner_id'), obj.workflow_state.get('release_owner_id')}
+        or _can_assign(db, obj, user)
+        or _can_defer(db, obj, user)
     )
 
 
@@ -200,6 +198,12 @@ def _is_assignee_department_head(db: Session, obj: models.Defect, user: models.U
     assigned_user = db.query(models.User).get(obj.assignee_id)
     if not assigned_user:
         return False
+    workspace_id = obj.qa_workspace_id or (obj.qa_request.qa_workspace_id if obj.qa_request else None)
+    if set(assigned_user.roles) & _QA_DEFECT_ROLES:
+        return user.has_qa_workspace_role(
+            Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+            workspace_id=workspace_id,
+        )
     departments = assigned_user.departments or ([obj.assigned_team] if obj.assigned_team else [])
     return any(
         department
@@ -221,8 +225,10 @@ def _valid_defect_reassignment_departments(obj: models.Defect, previous_assignee
     previous_departments = set(previous_assignee.departments if previous_assignee else [])
     if not previous_departments and obj.assigned_team:
         previous_departments.add(obj.assigned_team)
-    eligible_departments = previous_departments | set(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
-    return eligible_departments & set(new_assignee.departments)
+    workspace_id = obj.qa_workspace_id or (obj.qa_request.qa_workspace_id if obj.qa_request else None)
+    if new_assignee.has_qa_workspace_role(*_QA_DEFECT_ROLES, workspace_id=workspace_id):
+        return set(new_assignee.departments)
+    return previous_departments & set(new_assignee.departments)
 
 
 def _is_tester(obj: models.Defect, user: models.User) -> bool:
@@ -258,6 +264,10 @@ def _require_execution_link_access(db: Session, cycle: models.TestCycle, current
     if not current_user.has_role(*CREATE_ROLES):
         raise HTTPException(403, "You are not authorized to link defects in this Test Cycle")
     scope = dashboard_department_scope(current_user)
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    project_workspace_id = cycle.origin_workspace_id or (cycle.project.qa_workspace_id if cycle.project else None)
+    if workspace_ids and project_workspace_id not in workspace_ids:
+        raise HTTPException(404, "Test Cycle not found in the active workspace")
     project_department = cycle.project.department if cycle.project else None
     if scope and project_department and project_department not in scope:
         raise HTTPException(403, "You can only link defects to Test Cycles in your own department.")
@@ -279,7 +289,7 @@ def _required(value, label: str):
     return value.strip() if isinstance(value, str) else value
 
 
-def _execution_context(db: Session, execution_id: int, request: models.QARequest):
+def _execution_context(db: Session, execution_id: int, request: Optional[models.QARequest]):
     execution = db.query(models.TestExecution).get(execution_id)
     if not execution or not execution.cycle or not execution.test_case:
         raise HTTPException(404, "Test Execution, Test Cycle, or Test Case was not found")
@@ -293,7 +303,7 @@ def _execution_context(db: Session, execution_id: int, request: models.QARequest
             "DAST": models.DASTRequest, "Performance": models.PerformanceRequest,
         }.get(linked_request.child_type)
         child = db.query(child_model).get(linked_request.child_id) if child_model else None
-        if child and child.qa_request_id and child.qa_request_id != request.id:
+        if request and child and child.qa_request_id and child.qa_request_id != request.id:
             raise HTTPException(400, "This execution's Test Cycle is linked to a different QA Request")
     return execution, cycle, test_case
 
@@ -420,7 +430,7 @@ def _link_additional_execution(db: Session, obj: models.Defect, execution: model
 
 _TERMINAL_STATUSES = ("Closed", "Rejected", "Duplicate", "Not a Defect")
 _ATTENTION_SEVERITIES = ("Critical", "High")
-_RETEST_STATUSES = ("Resolved", "Retest")
+_RETEST_STATUSES = ("Resolved", "Retest", "Ready for QA", "QA Testing", "Business Acceptance", "Production Verification")
 
 # SRS 7.2 pagination rollout -- every field the register table, the queue
 # tabs, and every other module's own defect pickers need off a row, without
@@ -446,7 +456,7 @@ def list_defects(severity: Optional[str] = None,
                  qa_request_id: Optional[int] = None, assignee_id: Optional[int] = None,
                  reporter_id: Optional[int] = None,
                  queue: Optional[str] = Query(
-                     None, description="'attention'|'mine'|'unlinked'|'retest'|'closed', omitted for all -- "
+                     None, description="'attention'|'mine'|'unlinked'|'incomplete-traceability'|'retest'|'closed', omitted for all -- "
                                         "matches Defects.tsx's own queue tabs exactly",
                  ),
                  params: pagination.PageParams = Depends(),
@@ -489,6 +499,10 @@ def list_defects(severity: Optional[str] = None,
         q = q.filter(or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id))
     elif queue == "unlinked":
         q = q.filter(models.Defect.execution_id.is_(None))
+    elif queue == "incomplete-traceability":
+        # Additional execution links also establish traceability. Request,
+        # cycle or testcase links alone do not establish an execution trail.
+        q = q.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any())
     elif queue == "retest":
         q = q.filter(models.Defect.status.in_(_RETEST_STATUSES))
     elif queue == "closed":
@@ -608,6 +622,7 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         "Project", "Module", "Status", "Severity", "Priority", "Environment", "Assignee",
         "Reporter", "Created", "Target Release", "Expected Resolution", "Ageing (Days)",
         "Reopen Count", "External Defect ID", "Resolution Type", "Resolution Summary",
+        "Workflow Version", "Production Impact", "Affected Environments", "Verified Builds",
     ]
     today = models.now().date()
     rows = []
@@ -619,6 +634,10 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
             item.assignee_name, item.reporter_name, item.reported_at, item.target_release,
             item.expected_resolution_date, max(0, (today - item.reported_at.date()).days),
             item.reopen_count, item.external_defect_id, item.resolution_type, item.resolution_summary,
+            item.workflow.get("version") if item.workflow else "Legacy",
+            item.workflow_state.get("production_impact", "Not recorded"),
+            ", ".join(sorted({e["environment"] for e in item.workflow_state.get("occurrences", [])})),
+            ", ".join(f"{v['environment']}: {v['build']}" for v in item.verified_builds),
         ])
     add_table_sheet(
         workbook, "Defects", "Defect Register", headers, rows,
@@ -650,28 +669,54 @@ def get_defect(defect_id: int, db: Session = Depends(get_db), current_user: mode
     return _get_visible(defect_id, db, current_user)
 
 
+def _require_request_access(db, request, user):
+    from ..workspace_service import require_active_workspace, selectable_workspace_ids
+    workspace_id = require_active_workspace(user)
+    workspace_ids = active_qa_workspace_scope_ids(user) or (workspace_id,)
+    if request.qa_workspace_id not in workspace_ids or request.qa_workspace_id not in selectable_workspace_ids(db, user):
+        raise HTTPException(404, "QA Request was not found in the active workspace")
+    scope = dashboard_department_scope(user)
+    if scope is not None and request.department not in scope:
+        raise HTTPException(403, "Select a QA Request from your department")
+
+
+def _creation_context(db, user, payload, request=None, cycle=None):
+    """Resolve ownership independently of the optional request relationship."""
+    from ..workspace_service import require_active_workspace, selectable_workspace_ids
+    selected_workspace = require_active_workspace(user)
+    project = cycle.project if cycle else None
+    workspace_id = (request.qa_workspace_id if request else None) or ((cycle.origin_workspace_id or project.qa_workspace_id) if cycle and project else None) or selected_workspace
+    permitted = active_qa_workspace_scope_ids(user) or (selected_workspace,)
+    if workspace_id not in permitted or workspace_id not in selectable_workspace_ids(db, user):
+        raise HTTPException(403, "Select an accessible workspace before raising a defect")
+    if cycle and (cycle.origin_workspace_id or project.qa_workspace_id) != workspace_id:
+        raise HTTPException(400, "Request and execution must belong to the same workspace")
+    workspace = db.get(models.QAWorkspace, workspace_id)
+    if not workspace or not workspace.is_active:
+        raise HTTPException(400, "Select an active workspace")
+    department = _required((request.department if request else None) or (project.department if project else None)
+                           or payload.department or user.department, "Department")
+    scope = dashboard_department_scope(user)
+    if scope is not None and department not in scope:
+        raise HTTPException(403, "You can only raise defects for your department")
+    if not db.query(models.Department).filter(models.Department.name == department, models.Department.is_active == True).first():
+        raise HTTPException(400, "Select an active department")
+    project_application = project.application_master.name if project and project.application_master else None
+    application = _required((request.application_name if request else None) or project_application or payload.application_name, "Application")
+    if request and project_application and application.casefold() != project_application.casefold():
+        raise HTTPException(400, "Request and execution must belong to the same application")
+    return workspace_id, department, application
+
+
 @router.post("", response_model=schemas.DefectOut)
 def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(get_current_user)):
     _require_create_role(current_user)
-    request = db.query(models.QARequest).get(payload.qa_request_id)
-    if not request:
+    request = db.get(models.QARequest, payload.qa_request_id) if payload.qa_request_id else None
+    if payload.qa_request_id is not None and request is None:
         raise HTTPException(404, "QA Request was not found")
-    # Loophole fix: create_request (qa_requests.py) explicitly sources a new
-    # QA Request's own department from the requester's profile server-side,
-    # "ignore whatever the payload sent" -- but this endpoint accepted any
-    # client-supplied qa_request_id with no check the caller has any
-    # relationship to it at all, letting a Requester/Business Analyst/
-    # Application Owner from ANY department report (and see, via the
-    # created row) a defect against a request belonging to a department
-    # they have nothing to do with. Same dashboard_department_scope
-    # semantics as every list endpoint: QA/Security/Executive-COE roles
-    # (and Admin) stay unrestricted since they legitimately work across
-    # every department's requests; a department-scoped role may only
-    # report defects against its own department's requests.
-    scope = dashboard_department_scope(current_user)
-    if scope is not None and request.department not in scope:
-        raise HTTPException(403, "You can only report defects against QA Requests from your own department.")
+    if request:
+        _require_request_access(db, request, current_user)
     link_values = (payload.execution_id, payload.cycle_id, payload.test_case_id)
     if any(value is not None for value in link_values) and not all(value is not None for value in link_values):
         raise HTTPException(400, "Execution, Test Cycle, and Test Case must be supplied together, or all left blank")
@@ -681,6 +726,7 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
         _require_execution_link_access(db, cycle, current_user)
         if payload.cycle_id != cycle.id or payload.test_case_id != test_case.id:
             raise HTTPException(400, "Test Execution must belong to the selected Test Cycle and Test Case")
+    workspace_id, department, application_name = _creation_context(db, current_user, payload, request, cycle)
     if payload.severity not in SEVERITIES:
         raise HTTPException(400, "Select a valid severity")
     if payload.priority not in PRIORITIES:
@@ -695,21 +741,25 @@ def create_defect(payload: schemas.DefectCreate, db: Session = Depends(get_db),
         raise HTTPException(400, "Every linked Test Case must belong to the Test Cycle's project")
     obj = models.Defect(
         defect_key=models.gen_defect_id(db), title=_required(payload.title, "Defect Title"),
-        description=_required(payload.description, "Description"), qa_request_id=request.id,
+        description=_required(payload.description, "Description"), qa_request_id=request.id if request else None,
+        qa_workspace_id=workspace_id, department=department,
         cycle_id=cycle.id if cycle else None, primary_test_case_id=test_case.id if test_case else None,
         execution_id=execution.id if execution else None,
-        application_name=request.application_name, module_feature=_required(payload.module_feature, "Module/Feature"),
+        application_name=application_name, module_feature=_required(payload.module_feature, "Module/Feature"),
         environment=_required(payload.environment, "Environment"), severity=payload.severity,
         priority=payload.priority, steps_to_reproduce=_required(payload.steps_to_reproduce, "Steps to Reproduce"),
         expected_result=_required(payload.expected_result, "Expected Result"),
         actual_result=_required(payload.actual_result, "Actual Result"), reporter_id=current_user.id,
         retest_tester_id=payload.retest_tester_id or (execution.assigned_to_id if execution else None) or current_user.id,
         device_details=payload.device_details,
-        build_version=payload.build_version or (cycle.build if cycle else None) or request.build_number, api_endpoint=payload.api_endpoint,
+        build_version=payload.build_version or (cycle.build if cycle else None) or (request.build_number if request else None), api_endpoint=payload.api_endpoint,
         request_response_details=payload.request_response_details, log_details=payload.log_details,
-        related_cr_number=payload.related_cr_number or request.cr_number,
+        related_cr_number=payload.related_cr_number or (request.cr_number if request else None),
         external_defect_id=payload.external_defect_id, remarks=payload.remarks, labels=payload.labels,
     )
+    workspace = db.get(models.QAWorkspace, workspace_id)
+    obj.workflow_json = json.dumps(policy(workspace.defect_workflow_json if workspace else None))
+    obj.workflow_state_json = json.dumps({"production_impact": "Affected" if obj.environment == "Production" else "Unknown", "iteration": 0, "history": [], "occurrences": [{"environment": obj.environment, "build": obj.build_version, "remarks": "Original report"}]})
     db.add(obj); db.flush()
     for case_id in case_ids:
         _ensure_case_link(db, obj.id, case_id)
@@ -728,6 +778,10 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
     if obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect"}:
         raise HTTPException(400, f"A {obj.status} defect cannot be linked to a new execution")
     execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request)
+    if obj.qa_workspace_id and (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != obj.qa_workspace_id:
+        raise HTTPException(400, "Test execution must belong to the defect workspace")
+    if cycle.project.application_master and cycle.project.application_master.name.casefold() != obj.application_name.casefold():
+        raise HTTPException(400, "Test execution must belong to the defect application")
     _require_execution_link_access(db, cycle, current_user)
     if obj.execution_id and obj.execution_id != execution.id:
         # Already has a DIFFERENT primary execution -- add this as an
@@ -761,6 +815,8 @@ def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = D
         raise HTTPException(400, "Select a valid priority")
     if data.get("environment") and data["environment"] not in ENVIRONMENTS:
         raise HTTPException(400, "Select a valid environment")
+    if obj.workflow_json and "environment" in data and data["environment"] != obj.environment:
+        raise HTTPException(400, "Reported environment is preserved; record another occurrence instead")
     changes = []
     for field, value in data.items():
         old = getattr(obj, field)
@@ -777,6 +833,8 @@ def update_defect(defect_id: int, payload: schemas.DefectUpdate, db: Session = D
 def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Session = Depends(get_db),
                       current_user: models.User = Depends(get_current_user)):
     obj = _get_visible(defect_id, db, current_user)
+    if obj.workflow_json:
+        raise HTTPException(400, "Use the versioned workspace workflow actions for this defect")
     requested = payload.status
     if requested not in STATUSES or requested not in TRANSITIONS.get(obj.status, set()):
         raise HTTPException(400, f"Invalid status transition. Defect {obj.defect_key} cannot be changed from {obj.status} to {requested}.")
@@ -853,6 +911,8 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         assignee_user = db.query(models.User).get(assignee_id)
         if not assignee_user or not assignee_user.is_active:
             raise HTTPException(404, "Selected assignee was not found or is inactive")
+        if not assignee_user.show_in_user_dropdowns:
+            raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
         assigned_department = _required(
             payload.assigned_team or (obj.qa_request.department if obj.qa_request else None),
             "Department",
@@ -985,11 +1045,18 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
     previous_assignee_id = obj.assignee_id
     previous_assigned_at = obj.assigned_at
     previous_assignee = db.query(models.User).get(previous_assignee_id)
-    reassignment.require_can_reassign(current_user, obj.assignee_id, previous_assignee.departments if previous_assignee else None)
+    previous_is_qa = bool(previous_assignee and set(previous_assignee.roles) & _QA_DEFECT_ROLES)
+    reassignment.require_can_reassign(
+        current_user, obj.assignee_id,
+        previous_assignee.departments if previous_assignee else None,
+        qa_workspace_id=(obj.qa_workspace_id if previous_is_qa else None),
+    )
     reason = reassignment.require_reason(payload.reason)
     new_assignee = db.query(models.User).get(payload.assignee_id)
     if not new_assignee or not new_assignee.is_active:
         raise HTTPException(404, "Selected assignee was not found or is inactive")
+    if not new_assignee.show_in_user_dropdowns:
+        raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     if new_assignee.id == previous_assignee_id:
         raise HTTPException(400, "Select a different assignee for reassignment")
     # Reassignment pool: teammates of the current assignee plus configured
@@ -1006,10 +1073,7 @@ def reassign_defect(defect_id: int, payload: schemas.DefectReassign, db: Session
         )
     destination = payload.assigned_team if payload.assigned_team in valid_destinations else None
     if not destination:
-        destination = next(
-            (department for department in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS if department in valid_destinations),
-            sorted(valid_destinations)[0],
-        )
+        destination = sorted(valid_destinations)[0]
     department = db.query(models.Department).filter(
         models.Department.name == destination,
         models.Department.is_active == True,  # noqa: E712
@@ -1062,3 +1126,60 @@ def download_attachment(defect_id: int, document_id: int, db: Session = Depends(
     if not os.path.exists(path):
         raise HTTPException(404, "Attachment file is missing from storage")
     return FileResponse(path, filename=document.file_name, media_type=document.content_type or "application/octet-stream")
+
+
+@router.get('/{defect_id}/workflow-candidates', response_model=dict[str, List[schemas.UserOut]])
+def workflow_candidates(defect_id: int, department: Optional[str] = None,
+                        db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    from ..defect_assignment import assignment_error, OWNER_ROLES
+    obj = _get_visible(defect_id, db, current_user)
+    candidates = db.query(models.User).filter(models.User.is_active == True).all()
+    from .auth import _redact_confidential_roles
+    return {field: [_redact_confidential_roles(candidate, current_user) for candidate in candidates
+                    if assignment_error(db, obj, candidate, field, department) is None]
+            for field in OWNER_ROLES}
+
+
+@router.post('/{defect_id}/workflow-action', response_model=schemas.DefectOut)
+def defect_workflow_action(defect_id: int, payload: schemas.DefectWorkflowAction,
+                           db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    from .defect_workflow_actions import apply_action
+    return apply_action(db, _get_visible(defect_id, db, current_user), payload, current_user)
+
+
+@router.post('/{defect_id}/link-request', response_model=schemas.DefectOut)
+def link_defect_request(defect_id: int, payload: schemas.DefectLinkRequest,
+                        db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = _get_visible(defect_id, db, current_user)
+    if not (_is_manager(db, obj, current_user) or obj.reporter_id == current_user.id or _is_assignee(obj, current_user)):
+        raise HTTPException(403, 'Only the reporter, resolver or QA lead can link a request')
+    db.query(models.Defect).filter_by(id=obj.id).with_for_update().populate_existing().one()
+    if payload.revision != obj.workflow_revision:
+        raise HTTPException(409, 'Defect changed. Refresh before linking a request.')
+    if obj.qa_request_id:
+        raise HTTPException(400, 'This defect already has a QA request link')
+    if obj.status in _TERMINAL_STATUSES:
+        raise HTTPException(400, 'Reopen this defect before adding a request link')
+    request = db.get(models.QARequest, payload.qa_request_id)
+    if not request:
+        raise HTTPException(404, 'QA Request was not found')
+    _require_request_access(db, request, current_user)
+    if request.qa_workspace_id != obj.qa_workspace_id or request.department != obj.department:
+        raise HTTPException(400, 'Request must belong to the defect workspace and department')
+    if request.application_name.casefold() != obj.application_name.casefold():
+        raise HTTPException(400, 'Request must belong to the defect application')
+    executions = ([obj.execution] if obj.execution else []) + [link.execution for link in obj.execution_links if link.execution]
+    for execution in executions:
+        link = execution.cycle.child_request_link
+        if link:
+            model = {'Functional': models.FunctionalRequest, 'SAST': models.SASTRequest,
+                     'DAST': models.DASTRequest, 'Performance': models.PerformanceRequest}.get(link.child_type)
+            child = db.get(model, link.child_id) if model else None
+            if child and child.qa_request_id and child.qa_request_id != request.id:
+                raise HTTPException(400, 'A linked execution belongs to a different QA request')
+    obj.qa_request_id = request.id
+    obj.workflow_revision += 1
+    _audit(db, obj, current_user, 'Request Linked', f'Linked {request.request_id}. Workspace workflow version retained.')
+    db.commit()
+    db.refresh(obj)
+    return obj

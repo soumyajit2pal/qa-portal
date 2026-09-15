@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from './components/WorkflowStatusBadge'
 import { useRequestNavigation } from './hooks/useRequestNavigation'
 import React, { useEffect, useState, useMemo, useRef } from 'react'
 
@@ -24,6 +25,7 @@ import {
 // combined, sortable list across the QA Request gateway and every linked
 // child request type instead of six separate tables.
 interface UnifiedRequestRow {
+  children?: { id: number; request_id: string; type: string; status: string }[]
   id: number
   // `id` is each row's raw primary key from its OWN source table (QARequest,
   // FunctionalRequest, SASTRequest, DASTRequest, PerformanceRequest) -- those
@@ -623,7 +625,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         { key: 'cycle_id', header: 'Cycle ID', render: (r) => <span className="dashboard-trace-list">{r.cycle_ids?.length ? r.cycle_ids.map((key) => <small key={key}>{key}</small>) : '—'}</span> },
         { key: 'test_case_id', header: 'Testcase IDs', render: (r) => <span className="dashboard-trace-list">{r.test_case_ids?.length ? r.test_case_ids.map((key) => <small key={key}>{key}</small>) : '—'}</span> },
         { key: 'application_name', header: 'Application' },
-        { key: 'status', header: 'Status', render: (r) => <Badge status={r.status || ''} /> },
+        { key: 'status', header: 'Status', render: (r) => <WorkflowStatusBadge record={r} status={r.status} /> },
         { key: 'severity', header: 'Severity', render: (r) => <Badge status={r.severity || ''} /> },
         { key: 'resolver_name', header: 'Resolved by', render: (r) => r.resolver_name || 'Not resolved' },
         { key: 'reopen_count', header: 'Reopens', render: (r) => r.reopen_count || 0 },
@@ -648,7 +650,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         { key: 'request_id', header: 'Request ID' },
         { key: 'application_name', header: 'Application' },
         { key: 'department', header: 'Department', render: (r) => r.department || '—' },
-        { key: 'status', header: 'Decision stage', render: (r) => <Badge status={r.status || ''} /> },
+        { key: 'status', header: 'Decision stage', render: (r) => <WorkflowStatusBadge record={r} status={r.status} /> },
         { key: 'pending_with', header: 'Waiting on' },
         { key: 'updated_at', header: 'Waiting since', render: (r) => r.updated_at ? timeAgo(r.updated_at) : '—' },
       ]
@@ -657,7 +659,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         { key: 'request_id', header: 'Request ID' },
         { key: 'application_name', header: 'Application' },
         { key: 'department', header: 'Department', render: (r) => r.department || '—' },
-        { key: 'status', header: 'Current stage', render: (r) => <Badge status={r.status || ''} /> },
+        { key: 'status', header: 'Current stage', render: (r) => <WorkflowStatusBadge record={r} status={r.status} /> },
         { key: 'created_at', header: 'Raised', render: (r) => r.created_at ? timeAgo(r.created_at) : '—' },
         { key: 'updated_at', header: 'Last updated', render: (r) => r.updated_at ? timeAgo(r.updated_at) : '—' },
       ]
@@ -957,7 +959,7 @@ function SecurityTab({ range }: { range: RaisedRange }) {
     { key: 'application_name', header: 'Application' },
     ...(selection?.kind === 'dast' ? [{ key: 'application_url', header: 'Application URL' }] : []),
     { key: 'department', header: 'Department', render: (row) => row.department || '—' },
-    { key: 'status', header: 'Current stage', render: (row) => <Badge status={row.status} /> },
+    { key: 'status', header: 'Current stage', render: (row) => <WorkflowStatusBadge record={row} status={row.status} /> },
     ...(['vulnerabilities', 'severity', 'remediation'].includes(selection?.metric || '')
       ? [{ key: 'value', header: selection?.metric === 'severity' ? `${selection.value} findings` : 'Open findings' }] : []),
     { key: 'updated_at', header: 'Updated', render: (row) => row.updated_at ? timeAgo(row.updated_at) : '—' },
@@ -1137,8 +1139,17 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
 
   useEffect(() => { api.get<ThreeWOut>(`/api/dashboard/3w${rangeQuery(range)}`).then(setData).catch(setError) }, [range])
 
-  async function openProject(projectId: string) {
-    try { setDetail(await api.get<ThreeWDetailOut>(`/api/dashboard/3w/${projectId}${rangeQuery(range)}`)) } catch (err) { setError(err) }
+  const detailRequestId = useRef(0)
+  const [detailError, setDetailError] = useState<unknown>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  async function openProject(projectId: string, source: string) {
+    const requestId = ++detailRequestId.current
+    setDetail(null); setDetailError(null); setDetailLoading(true)
+    try {
+      const result = await api.get<ThreeWDetailOut>(`/api/dashboard/3w/${encodeURIComponent(projectId)}?source=${encodeURIComponent(source)}`)
+      if (requestId === detailRequestId.current) setDetail(result)
+    } catch (err) { if (requestId === detailRequestId.current) setDetailError(err) }
+    finally { if (requestId === detailRequestId.current) setDetailLoading(false) }
   }
 
   if (error) return <ErrorText error={error} />
@@ -1148,7 +1159,7 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
     <div>
       <p className="muted small">
         "Know What Is Pending, Where It Is Pending, and Since When" — real-time visibility into pending QA
-        documents, approvals, reviews and sign-offs across all teams. Click a Project ID to drill into its
+        documents, approvals, reviews and sign-offs in the selected workspace. Click a Project ID to drill into its
         lifecycle.
       </p>
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
@@ -1163,7 +1174,7 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
       <Card title="Pending Items">
         <Table
           rowKey="project_id"
-          onRowClick={(r) => openProject(r.project_id)}
+          onRowClick={(r) => openProject(r.project_id, r.source)}
           columns={[
             { key: 'project_id', header: 'Project / Request ID' },
             { key: 'application_name', header: 'Application' },
@@ -1178,11 +1189,13 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
           rows={data.items}
         />
       </Card>
+      {detailLoading && <p role="status">Loading lifecycle…</p>}
+      {!!detailError && <ErrorText error={detailError} />}
       {detail && (
         <Card title={`Lifecycle — ${detail.project_id || ''}`}>
           {detail.detail ? <p className="muted">{detail.detail}</p> : (
             <>
-              <p><strong>Application:</strong> {detail.application_name} &nbsp; <strong>Status:</strong> <Badge status={detail.status} /> &nbsp; <strong>Ageing:</strong> {detail.ageing_days} days</p>
+              <p><strong>Application:</strong> {detail.application_name} &nbsp; <strong>Status:</strong> <WorkflowStatusBadge record={detail} status={detail.status} /> &nbsp; <strong>Ageing:</strong> {detail.ageing_days} days</p>
               <div className="section-title">Lifecycle / Audit Trail</div>
               <Table rowKey="at" columns={[
                 { key: 'step', header: 'Step' },
@@ -1205,7 +1218,7 @@ function ThreeWTab({ range }: { range: RaisedRange }) {
 }
 
 // Own dedicated tab (not a card mixed into Dashboard) so the main
-// dashboard always shows the whole portal's data, and this personal/
+// dashboard shows the active workspace's data, and this personal/
 // department-scoped view is a deliberate, separate destination instead of
 // something narrowing the default landing view.
 //
@@ -1288,18 +1301,28 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
         )}
       >
         <div className="grid grid-3">
-          <StatCard icon={IconGrid} iconClass="blue" value={requestPage?.total || 0} label="Total requests" />
+          <StatCard icon={IconGrid} iconClass="blue" value={requestPage?.total || 0} label="Main requests" />
           <StatCard icon={IconWorkflow} iconClass="purple" value={requestPage?.active_total || 0} label="Active / in progress" />
           <StatCard icon={IconCheckCircle} iconClass="amber" value={requestPage?.terminal_total || 0} label="Closed / cancelled" />
         </div>
 
+        <p className="muted small">Each main QA request is counted once. Expand its child requests to view testing workflows. Standalone requests are counted separately. Raised requests remain active until all linked testing workflows are closed or cancelled.</p>
         <div style={{ marginTop: 18 }}>
           <Table
             rowKey="uid"
             onRowClick={(r) => navigate(`${TYPE_TO_PATH[r.type] || '/qa-requests'}?openId=${r.id}`)}
             columns={[
               { key: 'type', header: 'Type' },
-              { key: 'request_id', header: 'Request ID' },
+              { key: 'request_id', header: 'Main request / child requests', render: (r) => <div>
+                <strong>{r.request_id}</strong>
+                {!!r.children?.length && <details onClick={event => event.stopPropagation()} style={{ marginTop: 8 }}>
+                  <summary style={{ cursor: 'pointer' }}>{r.children.length} child request{r.children.length === 1 ? '' : 's'}</summary>
+                  <div style={{ display: 'grid', gap: 10, marginTop: 10 }}>{r.children.map(child => <div key={`${child.type}-${child.id}`}>
+                    <button type="button" className="btn btn-sm" onClick={() => navigate(`${TYPE_TO_PATH[child.type]}?openId=${child.id}`)}>{child.type} · {child.request_id}</button>
+                    <div style={{ marginTop: 4 }}><WorkflowStatusBadge record={r} status={child.status} /></div>
+                  </div>)}</div>
+                </details>}
+              </div> },
               { key: 'application_name', header: 'Application' },
               {
                 key: 'change_description',
@@ -1312,7 +1335,7 @@ function MyRequestsTab({ range }: { range: RaisedRange }) {
                 filterValue: (r) => r.change_description || '',
               },
               { key: 'department', header: 'Department', render: (r) => r.department || '—' },
-              { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} /> },
+              { key: 'status', header: 'Status', render: (r) => <WorkflowStatusBadge record={r} status={r.status} /> },
               { key: 'created_at', header: 'Raised', render: (r) => timeAgo(r.created_at) },
             ]}
             rows={scopedRequests}
@@ -1715,7 +1738,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
           { key: 'record_key', header: 'Record ID', render: (item) => <strong>{item.record_key}</strong> },
           { key: 'project_name', header: 'Project', render: (item) => item.project_name ? `${item.project_key} — ${item.project_name}` : 'Not linked to a Test Project' },
           { key: 'description', header: 'Details' },
-          { key: 'status', header: 'Status', render: (item) => <Badge status={item.status} /> },
+          { key: 'status', header: 'Status', render: (item) => <WorkflowStatusBadge record={item} status={item.status} /> },
           { key: 'activity_at', header: 'Activity Date', render: (item) => formatDateTimeIST(item.activity_at) },
         ]} />}
         {!['Projects', 'Current Assignments'].includes(detailView) && <p className="muted small">Up to {contributionDetail.detail_limit} recent records are shown per activity category. Summary counts above always cover the complete selected period.</p>}
@@ -1759,7 +1782,7 @@ function TesterOverviewTab({ range }: { range: RaisedRange }) {
               { key: 'request_id', header: 'Request ID', render: (item) => <strong>{item.request_id}</strong> },
               { key: 'source', header: 'Request Type' },
               { key: 'application_name', header: 'Application' },
-              { key: 'status', header: 'Status', render: (item) => <Badge status={item.status} /> },
+              { key: 'status', header: 'Status', render: (item) => <WorkflowStatusBadge record={item} status={item.status} /> },
               { key: 'work_state', header: 'Work State', render: (item) => <span className={item.is_current ? 'tester-ledger-current' : 'tester-ledger-complete'}>{item.is_current ? 'Currently working' : 'Completed'}</span> },
               { key: 'updated_at', header: 'Last Activity', render: (item) => formatDateTimeIST(item.updated_at) },
             ]}
@@ -1792,6 +1815,16 @@ export default function Dashboard() {
   const [tab, setTab] = useState('command')
   const [insightTab, setInsightTab] = useState<'security' | 'suppression' | '3w'>('security')
   const [range, setRange] = useState<RaisedRange>(DEFAULT_RAISED_RANGE)
+  // Remount dashboard data owners when account/workspace identity changes.
+  // This also prevents a slower response started under a previous scope from
+  // committing into the newly-selected scope's component state.
+  const activeWorkspaceId = localStorage.getItem('active_workspace_id')
+    || localStorage.getItem('qa_active_workspace_id')
+    || String(user?.preferred_workspace_id || user?.preferred_qa_workspace_id || 'unscoped')
+  const dashboardScopeKey = `${user?.id || 'anonymous'}:${activeWorkspaceId}`
+  const activeWorkspace = (user?.workspace_access || user?.qa_workspace_access || [])
+    .find((membership) => String(membership.workspace_id) === activeWorkspaceId)
+  const activeWorkspaceName = activeWorkspace?.workspace_name || 'Selected workspace'
 
   const hideRequestsTab = !!user?.roles?.some((r) => REQUESTS_TAB_HIDDEN_ROLES.includes(r))
     && !user?.roles?.includes('ADMIN')
@@ -1804,8 +1837,8 @@ export default function Dashboard() {
   const organisationWidePortfolio = !!user?.roles?.some((role) => ORGANISATION_WIDE_PORTFOLIO_ROLES.has(role))
     || !user?.departments?.length
   const portfolioScopeLabel = organisationWidePortfolio
-    ? 'All departments'
-    : user?.departments.join(', ') || 'No department assigned'
+    ? `${activeWorkspaceName} · All departments`
+    : `${activeWorkspaceName} · ${user?.departments.join(', ') || 'No department assigned'}`
 
   const tabs = [
     { key: 'command', label: 'Dashboard' },
@@ -1850,8 +1883,8 @@ export default function Dashboard() {
           <button key={t.key} className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}>{t.label}</button>
         ))}
       </div>
-      {tab === 'command' && <CommandCentre range={range} />}
-      {tab === 'my-requests' && !hideRequestsTab && <MyRequestsTab range={range} />}
+      {tab === 'command' && <CommandCentre key={`command:${dashboardScopeKey}`} range={range} />}
+      {tab === 'my-requests' && !hideRequestsTab && <MyRequestsTab key={`requests:${dashboardScopeKey}`} range={range} />}
       {tab === 'insights' && (
         <div className="dashboard-insights">
           <div className="dashboard-insights-head">
@@ -1865,16 +1898,16 @@ export default function Dashboard() {
           <div className="portfolio-scope-note" role="note">
             <div>
               <span>Data scope</span>
-              <strong>{organisationWidePortfolio ? 'Organization-wide portfolio' : 'Department portfolio'}</strong>
+              <strong>{organisationWidePortfolio ? 'Workspace-wide portfolio' : 'Department portfolio'}</strong>
             </div>
-            <p><b>{portfolioScopeLabel}</b> · Security and suppression totals follow the signed-in user&apos;s role and department access, so authorized users with different scopes can see different figures.</p>
+            <p><b>{portfolioScopeLabel}</b> · Every total and drilldown follows this workspace plus the signed-in user&apos;s team access.</p>
           </div>
-          {insightTab === 'security' && <SecurityTab range={range} />}
-          {insightTab === 'suppression' && <SuppressionTab range={range} />}
-          {insightTab === '3w' && <ThreeWTab range={range} />}
+          {insightTab === 'security' && <SecurityTab key={`security:${dashboardScopeKey}`} range={range} />}
+          {insightTab === 'suppression' && <SuppressionTab key={`suppression:${dashboardScopeKey}`} range={range} />}
+          {insightTab === '3w' && <ThreeWTab key={`3w:${dashboardScopeKey}`} range={range} />}
         </div>
       )}
-      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab range={range} />}
+      {tab === 'tester-overview' && showTesterOverviewTab && <TesterOverviewTab key={`testers:${dashboardScopeKey}`} range={range} />}
     </div>
   )
 }

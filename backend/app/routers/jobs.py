@@ -8,6 +8,8 @@ removes request timeouts without introducing a second database schema;
 production should place the upload root on durable shared storage.
 """
 import json
+import logging
+import re
 import os
 import queue
 import threading
@@ -20,6 +22,7 @@ from fastapi.responses import FileResponse
 from .. import models
 from ..deps import get_current_user
 from ..storage_config import get_upload_root
+from ..storage_lock import exclusive_file_lock
 
 
 router = APIRouter(prefix="/api/jobs", tags=["background-jobs"])
@@ -27,6 +30,8 @@ _write_lock = threading.Lock()
 _worker_start_lock = threading.Lock()
 _job_queue: queue.Queue[tuple[str, Callable[[str], Optional[dict]]]] = queue.Queue()
 _workers_started = False
+_job_leases = {}
+logger = logging.getLogger(__name__)
 
 
 def _job_worker_count() -> int:
@@ -46,6 +51,8 @@ def _job_worker_count() -> int:
 
 
 def _job_dir(job_id: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(404, "Background job not found")
     path = os.path.join(get_upload_root(), ".jobs", job_id)
     os.makedirs(path, exist_ok=True)
     return path
@@ -120,7 +127,12 @@ def _job_worker() -> None:
         job_id, action = _job_queue.get()
         try:
             _run(job_id, action)
+        except Exception:
+            logger.exception("Background worker could not persist job %s", job_id)
         finally:
+            lease = _job_leases.pop(job_id, None)
+            if lease is not None:
+                lease.__exit__(None, None, None)
             _job_queue.task_done()
 
 
@@ -138,25 +150,34 @@ def enqueue(background_tasks: BackgroundTasks, job_type: str, user_id: int,
             action: Callable[[str], Optional[dict]]) -> dict:
     job_id = uuid.uuid4().hex
     now = models.now().isoformat()
-    _write(job_id, {
-        "id": job_id,
-        "job_type": job_type,
-        "status": "QUEUED",
-        "progress": 0,
-        "created_by_id": user_id,
-        "created_at": now,
-        "updated_at": now,
-        "result": None,
-        "error": None,
-        "artifact_name": None,
-    })
-    # Do not hand every job directly to Starlette's shared BackgroundTasks
-    # executor: bursty imports/exports would then all open database sessions
-    # together. The fixed queue above owns concurrency instead. Keep the
-    # parameter for compatible call sites and FastAPI route signatures.
-    del background_tasks
-    _ensure_job_workers()
-    _job_queue.put((job_id, action))
+    lease = exclusive_file_lock(os.path.join(_job_dir(job_id), "worker.lock"))
+    if not lease.__enter__():
+        raise RuntimeError("Could not acquire new job lease")
+    _job_leases[job_id] = lease
+    try:
+        _write(job_id, {
+            "id": job_id,
+            "job_type": job_type,
+            "status": "QUEUED",
+            "progress": 0,
+            "created_by_id": user_id,
+            "created_at": now,
+            "updated_at": now,
+            "result": None,
+            "error": None,
+            "artifact_name": None,
+        })
+        # Do not hand every job directly to Starlette's shared BackgroundTasks
+        # executor: bursty imports/exports would then all open database sessions
+        # together. The fixed queue above owns concurrency instead. Keep the
+        # parameter for compatible call sites and FastAPI route signatures.
+        del background_tasks
+        _ensure_job_workers()
+        _job_queue.put((job_id, action))
+    except Exception:
+        _job_leases.pop(job_id, None)
+        lease.__exit__(None, None, None)
+        raise
     return _read(job_id) or {"id": job_id, "status": "QUEUED"}
 
 
@@ -166,6 +187,16 @@ def _authorized_job(job_id: str, current_user: models.User) -> dict:
         raise HTTPException(404, "Background job not found")
     if job.get("created_by_id") != current_user.id and not current_user.has_role("ADMIN"):
         raise HTTPException(403, "You can only view your own background jobs")
+    if job.get("status") in {"QUEUED", "RUNNING"}:
+        with exclusive_file_lock(os.path.join(_job_dir(job_id), "worker.lock")) as acquired:
+            if acquired:
+                # No process owns the queued callable anymore. Never rerun an
+                # import automatically: its DB transaction may have committed.
+                job = _read(job_id) or job
+                if job.get("status") in {"QUEUED", "RUNNING"}:
+                    update(job_id, status="FAILED", finished_at=models.now().isoformat(),
+                           error="Worker interrupted. Review the result before submitting this job again.")
+                    job = _read(job_id)
     return job
 
 

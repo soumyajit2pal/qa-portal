@@ -31,6 +31,7 @@ export interface UserOut {
   // `department` (singular) is kept for compat, synced to the primary
   // (first-assigned) department.
   departments: string[]
+  department_unit_ids?: number[]
   roles: string[]
   login_type: string
   is_active: boolean
@@ -44,6 +45,34 @@ export interface UserOut {
   // rosters (DepartmentAdmin.tsx) and only a System Admin (Admin.tsx) can
   // reassign their role(s) or activate/deactivate them.
   admin_managed_only: boolean
+  show_in_user_dropdowns: boolean
+  preferred_qa_workspace_id?: number | null
+  qa_workspace_access: QAWorkspaceAccessOut[]
+  preferred_workspace_id?: number | null
+  active_workspace_id?: number | null
+  workspace_access: QAWorkspaceAccessOut[]
+  department_coordinator_access: DepartmentCoordinatorOut[]
+}
+
+export interface LocalAdminWorkspaceCandidateOut {
+  id: number
+  username: string
+  full_name: string
+  email?: string | null
+  department?: string | null
+  departments: string[]
+  department_unit_ids?: number[]
+  roles: string[]
+  needs_role_review: boolean
+  show_in_user_dropdowns: boolean
+}
+
+export interface LocalAdminApprovalWorkspaceOut {
+  id: number
+  workspace_key: string
+  name: string
+  parent_workspace_id?: number | null
+  coordinator_departments: string[]
 }
 
 export interface QARequestDelegationOut {
@@ -107,8 +136,89 @@ export interface AuditSummary {
 // Departments are DB-backed (see backend app/models.py Department, managed
 // via /api/departments) -- fetched at render time everywhere a department
 // picker is shown, instead of importing a hardcoded list.
+export interface QAWorkspaceAccessOut {
+  id: number
+  workspace_id: number
+  role: string
+  is_active: boolean
+  workspace_name?: string | null
+  workspace_key?: string | null
+  parent_workspace_id?: number | null
+  parent_workspace_name?: string | null
+  parent_workspace_key?: string | null
+}
+
+export interface QAWorkspaceMemberOut {
+  id: number
+  workspace_id: number
+  user_id: number
+  role: string
+  is_active: boolean
+  user_name?: string | null
+  is_system_administrator: boolean
+}
+
+export interface DepartmentCoordinatorOut {
+  id: number
+  user_id: number
+  department_id: number
+  department_unit_id?: number | null
+  workspace_id: number
+  is_active: boolean
+  created_by_id?: number | null
+  created_at: string
+  user_name?: string | null
+  department_name?: string | null
+  department_unit_name?: string | null
+  workspace_name?: string | null
+  workspace_key?: string | null
+}
+
+export interface QAWorkspaceCoverageOut {
+  id: number
+  workspace_id: number
+  department_id?: number | null
+  department_name?: string | null
+  department_unit_id?: number | null
+  department_unit_name?: string | null
+  application_master_id?: number | null
+  application_name?: string | null
+  request_type?: string | null
+  priority: number
+  is_active: boolean
+}
+
+export interface QAWorkspaceOut {
+  defect_workflow: DefectWorkflowPolicy
+  id: number
+  workspace_key: string
+  name: string
+  description?: string | null
+  is_active: boolean
+  is_default: boolean
+  parent_workspace_id?: number | null
+  parent_workspace_name?: string | null
+  parent_workspace_key?: string | null
+  created_by_id?: number | null
+  created_at: string
+  updated_at: string
+  members: QAWorkspaceMemberOut[]
+  coverage_rules: QAWorkspaceCoverageOut[]
+  department_coordinators: DepartmentCoordinatorOut[]
+}
+
 export interface DepartmentOut {
   id: number
+  name: string
+  is_active: boolean
+  units?: DepartmentUnitOut[]
+}
+
+export interface DepartmentUnitOut {
+  id: number
+  department_id: number
+  department_name?: string | null
+  parent_unit_id?: number | null
   name: string
   is_active: boolean
 }
@@ -187,6 +297,8 @@ export interface LinkedRequestRef {
   priority?: string | null
   risk_rating?: string | null
   risk_category?: string | null
+  department_unit_id?: number | null
+  department_unit_name?: string | null
 }
 
 // Minimal cross-reference the other direction from LinkedRequestRef -- one
@@ -247,8 +359,13 @@ export interface QARequestListOut {
   request_id?: string | null
   request_date?: string | null
   department?: string | null
+  department_unit_id?: number | null
+  department_unit_name?: string | null
   application_name: string
   application_master_id?: number | null
+  qa_workspace_id?: number | null
+  qa_workspace_name?: string | null
+  workspace_routing_status: string
   // See backend schemas.QARequestListOut's own comment -- previously
   // missing from this lightweight list schema entirely, which is why the
   // "CR Number/EPIC Number" list column always showed blank.
@@ -278,6 +395,8 @@ export interface QARequestOut {
   request_id?: string | null
   request_date?: string | null
   department?: string | null
+  department_unit_id?: number | null
+  department_unit_name?: string | null
   application_name: string
   application_owner?: string | null
   cr_number?: string | null
@@ -304,6 +423,9 @@ export interface QARequestOut {
   // SM's Approve/Reject action target the right master row.
   application_master_id?: number | null
   application_master_status?: string | null
+  qa_workspace_id?: number | null
+  qa_workspace_name?: string | null
+  workspace_routing_status: string
   active_delegation?: QARequestDelegationOut | null
   linked_functional_requests: LinkedRequestRef[]
   linked_sast_requests: LinkedRequestRef[]
@@ -807,7 +929,31 @@ export interface SuppressionOut {
 }
 
 // ---------------- QA Clearance ----------------
+export interface CertificateSummary {
+  assigned_testers?: { id: number; name: string }[]
+  conditional_observations?: string
+  observations?: { defect_key: string; functionality: string; observation: string; severity: string; status: string; owner: string; target_date: string }[]
+  change_request_ids?: string
+  change_description?: string
+  revision: number
+  captured_at: string
+  application_name: string
+  population_note: string
+  execution: { total: number; counts: Record<string, number>; pass_pct: number | null }
+  defects: { total: number; counts: Record<string, number> }
+  severity: { severity: string; open: number; closed: number; total: number }[]
+  open_critical_high: number
+}
+
 export interface SignOffOut {
+  qa_workspace_id?: number | null
+  known_limitations?: string | null
+  business_acceptance_status?: string | null
+  security_testing_status?: string | null
+  deployment_recommendation?: string | null
+  conditional_observations?: string | null
+
+  certificate_summary?: CertificateSummary | null
   id: number
   certificate_id: string
   certificate_date?: string | null
@@ -949,7 +1095,7 @@ export interface ThreeWItem {
   ageing_days: number
   ageing_bucket: string
   priority?: string
-  source?: string
+  source: string
 }
 
 export interface ThreeWOut {
@@ -1057,11 +1203,16 @@ export interface FortifySuppressionDetailOut {
 // else its approved baseline). See constants.ts's TEST_CASE_STATUSES (5
 // values) and TEST_CYCLE_STATUSES (7 values) for the current vocabularies.
 export interface TestProjectOut {
+  application_name?: string | null
   id: number
   project_key: string
   name: string
   application_master_id?: number | null
+  qa_workspace_id?: number | null
+  qa_workspace_name?: string | null
   department?: string | null
+  department_unit_id?: number | null
+  department_unit_name?: string | null
   description?: string | null
   is_active: boolean
   owner_id?: number | null
@@ -1101,7 +1252,7 @@ export interface TestProjectSummaryCountsOut {
 }
 
 // 2026-08 "view-only access to department/user" CR -- mirrors backend
-// schemas.TestProjectViewGrantOut. Exactly one of department/user_id is set
+// schemas.TestProjectViewGrantOut. Exactly one recipient scope is set.
 // per row.
 export interface TestProjectViewGrantOut {
   id: number
@@ -1109,9 +1260,17 @@ export interface TestProjectViewGrantOut {
   department?: string | null
   user_id?: number | null
   user_name?: string | null
+  workspace_id?: number | null
+  workspace_name?: string | null
   granted_by_id?: number | null
   granted_by_name?: string | null
   created_at: string
+}
+
+export interface TestProjectWorkspaceOptionOut {
+  id: number
+  workspace_key: string
+  name: string
 }
 
 // Request body for POST /api/test-projects -- mirrors backend TestProjectCreate.
@@ -1120,6 +1279,7 @@ export interface TestProjectCreateIn {
   name: string
   application_master_id?: number | null
   department?: string | null
+  department_unit_id?: number | null
   description?: string | null
   owner_id?: number | null
   default_reviewer_id?: number | null
@@ -1127,11 +1287,13 @@ export interface TestProjectCreateIn {
 }
 
 // Request body for PATCH /api/test-projects/{id} -- mirrors backend TestProjectUpdate.
-// All fields optional/partial; explicit null clears default_reviewer_id/default_qa_lead_id.
+// All fields are optional/partial. Reviewer fields remain for compatibility
+// with older API records; current workflow routing is group-based.
 export interface TestProjectUpdateIn {
   name?: string
   application_master_id?: number | null
   department?: string | null
+  department_unit_id?: number | null
   description?: string | null
   is_active?: boolean
   owner_id?: number | null
@@ -1174,6 +1336,9 @@ export interface TestProjectMemberOut {
 }
 
 export interface TestFolderOut {
+  origin_workspace_id?: number | null
+  origin_workspace_name?: string | null
+  workspace_writable?: boolean
   id: number
   project_id: number
   parent_id?: number | null
@@ -1192,6 +1357,9 @@ export interface TestStepIn {
 export type TestStepOut = TestStepIn & { id: number }
 
 export interface TestCaseOut {
+  origin_workspace_id?: number | null
+  origin_workspace_name?: string | null
+  workspace_writable?: boolean
   id: number
   test_case_key: string
   project_id: number
@@ -1221,6 +1389,10 @@ export interface TestCaseOut {
   current_draft_submitted_by_name?: string | null
   // "Add Recommended By once recommended" -- see backend schemas.TestCaseOut's matching comment.
   current_draft_reviewed_by_name?: string | null
+  assigned_reviewer_id?: number | null
+  assigned_reviewer_name?: string | null
+  assigned_qa_lead_id?: number | null
+  assigned_qa_lead_name?: string | null
   created_by_id?: number | null
   created_by_name?: string | null
   created_at: string
@@ -1247,6 +1419,9 @@ export interface TestCaseOut {
 
 // PAG-005 lightweight list schema -- mirrors backend schemas.TestCaseListOut.
 export interface TestCaseListOut {
+  origin_workspace_id?: number | null
+  origin_workspace_name?: string | null
+  workspace_writable?: boolean
   id: number
   test_case_key: string
   project_id: number
@@ -1274,6 +1449,10 @@ export interface TestCaseListOut {
   current_draft_submitted_by_name?: string | null
   // "Add Recommended By once recommended" -- see backend schemas.TestCaseOut's matching comment.
   current_draft_reviewed_by_name?: string | null
+  assigned_reviewer_id?: number | null
+  assigned_reviewer_name?: string | null
+  assigned_qa_lead_id?: number | null
+  assigned_qa_lead_name?: string | null
   created_by_id?: number | null
   created_by_name?: string | null
   created_at: string
@@ -1355,8 +1534,8 @@ export interface TestCaseVersionOut {
   qa_lead_decided_by_name?: string | null
   qa_lead_decided_at?: string | null
   qa_lead_decision_comments?: string | null
-  // APR-001 -- per-item assignment override of the project's default_reviewer/
-  // default_qa_lead; routing/visibility only, not an authorization gate.
+  // Per-item decision owners copied from the project defaults. These IDs
+  // drive both pending visibility and stage authorization.
   assigned_reviewer_id?: number | null
   assigned_reviewer_name?: string | null
   assigned_qa_lead_id?: number | null
@@ -1374,8 +1553,8 @@ export interface TestCaseReassignApproversIn {
 }
 
 // Request body for POST /api/test-cases/{id}/review (and bulk variants).
-// Stage 1 (In Review, gated by can_review_repository): RECOMMEND | RETURN
-// Stage 2 (Review Completed, gated by can_give_final_approval): APPROVE | RETURN | REJECT
+// Stage 1 is handled by the QA Group; Stage 2 by the QA Lead Group.
+// Administrator may recover either stage.
 export type TestCaseReviewDecision = "RECOMMEND" | "APPROVE" | "RETURN" | "REJECT"
 export interface TestCaseReviewIn {
   decision: TestCaseReviewDecision
@@ -1421,6 +1600,9 @@ export interface TestCaseImportResult {
 }
 
 export interface TestCycleOut {
+  origin_workspace_id?: number | null
+  origin_workspace_name?: string | null
+  workspace_writable?: boolean
   id: number
   cycle_key: string
   project_id: number
@@ -1464,6 +1646,9 @@ export interface TestCycleFolderAccessOut {
 }
 
 export interface TestCycleFolderOut {
+  origin_workspace_id?: number | null
+  origin_workspace_name?: string | null
+  workspace_writable?: boolean
   id: number
   project_id: number
   name: string
@@ -1589,6 +1774,8 @@ export interface TestExecutionSummaryOut {
 }
 
 export interface LinkedGovernedDefectRef {
+  modern_workflow?: boolean
+  verified_execution_ids?: number[]
   id: number
   defect_key: string
   status: string
@@ -1729,13 +1916,28 @@ export interface DefectExecutionLinkOut {
   status?: string | null
 }
 
+export interface DefectWorkflowPolicy {
+  version: number
+  qa_environment: string
+  business_acceptance: boolean
+  business_environment: string
+  production_for_all: boolean
+}
 export interface DefectOut {
+  workflow?: DefectWorkflowPolicy | null
+  workflow_state?: { production_impact?: string; business_owner_id?: number; release_owner_id?: number; deployed_build?: string; blocked?: { reason: string; review_date: string }; occurrences?: Record<string, any>[]; history?: Record<string, any>[] }
+  workflow_revision?: number
+  workflow_stages?: string[]
+  workflow_transitions?: string[]
+
   id: number
   defect_key: string
   title: string
   description: string
   status: string
-  qa_request_id: number
+  qa_request_id?: number | null
+  qa_workspace_id?: number | null
+  department?: string | null
   qa_request_key?: string | null
   cycle_id?: number | null
   cycle_key?: string | null
@@ -1749,6 +1951,7 @@ export interface DefectOut {
   primary_test_case_id?: number | null
   test_case_key?: string | null
   execution_id?: number | null
+  execution_status?: string | null
   execution_assignee_id?: number | null
   linked_test_case_ids: number[]
   linked_test_case_keys: string[]
@@ -1820,11 +2023,16 @@ export interface DefectOut {
 // (PAG-005); Defects.tsx fetches the full `DefectOut` via `GET /{id}` only
 // when a row is actually opened (PAG-006).
 export interface DefectListOut {
+  modern_workflow?: boolean
+  resolution_type?: string | null
+  verified_builds?: { environment: string; build: string }[]
   id: number
   defect_key: string
   title: string
   status: string
-  qa_request_id: number
+  qa_request_id?: number | null
+  qa_workspace_id?: number | null
+  department?: string | null
   qa_request_key?: string | null
   cycle_id?: number | null
   cycle_key?: string | null

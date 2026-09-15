@@ -7,7 +7,7 @@ import DepartmentPrompt from './components/DepartmentPrompt'
 import EmailCompletionPrompt from './components/EmailCompletionPrompt'
 import PendingApprovalsNotice from './components/PendingApprovalsNotice'
 import { UserOut } from './types'
-import { hasDepartment, QA_DEPARTMENT } from './constants'
+import { hasWorkspaceRole, uniqueWorkspaceAccess } from './constants'
 
 // Cross-cutting pages -- not owned by any one domain module (the QA Request
 // gateway feeds every module, the Dashboard summarizes across all of
@@ -43,6 +43,7 @@ const Approvals = lazy(() => import('./modules/governance/Approvals'))
 const Reports = lazy(() => import('./modules/governance/Reports'))
 const Admin = lazy(() => import('./modules/governance/Admin'))
 const DepartmentAdmin = lazy(() => import('./modules/governance/DepartmentAdmin'))
+const ParentWorkspaceAdmin = lazy(() => import('./modules/governance/ParentWorkspaceAdmin'))
 const AuditLog = lazy(() => import('./modules/governance/AuditLog'))
 const ChecklistConfig = lazy(() => import('./modules/governance/ChecklistConfig'))
 const RequestTypeConfig = lazy(() => import('./modules/governance/RequestTypeConfig'))
@@ -69,7 +70,15 @@ function DocumentPortalOnlyAccessDenied() {
 }
 
 function isAccessApprovalPending(user: UserOut | null): boolean {
-  return !!user && user.needs_role_review && !user.needs_department_selection && user.roles.length === 0
+  return !!user && user.needs_role_review && !user.needs_department_selection
+}
+
+function isWorkspaceAccessMissing(user: UserOut | null): boolean {
+  return !!user
+    && !user.needs_department_selection
+    && !user.needs_role_review
+    && user.roles.length > 0
+    && uniqueWorkspaceAccess(user).length === 0
 }
 
 function isLdapEmailCompletionRequired(user: UserOut | null): boolean {
@@ -119,6 +128,51 @@ function AccessApprovalPending() {
         <div className="access-pending-actions">
           <button className="btn btn-primary" onClick={checkApprovalStatus} disabled={checking}>
             {checking ? 'Checking…' : 'Check approval status'}
+          </button>
+          <button className="btn" onClick={logout}>Log out</button>
+        </div>
+      </section>
+    </main>
+  )
+}
+
+function WorkspaceAccessRequired() {
+  const { refreshUser, logout } = useAuth()
+  const [checking, setChecking] = useState(false)
+
+  async function checkWorkspaceAccess() {
+    setChecking(true)
+    try {
+      await refreshUser()
+    } catch {
+      // Keep the fail-closed screen available during a transient API error.
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  return (
+    <main className="access-pending-page">
+      <section className="access-pending-card" role="alert" aria-live="polite">
+        <div className="access-pending-brand">
+          <img className="qualityops-app-logo" src="/qualityops-logo.png" alt="" aria-hidden="true" />
+          <div>
+            <strong>Quality<em>Ops</em></strong>
+            <img className="bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
+          </div>
+        </div>
+        <span className="access-pending-status" aria-hidden="true">!</span>
+        <p className="access-pending-kicker">Workspace access required</p>
+        <h1>No workspace is assigned</h1>
+        <p className="access-pending-message">
+          QualityOps cannot show requests, projects, testing, defects, or reports until your account has an active workspace.
+        </p>
+        <div className="access-pending-note">
+          Ask an Administrator to assign a workspace. If access was just updated, check again.
+        </div>
+        <div className="access-pending-actions">
+          <button className="btn btn-primary" onClick={checkWorkspaceAccess} disabled={checking}>
+            {checking ? 'Checking…' : 'Check workspace access'}
           </button>
           <button className="btn" onClick={logout}>Log out</button>
         </div>
@@ -211,6 +265,7 @@ function ProtectedLayout() {
   // prevents their navigation-specific API calls from running while the
   // backend pending-access guard intentionally permits only /me and logout.
   if (isAccessApprovalPending(user)) return <AccessApprovalPending />
+  if (isWorkspaceAccessMissing(user)) return <WorkspaceAccessRequired />
   return (
     <AuthenticatedChrome user={user}>
       <DocumentOnlyAccessGuard user={user}>
@@ -228,7 +283,7 @@ function LoginRoute() {
 
 function QaGroupOnly({ children }: { children: ReactNode }) {
   const { user } = useAuth()
-  return hasDepartment(user, QA_DEPARTMENT) ? <>{children}</> : <Navigate to="/" replace />
+  return hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA') ? <>{children}</> : <Navigate to="/" replace />
 }
 
 function DocumentPortalOnly({ children }: { children: ReactNode }) {
@@ -254,6 +309,7 @@ function HelpRoute() {
   const { user, loading } = useAuth()
   if (loading) return <ModuleFallback />
   if (isAccessApprovalPending(user)) return <AccessApprovalPending />
+  if (isWorkspaceAccessMissing(user)) return <PublicHelp />
   if (user) return (
     <AuthenticatedChrome user={user}>
       {isDocumentPortalOnly(user) ? <DocumentPortalOnlyAccessDenied /> : <Help />}
@@ -362,6 +418,7 @@ export default function App() {
           <Route path="/reports" element={<ModuleBoundary moduleName="Governance"><Reports /></ModuleBoundary>} />
           <Route path="/admin" element={<ModuleBoundary moduleName="Governance"><Admin /></ModuleBoundary>} />
           <Route path="/department-admin" element={<ModuleBoundary moduleName="Governance"><DepartmentAdmin /></ModuleBoundary>} />
+          <Route path="/workspace-admin" element={<ModuleBoundary moduleName="Governance"><ParentWorkspaceAdmin /></ModuleBoundary>} />
           <Route path="/audit-log" element={<ModuleBoundary moduleName="Governance"><AuditLog /></ModuleBoundary>} />
           <Route path="/checklist-config" element={<ModuleBoundary moduleName="Governance"><ChecklistConfig /></ModuleBoundary>} />
           <Route path="/request-type-config" element={<ModuleBoundary moduleName="Governance"><RequestTypeConfig /></ModuleBoundary>} />

@@ -16,13 +16,15 @@ from ..upload_limits import validate_qa_document_sizes, validate_document_file_t
 from .. import application_names as app_names
 from ..database import get_db
 from ..deps import (
-    get_current_user, require_roles, dashboard_department_scope,
-    require_department_visibility,
+    get_workflow_user as get_current_user, require_workflow_roles as require_roles, dashboard_department_scope,
+    require_department_visibility, active_qa_workspace_scope_ids,
+    department_unit_visibility_condition, require_department_unit_visibility,
 )
 from ..constants import (
     Role,
     REQUEST_TYPES, FUNCTIONAL_BUCKET_TYPES, QAStatus, GatewayStatus,
     GATEWAY_EDITABLE_STATUSES, GATEWAY_CANCELLABLE_STATUSES,
+    QA_REQUEST_CREATOR_ROLES,
     POST_SIT_ENVIRONMENTS,
     validate_environment_promotion, validate_target_release_date,
 )
@@ -31,6 +33,7 @@ from ..constants import (
 # constants.DEFAULT_*_CHECKLIST_ITEMS lists directly any more.
 from ..checklist_config import get_template_items, is_mandatory_for_department
 from ..request_type_config import inactive_request_types
+from ..workspace_service import require_active_workspace
 from ..pdf_export import build_request_detail_pdf
 
 router = APIRouter(prefix="/api/qa-requests", tags=["qa-requests"])
@@ -134,12 +137,17 @@ def _is_active_delegate(obj: "models.QARequest", user: models.User) -> bool:
     return bool(delegation and delegation.assigned_to_id == user.id)
 
 
-def _require_gateway_visibility(obj: "models.QARequest", user: models.User) -> None:
+def _require_gateway_visibility(db: Session, obj: "models.QARequest", user: models.User) -> None:
     if not _can_view_gateway(obj, user):
         raise HTTPException(403, "You do not have access to this request")
     require_department_visibility(
         user, obj.department, requester_id=obj.requester_id,
         delegated=_is_active_delegate(obj, user),
+        entity_workspace_id=obj.qa_workspace_id,
+    )
+    require_department_unit_visibility(
+        db, user, obj.department, obj.department_unit_id,
+        requester_id=obj.requester_id, delegated=_is_active_delegate(obj, user),
     )
 
 
@@ -502,8 +510,14 @@ def list_requests(params: pagination.PageParams = Depends(),
     # pagination.paginate() below so PAG-009's "the total count shall
     # include only records the current user is authorized to access" holds.
     scope = dashboard_department_scope(current_user)
+    workspace_scope = active_qa_workspace_scope_ids(current_user)
     if scope is not None:
-        q = q.filter(or_(models.QARequest.department.in_(scope), delegated_to_user))
+        organisation_scope = department_unit_visibility_condition(
+            db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
+        )
+        q = q.filter(or_(organisation_scope, delegated_to_user))
+    if workspace_scope:
+        q = q.filter(models.QARequest.qa_workspace_id.in_(workspace_scope))
     if assigned_to_me:
         q = q.filter(my_gateway_input_work)
     # Broad "requests or IDs" search (topbar search box and the QA Requests
@@ -601,7 +615,9 @@ def bug_fix_source_options(application_name: str = Query(..., min_length=1),
          ))
     scope = dashboard_department_scope(current_user)
     if scope is not None:
-        q = q.filter(models.QARequest.department.in_(scope))
+        q = q.filter(department_unit_visibility_condition(
+            db, current_user, models.QARequest.department, models.QARequest.department_unit_id,
+        ))
     rows = q.order_by(models.FunctionalRequest.updated_at.desc()).limit(limit).all()
     return [{
         "request_id": gateway.request_id,
@@ -621,7 +637,7 @@ def get_request(req_id: int, db: Session = Depends(get_db), current_user: models
     ).filter(models.QARequest.id == req_id).first())
     if not obj:
         raise HTTPException(404, "QA Request not found")
-    _require_gateway_visibility(obj, current_user)
+    _require_gateway_visibility(db, obj, current_user)
     # Same batched-in-list_requests() reasoning applies here for a single
     # row -- QASignOff has no FK to QARequest, only a business-ID match
     # against a linked FunctionalRequest's own request_id.
@@ -673,6 +689,8 @@ def assign_for_input(req_id: int, payload: schemas.QARequestDelegationCreate,
     ).first()
     if not assignee:
         raise HTTPException(400, "Select an active user")
+    if not assignee.show_in_user_dropdowns:
+        raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     if assignee.id == obj.requester_id:
         raise HTTPException(400, "The requester already owns this request; select another user")
     delegation = models.QARequestDelegation(
@@ -860,6 +878,8 @@ def assign_child_for_input(qa_request_id: int, target_type: str, target_id: int,
     ).first()
     if not assignee:
         raise HTTPException(400, "Select an active user")
+    if not assignee.show_in_user_dropdowns:
+        raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
     if assignee.id == target.requester_id:
         raise HTTPException(400, "The requester already owns this request; select another user")
     delegation = models.QARequestDelegation(
@@ -1200,9 +1220,21 @@ def _resolve_requester_department(current_user: models.User, requested: Optional
     return requested
 
 
+def _resolve_requester_department_unit(
+    db: Session,
+    current_user: models.User,
+    department: Optional[str],
+    requested_unit_id: Optional[int],
+) -> Optional[int]:
+    # Units were replaced by child workspaces as the operational boundary.
+    # Keep the nullable column for historical rows while all new and edited
+    # requests use workspace membership and routing.
+    return None
+
+
 @router.post("", response_model=schemas.QARequestOut)
 def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_db),
-                    current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
+                    current_user: models.User = Depends(require_roles(*QA_REQUEST_CREATOR_ROLES))):
     """Creates the gateway request in Draft ONLY -- no linked child request
     (Functional/SAST/DAST/Performance) is created yet, even if
     SAST/DAST/etc. detail fields were filled in on the wizard. Those details
@@ -1214,6 +1246,9 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
     # _resolve_requester_department's own docstring; defaults to their
     # primary (first-assigned) one when the client doesn't send a choice.
     data["department"] = _resolve_requester_department(current_user, payload.department)
+    data["department_unit_id"] = _resolve_requester_department_unit(
+        db, current_user, data["department"], payload.department_unit_id,
+    )
     request_types = data.pop("request_types", [])
     _validate_request_types(db, request_types)
     checked_items = set(data.pop("checked_items", []) or [])
@@ -1278,7 +1313,8 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
         raise HTTPException(400, str(e))
     obj = models.QARequest(
         **data, application_name=name_upper, request_types=",".join(request_types), requester_id=current_user.id,
-        status=GatewayStatus.DRAFT,
+        status=GatewayStatus.DRAFT, qa_workspace_id=require_active_workspace(current_user),
+        workspace_routing_status="ASSIGNED",
         draft_child_details=_stash_draft_details(
             checked_items, sast_components, dast_components, performance_details,
             performance_checked_items, classification_details,
@@ -1302,6 +1338,7 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    _require_gateway_visibility(db, obj, current_user)
     if not _can_edit_draft(obj, current_user):
         if obj.active_delegation and obj.requester_id == current_user.id:
             raise HTTPException(403, "This request is delegated and locked for editing until it is returned or recalled")
@@ -1325,6 +1362,22 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
             data["department"] = obj.department
         else:
             data["department"] = _resolve_requester_department(current_user, data["department"])
+    if "department_unit_id" in data:
+        if _is_active_delegate(obj, current_user) and not current_user.has_role(Role.ADMIN):
+            if data["department_unit_id"] != obj.department_unit_id:
+                raise HTTPException(403, "A delegated user cannot change the request department unit")
+        elif data["department_unit_id"] != obj.department_unit_id or data.get("department", obj.department) != obj.department:
+            data["department_unit_id"] = _resolve_requester_department_unit(
+                db,
+                current_user,
+                data.get("department", obj.department),
+                data["department_unit_id"],
+            )
+    elif "department" in data and obj.department_unit_id:
+        # Clear an incompatible old unit when the request moves department.
+        existing_unit = db.get(models.DepartmentUnit, obj.department_unit_id)
+        if not existing_unit or existing_unit.department.name != data["department"]:
+            data["department_unit_id"] = None
     request_types = data.pop("request_types", None)
     if request_types is not None:
         _validate_request_types(db, request_types)
@@ -1439,6 +1492,7 @@ def cancel_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    _require_gateway_visibility(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can cancel this request")
     if obj.active_delegation:
@@ -1461,7 +1515,7 @@ def cancel_request(req_id: int, db: Session = Depends(get_db), current_user: mod
 
 @router.post("/{req_id}/submit", response_model=schemas.QARequestOut)
 def submit_request(req_id: int, db: Session = Depends(get_db),
-                    current_user: models.User = Depends(require_roles(Role.REQUESTER, Role.BUSINESS_ANALYST))):
+                    current_user: models.User = Depends(require_roles(*QA_REQUEST_CREATOR_ROLES))):
     """Raises the request: creates whichever linked child request(s) the
     selected request_types call for -- this is the only place they're ever
     created (see create_request/edit_request, which merely stash their
@@ -1509,6 +1563,7 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
+    _require_gateway_visibility(db, obj, current_user)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this request")
     if obj.active_delegation:
@@ -1660,6 +1715,8 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     # all Draft uploads before either raising immediately or waiting at the
     # Application Owner checkpoint, preventing split DRAFT/TQA folders.
     _promote_draft_upload_folder(db, obj)
+    # The global workspace is fixed when the draft is created. Submitting it
+    # must never move the record to a different tenant.
 
     if obj.application_master_status == "PENDING_APP_OWNER":
         # Brand-new "Other" name, still awaiting the first approval tier --
@@ -1686,7 +1743,7 @@ def request_history(req_id: int, db: Session = Depends(get_db), current_user: mo
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
-    _require_gateway_visibility(obj, current_user)
+    _require_gateway_visibility(db, obj, current_user)
     return (db.query(models.ApprovalAction)
             .filter_by(entity_type="QA_REQUEST", entity_id=req_id)
             .order_by(models.ApprovalAction.created_at).all())
@@ -1704,7 +1761,7 @@ def export_request(req_id: int, db: Session = Depends(get_db), current_user: mod
     obj = db.query(models.QARequest).get(req_id)
     if not obj:
         raise HTTPException(404, "QA Request not found")
-    _require_gateway_visibility(obj, current_user)
+    _require_gateway_visibility(db, obj, current_user)
 
     linked = []
     linked += [f"Functional QA {f.request_id}" for f in obj.linked_functional_requests]
@@ -1783,7 +1840,7 @@ def _draft_request_for_evidence(db: Session, req_id: int, current_user: models.U
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
-    _require_gateway_visibility(req, current_user)
+    _require_gateway_visibility(db, req, current_user)
     if require_editable:
         if not _can_edit_draft(req, current_user):
             raise HTTPException(403, "Only the current Draft editor can change checklist evidence")
@@ -1883,7 +1940,7 @@ def list_documents(req_id: int, db: Session = Depends(get_db), current_user: mod
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
-    _require_gateway_visibility(req, current_user)
+    _require_gateway_visibility(db, req, current_user)
     return (db.query(models.QARequestDocument)
             .filter_by(qa_request_id=req_id)
             .order_by(models.QARequestDocument.uploaded_at).all())
@@ -1966,7 +2023,7 @@ def download_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
     req = db.query(models.QARequest).get(req_id)
     if not req:
         raise HTTPException(404, "QA Request not found")
-    _require_gateway_visibility(req, current_user)
+    _require_gateway_visibility(db, req, current_user)
     doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
     if not doc:
         raise HTTPException(404, "Document not found")
@@ -1990,7 +2047,7 @@ def delete_document(req_id: int, doc_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "QA Request not found")
     if req.active_delegation and req.requester_id == current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "This request is delegated and read-only until it is returned or recalled")
-    _require_gateway_visibility(req, current_user)
+    _require_gateway_visibility(db, req, current_user)
     doc = db.query(models.QARequestDocument).filter_by(id=doc_id, qa_request_id=req_id).first()
     if not doc:
         raise HTTPException(404, "Document not found")

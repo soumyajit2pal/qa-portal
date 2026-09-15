@@ -5,10 +5,12 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 
-from .. import models, schemas
+from .. import models, schemas, certificate_summary
 from ..database import get_db
-from ..deps import get_current_user, require_roles, require_not_requester, dashboard_department_scope
-from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, QA_DEPARTMENT, validate_environment_promotion
+from ..deps import (get_workflow_user as get_current_user, require_workflow_roles as require_roles, require_not_requester,
+                    dashboard_department_scope, active_qa_workspace_scope_ids,
+                    require_entity_workspace_visibility)
+from ..constants import Role, SIGNOFF_EDITABLE_STATUSES, QAStatus, validate_environment_promotion
 from ..pdf_export import (
     DIGITAL_SIGNATURE_METHOD,
     QA_CLEARANCE_SIGNED_TYPE,
@@ -24,8 +26,8 @@ router = APIRouter(prefix="/api/signoffs", tags=["signoff"])
 # ---------------------------------------------------------------------------
 # Module 8: QA Clearance Certificate lifecycle -- Draft (QA Engineer fills
 # in the certificate) -> QA Lead Approval -> Executive  Approval -> Issued.
-# The linked application may belong to any department, but this certificate
-# workflow is owned entirely by COE - Quality Assurance.
+# The linked application may belong to any department. The selected workspace
+# and QA permission profile govern this workflow.
 # ---------------------------------------------------------------------------
 
 
@@ -36,7 +38,21 @@ def _log(db: Session, entity_id: int, step: str, user: models.User, decision: st
     ))
 
 
+def _require_workspace_approver(obj: models.QASignOff, user: models.User, *, executive: bool = False):
+    """Use the certificate workspace, not an obsolete QA department guard."""
+    if user.has_role(Role.ADMIN):
+        return
+    roles = (Role.CHIEF_MANAGER_QA, Role.AGM_QA) if executive else (
+        Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
+    if not obj.qa_workspace_id or not user.has_qa_workspace_role(*roles, workspace_id=obj.qa_workspace_id):
+        raise HTTPException(403, 'An authorized QA approver in the certificate workspace is required')
+
+
 def _require(obj, expected_statuses, action: str):
+    from ..workspace_service import current_workspace_scope_ids
+    selected = current_workspace_scope_ids()
+    if selected and obj.qa_workspace_id not in selected:
+        raise HTTPException(404, "Clearance certificate not found in the active workspace")
     if isinstance(expected_statuses, str):
         expected_statuses = [expected_statuses]
     if obj.status not in expected_statuses:
@@ -47,12 +63,17 @@ def _get_or_404(db: Session, signoff_id: int) -> "models.QASignOff":
     obj = db.query(models.QASignOff).get(signoff_id)
     if not obj:
         raise HTTPException(404, "Clearance certificate not found")
+    from ..workspace_service import current_workspace_scope_ids
+    selected = current_workspace_scope_ids()
+    if selected and obj.qa_workspace_id not in selected:
+        raise HTTPException(404, "Clearance certificate not found")
     return obj
 
 
 def _get_visible_or_404(db: Session, signoff_id: int, user: models.User) -> "models.QASignOff":
     """Resolve a certificate while enforcing request-department privacy."""
     obj = _get_or_404(db, signoff_id)
+    require_entity_workspace_visibility(db, user, "SIGNOFF", obj.id)
     scope = dashboard_department_scope(user)
     if scope is not None and obj.request_department not in scope:
         # Deliberately 404 instead of 403 so another department cannot use
@@ -93,17 +114,6 @@ def _sync_linked_functional_request(db: Session, obj: "models.QASignOff", curren
         ))
 
 
-def _require_qa_department(user: models.User) -> None:
-    if user.has_role(Role.ADMIN):
-        return
-    if not user.has_department(QA_DEPARTMENT):
-        raise HTTPException(
-            403,
-            f"QA Clearance is restricted to the '{QA_DEPARTMENT}' department. "
-            f"Your profile is mapped to '{', '.join(user.departments) or 'no department'}'.",
-        )
-
-
 def _validate_rich_text_before_progress(obj: models.QASignOff) -> None:
     """Block workflow advancement for legacy records saved before the API
     enforced the editor's 10,000-character contract. Return/reject decisions
@@ -111,9 +121,14 @@ def _validate_rich_text_before_progress(obj: models.QASignOff) -> None:
     invoke this only for submit/resubmit/approve paths.
     """
     fields = (
-        ("Exit Criteria Validation Notes", obj.exit_criteria_notes),
-        ("Open Defect Review Summary", obj.open_defect_summary),
+        ("Testing Scope Completed", obj.exit_criteria_notes),
+        ("Open Risks (if any)", obj.open_defect_summary),
         ("Remarks", obj.residual_risk_notes),
+        ("Known Limitations", obj.known_limitations),
+        ("Business Acceptance Status", obj.business_acceptance_status),
+        ("Security Testing Status", obj.security_testing_status),
+        ("Deployment Recommendation", obj.deployment_recommendation),
+        ("Conditional Clearance Observations", obj.conditional_observations),
     )
     oversized = [
         f"{label} ({len(value):,}/{schemas.RICH_TEXT_MAX_LENGTH:,})"
@@ -136,8 +151,7 @@ def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Dep
     # QA delivery/executive roles and Administrators are intentionally
     # unscoped by dashboard_department_scope because their governed workflow
     # responsibilities span departments. Filter on the linked request's
-    # department, not QASignOff.department (the latter is always the COE - Quality Assurance
-    # approval owner and would make business privacy filtering meaningless).
+    # department, not QASignOff.department (the latter is retained only as source-department metadata and would make business privacy filtering meaningless).
     # Perf tuning (2026-08, reported directly: "some of the apis are taking
     # lot of timing") -- SignOffOut.request_department reads
     # source_functional_request (a viewonly relationship matched on business
@@ -159,6 +173,9 @@ def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Dep
             )
             .join(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id)
             .filter(models.QARequest.department.in_(scope)))
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        q = q.filter(models.QASignOff.qa_workspace_id.in_(workspace_ids))
     return q.order_by(models.QASignOff.created_at.desc()).all()
 
 
@@ -176,11 +193,19 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     the request"), by the QA Lead group on behalf of a request whose tester
     isn't available to raise it themselves. Starts as a Draft either way --
     no different downstream handling based on who created it."""
-    _require_qa_department(current_user)
     data = payload.model_dump()
-    # Never trust the linked business request's department for approval
-    # routing: the sign-off certificate is a COE - Quality Assurance-owned record.
-    data["department"] = QA_DEPARTMENT
+    source = db.query(models.FunctionalRequest).filter(
+        models.FunctionalRequest.request_id == data.get("testing_request_id")
+    ).first()
+    if not source or not source.qa_request:
+        raise HTTPException(400, "Select a Functional Request in the active workspace")
+    # Keep the source department for reporting. Approval ownership comes
+    # from qa_workspace_id and must never be inferred from a department name.
+    data["department"] = source.qa_request.department
+    data["qa_workspace_id"] = source.qa_request.qa_workspace_id
+    selected_workspaces = active_qa_workspace_scope_ids(current_user)
+    if selected_workspaces and data["qa_workspace_id"] not in selected_workspaces:
+        raise HTTPException(404, "Functional Request not found in the active workspace")
     # Same Environment Tested/Target Promotion Environment ordering rule as
     # routers/qa_requests.py::create_request/edit_request and
     # routers/functional.py::update_functional -- reuses the same shared
@@ -192,6 +217,7 @@ def create_signoff(payload: schemas.SignOffCreate, db: Session = Depends(get_db)
     except ValueError as e:
         raise HTTPException(400, str(e))
     obj = models.QASignOff(**data, status="DRAFT", requester_id=current_user.id)
+    certificate_summary.refresh(db, obj)
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -211,6 +237,9 @@ def update_signoff(signoff_id: int, payload: schemas.SignOffUpdate, db: Session 
     returning it first just to fix something minor. Executive 
     gets no edit window; their only actions are Approve/Return/Reject."""
     obj = _get_or_404(db, signoff_id)
+    db.refresh(obj, with_for_update=True)
+    if obj.status not in [*SIGNOFF_EDITABLE_STATUSES, "SM_APPROVAL_PENDING"]:
+        raise HTTPException(400, "Refresh and reopen this certificate for reapproval before editing")
     is_own = obj.requester_id == current_user.id
     is_admin = current_user.has_role(Role.ADMIN)
     # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
@@ -223,7 +252,7 @@ def update_signoff(signoff_id: int, payload: schemas.SignOffUpdate, db: Session 
     # requester AND holds the QA Lead role isn't wrongly blocked by the
     # requester's own (narrower) editable-status gate below.
     if is_qa_lead and obj.status == "SM_APPROVAL_PENDING":
-        _require_qa_department(current_user)
+        _require_workspace_approver(obj, current_user)
     elif is_admin:
         pass  # admin bypasses the status gate, same convention as every other module
     elif is_own:
@@ -246,6 +275,42 @@ def update_signoff(signoff_id: int, payload: schemas.SignOffUpdate, db: Session 
             raise HTTPException(400, str(e))
     for k, v in data.items():
         setattr(obj, k, v)
+    # Archive the old approval ownership before clearing it.
+    certificate_summary.refresh(db, obj)
+    # Every content edit starts a fresh approval cycle; no executive-only shortcut.
+    obj.status = 'DRAFT'
+    obj.reviewed_by_id = None
+    obj.approved_by_id = None
+    obj.issued_by_id = None
+    obj.signed_by_id = None
+    _log(db, obj.id, 'Certificate revision', current_user, 'Approval reset', 'Certificate edited; full reapproval required')
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+@router.post('/{signoff_id}/refresh-summary', response_model=schemas.SignOffOut)
+def refresh_certificate_summary(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    obj = _get_visible_or_404(db, signoff_id, current_user)
+    if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
+        raise HTTPException(403, 'Only the requester or System Admin can refresh and reopen a certificate')
+    db.refresh(obj, with_for_update=True)
+    if obj.status in ('SM_REJECTED', 'DEPT_HEAD_COE_REJECTED'):
+        raise HTTPException(409, 'Reopen the rejected certificate before refreshing summaries and restarting approval')
+    snapshot = certificate_summary.refresh(db, obj)
+    obj.status = 'DRAFT'
+    obj.reviewed_by_id = None
+    obj.approved_by_id = None
+    obj.issued_by_id = None
+    obj.signed_by_id = None
+    _log(db, obj.id, 'Certificate revision', current_user, 'Approval reset',
+         f"Summary revision {snapshot['revision']} captured; previous clearance and approvals invalidated. Full reapproval required.")
+    for source in db.query(models.FunctionalRequest).filter_by(signoff_id=obj.id).all():
+        if source.status in (QAStatus.QA_SIGNED_OFF, QAStatus.REQUESTER_VERIFICATION, QAStatus.CLOSED):
+            source.status = QAStatus.QA_SIGNOFF_PENDING
+            db.add(models.ApprovalAction(entity_type='FUNCTIONAL_REQUEST', entity_id=source.id,
+                actor_id=current_user.id, actor_role=current_user.roles_csv, step_name='QA Clearance',
+                decision='Reapproval required', comments=f'Certificate {obj.certificate_id} refreshed; prior clearance invalidated'))
     db.commit()
     db.refresh(obj)
     return obj
@@ -254,10 +319,12 @@ def update_signoff(signoff_id: int, payload: schemas.SignOffUpdate, db: Session 
 @router.post("/{signoff_id}/submit", response_model=schemas.SignOffOut)
 def submit_signoff(signoff_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, signoff_id)
+    db.refresh(obj, with_for_update=True)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can submit this certificate")
     _require(obj, "DRAFT", "Submit")
     _validate_rich_text_before_progress(obj)
+    certificate_summary.validate(obj, db)
     obj.status = "SUBMITTED"
     _log(db, obj.id, "Requester", current_user, "Submitted", None)
     obj.status = "SM_APPROVAL_PENDING"
@@ -288,10 +355,12 @@ def resubmit_signoff(signoff_id: int, db: Session = Depends(get_db), current_use
     lead approval, then AGM approval" -- it re-enters the SAME chain as a
     QA-Lead return/reopen, one full pass through QA Lead then Executive."""
     obj = _get_or_404(db, signoff_id)
+    db.refresh(obj, with_for_update=True)
     if obj.requester_id != current_user.id and not current_user.has_role(Role.ADMIN):
         raise HTTPException(403, "Only the requester or an admin can resubmit this certificate")
     _require(obj, ["RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"], "Resubmit")
     _validate_rich_text_before_progress(obj)
+    certificate_summary.validate(obj, db)
     if obj.status in ("RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_REQUESTER"):
         reopening = obj.status in ("SM_REJECTED", "RETURNED_BY_REQUESTER")
         obj.status = "SM_APPROVAL_PENDING"
@@ -312,11 +381,13 @@ def qa_lead_decision(signoff_id: int, payload: schemas.WorkflowDecision, db: Ses
                          require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """QA Lead approval checkpoint before Executive  final approval."""
     obj = _get_or_404(db, signoff_id)
-    _require_qa_department(current_user)
+    db.refresh(obj, with_for_update=True)
+    _require_workspace_approver(obj, current_user)
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "SM_APPROVAL_PENDING", "QA Lead decision")
     if payload.decision == "Approved":
         _validate_rich_text_before_progress(obj)
+        certificate_summary.validate(obj, db)
         obj.status = "DEPT_HEAD_QA_APPROVAL_PENDING"
         obj.reviewed_by_id = current_user.id
     elif payload.decision == "Returned":
@@ -344,9 +415,10 @@ def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, d
     # (CHEIF_MANAGER_COE/CHEIF_MANAGER_QA/AGM_COE) with the COE variants
     # retired; existing UserRole rows were migrated by the one-time
     # role-consolidation data-fix script.
-    """Final COE - Quality Assurance approval by Executive  (the QA Executive Group); approval issues the certificate."""
+    """Final workspace QA approval by Executive  (the QA Executive Group); approval issues the certificate."""
     obj = _get_or_404(db, signoff_id)
-    _require_qa_department(current_user)
+    db.refresh(obj, with_for_update=True)
+    _require_workspace_approver(obj, current_user, executive=True)
     require_not_requester(current_user, obj.requester_id)
     _require(obj, "DEPT_HEAD_QA_APPROVAL_PENDING", "Executive  decision")
     # Maker-checker separation across the two approval stages. A Chief
@@ -362,6 +434,7 @@ def executive_coe_decision(signoff_id: int, payload: schemas.WorkflowDecision, d
         )
     if payload.decision == "Approved":
         _validate_rich_text_before_progress(obj)
+        certificate_summary.validate(obj, db)
         obj.status = "ISSUED"
         obj.approved_by_id = current_user.id
         _sync_linked_functional_request(db, obj, current_user)
@@ -406,6 +479,8 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     # both the UI and the exported certificate.
     signatures_by_stage: dict = {}
     for row in history_rows:
+        if row.decision == 'Approval reset' or (row.step_name == 'Requester Verification' and row.decision == 'Changes Required'):
+            signatures_by_stage.clear()
         signature = parse_electronic_signature(
             row.comments,
             stage=row.step_name or "Approval",
@@ -432,6 +507,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Request Department", obj.request_department),
             ("QA Approval Department", obj.department),
             ("Testing Request ID", obj.testing_request_id),
+            ("Assigned Tester(s)", certificate_summary.assigned_testers_label(obj.certificate_summary)),
             ("CR Number/EPIC Number", obj.change_request_ids),
             ("Vendor / SI Partner", obj.vendor_si_partner),
             ("Technology Stack", obj.technology_stack),
@@ -445,9 +521,13 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Validity", f"{obj.validity_from or '—'} to {obj.validity_to or '—'}"),
         ]),
         ("Exit Criteria & Risk", [
-            ("Exit Criteria Notes", RichTextValue(obj.exit_criteria_notes or "")),
-            ("Open Defect Summary", RichTextValue(obj.open_defect_summary or "")),
-            ("Residual Risk Notes", RichTextValue(obj.residual_risk_notes or "")),
+            ("Testing Scope Completed", RichTextValue(obj.exit_criteria_notes or "")),
+            ("Open Risks (if any)", RichTextValue(obj.open_defect_summary or "")),
+            ("Known Limitations", RichTextValue(obj.known_limitations or "")),
+            ("Business Acceptance Status", RichTextValue(obj.business_acceptance_status or "")),
+            ("Security Testing Status", RichTextValue(obj.security_testing_status or "")),
+            ("Deployment Recommendation", RichTextValue(obj.deployment_recommendation or "")),
+            ("Remarks", RichTextValue(obj.residual_risk_notes or "")),
         ]),
         # Mandatory on a fully-Issued certificate -- one name per approval
         # stage of the QA Team -> QA Lead -> Executive  chain.
@@ -466,20 +546,43 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     # a dict keyed by stage and letting later rows overwrite earlier ones
     # keeps only the most recent signature per stage -- same fix as
     # SignOff.tsx's own `signatures` (the modal view this PDF mirrors).
+    snapshot = obj.certificate_summary
+    metadata = sections[0][1] + sections[1][1] + sections[2][1]
+    remarks = sections[3][1]
+    approval_fields = sections[4][1]
+    sections = [('Section A – Certificate Metadata', metadata)]
+    if snapshot:
+        sections.append(('Evidence snapshot', [('Revision', snapshot['revision']), ('Captured at', snapshot['captured_at']), ('Population', snapshot['population_note'])]))
+        sections.extend((title, [('Summary', RichTextValue(content))]) for title, content in certificate_summary.markdown_tables(snapshot))
+        security_rows = [(f"{row['type']} · {row['request_id']}", f"Workflow status: {row['status']}; recorded findings: {row['findings']}; risk: {row['risk_level']}") for row in snapshot.get('security', [])]
+        sections.append(('Section D – Security Testing Assessment', security_rows or [('Assessment', 'No linked security assessment recorded; this is not a Pass result.')]))
+    else:
+        sections.append(('Sections B–D – Evidence snapshot', [('Availability', 'Legacy certificate: no frozen automatic summary. Refresh requires full reapproval.')]))
+    sections.append(('Section E – QA Clearance Remarks', remarks))
+    observations = snapshot.get('observations', []) if snapshot else []
+    manual_observations = (snapshot.get('conditional_observations', '') if snapshot else obj.conditional_observations) or ''
+    observation_fields = [('User-entered observations', RichTextValue(manual_observations))] if manual_observations.strip() else [
+        (row['defect_key'], f"{row['functionality']}: {row['observation']} | Severity: {row['severity']} | Status: {row['status']} | Owner: {row['owner']} | Target date: {row['target_date']}") for row in observations
+    ] or [('Observations', 'No open linked defect observations in the captured evidence.' if snapshot else 'No captured evidence available.')]
+    if obj.certificate_type == 'Conditional Clearance':
+        sections.append(('Section F – Conditional Clearance Observations', observation_fields))
+    sections.append(('Section G – Certificate Validity & Compliance Declaration', [('Declaration', 'This certificate remains valid only for the tested build/version/hash. Code, configuration, infrastructure, dependency or requirement changes and production hotfixes require QA recertification. This certificate does not constitute Business Acceptance or Production readiness unless countersigned by the Application Owner.')]))
+    sections.append(('Section H – Approval Matrix', approval_fields))
     if signatures:
         sections.append(("QA Clearance Digital Signatures", [
             (f"{signature.stage} — Digital Signature", signature)
             for signature in signatures
         ]))
     history = []
-    for h in history_rows:
+    reset_index = max((i for i, h in enumerate(history_rows) if h.decision == 'Approval reset'), default=-1)
+    for h in history_rows[reset_index + 1:]:
         history.append((h.step_name or "—", h.decision or "—", uname(h.actor_id) or "—",
                          h.actor_role or "—", h.comments or "—",
                          h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "—"))
 
     buf = build_request_detail_pdf(
         title=f"{obj.certificate_id} — {obj.application_name}",
-        subtitle="QA Clearance Certificate — Full Detail Export",
+        subtitle="Bank of Maharashtra · Quality Assurance Certificate",
         sections=sections, history=history,
         history_title=None,
         generated_by=current_user.full_name,
@@ -511,11 +614,17 @@ def _can_upload_documents(db: Session, obj: "models.QASignOff", user: models.Use
     if status in ("DRAFT", "SUBMITTED", "RETURNED_BY_SM", "SM_REJECTED", "RETURNED_BY_DEPT_HEAD_COE", "RETURNED_BY_REQUESTER"):
         return obj.requester_id == user.id
     if status == "SM_APPROVAL_PENDING":
-        return user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA) and user.has_department(QA_DEPARTMENT)
+        return user.has_qa_workspace_role(
+            Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+            workspace_id=obj.qa_workspace_id,
+        )
     if status == "DEPT_HEAD_QA_APPROVAL_PENDING":
         return obj.reviewed_by_id != user.id and user.has_role(
             Role.CHIEF_MANAGER_QA, Role.AGM_QA,
-        ) and user.has_department(QA_DEPARTMENT)
+        ) and user.has_qa_workspace_role(
+            Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+            workspace_id=obj.qa_workspace_id,
+        )
     return False
 
 

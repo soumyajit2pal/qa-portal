@@ -220,7 +220,9 @@ function CommentContent({ commentId, value }: { commentId: number; value: string
   )
 }
 
-export default function JiraActivity({ entityType, entityId, items, onPosted }: {
+export default function JiraActivity({ entityType, entityId, items, onPosted, workflowHistory, readOnly = false }: {
+  readOnly?: boolean
+  workflowHistory?: Record<string, any>[]
   entityType: string
   entityId: number
   items: ApprovalActionOut[]
@@ -246,10 +248,25 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
   })
   const { showLink, linkUrl, setLinkUrl, linkInputRef, beginLink, applyLink, cancelLink } = useRichTextLink(editorRef, setError)
 
-  const visible = useMemo(() => items.filter((item) => {
+  const timeline = useMemo(() => {
+    const entries: (ApprovalActionOut & { workflowEvent?: Record<string, any> })[] = items.map(item => ({ ...item }))
+    for (const [index, event] of (workflowHistory || []).entries()) {
+      const summary = [event.remarks, event.environment, event.build, event.result, event.reference].filter(Boolean).join('\n') || event.kind
+      const match = entries.filter(item => !item.workflowEvent && item.decision !== 'Commented'
+        && item.actor_id === event.user_id && item.decision === (event.to || event.kind)
+        && item.previous_state === event.from && item.comments === summary)
+        .sort((a, b) => Math.abs(Date.parse(a.created_at) - Date.parse(event.at)) - Math.abs(Date.parse(b.created_at) - Date.parse(event.at)))[0]
+      if (match) match.workflowEvent = event
+      else entries.push({ id: -(index + 1), entity_type: entityType, entity_id: entityId,
+        actor_id: event.user_id, actor_name: event.user_name, decision: event.to || event.kind,
+        created_at: event.at, previous_state: event.from, new_state: event.to, workflowEvent: event })
+    }
+    return entries
+  }, [items, workflowHistory, entityType, entityId])
+  const visible = useMemo(() => timeline.filter((item) => {
     const comment = item.decision === 'Commented'
     return filter === 'all' || (filter === 'comments' ? comment : !comment)
-  }).slice().sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()), [items, filter])
+  }).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()), [timeline, filter])
 
   const commentCount = items.filter((item) => item.decision === 'Commented').length
 
@@ -327,15 +344,15 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
   return (
     <section className="jira-activity">
       <div className="jira-activity-head">
-        <div><h3>Activity</h3><span>{items.length} event{items.length !== 1 ? 's' : ''}</span></div>
+        <div><h3>Activity</h3><span>{timeline.length} event{timeline.length !== 1 ? 's' : ''}</span></div>
         <div className="jira-activity-filters">
           <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>All</button>
           <button className={filter === 'comments' ? 'active' : ''} onClick={() => setFilter('comments')}>Comments <span>{commentCount}</span></button>
-          <button className={filter === 'history' ? 'active' : ''} onClick={() => setFilter('history')}>History</button>
+          <button className={filter === 'history' ? 'active' : ''} onClick={() => setFilter('history')}>{workflowHistory ? 'Workflow history' : 'History'}</button>
         </div>
       </div>
 
-      <div className={`jira-comment-composer ${expanded ? 'expanded' : ''}`}>
+      {!readOnly && <div className={`jira-comment-composer ${expanded ? 'expanded' : ''}`}>
         <div className="jira-avatar current">{initials(user?.full_name)}</div>
         <div className="jira-composer-body">
           {expanded && (
@@ -384,7 +401,7 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
           {expanded && <div className="jira-composer-actions"><div><button className="btn btn-primary btn-sm" disabled={busy || characterCount > 5000 || (characterCount === 0 && images.length === 0)} onClick={postComment}>{busy ? 'Posting…' : 'Comment'}</button><button className="btn btn-sm" onClick={clearComposer}>Cancel</button></div><span className={characterCount > 5000 ? 'over-limit' : ''}>{characterCount}/5000 · Rich text · Paste images with Ctrl/Cmd+V</span></div>}
           <ErrorText error={error} title="Comment could not be posted" guidance="Correct the issue described above, then post the comment again. Your draft and pasted images remain available." />
         </div>
-      </div>
+      </div>}
 
       <div className="jira-activity-feed">
         {visible.map((item) => {
@@ -408,7 +425,8 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
                   )}
                   <time title={formatDateTimeIST(item.created_at)}>{relativeTime(item.created_at)}</time>
                 </div>
-                {item.comments && (isComment ? <CommentContent commentId={item.id} value={item.comments} /> : <div className="jira-activity-message">{item.comments}</div>)}
+                {item.workflowEvent && <WorkflowEventDetails event={item.workflowEvent} basePath={`/api/defects/${entityId}/attachments`} />}
+                {!item.workflowEvent && item.comments && (isComment ? <CommentContent commentId={item.id} value={item.comments} /> : <div className="jira-activity-message">{item.comments}</div>)}
                 {isComment && !item.comments && <CommentContent commentId={item.id} value="" />}
               </div>
             </article>
@@ -424,4 +442,26 @@ export default function JiraActivity({ entityType, entityId, items, onPosted }: 
       </div>
     </section>
   )
+}
+
+function WorkflowEventDetails({ event, basePath }: { event: Record<string, any>; basePath: string }) {
+  const [open, setOpen] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  async function download(doc: { id: number; file_name: string }) {
+    try {
+      setError(null)
+      const blob = await api.getBlob(`${basePath}/${doc.id}/download`)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = doc.file_name
+      anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) { setError(err) }
+  }
+  return <details className="workflow-activity-details" onToggle={e => setOpen(e.currentTarget.open)}>
+    <summary>View decision details{[event.environment, event.build, event.result].filter(Boolean).length > 0 && ` · ${[event.environment, event.build, event.result].filter(Boolean).join(' · ')}`}</summary>
+    {open && <div className="workflow-history-content">
+      <AuthenticatedMarkdown value={[["Root cause", event.root_cause], ["Fix details", event.fix_details], ["Notes", event.remarks], ["Evidence / reference", event.reference]].filter(([, text]) => text).map(([label, text]) => `**${label}**\n\n${text}`).join('\n\n---\n\n')} basePath={basePath} />
+      <div className="workflow-actions">{event.evidence_documents?.map((doc: { id: number; file_name: string }) => <button type="button" className="btn btn-sm" key={doc.id} onClick={() => void download(doc)}>Download {doc.file_name}</button>)}</div>
+      <ErrorText error={error} />
+    </div>}
+  </details>
 }

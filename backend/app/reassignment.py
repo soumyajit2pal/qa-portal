@@ -18,21 +18,12 @@ already-populated assignee fields -- Functional/Performance tester(s), SAST/
 DAST Security Analyst, Test Execution runner, Test Cycle owner, and Defect
 assignee. FunctionalRequest.qa_lead_id / SAST&DASTRequest.security_lead_id /
 PerformanceRequest.engineer_id are vestigial (never actually set to a real
-person anywhere in this codebase) and TestCaseVersion.assigned_reviewer_id/
-assigned_qa_lead_id reassignment was deliberately disabled in the 2026-08
-"Simplified Test Management" refactor in favor of role-group routing --
-both were explicitly confirmed out of scope rather than silently skipped.
+person anywhere in this codebase). Test-case Reviewer and QA Lead routing is
+managed by its dedicated project/test-case workflow endpoints.
 
-Department Head mapping is the CR's own clarification table:
-    COE - Quality Assurance -> Assistant General Manager - QA, Chief Manager - QA
-                               (Role.AGM_QA / Role.CHIEF_MANAGER_QA)
-    every other department  -> Chief Manager - Department, Assistant General
-                               Manager - Department
-                               (Role.DEPARTMENT_HEAD_CM / Role.DEPARTMENT_HEAD_AGM)
-A "Department Head" is scoped to their OWN department, not just the role
-title in isolation -- matches deps.py's existing department-binding for
-DEPARTMENT_HEAD_CM/AGM elsewhere in this app (a Chief Manager of one
-department must not be able to reassign another department's records).
+Business assignees are governed by the Department Heads of their own
+organisational department. QA assignees are governed by the QA Executive
+roles inside the record's workspace. No department name implies QA access.
 
 "The previous assignee shall lose action permission after reassignment" is
 satisfied structurally, not by a separate flag: every eligibility check in
@@ -47,14 +38,12 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from . import models
-from .constants import Role, QA_DEPARTMENT
+from .constants import Role
 
 
 def department_head_roles(department: Optional[str]) -> tuple:
-    """Which two Department Head roles apply for `department`, per the CR's
-    clarification table."""
-    return (Role.CHIEF_MANAGER_QA, Role.AGM_QA) if department == QA_DEPARTMENT \
-        else (Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM)
+    """Organisational Department Head roles for a business department."""
+    return (Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM)
 
 
 def department_head_user_ids(db: Session, department: Optional[str]) -> List[int]:
@@ -77,7 +66,7 @@ def department_head_user_ids(db: Session, department: Optional[str]) -> List[int
 
 
 def require_can_reassign(current_user: models.User, current_assignee_id: Optional[int],
-                          department) -> None:
+                          department, qa_workspace_id: Optional[int] = None) -> None:
     """403s unless `current_user` is the current assignee, a Department Head
     of `department`, or an Administrator (has_role's own Admin bypass covers
     the last one). `department` is the CURRENT ASSIGNEE's department -- the
@@ -94,6 +83,10 @@ def require_can_reassign(current_user: models.User, current_assignee_id: Optiona
     if current_user.has_role(Role.ADMIN):
         return
     if current_assignee_id and current_user.id == current_assignee_id:
+        return
+    if qa_workspace_id is not None and current_user.has_qa_workspace_role(
+        Role.CHIEF_MANAGER_QA, Role.AGM_QA, workspace_id=qa_workspace_id,
+    ):
         return
     departments = [department] if isinstance(department, str) else list(department or [])
     for dept in departments:

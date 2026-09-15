@@ -37,7 +37,7 @@ from .routers import (
     sast_dast, suppression, performance,
     approvals, signoff, dashboard, reports, export, departments, applications,
     test_projects, test_repository, test_execution, test_reports, audit, checklist_config, request_type_config,
-    pending_approvals, defects, jobs,
+    pending_approvals, defects, jobs, qa_workspaces,
 )
 
 
@@ -77,31 +77,23 @@ if DOCUMENT_PORTAL_EMBEDDED:
 #     raise
 # logger.info("Database schema verified/created successfully.")
 
-# INF-001 -- with multiple API worker processes, this module (everything
-# above `app = FastAPI(...)` below) runs once per worker, not once per
-# deployment: each worker is a separate `uvicorn`-forked process that
-# imports app.main fresh. The sweeps and legacy-layout migration are one-time
-# filesystem/data-maintenance side effects that
-# should only happen once per deployment, not once per worker. Gated on
-# cache.try_acquire_lock: with Redis configured, only the first worker to
-# start does this work; without Redis it's permissive (see that function's
-# docstring) and every worker does it, same as before this lock existed.
-with SessionLocal() as migration_db:
-    if cache.try_acquire_lock("startup-migrations-and-sweeps", ttl_seconds=600):
-        migrated_uploads = migrate_legacy_document_layout(migration_db)
-        if migrated_uploads:
-            logger.info("Migrated %d upload(s) to request-first folders", migrated_uploads)
-        backfilled_departments = departments.backfill_user_department_assignments(migration_db)
-        if backfilled_departments:
-            logger.info("Backfilled department_assignments for %d existing user(s)", backfilled_departments)
-        reconciled_department_references = departments.reconcile_department_references(migration_db)
-        if reconciled_department_references:
-            logger.info(
-                "Reconciled %d department reference(s) with the Department master",
-                reconciled_department_references,
-            )
+# Shared-filesystem lock lasts for the entire maintenance operation, including
+# Redis outages. Storage errors fail startup rather than running unprotected.
+from .storage_lock import exclusive_file_lock
+from .storage_config import get_upload_root
+from pathlib import Path
+with exclusive_file_lock(Path(get_upload_root()) / '.maintenance.lock') as acquired:
+    if acquired:
+        with SessionLocal() as migration_db:
+            from .documents import cleanup_deleted_documents
+            cleanup_deleted_documents(migration_db)
+            migrated_uploads = migrate_legacy_document_layout(migration_db)
+            backfilled_departments = departments.backfill_user_department_assignments(migration_db)
+            reconciled_department_references = departments.reconcile_department_references(migration_db)
+            logger.info("Startup maintenance: uploads=%s departments=%s references=%s",
+                        migrated_uploads, backfilled_departments, reconciled_department_references)
     else:
-        logger.info("Skipping legacy-layout migration/overdue sweeps -- another worker already holds the startup lock.")
+        logger.info("Startup maintenance is already running in another worker.")
 
 app = FastAPI(
     title="QualityOps API",
@@ -458,15 +450,15 @@ async def pending_access_approval_api_guard(request, call_next):
     # every route's own get_db dependency correctly closes its session.
     with SessionLocal() as db:
         user = db.query(models.User).filter(models.User.username == username).first()
-        # While the department picker is open, /api/departments must remain
-        # available. Once it has been saved, an LDAP account with zero roles
-        # is deliberately limited to /me and logout until approval.
-        allow_request = (
+        # Authentication may succeed so first-time users can complete the
+        # department prompt and see their approval status, but portal data is
+        # unavailable until role review finishes. A provisional/existing role
+        # must never bypass the durable needs_role_review flag.
+        allow_request = bool(
             not user
             or not user.is_active
-            or user.needs_department_selection
             or not user.needs_role_review
-            or user.roles
+            or (user.needs_department_selection and path == "/api/departments")
         )
         if not allow_request:
             request.state.current_user_snapshot = {
@@ -740,6 +732,7 @@ app.include_router(dashboard.router)
 app.include_router(reports.router)
 app.include_router(export.router)
 app.include_router(departments.router)
+app.include_router(qa_workspaces.router)
 app.include_router(applications.router)
 app.include_router(test_projects.router)
 app.include_router(test_repository.router)

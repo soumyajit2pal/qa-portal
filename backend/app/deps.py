@@ -2,8 +2,9 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
+from starlette.concurrency import run_in_threadpool
 from jose import JWTError
-from sqlalchemy import or_
+from sqlalchemy import and_, false, func, or_, true
 from sqlalchemy.orm import Session, selectinload
 
 from .database import SessionLocal, get_db
@@ -35,8 +36,19 @@ _VIEW_ONLY_ROLE_GATED_READ_PREFIXES = (
     "/api/application-names",
 )
 
+_NO_WORKSPACE_SELF_SERVICE_PATHS = {
+    "/api/auth/me",
+    "/api/auth/me/email",
+    "/api/auth/logout",
+    "/api/auth/renew",
+}
 
-def _enforce_view_only_request(request: Request, user: models.User) -> None:
+
+def _enforce_view_only_request(
+    request: Request,
+    user: models.User,
+    db: Session | None = None,
+) -> None:
     """Fail closed for the organisation-wide View Only permission profile.
 
     Endpoint role checks remain the source of truth for operational roles;
@@ -50,6 +62,23 @@ def _enforce_view_only_request(request: Request, user: models.User) -> None:
     if request.method.upper() in _SAFE_READ_METHODS:
         return
     if request.url.path in _VIEW_ONLY_SELF_SERVICE_PATHS:
+        return
+    selected_workspace_id = getattr(user, "active_qa_workspace_id", None)
+    selected_workspace = (
+        db.get(models.QAWorkspace, selected_workspace_id)
+        if db is not None and selected_workspace_id else None
+    )
+    coordinator_scope_ids = {
+        selected_workspace_id,
+        selected_workspace.parent_workspace_id if selected_workspace else None,
+    }
+    if db is not None and request.url.path.startswith("/api/auth/local-admin") and any(
+        assignment.is_active and assignment.workspace_id in coordinator_scope_ids
+        for assignment in user.department_coordinator_access
+    ):
+        # Department Coordinator is an explicit, tightly-scoped management
+        # grant. It remains usable even when the person's ordinary permission
+        # profile is View Only.
         return
     # Document Portal has its own independent permission profile. Combining
     # VIEW_ONLY with Contributor/Manager keeps core workflow data read-only
@@ -67,6 +96,21 @@ def _enforce_view_only_request(request: Request, user: models.User) -> None:
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Your View Only role does not permit creating, changing, approving, uploading, or deleting data.",
+    )
+
+
+def _enforce_parent_workspace_viewer_request(request: Request, access_mode: str | None) -> None:
+    """Make an inherited Parent Viewer grant read-only at the API boundary."""
+    if access_mode != "PARENT_VIEWER" or request.method.upper() in _SAFE_READ_METHODS:
+        return
+    if request.url.path in (
+        _VIEW_ONLY_SELF_SERVICE_PATHS
+        | {"/api/workspaces/preference/current", "/api/qa-workspaces/preference/current"}
+    ):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Parent Workspace Viewer access is read-only across this workspace hierarchy.",
     )
 
 
@@ -94,13 +138,89 @@ def _resolve_current_user(request: Request, token: str, db: Session) -> models.U
         .options(
             selectinload(models.User.role_assignments),
             selectinload(models.User.department_assignments),
+            selectinload(models.User.qa_workspace_memberships).selectinload(models.QAWorkspaceMember.workspace),
+            selectinload(models.User.department_coordinator_assignments).selectinload(models.DepartmentCoordinatorAssignment.workspace),
+            selectinload(models.User.department_coordinator_assignments).selectinload(models.DepartmentCoordinatorAssignment.department),
+            selectinload(models.User.department_coordinator_assignments).selectinload(models.DepartmentCoordinatorAssignment.department_unit),
         )
         .filter(models.User.username == username)
         .first()
     )
     if user is None or not user.is_active:
         raise credentials_exception
-    _enforce_view_only_request(request, user)
+    # X-Workspace-ID is the public tenant selector. Keep the old header as a
+    # temporary compatibility fallback for already-open clients.
+    workspace_header = (
+        request.headers.get("X-Workspace-ID")
+        or request.headers.get("X-QA-Workspace-ID")
+        or ""
+    ).strip()
+    from .workspace_service import (
+        ensure_default_workspace_membership,
+        inherited_workspace_access_mode,
+        selectable_workspace_ids,
+    )
+    workspace_ids = selectable_workspace_ids(db, user)
+    access_review_complete = bool(user.roles) and not (
+        user.needs_department_selection or user.needs_role_review
+    )
+    if access_review_complete and not workspace_ids:
+        # Older/seeded accounts may predate workspace membership. Repair the
+        # invariant once at authentication time so they enter the explicit
+        # Default Workspace instead of receiving an unscoped portal session.
+        if ensure_default_workspace_membership(db, user):
+            db.commit()
+            db.refresh(user)
+            workspace_ids = selectable_workspace_ids(db, user)
+    if (
+        not workspace_ids
+        and request.url.path not in _NO_WORKSPACE_SELF_SERVICE_PATHS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No active workspace access is assigned to your account.",
+        )
+    preferred = user.preferred_qa_workspace_id
+    fallback_workspace_id = (
+        preferred if preferred in workspace_ids else next(iter(workspace_ids), None)
+    )
+    if workspace_header:
+        try:
+            selected_workspace_id = int(workspace_header)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="X-Workspace-ID must be a numeric workspace ID")
+        if selected_workspace_id not in workspace_ids:
+            # A browser can retain the previous account's workspace, or the
+            # Default Workspace that was selected before a first-login access
+            # request was approved. Identity/self-service calls must be able
+            # to recover that session so the client can learn the server's
+            # valid selection. Business endpoints remain fail-closed.
+            if request.url.path in _NO_WORKSPACE_SELF_SERVICE_PATHS:
+                selected_workspace_id = fallback_workspace_id
+            else:
+                raise HTTPException(status_code=403, detail="You do not have access to the selected workspace")
+        user.active_qa_workspace_id = selected_workspace_id
+    else:
+        user.active_qa_workspace_id = fallback_workspace_id
+    from .workspace_service import (
+        active_workspace_scope_ids, set_current_workspace_id,
+        set_current_workspace_scope_ids,
+    )
+    selected_workspace_id = getattr(user, "active_qa_workspace_id", None)
+    set_current_workspace_id(selected_workspace_id)
+    user.active_workspace_scope_ids = tuple(
+        active_workspace_scope_ids(db, user, selected_workspace_id)
+        if selected_workspace_id is not None else set()
+    )
+    set_current_workspace_scope_ids(user.active_workspace_scope_ids)
+    access_mode = inherited_workspace_access_mode(db, user, selected_workspace_id)
+    _enforce_parent_workspace_viewer_request(request, access_mode)
+    _enforce_view_only_request(request, user, db)
+    from .workflow_authority import configure_request
+    configure_request(db, user, request, workflow=bool(getattr(request.state, "workflow_operation", False)))
+    from .project_workspace_ownership import bind_actor, guard_request
+    bind_actor(db, user)
+    guard_request(db, user, request)
     # AUD-008 -- stash the already-resolved user on the request so
     # main.py's _write_request_audit (which runs after the response, as a
     # BackgroundTask on this same request object) can reuse it instead of
@@ -131,14 +251,20 @@ def _resolve_current_user(request: Request, token: str, db: Session) -> models.U
     return user
 
 
-def get_current_user(
+async def get_current_user(
     request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
 ) -> models.User:
     """Core-API user dependency; its request session is closed after the response."""
-    return _resolve_current_user(request, token, db)
+    from .workspace_service import workspace_context
+    user = await run_in_threadpool(_resolve_current_user, request, token, db)
+    from .workflow_authority import workflow_context
+    with workspace_context(user.active_qa_workspace_id, user.active_workspace_scope_ids), workflow_context(
+        user, enabled=bool(getattr(request.state, "workflow_operation", False)),
+    ):
+        yield user
 
 
-def get_document_portal_current_user(
+def _resolve_document_portal_user(
     request: Request, token: str = Depends(oauth2_scheme),
 ) -> models.User:
     """Authenticate a Document Portal request without pinning an Oracle session.
@@ -156,12 +282,40 @@ def get_document_portal_current_user(
         return user
 
 
-def require_roles(*roles):
+async def get_document_portal_current_user(
+    request: Request, token: str = Depends(oauth2_scheme),
+):
+    from .workspace_service import workspace_context
+    user = await run_in_threadpool(_resolve_document_portal_user, request, token)
+    from .workflow_authority import workflow_context
+    with workspace_context(user.active_qa_workspace_id, user.active_workspace_scope_ids), workflow_context(
+        user, enabled=bool(getattr(request.state, "workflow_operation", False)),
+    ):
+        yield user
+
+
+async def get_workflow_user(
+    request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db),
+):
+    """Explicit operational authority; administrator privileges do not qualify."""
+    request.state.workflow_operation = True
+    from .workspace_service import workspace_context
+    from .workflow_authority import workflow_context
+    user = await run_in_threadpool(_resolve_current_user, request, token, db)
+    with workspace_context(user.active_qa_workspace_id, user.active_workspace_scope_ids), workflow_context(user):
+        yield user
+
+
+def require_workflow_roles(*roles):
+    return require_roles(*roles, workflow=True)
+
+
+def require_roles(*roles, workflow=False):
     """Dependency factory: restricts an endpoint to users holding at least one
     of the given roles (ADMIN always allowed). A user may hold several roles
     at once -- all are active simultaneously, so this passes if ANY assigned
     role qualifies."""
-    def checker(request: Request, current_user: models.User = Depends(get_current_user)) -> models.User:
+    def checker(request: Request, current_user: models.User = Depends(get_workflow_user if workflow else get_current_user)) -> models.User:
         view_only_read = request.method.upper() in _SAFE_READ_METHODS
         view_only_export_job = request.url.path.endswith("/export-xlsx/jobs")
         if (
@@ -170,7 +324,15 @@ def require_roles(*roles):
             and request.url.path.startswith(_VIEW_ONLY_ROLE_GATED_READ_PREFIXES)
         ):
             return current_user
-        if not current_user.has_role(*roles):
+        workspace_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+        requested_workspace_roles = workspace_roles & set(roles)
+        permitted = current_user.has_role(*roles)
+        if requested_workspace_roles and not current_user.has_role(Role.ADMIN):
+            permitted = current_user.has_qa_workspace_role(
+                *requested_workspace_roles,
+                workspace_id=getattr(current_user, "active_qa_workspace_id", None),
+            )
+        if not permitted:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"None of your roles ({', '.join(current_user.roles) or 'none assigned'}) "
@@ -267,6 +429,7 @@ def require_department_visibility(
     *,
     requester_id: Optional[int] = None,
     delegated: bool = False,
+    entity_workspace_id: Optional[int] = None,
 ) -> None:
     """Enforce the same scope on direct record URLs as their list queries.
 
@@ -275,6 +438,10 @@ def require_department_visibility(
     users need an assigned department match; the original requester and a
     verified active delegate retain access to their own record.
     """
+    from .workspace_service import current_workspace_scope_ids
+    workspace_ids = set(current_workspace_scope_ids())
+    if workspace_ids and entity_workspace_id not in workspace_ids:
+        raise HTTPException(status_code=403, detail="This record belongs to another workspace.")
     scope = dashboard_department_scope(current_user)
     if scope is None:
         return
@@ -290,6 +457,25 @@ def require_department_visibility(
     )
 
 
+def active_qa_workspace_scope(current_user: models.User) -> Optional[int]:
+    """Workspace selected for this request, or None for non-QA users."""
+    if current_user.has_role(Role.ADMIN) or current_user.qa_workspace_access:
+        return getattr(current_user, "active_qa_workspace_id", None)
+    return None
+
+
+def active_qa_workspace_scope_ids(current_user: models.User) -> tuple[int, ...]:
+    """Selected workspace plus accessible direct children for parent views."""
+    if not (current_user.has_role(Role.ADMIN) or current_user.qa_workspace_access):
+        return ()
+    from .workspace_service import current_workspace_scope_ids
+    scope = current_workspace_scope_ids()
+    if scope:
+        return scope
+    selected = getattr(current_user, "active_qa_workspace_id", None)
+    return (selected,) if selected is not None else ()
+
+
 # Reported directly: "In dashboard, every-where show data from which
 # department user belong to only," then extended to every standalone request
 # list, then extended once more (reported directly): "Department head also
@@ -302,12 +488,11 @@ def require_department_visibility(
 # Still unrestricted: the QA/Security/Executive roles that review
 # requests raised by every business department as their actual job
 # (QA_LEAD, QA_ENGINEER, SECURITY_ANALYST, CHIEF_MANAGER_QA/AGM_QA) --
-# these roles are all mapped to the fixed QA_DEPARTMENT ("COE - Quality Assurance"), never the
-# business department of the request they're reviewing, so scoping them the
-# same way as a Requester/SM would show them nothing rather than something
-# narrower (confirmed directly). Also unrestricted: Role.SCALE_6_PLUS -- a
+# these roles act within the selected workspace and review requests from its
+# covered departments, so scoping them to their personal organisational
+# department would hide work they are responsible for. Also unrestricted: Role.SCALE_6_PLUS -- a
 # System-Admin-only, confidential super-access role added per request ("that
-# user can see all data like COE - Quality Assurance has") specifically so it can be granted to
+# user can see data across covered departments") specifically so it can be granted to
 # someone outside the QA department who still needs the same org-wide view.
 DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES = {
     Role.QA_LEAD, Role.QA_ENGINEER, Role.SECURITY_ANALYST,
@@ -348,10 +533,73 @@ def dashboard_department_scope(current_user: models.User) -> Optional[list]:
     business user's access to every department."""
     if current_user.has_role(Role.ADMIN):
         return None
+    selected_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
+    if selected_workspace_id is not None and any(
+        membership.is_active
+        and membership.workspace_id == selected_workspace_id
+        and membership.role in {"PARENT_WORKSPACE_VIEWER", "PARENT_WORKSPACE_ADMIN"}
+        for membership in current_user.qa_workspace_memberships
+    ):
+        # This explicit parent grant is department-independent. The active
+        # workspace scope still confines results to this hierarchy.
+        return None
     # QA working roles retain their established cross-department scope.
     if set(current_user.roles) & DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES:
         return None
     return current_user.departments
+
+
+def department_unit_visibility_condition(db: Session, current_user: models.User,
+                                         department_column, unit_column):
+    """Compatibility wrapper for department-only organization visibility.
+
+    Operational team boundaries are child workspaces. Legacy unit columns
+    are intentionally ignored so they cannot grant or deny record access.
+    """
+    departments = dashboard_department_scope(current_user)
+    if departments is None:
+        # This helper is consumed as a SQL predicate. ``None`` does not mean
+        # "skip this filter" to SQLAlchemy when a caller passes it to
+        # Query.filter(); it compiles to ``WHERE NULL`` and hides every row.
+        # Parent Workspace Viewer/Admin access deliberately returns an
+        # unrestricted department scope inside the selected workspace
+        # hierarchy, so represent that scope with an always-true predicate.
+        return true()
+    return department_column.in_(departments) if departments else false()
+
+
+def require_department_unit_visibility(db: Session, current_user: models.User,
+                                       entity_department: Optional[str], entity_unit_id: Optional[int],
+                                       *, requester_id: Optional[int] = None,
+                                       delegated: bool = False) -> None:
+    """Direct-record counterpart to ``department_unit_visibility_condition``."""
+    departments = dashboard_department_scope(current_user)
+    if departments is None or requester_id == current_user.id or delegated:
+        return
+    if not entity_department or entity_department not in departments:
+        raise HTTPException(status_code=403, detail="You do not have access to this record.")
+    return
+
+
+def require_department_unit_action_scope(db: Session, current_user: models.User,
+                                         entity_department: Optional[str], entity_unit_id: Optional[int]) -> None:
+    """Compatibility wrapper for department-scoped approval authority."""
+    if current_user.has_role(Role.ADMIN):
+        return
+    if not entity_department or not current_user.has_department(entity_department):
+        raise HTTPException(status_code=403, detail="This approval is outside your department scope.")
+    return
+
+
+def has_department_unit_action_scope(db: Session, current_user: models.User,
+                                     entity_department: Optional[str], entity_unit_id: Optional[int]) -> bool:
+    try:
+        require_department_unit_action_scope(
+            db, current_user, entity_department, entity_unit_id,
+        )
+        return True
+    except HTTPException:
+        return False
 
 
 def viewable_project_ids(db: Session, current_user: models.User) -> Optional[list]:
@@ -378,6 +626,15 @@ def viewable_project_ids(db: Session, current_user: models.User) -> Optional[lis
     sites this widens; routers/defects.py::_scoped_defects also calls this
     directly for the "grant recipients also see the project's Defects"
     parity decision."""
+    workspace_scope = active_qa_workspace_scope_ids(current_user)
+    if workspace_scope:
+        owned_workspace_ids = [row[0] for row in db.query(models.TestProject.id).filter(
+            models.TestProject.qa_workspace_id.in_(workspace_scope),
+        ).all()]
+        shared_workspace_ids = [row[0] for row in db.query(models.TestProjectViewGrant.project_id).filter(
+            models.TestProjectViewGrant.workspace_id.in_(workspace_scope),
+        ).all()]
+        return list(dict.fromkeys(owned_workspace_ids + shared_workspace_ids))
     scope = dashboard_department_scope(current_user)
     if scope is None:
         return None
@@ -438,7 +695,7 @@ def resolve_entity_department(db: Session, entity_type: str, entity_id: int) -> 
         return obj.request_department if obj else None
     if entity_type == "DEFECT":
         obj = db.query(models.Defect).get(entity_id)
-        return obj.qa_request.department if obj and obj.qa_request else None
+        return obj.department if obj else None
     if entity_type == "TEST_PROJECT":
         obj = db.query(models.TestProject).get(entity_id)
         return obj.department if obj else None
@@ -448,7 +705,75 @@ def resolve_entity_department(db: Session, entity_type: str, entity_id: int) -> 
     if entity_type == "TEST_CYCLE":
         obj = db.query(models.TestCycle).get(entity_id)
         return obj.project.department if obj and obj.project else None
+    if entity_type == "TEST_EXECUTION":
+        obj = db.get(models.TestExecution, entity_id)
+        return obj.cycle.project.department if obj and obj.cycle and obj.cycle.project else None
     return None
+
+
+def resolve_entity_workspace_id(db: Session, entity_type: str, entity_id: int) -> Optional[int]:
+    """Resolve the persisted Workspace for any workflow/audit entity."""
+    normalized = (entity_type or "").strip().upper()
+    if normalized == "QA_REQUEST":
+        row = db.query(models.QARequest.qa_workspace_id).filter(models.QARequest.id == entity_id).first()
+    elif normalized in {"FUNCTIONAL_REQUEST", "SAST", "DAST", "PERFORMANCE"}:
+        model = {
+            "FUNCTIONAL_REQUEST": models.FunctionalRequest, "SAST": models.SASTRequest,
+            "DAST": models.DASTRequest, "PERFORMANCE": models.PerformanceRequest,
+        }[normalized]
+        row = db.query(models.QARequest.qa_workspace_id).join(
+            model, model.qa_request_id == models.QARequest.id,
+        ).filter(model.id == entity_id).first()
+    elif normalized == "SAST_DAST":
+        return (resolve_entity_workspace_id(db, "SAST", entity_id)
+                or resolve_entity_workspace_id(db, "DAST", entity_id))
+    elif normalized == "SUPPRESSION":
+        row = db.query(models.SuppressionRequest.qa_workspace_id).filter(models.SuppressionRequest.id == entity_id).first()
+    elif normalized == "SIGNOFF":
+        row = db.query(models.QASignOff.qa_workspace_id).filter(models.QASignOff.id == entity_id).first()
+    elif normalized == "DEFECT":
+        row = db.query(models.Defect.qa_workspace_id).filter(models.Defect.id == entity_id).first()
+    elif normalized in {"TEST_PROJECT", "TEST_CASE", "TEST_CYCLE", "TEST_EXECUTION"}:
+        if normalized == "TEST_PROJECT":
+            row = db.query(models.TestProject.qa_workspace_id).filter(models.TestProject.id == entity_id).first()
+        elif normalized == "TEST_CASE":
+            row = db.query(func.coalesce(models.TestCase.origin_workspace_id, models.TestProject.qa_workspace_id)).select_from(models.TestProject).join(
+                models.TestCase, models.TestCase.project_id == models.TestProject.id,
+            ).filter(models.TestCase.id == entity_id).first()
+        else:
+            q = db.query(func.coalesce(models.TestCycle.origin_workspace_id, models.TestProject.qa_workspace_id)).select_from(models.TestProject).join(
+                models.TestCycle, models.TestCycle.project_id == models.TestProject.id,
+            )
+            if normalized == "TEST_EXECUTION":
+                q = q.join(models.TestExecution, models.TestExecution.cycle_id == models.TestCycle.id).filter(
+                    models.TestExecution.id == entity_id)
+            else:
+                q = q.filter(models.TestCycle.id == entity_id)
+            row = q.first()
+    else:
+        return None
+    return row[0] if row else None
+
+
+def require_entity_workspace_visibility(db: Session, current_user: models.User,
+                                        entity_type: str, entity_id: int) -> None:
+    # Shared project content remains readable across its participating
+    # workspaces. Creating-workspace ownership governs writes, not reads.
+    content_model = {"TEST_CASE": models.TestCase, "TEST_CYCLE": models.TestCycle,
+                     "TEST_EXECUTION": models.TestExecution}.get(entity_type)
+    if content_model:
+        content = db.get(content_model, entity_id)
+        if not content:
+            raise HTTPException(404, "Record not found")
+        project_id = content.cycle.project_id if entity_type == "TEST_EXECUTION" else content.project_id
+        require_project_visibility(db, project_id, current_user)
+        return
+    selected = active_qa_workspace_scope(current_user)
+    if selected is not None:
+        from .workspace_service import active_workspace_scope_ids
+        visible_workspace_ids = active_workspace_scope_ids(db, current_user, selected)
+        if resolve_entity_workspace_id(db, entity_type, entity_id) not in visible_workspace_ids:
+            raise HTTPException(status_code=404, detail="Record not found in the active workspace")
 
 
 def require_not_requester(current_user: models.User, requester_id) -> None:
@@ -590,6 +915,19 @@ def _project_role_permits(db: Session, project_id: int, current_user: models.Use
     return role in allowed
 
 
+def _project_is_owned_by_active_workspace(
+    db: Session, project_id: int, current_user: models.User,
+) -> bool:
+    """Whether the active workspace scope owns the project itself."""
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if not workspace_ids:
+        return True
+    return db.query(models.TestProject.id).filter(
+        models.TestProject.id == project_id,
+        models.TestProject.qa_workspace_id.in_(workspace_ids),
+    ).first() is not None
+
+
 # 2026-08 "Simplified Test Management Review and Approval" requirement
 # ("whole module" scope, per ORACLE_MIGRATION_2026-07.md) -- repository
 # authoring is a stateless, current-moment permission (unlike the
@@ -602,8 +940,15 @@ def _project_role_permits(db: Session, project_id: int, current_user: models.Use
 # longer read here (table/data kept for history only, per the additive-only
 # schema convention; no migration needed since there was never a per-item
 # status tracking who authored under which model).
+def _project_allows_workspace_content(db, project_id, user):
+    from .project_workspace_ownership import workspace_can_contribute
+    if getattr(user, "active_qa_workspace_id", None) is not None:
+        return workspace_can_contribute(db, project_id, user)
+    return _project_is_owned_by_active_workspace(db, project_id, user)
+
+
 def can_author_repository(db: Session, project_id: int, current_user: models.User) -> bool:
-    return True
+    return _project_allows_workspace_content(db, project_id, current_user)
 
 
 def can_review_repository(db: Session, project_id: int, current_user: models.User) -> bool:
@@ -625,6 +970,8 @@ def can_review_repository(db: Session, project_id: int, current_user: models.Use
     THIS project holding Reviewer, Project Lead, or Owner. Same reasoning
     as test_execution.py's CYC-007 _require_scope_change_permission, which
     is strict for an identical reason."""
+    if not _project_allows_workspace_content(db, project_id, current_user):
+        return False
     if current_user.has_role(Role.QA_LEAD):  # has_role() already bypasses for ADMIN too
         return True
     role = get_project_member_role(db, project_id, current_user.id)
@@ -652,6 +999,8 @@ _FINAL_APPROVAL_ROLES = {"Project Lead"}
 def can_give_final_approval(db: Session, project_id: int, current_user: models.User) -> bool:
     # Test-case Stage 2 is the shared QA-management queue. Either CM QA or
     # AGM QA may complete it; Admin retains oversight access.
+    if not _project_allows_workspace_content(db, project_id, current_user):
+        return False
     if current_user.has_role(Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return True
     return False
@@ -675,12 +1024,18 @@ def require_can_give_final_approval(db: Session, project_id: int, current_user: 
 # "In Review"/"Review Completed" (test_repository.py's
 # bulk_recommend_test_cases is_old_path branch calls it directly),
 # unchanged per the "new cases only" migration decision.
-def can_manage_repository_governance(current_user: models.User) -> bool:
+def can_manage_repository_governance(
+    current_user: models.User, db: Session | None = None, project_id: int | None = None,
+) -> bool:
+    if db is not None and project_id is not None and not _project_allows_workspace_content(db, project_id, current_user):
+        return False
     return current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
 
 
-def require_can_manage_repository_governance(current_user: models.User) -> None:
-    if not can_manage_repository_governance(current_user):
+def require_can_manage_repository_governance(
+    current_user: models.User, db: Session | None = None, project_id: int | None = None,
+) -> None:
+    if not can_manage_repository_governance(current_user, db, project_id):
         raise HTTPException(403, "This action is available only to the QA Lead Group (QA Lead, CM QA, or AGM QA).")
 
 
@@ -693,17 +1048,20 @@ def require_can_manage_repository_governance(current_user: models.User) -> None:
 # Lead/Owner project roles are no longer read here (table/data kept for
 # history only).
 def can_execute_project(db: Session, project_id: int, current_user: models.User) -> bool:
-    return current_user.has_role(Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
+    return _project_allows_workspace_content(db, project_id, current_user) and current_user.has_role(
+        Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+    )
 
 
 def can_manage_execution_governance(db: Session, project_id: int, current_user: models.User) -> bool:
-    return current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA)
+    return _project_allows_workspace_content(db, project_id, current_user) and current_user.has_role(
+        Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+    )
 
 
 def require_can_author_repository(db: Session, project_id: int, current_user: models.User) -> None:
     if not can_author_repository(db, project_id, current_user):
-        raise HTTPException(403, "Your project role on this Test Project doesn't include repository authoring -- "
-                                  "ask the project owner to change your role to Author, Project Lead, or Owner.")
+        raise HTTPException(403, "Repository authoring requires an eligible QA role and an owning or shared workspace.")
 
 
 def require_can_review_repository(db: Session, project_id: int, current_user: models.User) -> None:
@@ -744,6 +1102,9 @@ def can_manage_project(project: models.TestProject, current_user: models.User) -
     # Executive bypass: CHIEF_MANAGER_QA/AGM_QA can act on every QA-Lead-
     # gated action, same as ADMIN -- see ORACLE_MIGRATION_2026-07.md
     # section 59. has_role() already bypasses for ADMIN too.
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids and project.qa_workspace_id not in workspace_ids:
+        return False
     if current_user.has_role(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA):
         return True
     return project.owner_id == current_user.id

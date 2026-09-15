@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, mapWithConcurrency, waitForJob } from '../../api'
@@ -6,7 +7,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge, InfoTooltip, WorkflowDecisionPanel } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import {
-  hasRole, TEST_CASE_TYPES, TEST_CASE_CURRENT_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES,
+  hasWorkflowRole as hasRole, hasDepartment, TEST_CASE_TYPES, TEST_CASE_CURRENT_STATUSES, TEST_CASE_STATUS_LABELS, TEST_CASE_PENDING_WITH, TEST_CASE_PRIORITIES,
   TEST_CASE_PENDING_DECISION_STATUSES, TEST_CASE_TERMINAL_STATUSES, TEST_CASE_REVIEW_ACTION_LABELS,
   TEST_CASE_REVIEW_MANDATORY_COMMENT_DECISIONS, QA_LEAD_GROUP_ROLES, selectionActionLabel, selectionActionPhrase,
 } from '../../constants'
@@ -22,21 +23,6 @@ import LinkedDefects from '../../components/LinkedDefects'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconArchive, IconFolder, IconGrid, IconInbox, IconTrash } from '../../components/Icons'
-
-// 2026-08 "Simplified Test Management" NEW-path group-pending statuses --
-// reported directly: "show the group name where pending approval, on click
-// of group name, members will be visible" -- maps each NEW-path
-// group-routed status to the system role(s) RoleGroupLink should filter its
-// member list to (same component/pattern Functional.tsx/SAST.tsx/etc.
-// already use for "Assigned Group"). OLD-path "In Review"/"Review
-// Completed" are deliberately NOT included -- eligibility there is role OR
-// project membership (can_review_repository/can_give_final_approval), which
-// a role-only member list would misrepresent; those keep their existing
-// plain-text label.
-const TEST_CASE_PENDING_GROUP_ROLES: Record<string, string | string[]> = {
-  'Recommendation Pending': 'QA_ENGINEER',
-  'QA Lead Approval Pending': QA_LEAD_GROUP_ROLES,
-}
 
 // Test Repository module -- folder tree + test case authoring/import, under
 // a selected Test Project. QA Engineer + QA Lead both author (create/edit/
@@ -91,15 +77,10 @@ function workflowStatusNote(existing: TestCaseOut | null): string {
       return "Recommended by Reviewer -- awaiting QA Lead's final decision."
     case 'Returned':
       return 'Returned for correction -- edit and resubmit for review.'
-    // 2026-08 "Simplified Test Management Review and Approval" requirement --
-    // NEW-path statuses (any fresh Draft submission, or a NEW-vocabulary
-    // Returned status resubmitting). Stage 1 routes to the QA Group
-    // (QA_ENGINEER), Stage 2 to the QA Lead Group (QA_LEAD/CHIEF_MANAGER_QA/
-    // AGM_QA) -- no individual reviewer/QA-Lead assignment either way.
     case 'Recommendation Pending':
       return 'Submitted -- awaiting a QA Group recommendation.'
     case 'QA Lead Approval Pending':
-      return "Recommended by the QA Group -- awaiting the QA Lead Group's final decision."
+      return 'Recommended -- awaiting the QA Lead Group for the final decision.'
     case 'Returned by QA':
     case 'Returned by QA Lead':
       return 'Returned for correction -- edit and resubmit for review.'
@@ -233,7 +214,7 @@ function FolderTreeRows({
                   <span className="tm-folder-identity"><strong>{f.name}</strong><small>Created by {f.created_by_name || 'Unknown user'}</small></span>
                   <em>{folderCounts[f.id] || 0}</em>
                 </button>
-                {(canAuthor || canDeleteFolder) && projectIsActive && (
+                {(canAuthor || canDeleteFolder) && projectIsActive && f.workspace_writable && (
                   <div className="tm-folder-actions">
                     {canAuthor && (
                       <button type="button" className="tm-folder-action" title="Rename folder" aria-label={`Rename ${f.name}`} onClick={() => onRenameRequest(f)}>✎</button>
@@ -655,11 +636,11 @@ function reviewDecisionOutcome(decision: TestCaseReviewDecision, currentStatus?:
   switch (decision) {
     case 'RECOMMEND':
       return currentStatus === 'Recommendation Pending'
-        ? "Moves to QA Lead Approval Pending, awaiting the QA Lead Group's final decision."
-        : "Moves to Review Completed, awaiting the QA Lead's final decision."
+        ? "Moves to QA Lead Approval Pending for the QA Lead Group's final decision."
+        : "Moves to Review Completed for QA Lead final approval."
     case 'APPROVE':
       return currentStatus === 'In Review'
-        ? 'Completes Stage 1 and routes the test case to the shared CM QA / AGM QA approval queue.'
+        ? 'Completes Stage 1 and routes the test case to the QA Lead Group.'
         : 'The test case becomes Approved and is immediately available for Test Cycles.'
     case 'RETURN':
       return 'Returns to the Author as Returned -- they must edit and resubmit for review.'
@@ -714,8 +695,7 @@ function TestCaseReviewModal({ testCase, decision, onClose, onReviewed }: {
           <span>{testCase.test_scenario || 'No scenario provided'}</span>
         </div>
         <p><strong>Result:</strong> {reviewDecisionOutcome(decision, testCase.status)}</p>
-        {testCase.status === 'In Review' && decision === 'APPROVE' && <div className="info-banner">Approval will automatically route to all active CM QA and AGM QA users. Either may complete Stage 2.</div>}
-        {testCase.status === 'Recommendation Pending' && decision === 'RECOMMEND' && <div className="info-banner">Recommending will automatically route to every active QA Lead Group member (QA Lead, CM QA, or AGM QA). Any of them may complete Stage 2.</div>}
+        {testCase.status === 'Recommendation Pending' && decision === 'RECOMMEND' && <div className="info-banner">Recommending routes this test case to the QA Lead Group for the Stage 2 decision.</div>}
         <Field label={mandatoryComment ? 'Reason and required changes *' : 'Comments (optional)'}>
           <textarea
             required={mandatoryComment}
@@ -1003,7 +983,7 @@ function BulkRecommendModal({ project, selectedCases, onClose, onRecommended }: 
         <form onSubmit={recommend}>
           <div className="tm-bulk-confirm-count"><strong>{recommendIds.length}</strong><span>pending testcase{recommendIds.length !== 1 ? 's' : ''} will move to Stage 2 final approval</span></div>
           <p>Confirm that the selected definitions and steps have been reviewed. They will await the QA Lead's final decision next -- Recommend does not approve or activate them.</p>
-          <div className="info-banner">These test cases will automatically route to the shared approval queue -- CM QA/AGM QA for a testcase already mid-review under the pre-existing workflow, or the whole QA Lead Group for a new submission.</div>
+          <div className="info-banner">Each test case moves to the QA Lead Group for Stage 2 approval.</div>
           <Field label="Comments (optional)">
             <textarea rows={4} value={comments} onChange={(e) => setComments(e.target.value)} placeholder="Optional notes for the QA Lead…" />
           </Field>
@@ -1219,9 +1199,8 @@ function BulkSubmitModal({ project, selectedCases, onClose, onSubmitted }: {
         <form onSubmit={doSubmit}>
           <div className="tm-bulk-confirm-count"><strong>{submitIds.length}</strong><span>Draft / Returned testcase{submitIds.length !== 1 ? 's' : ''} will move to review</span></div>
           <p>If any selected testcase isn't ready, none of them are submitted.</p>
-          <div className="info-banner">Stage 1 is assigned to the QA Lead for existing reviews or the QA Group for new submissions. 
-            Stage 2 goes to CM/AGM QA or the QA Lead Group, respectively.</div>
-          <p className="muted small">Group routing sends work to the appropriate approval queue -- there's no individual reviewer/QA Lead to assign. The testcase author is excluded from acting on their own submission at every stage.</p>
+          <div className="info-banner">Each test case routes to the QA Group for Stage 1 and the QA Lead Group for Stage 2.</div>
+          <p className="muted small">The submission is atomic. If either project assignment is missing or invalid, no selected testcase is submitted.</p>
           <Field label="Note for the Reviewer (optional)">
             <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Optional context shared on every selected testcase…" />
           </Field>
@@ -1655,8 +1634,9 @@ function TestCaseArchiveModal({ testCase, onClose, onArchived }: {
   )
 }
 
-function TestCaseModal({ projectId, allProjects, folders, folderId, existing, users, onClose, onSaved, onDeleted, onReviewed, onCheckoutChange, canAuthor, canReview, canGiveFinalApproval }: {
+function TestCaseModal({ projectId, currentProject, allProjects, folders, folderId, existing, users, onClose, onSaved, onDeleted, onReviewed, onCheckoutChange, canAuthor, canReview, canGiveFinalApproval }: {
   projectId: number
+  currentProject: TestProjectOut
   allProjects: TestProjectOut[]
   folders: TestFolderOut[]
   folderId: number | ''
@@ -1715,19 +1695,8 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
   const [showVersions, setShowVersions] = useState(false)
   const [compareIds, setCompareIds] = useState<{ left: number; right: number } | null>(null)
   const { user } = useAuth()
-  // 2026-08 "Simplified Test Management Review and Approval" requirement --
-  // repository-governance actions that aren't tied to a specific
-  // TestCaseVersion's old/new-workflow status (checkout override, archive/
-  // restore of an already-Approved baseline) moved off project membership
-  // to the plain QA Lead Group system-role model on the backend
-  // (require_can_manage_repository_governance, deps.py) -- mirror that
-  // exactly here instead of reusing the OLD-path-only canReview/
-  // canGiveFinalApproval props. QA Group / QA Lead Group new-path Stage 1/
-  // Stage 2 review authority is the same kind of plain system-role check
-  // (see canActOnPendingStage below).
-  const canManageRepoGovernance = hasRole(user, ...QA_LEAD_GROUP_ROLES)
-  const canQAGroupNewPath = hasRole(user, 'QA_ENGINEER')
-  const currentProject = allProjects.find((project) => project.id === (existing?.project_id ?? projectId))
+  const canManageRepoGovernance = hasRole(user, ...QA_LEAD_GROUP_ROLES) && (!existing || !!existing.workspace_writable)
+  const isAdministrator = hasRole(user, 'ADMIN')
   // Reported directly: "check in checkout option should be available for
   // testcases, otherwise multiple people can edit at once, if checkout, the
   // testcase is locked for editing by that user." A case someone ELSE
@@ -1746,7 +1715,7 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
   const returnedCorrectionLocked = !!existing
     && RETURNED_CORRECTION_STATUSES.includes(existing.status)
     && !isCurrentDraftAuthor
-  // 2026-08 "Simplified Test Management" GOV-002 gap fix, NEW-path only --
+  // Maker-checker for the current role-group workflow.
   // reported directly: Tester 2 (not the draft's author) submitted Tester
   // 1's draft, then Tester 2 was immediately able to record the Stage 1
   // decision on the very item they'd just submitted. Mirrors
@@ -1755,48 +1724,48 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
   // recorded Stage 1 from also recording Stage 2, not just the content
   // author. OLD-path ("In Review"/"Review Completed") stays exactly
   // isCurrentDraftAuthor, unchanged.
-  const isBlockedFromNewStage1 = !!existing && !!user?.id && (
+  const isBlockedFromNewStage1 = !isAdministrator && !!existing && !!user?.id && (
     isCurrentDraftAuthor || existing.current_draft_submitted_by_id === user.id
   )
-  const isBlockedFromNewStage2 = !!existing && !!user?.id && (
+  const isBlockedFromNewStage2 = !isAdministrator && !!existing && !!user?.id && (
     isCurrentDraftAuthor
     || existing.current_draft_submitted_by_id === user.id
     || existing.current_draft_reviewed_by_id === user.id
   )
-  const canActOnPendingStage = !!existing && (
-    (existing.status === 'In Review' && canReview && !isCurrentDraftAuthor)
-    || (existing.status === 'Review Completed' && canGiveFinalApproval && !isCurrentDraftAuthor)
-    || (existing.status === 'Recommendation Pending' && canQAGroupNewPath && !isBlockedFromNewStage1)
-    || (existing.status === 'QA Lead Approval Pending' && canManageRepoGovernance && !isBlockedFromNewStage2)
+  const canActOnPendingStage = !!existing && !!existing.workspace_writable && (
+    (existing.status === 'In Review' && canReview && (isAdministrator || !isCurrentDraftAuthor))
+    || (existing.status === 'Review Completed' && canGiveFinalApproval && (isAdministrator || !isCurrentDraftAuthor))
+    || (existing.status === 'Recommendation Pending' && hasRole(user, 'QA_ENGINEER') && !isBlockedFromNewStage1)
+    || (existing.status === 'QA Lead Approval Pending' && hasRole(user, ...QA_LEAD_GROUP_ROLES) && !isBlockedFromNewStage2)
   )
-  const gov002BlockedMessage = !existing ? null
+  const gov002BlockedMessage = !existing || isAdministrator ? null
     : isCurrentDraftAuthor
       ? 'You authored this testcase version, so you cannot review or approve it yourself. Another authorized reviewer must record the pending decision.'
       : (existing.status === 'Recommendation Pending' && existing.current_draft_submitted_by_id === user?.id)
-        ? 'You submitted this testcase version for review, so you cannot also record its Stage 1 decision. Another QA Group member must record it.'
+        ? 'You submitted this testcase version for review, so you cannot also record its Stage 1 decision. Another eligible QA Group member must record it.'
         : (existing.status === 'QA Lead Approval Pending' && (existing.current_draft_submitted_by_id === user?.id || existing.current_draft_reviewed_by_id === user?.id))
-          ? 'You already acted on this testcase version at an earlier stage (submitted it, or recorded its Stage 1 decision), so you cannot also record its Stage 2 decision. Another QA Lead Group member must record it.'
+          ? 'You already acted on this testcase version at an earlier stage, so you cannot also record its Stage 2 decision. Another eligible QA Lead Group member must record it.'
           : null
   const pendingLockContext = !pendingDecisionStatus || !existing ? null
     : gov002BlockedMessage ? {
       title: 'Maker-checker lock',
       message: gov002BlockedMessage,
     }
-      : existing.status === 'In Review' && canReview ? {
+      : existing.status === 'In Review' && canActOnPendingStage ? {
         title: 'Reviewer mode — submitted content locked',
         message: 'The submitted testcase is preserved unchanged while you review it. Use the Stage 1 Reviewer decision controls below to recommend it or return it for correction.',
       }
-        : existing.status === 'Review Completed' && canGiveFinalApproval ? {
+        : existing.status === 'Review Completed' && canActOnPendingStage ? {
           title: 'QA Lead approval mode — submitted content locked',
           message: 'The recommended testcase is preserved unchanged while you make the final decision. Use the Stage 2 controls below to approve, return, or reject it.',
         }
-          : existing.status === 'Recommendation Pending' && canQAGroupNewPath ? {
-            title: 'QA Group mode — submitted content locked',
-            message: 'The submitted testcase is preserved unchanged while you review it. Use the Stage 1 QA Group decision controls below to recommend it or return it for correction.',
+          : existing.status === 'Recommendation Pending' && canActOnPendingStage ? {
+            title: 'QA Group review mode — submitted content locked',
+            message: 'This testcase is available to eligible QA Group members for Stage 1. Use the decision controls below to recommend it or return it for correction.',
           }
-            : existing.status === 'QA Lead Approval Pending' && canManageRepoGovernance ? {
-              title: 'QA Lead Group mode — submitted content locked',
-              message: 'The recommended testcase is preserved unchanged while you make the final decision. Use the Stage 2 controls below to approve, return, or reject it.',
+            : existing.status === 'QA Lead Approval Pending' && canActOnPendingStage ? {
+              title: 'QA Lead Group approval mode — submitted content locked',
+              message: 'This testcase is available to eligible QA Lead Group members for Stage 2. Use the controls below to approve, return, or reject it.',
             }
               : existing.status === 'In Review' || existing.status === 'Recommendation Pending' ? {
                 title: 'Editing locked — awaiting a QA recommendation',
@@ -1990,9 +1959,10 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
             <input value={tags} onChange={(e) => setTags(e.target.value)} disabled={readOnly} placeholder="smoke, payments, regression" />
             <small className="muted">Separate multiple tags with commas.</small>
           </Field>
+          {existing && <Field label="Creating workspace"><span>{existing.origin_workspace_name || 'Workspace not recorded'} · {existing.workspace_writable ? 'Your workspace' : 'Read-only'}</span></Field>}
           <Field label="Workflow Status">
             <div className="tm-workflow-status-field">
-              <Badge status={existing?.status || 'Draft'} label={TEST_CASE_STATUS_LABELS[existing?.status || 'Draft']} />
+              <WorkflowStatusBadge record={existing || {}} status={existing?.status || 'Draft'} label={TEST_CASE_STATUS_LABELS[existing?.status || 'Draft']} />
               {/* Reported directly: this note used to only check
                   current_approved_version_id, so a brand-new, never-submitted
                   Draft showed "Unavailable until QA Lead approval" -- easily
@@ -2142,45 +2112,39 @@ function TestCaseModal({ projectId, allProjects, folders, folderId, existing, us
         </div>
       )}
       {/* Stage 1 -- Reviewer tier, only valid while "In Review" (RECOMMEND/RETURN). */}
-      {existing && existing.status === 'In Review' && canReview && canActOnPendingStage && (
+      {existing && existing.status === 'In Review' && canActOnPendingStage && (
         <WorkflowDecisionPanel title="QA review decision (Stage 1)" description={isCurrentDraftAuthor ? 'You authored this testcase version. Another Reviewer must record the decision.' : 'Approve for QA management, return for correction, or reject the test case.'} options={[
-          { key: 'approve', label: 'Approve Stage 1', description: 'Recommend for final QA approval', tone: 'approve', disabled: isCurrentDraftAuthor, onClick: () => setReviewDecision('APPROVE') },
-          { key: 'return', label: TEST_CASE_REVIEW_ACTION_LABELS.RETURN, description: 'Send back to the author for correction', tone: 'return', disabled: isCurrentDraftAuthor, onClick: () => setReviewDecision('RETURN') },
-          { key: 'reject', label: TEST_CASE_REVIEW_ACTION_LABELS.REJECT, description: 'Reject this testcase version', tone: 'reject', disabled: isCurrentDraftAuthor, onClick: () => setReviewDecision('REJECT') },
+          { key: 'approve', label: 'Approve Stage 1', description: 'Recommend for final QA approval', tone: 'approve', disabled: isCurrentDraftAuthor && !isAdministrator, onClick: () => setReviewDecision('APPROVE') },
+          { key: 'return', label: TEST_CASE_REVIEW_ACTION_LABELS.RETURN, description: 'Send back to the author for correction', tone: 'return', disabled: isCurrentDraftAuthor && !isAdministrator, onClick: () => setReviewDecision('RETURN') },
+          { key: 'reject', label: TEST_CASE_REVIEW_ACTION_LABELS.REJECT, description: 'Reject this testcase version', tone: 'reject', disabled: isCurrentDraftAuthor && !isAdministrator, onClick: () => setReviewDecision('REJECT') },
         ]} />
       )}
       {/* Stage 2 -- QA Lead tier, only valid while "Review Completed" (APPROVE/RETURN/REJECT). Strictly narrower than Stage 1 -- a plain Reviewer project role does not qualify. */}
-      {existing && existing.status === 'Review Completed' && canGiveFinalApproval && canActOnPendingStage && (
+      {existing && existing.status === 'Review Completed' && canActOnPendingStage && (
         <WorkflowDecisionPanel title="QA management decision (Stage 2)" description="Approve and activate this test case, return it for changes, or reject it." options={[
           { key: 'approve', label: TEST_CASE_REVIEW_ACTION_LABELS.APPROVE, description: 'Approve and activate this testcase version', tone: 'approve', onClick: () => setReviewDecision('APPROVE') },
           { key: 'return', label: TEST_CASE_REVIEW_ACTION_LABELS.RETURN, description: 'Send back to the author for correction', tone: 'return', onClick: () => setReviewDecision('RETURN') },
           { key: 'reject', label: TEST_CASE_REVIEW_ACTION_LABELS.REJECT, description: 'Reject this testcase version', tone: 'reject', onClick: () => setReviewDecision('REJECT') },
         ]} />
       )}
-      {/* 2026-08 "Simplified Test Management" NEW-path Stage 1 -- QA Group
-          (QA_ENGINEER) tier, only valid while "Recommendation Pending"
-          (RECOMMEND/RETURN/REJECT). No individual reviewer assignment --
-          any active QA Group member may act, GOV-002 self-authorship aside. */}
-      {existing && existing.status === 'Recommendation Pending' && canQAGroupNewPath && canActOnPendingStage && (
+      {existing && existing.status === 'Recommendation Pending' && canActOnPendingStage && (
         <div className="tm-review-actions">
-          <div><strong>QA recommendation (Stage 1)</strong><span>{isBlockedFromNewStage1 ? (isCurrentDraftAuthor ? 'You authored this testcase version. Another QA Group member must record the decision.' : 'You submitted this testcase version for review. Another QA Group member must record the decision.') : 'Recommend for QA Lead approval, return for correction, or reject the test case.'}</span></div>
+          <div><strong>Reviewer recommendation (Stage 1)</strong><span>Recommend for QA Lead approval, return for correction, or reject the test case.</span></div>
           <button className="btn btn-primary" disabled={isBlockedFromNewStage1} onClick={() => setReviewDecision('RECOMMEND')}>{TEST_CASE_REVIEW_ACTION_LABELS.RECOMMEND}</button>
           <button className="btn" disabled={isBlockedFromNewStage1} onClick={() => setReviewDecision('RETURN')}>{TEST_CASE_REVIEW_ACTION_LABELS.RETURN}</button>
           <button className="btn btn-danger" disabled={isBlockedFromNewStage1} onClick={() => setReviewDecision('REJECT')}>{TEST_CASE_REVIEW_ACTION_LABELS.REJECT}</button>
         </div>
       )}
-      {/* NEW-path Stage 2 -- QA Lead Group (QA_LEAD/CHIEF_MANAGER_QA/AGM_QA)
-          tier, only valid while "QA Lead Approval Pending" (APPROVE/RETURN/REJECT). */}
-      {existing && existing.status === 'QA Lead Approval Pending' && canManageRepoGovernance && canActOnPendingStage && (
+      {existing && existing.status === 'QA Lead Approval Pending' && canActOnPendingStage && (
         <div className="tm-review-actions">
-          <div><strong>QA Lead decision (Stage 2)</strong><span>{isBlockedFromNewStage2 ? (isCurrentDraftAuthor ? 'You authored this testcase version. Another QA Lead Group member must record the decision.' : 'You already acted on this testcase version at an earlier stage (submitted it, or recorded its Stage 1 decision). Another QA Lead Group member must record the decision.') : 'Any QA Lead Group member (QA Lead, CM QA, or AGM QA) may approve and activate this test case, return it for changes, or reject it.'}</span></div>
+          <div><strong>QA Lead decision (Stage 2)</strong><span>Approve and activate this test case, return it for changes, or reject it.</span></div>
           <button className="btn btn-primary" disabled={isBlockedFromNewStage2} onClick={() => setReviewDecision('APPROVE')}>{TEST_CASE_REVIEW_ACTION_LABELS.APPROVE}</button>
           <button className="btn" disabled={isBlockedFromNewStage2} onClick={() => setReviewDecision('RETURN')}>{TEST_CASE_REVIEW_ACTION_LABELS.RETURN}</button>
           <button className="btn btn-danger" disabled={isBlockedFromNewStage2} onClick={() => setReviewDecision('REJECT')}>{TEST_CASE_REVIEW_ACTION_LABELS.REJECT}</button>
         </div>
       )}
       {existing && <LinkedDefects query={`test_case_id=${existing.id}`} />}
-      {existing && <JiraActivity entityType="TEST_CASE" entityId={existing.id} items={activity} onPosted={(item) => setActivity((prev) => [...prev, item])} />}
+      {existing && <JiraActivity readOnly={!existing.workspace_writable} entityType="TEST_CASE" entityId={existing.id} items={activity} onPosted={(item) => setActivity((prev) => [...prev, item])} />}
       {confirmDelete && existing && (
         <ConfirmModal
           title="Delete test case?"
@@ -2668,20 +2632,7 @@ export default function TestRepository() {
   // what's shown here.
   const [myAccess, setMyAccess] = useState<TestProjectMyAccessOut | null>(null)
   const canAuthor = hasRole(user, ...CAN_AUTHOR_ROLES) && (myAccess?.can_author_repository ?? true)
-  // Review-tier actions (approve/return, checkout override, archive/
-  // restore, delete folder, bulk-approve) are reachable by system QA_LEAD/
-  // Admin always, or by a QA_ENGINEER who is this project's Reviewer/
-  // Project Lead/Owner member -- can_review_repository (deps.py) is the
-  // real, strict check; it's deliberately NOT the same "any QA_ENGINEER
-  // gets in" fallback canAuthor above relies on, so this checks the same
-  // CAN_AUTHOR_ROLES system-role floor and lets myAccess narrow it further.
   const canReview = hasRole(user, ...CAN_AUTHOR_ROLES) && (myAccess?.can_review_repository ?? true)
-  // 2026-08 Test Approval Workflow refactor -- Stage 2 (QA Lead final
-  // approve/return/reject, only valid while a version is "Review
-  // Completed") is strictly narrower/higher-trust than canReview above:
-  // Project Lead/Owner project roles or system QA_LEAD/Admin only, no plain
-  // "Reviewer" project role, no permissive default while myAccess is still
-  // loading (defaults to false, not true, unlike every other flag here).
   const canGiveFinalApproval = hasRole(user, ...CAN_AUTHOR_ROLES) && (myAccess?.can_give_final_approval ?? false)
   // 2026-08 "Simplified Test Management Review and Approval" requirement --
   // folder deletion is repository governance not tied to a specific
@@ -2691,11 +2642,8 @@ export default function TestRepository() {
   // TestCaseModal's own canManageRepoGovernance mirrors for archive/
   // restore/checkout-override.
   const canDeleteFolder = hasRole(user, ...QA_LEAD_GROUP_ROLES)
-  // NEW-path Stage 1/Stage 2 authority (see TestCaseModal's identically-named
-  // consts above) -- plain system-role checks, no project membership,
-  // reused here for the bulk recommend/approve eligibility filters below.
   const canManageRepoGovernance = hasRole(user, ...QA_LEAD_GROUP_ROLES)
-  const canQAGroupNewPath = hasRole(user, 'QA_ENGINEER')
+  const isAdministrator = hasRole(user, 'ADMIN')
   // Selection is shared workflow infrastructure, not an authoring action.
   // Reviewer-only members need it for bulk recommendation, while Stage 2
   // approvers need it for bulk final approval. Edit/delete controls remain
@@ -2782,10 +2730,8 @@ export default function TestRepository() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams])
 
-  // Author-tier approver assignment (PATCH .../approvers) needs a user
-  // picker, same SearchableSelect-over-user-list pattern TestProjects.tsx
-  // uses for its own Owner/Default Reviewer/Default QA Lead pickers -- both
-  // scoped to constants.TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS via the
+  // Author-tier approver assignment (PATCH .../approvers) uses the shared
+  // user picker and is scoped to the selected workspace via the
   // dedicated /api/test-projects/eligible-users endpoint, not the app-wide
   // /api/auth/users list every other module uses.
   useEffect(() => {
@@ -2952,58 +2898,33 @@ export default function TestRepository() {
   )
   const canBulkUpdateTestcaseFields = canAuthor && !selectedCasesIncludeWorkflowLock && selectedReturnedCasesBelongToUser
   const canOpenBulkUpdate = canBulkUpdateAssignments || canBulkUpdateTestcaseFields
-  // Stage 1 (Reviewer) bulk-recommend acts on OLD-path "In Review" rows
-  // (unchanged, still keyed to the individually-assigned pending_with_user_id
-  // -- ORACLE_MIGRATION_2026-07 "new cases only" migration decision); Stage 2
-  // (QA Lead) bulk-approve on OLD-path "Review Completed" rows likewise.
-  // 2026-08 "Simplified Test Management" NEW-path rows have no individual
-  // assignee at all -- group routing is authoritative -- so eligibility there
-  // is a plain QA Group / QA Lead Group role check instead of
-  // pending_with_user_id. A selection spanning both an OLD- and a NEW-path
-  // row is intentionally left in the same eligible-ids array: the backend's
-  // own bulk-recommend/bulk-approve guard rejects a mixed OLD+NEW selection
-  // with an explicit "select one group at a time" error.
   const recommendSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
-    && testCase.current_draft_author_id !== user?.id
-    && (
-      (testCase.status === 'In Review' && (testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN')))
-      // 2026-08 GOV-002 gap fix, NEW-path only -- also exclude whoever
-      // submitted this specific draft (see TestCaseModal's identically-named
-      // isBlockedFromNewStage1 for the single-case equivalent). OLD-path
-      // ("In Review" above) intentionally stays author-only, unchanged.
-      || (testCase.status === 'Recommendation Pending' && canQAGroupNewPath
-          && testCase.current_draft_submitted_by_id !== user?.id)
-    )).map((testCase) => testCase.id)
+    && (testCase.current_draft_author_id !== user?.id || isAdministrator)
+    && ['In Review', 'Recommendation Pending'].includes(testCase.status)
+    && (testCase.status === 'In Review' ? canReview : hasRole(user, 'QA_ENGINEER'))
+    && (isAdministrator || testCase.status !== 'Recommendation Pending' || testCase.current_draft_submitted_by_id !== user?.id)
+  ).map((testCase) => testCase.id)
   const finalApproveSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
-    && testCase.current_draft_author_id !== user?.id
-    && (
-      (testCase.status === 'Review Completed' && (testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN')))
-      // 2026-08 GOV-002 gap fix, NEW-path only -- also exclude whoever
-      // submitted this draft or recorded its Stage 1 decision (see
-      // isBlockedFromNewStage2). OLD-path ("Review Completed" above)
-      // intentionally stays author-only, unchanged.
-      || (testCase.status === 'QA Lead Approval Pending' && canManageRepoGovernance
-          && testCase.current_draft_submitted_by_id !== user?.id
-          && testCase.current_draft_reviewed_by_id !== user?.id)
-    )).map((testCase) => testCase.id)
+    && (testCase.current_draft_author_id !== user?.id || isAdministrator)
+    && ['Review Completed', 'QA Lead Approval Pending'].includes(testCase.status)
+    && (testCase.status === 'Review Completed' ? canGiveFinalApproval : hasRole(user, ...QA_LEAD_GROUP_ROLES))
+    && (isAdministrator || testCase.status !== 'QA Lead Approval Pending'
+      || (testCase.current_draft_submitted_by_id !== user?.id && testCase.current_draft_reviewed_by_id !== user?.id))
+  ).map((testCase) => testCase.id)
   const submittableSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
     && ['Draft', ...RETURNED_CORRECTION_STATUSES].includes(testCase.status)
     && (!RETURNED_CORRECTION_STATUSES.includes(testCase.status)
       || testCase.current_draft_author_id === user?.id)).map((testCase) => testCase.id)
-  // 2026-08 -- bulk Return/Reject, NEW-path only (see backend
-  // bulk_return_test_cases/bulk_reject_test_cases -- OLD-path "In Review"/
-  // "Review Completed" return/reject stays single-case only, unchanged).
-  // Same GOV-002 exclusions as recommendSelectedIds/finalApproveSelectedIds
-  // above -- a selection spanning both stages is intentionally left in one
-  // array; the backend's own guard rejects a mixed-stage selection.
   const returnRejectSelectedIds = cases.filter((testCase) => selectedCaseIds.has(testCase.id)
-    && testCase.current_draft_author_id !== user?.id
+    && (testCase.current_draft_author_id !== user?.id || isAdministrator)
     && (
-      (testCase.status === 'Recommendation Pending' && canQAGroupNewPath
-        && testCase.current_draft_submitted_by_id !== user?.id)
-      || (testCase.status === 'QA Lead Approval Pending' && canManageRepoGovernance
-        && testCase.current_draft_submitted_by_id !== user?.id
-        && testCase.current_draft_reviewed_by_id !== user?.id)
+      (testCase.status === 'Recommendation Pending'
+        && hasRole(user, 'QA_ENGINEER')
+        && (isAdministrator || testCase.current_draft_submitted_by_id !== user?.id))
+      || (testCase.status === 'QA Lead Approval Pending'
+        && hasRole(user, ...QA_LEAD_GROUP_ROLES)
+        && (isAdministrator || (testCase.current_draft_submitted_by_id !== user?.id
+          && testCase.current_draft_reviewed_by_id !== user?.id)))
     )).map((testCase) => testCase.id)
   // 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement":
   // a test case that has ever been approved/archived/rejected is governed
@@ -3079,6 +3000,7 @@ export default function TestRepository() {
   // per-row instead of against the current selection, so the three stay
   // consistent by construction.
   function checkboxEligibility(testCase: TestCaseListOut): { eligible: boolean; reason?: string } {
+    if (!testCase.workspace_writable) return { eligible: false, reason: "Created by another workspace — read-only" }
     const isAuthor = testCase.current_draft_author_id === user?.id
     if (RETURNED_CORRECTION_STATUSES.includes(testCase.status) && !isAuthor) {
       return {
@@ -3087,19 +3009,13 @@ export default function TestRepository() {
       }
     }
     if (testCase.status === 'In Review') {
-      if (isAuthor) return { eligible: false, reason: 'You authored this test case. Another reviewer must record the decision.' }
+      if (isAuthor && !isAdministrator) return { eligible: false, reason: 'You authored this test case. Another reviewer must record the decision.' }
       if (!canReview) return { eligible: false, reason: 'You are not eligible to review this test case.' }
-      if (!(testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN'))) {
-        return { eligible: false, reason: 'This test case is currently assigned to another reviewer.' }
-      }
       return { eligible: true }
     }
     if (testCase.status === 'Review Completed') {
-      if (isAuthor) return { eligible: false, reason: 'You authored this test case. Another QA Lead must record the decision.' }
+      if (isAuthor && !isAdministrator) return { eligible: false, reason: 'You authored this test case. Another QA Lead must record the decision.' }
       if (!canGiveFinalApproval) return { eligible: false, reason: 'You are not eligible to give final approval on this test case.' }
-      if (!(testCase.pending_with_user_id === user?.id || hasRole(user, 'ADMIN'))) {
-        return { eligible: false, reason: 'This test case is currently assigned to another QA Lead.' }
-      }
       return { eligible: true }
     }
     if (testCase.status === 'Recommendation Pending') {
@@ -3112,17 +3028,17 @@ export default function TestRepository() {
       // submitter) -- the reason text below must say "authored", not
       // "submitted", or it reads as flatly wrong whenever those two differ
       // (reported: QA 2 authored it, QA 1 submitted it, QA 2 still blocked).
-      if (isAuthor) return { eligible: false, reason: 'You authored this test case. Another QA Group member must record its Stage 1 decision.' }
-      if (!canQAGroupNewPath) return { eligible: false, reason: 'Only QA Group members can act on this test case.' }
-      if (testCase.current_draft_submitted_by_id === user?.id) {
+      if (isAuthor && !isAdministrator) return { eligible: false, reason: 'You authored this test case. Another QA Group member must record its Stage 1 decision.' }
+      if (!hasRole(user, 'QA_ENGINEER')) return { eligible: false, reason: 'Stage 1 is available to the QA Group.' }
+      if (!isAdministrator && testCase.current_draft_submitted_by_id === user?.id) {
         return { eligible: false, reason: 'You submitted this test case for review and cannot also record its Stage 1 decision.' }
       }
       return { eligible: true }
     }
     if (testCase.status === 'QA Lead Approval Pending') {
-      if (isAuthor) return { eligible: false, reason: 'You authored this test case. Another QA Lead Group member must record the decision.' }
-      if (!canManageRepoGovernance) return { eligible: false, reason: 'Already recommended and pending QA Lead approval.' }
-      if (testCase.current_draft_submitted_by_id === user?.id || testCase.current_draft_reviewed_by_id === user?.id) {
+      if (isAuthor && !isAdministrator) return { eligible: false, reason: 'You authored this test case. Another QA Lead Group member must record the decision.' }
+      if (!hasRole(user, ...QA_LEAD_GROUP_ROLES)) return { eligible: false, reason: 'Stage 2 is available to the QA Lead Group.' }
+      if (!isAdministrator && (testCase.current_draft_submitted_by_id === user?.id || testCase.current_draft_reviewed_by_id === user?.id)) {
         return { eligible: false, reason: 'You already acted on this test case at an earlier stage and cannot also record its Stage 2 decision.' }
       }
       return { eligible: true }
@@ -3278,7 +3194,7 @@ export default function TestRepository() {
         <div className="tm-workflow-banner inactive"><span>!</span><strong>Project is inactive</strong><InfoTooltip label="About inactive projects" content="Repository content remains available for review, but changes are disabled until the project is reactivated." /></div>
       )}
       {projectId && projectIsActive && (
-        <div className="tm-workflow-banner"><span>✓</span><strong>Governed test-case workflow</strong><InfoTooltip label="About the governed test-case workflow" content="Author creates or imports a Draft → submits for review → the QA Group recommends → the QA Lead Group gives final approval → approved testcases become available in Test Cycles. No individual reviewer or QA Lead is assigned — either group routes and notifies automatically." /></div>
+        <div className="tm-workflow-banner"><span>✓</span><strong>Governed test-case workflow</strong><InfoTooltip label="About the governed test-case workflow" content="Author creates or imports a Draft → an eligible QA Group member recommends → an eligible QA Lead Group member gives final approval → approved testcases become available in Test Cycles. Administrator access is retained for workflow recovery." /></div>
       )}
       {projectId && (
         <div className={`tm-workspace${repositoryStructureCollapsed ? ' tree-collapsed' : ''}`}>
@@ -3373,7 +3289,7 @@ export default function TestRepository() {
               <select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}><option value="">All priorities</option>{TEST_CASE_PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select>
               <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="">All current statuses</option>{TEST_CASE_CURRENT_STATUSES.map((s) => <option key={s} value={s}>{TEST_CASE_STATUS_LABELS[s] || s}</option>)}</select>
               <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}><option value="">All tags</option>{availableTags.map((tag) => <option key={tag}>{tag}</option>)}</select>
-              {(canReview || canQAGroupNewPath) && (
+              {canSelectCases && (
                 <button
                   type="button"
                   className={`btn btn-sm ${statusFilter === REVIEW_QUEUE_TOKEN ? 'btn-primary' : ''}`}
@@ -3382,7 +3298,7 @@ export default function TestRepository() {
                   Review queue ({summary?.in_review_count ?? 0})
                 </button>
               )}
-              {(canGiveFinalApproval || canManageRepoGovernance) && (
+              {canSelectCases && (
                 <button
                   type="button"
                   className={`btn btn-sm ${statusFilter === FINAL_APPROVAL_QUEUE_TOKEN ? 'btn-primary' : ''}`}
@@ -3402,20 +3318,14 @@ export default function TestRepository() {
               <div className="tm-bulk-bar" role="region" aria-label={selectedCount > 1 ? 'Bulk test case actions' : 'Test case actions'}>
                 <strong>{selectedCount} test case{selectedCount !== 1 ? 's' : ''} selected</strong>
                 {canAuthor && submittableSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkSubmit(true)}>Submit for review ({submittableSelectedIds.length})</button>}
-                {/* 2026-08 fix: recommendSelectedIds/finalApproveSelectedIds already
-                    include NEW-path-eligible rows (see their own comments above), but
-                    these two buttons were still gated on the OLD-path-only canReview/
-                    canGiveFinalApproval flags, matching the "Review queue"/"Final
-                    approval queue" filter buttons above did already -- so a QA Group/
-                    QA Lead Group member with no old-path project access could select
-                    an eligible NEW-path testcase and never see a button to act on it. */}
-                {(canReview || canQAGroupNewPath) && recommendSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRecommend(true)}>{selectionActionLabel(recommendSelectedIds.length, 'Recommend')} ({recommendSelectedIds.length})</button>}
-                {(canGiveFinalApproval || canManageRepoGovernance) && finalApproveSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkApprove(true)}>{selectionActionLabel(finalApproveSelectedIds.length, 'Approve')} ({finalApproveSelectedIds.length})</button>}
+                {/* Eligibility is computed from each version's recorded assignee. */}
+                {recommendSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkRecommend(true)}>{selectionActionLabel(recommendSelectedIds.length, 'Recommend')} ({recommendSelectedIds.length})</button>}
+                {finalApproveSelectedIds.length > 0 && <button className="btn btn-sm btn-primary" onClick={() => setShowBulkApprove(true)}>{selectionActionLabel(finalApproveSelectedIds.length, 'Approve')} ({finalApproveSelectedIds.length})</button>}
                 {/* 2026-08 -- bulk counterparts to the single-case "Return for Correction"/"Reject" decisions,
                     NEW-path only (see returnRejectSelectedIds above and bulk_return_test_cases/
                     bulk_reject_test_cases on the backend). */}
-                {(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkReturn(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Return For Correction')} ({returnRejectSelectedIds.length})</button>}
-                {(canQAGroupNewPath || canManageRepoGovernance) && returnRejectSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkReject(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Reject')} ({returnRejectSelectedIds.length})</button>}
+                {returnRejectSelectedIds.length > 0 && <button className="btn btn-sm" onClick={() => setShowBulkReturn(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Return For Correction')} ({returnRejectSelectedIds.length})</button>}
+                {returnRejectSelectedIds.length > 0 && <button className="btn btn-sm btn-danger" onClick={() => setShowBulkReject(true)}>{selectionActionLabel(returnRejectSelectedIds.length, 'Reject')} ({returnRejectSelectedIds.length})</button>}
                 {canOpenBulkUpdate && <button className="btn btn-sm" onClick={() => setShowBulkUpdate(true)}>{selectionActionLabel(selectedCount, 'update')}</button>}
                 {/* 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement": Delete only ever
                     targets deletableSelectedIds (never-governed cases) -- an Approved/Archived/Rejected case in
@@ -3473,17 +3383,8 @@ export default function TestRepository() {
                 { key: 'classification', header: 'Type / Priority', render: (c) => <span className="tm-classification-cell"><strong>{c.test_type || '—'}</strong>{c.priority ? <Badge status={c.priority} /> : <small>No priority</small>}</span>, filterValue: (c) => `${c.test_type || ''} ${c.priority || ''}` },
                 { key: 'tags', header: 'Tags', render: (c) => <span className="tm-case-tags">{(c.tags || []).length ? c.tags.map((tag) => <button type="button" key={tag} onClick={(event) => { event.stopPropagation(); setTagFilter(tag) }}>{tag}</button>) : <small>—</small>}</span>, filterValue: (c) => (c.tags || []).join(' ') },
                 { key: 'status', header: 'Workflow', render: (c) => {
-                  // Prefer the real assignee (APR-006) over the static
-                  // status->role fallback map; surface pending_since too so
-                  // SLA aging is visible without opening the record. Reported
-                  // directly: "Pending with author, give details who have
-                  // uploaded" (now covered -- pending_with_user_name returns
-                  // the real author for every Returned-family status, NEW-path
-                  // included, see models.TestCaseVersion.pending_with_user_name)
-                  // and "show the group name where pending approval, on click
-                  // of group name, members will be visible" (NEW-path group
-                  // statuses below render a clickable RoleGroupLink instead of
-                  // plain text).
+                  // Display the responsible group (or the legacy pending
+                  // person) and workflow age without opening the record.
                   // A never-submitted Draft has no pending_with_user_name
                   // (nothing's actually pending review yet), so its fallback
                   // is the bare word "Author" -- swap in the real author's
@@ -3491,7 +3392,11 @@ export default function TestRepository() {
                   const pendingWithLabel = c.pending_with_user_name
                     || (c.status === 'Draft' ? c.current_draft_author_name : null)
                     || TEST_CASE_PENDING_WITH[c.status]
-                  const groupRole = TEST_CASE_PENDING_GROUP_ROLES[c.status]
+                  const pendingGroup = c.status === 'Recommendation Pending'
+                    ? { role: 'QA_ENGINEER', label: 'QA Group' }
+                    : c.status === 'QA Lead Approval Pending'
+                      ? { role: 'QA_LEAD', label: 'QA Lead Group' }
+                      : null
                   // Final states have no next actor. The fallback map uses
                   // an em dash for those states; treating that as a person
                   // produced the confusing literal "Pending with —" below
@@ -3499,13 +3404,15 @@ export default function TestRepository() {
                   const hasPendingActor = !!pendingWithLabel && pendingWithLabel !== '—'
                   return (
                     <span className="tm-workflow-cell">
-                      <Badge status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />
-                      {groupRole && hasPendingActor ? (
-                        <span className="tm-workflow-pending-group" onClick={(e) => e.stopPropagation()}>
-                          <small>Pending with</small>
-                          <RoleGroupLink users={users} role={groupRole} label={pendingWithLabel || 'group'} />
-                        </span>
-                      ) : hasPendingActor ? <small>Pending with {pendingWithLabel}</small> : null}
+                      <WorkflowStatusBadge record={c} status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />
+                      {pendingGroup
+                        ? <RoleGroupLink
+                            users={users.filter(member => !member.roles.includes('ADMIN') || (!!selectedProject?.department && hasDepartment(member, selectedProject.department)))}
+                            role={pendingGroup.role}
+                            label={pendingGroup.label}
+                            renderTrigger={(count, open) => <button type="button" className="role-group-link" onClick={(event) => { event.stopPropagation(); open() }}>Pending with {pendingGroup.label}<span>{count}</span></button>}
+                          />
+                        : hasPendingActor ? <small>Pending with {pendingWithLabel}</small> : null}
                       {/* "along with Pending with details, show submitted by as well" --
                           current_draft_submitted_by_name is only ever set once the current
                           draft has actually been submitted, so this stays absent for a
@@ -3542,7 +3449,9 @@ export default function TestRepository() {
                     </span>
                   )
                 }, filterValue: (c) => {
-                  const pending = c.pending_with_user_name || TEST_CASE_PENDING_WITH[c.status] || ''
+                  const pending = c.status === 'Recommendation Pending' ? 'QA Group'
+                    : c.status === 'QA Lead Approval Pending' ? 'QA Lead Group'
+                      : c.pending_with_user_name || TEST_CASE_PENDING_WITH[c.status] || ''
                   return `${TEST_CASE_STATUS_LABELS[c.status] || c.status} ${pending === '—' ? '' : pending}`
                 } },
                 { key: 'version', header: 'Version', render: (c) => <span className="badge badge-gray">{`v${c.version || '1.0'}`}</span>, filterValue: (c) => `v${c.version || '1.0'}` },
@@ -3551,6 +3460,7 @@ export default function TestRepository() {
                   key: 'checkout',
                   header: 'Editing access',
                   render: (c) => {
+                    if (!c.workspace_writable) return <span className="badge badge-gray">{c.origin_workspace_name || "Other workspace"} · Read-only</span>
                     const lockedByMe = c.checked_out_by_id === user?.id
                     const lockedByOther = !!c.checked_out_by_id && !lockedByMe
                     const reviewLocked = TEST_CASE_PENDING_DECISION_STATUSES.includes(c.status)
@@ -3727,14 +3637,15 @@ export default function TestRepository() {
       {editingCase && projectId && (
         <TestCaseModal
           projectId={projectId}
+          currentProject={selectedProject!}
           allProjects={projects}
           folders={folders}
           folderId={typeof selectedFolder === 'number' ? selectedFolder : ''}
           existing={editingCase === 'new' ? null : editingCase}
           users={users}
-          canAuthor={canAuthor && projectIsActive}
-          canReview={canReview && projectIsActive}
-          canGiveFinalApproval={canGiveFinalApproval && projectIsActive}
+          canAuthor={canAuthor && projectIsActive && (editingCase === "new" || !!editingCase.workspace_writable)}
+          canReview={canReview && projectIsActive && editingCase !== "new" && !!editingCase.workspace_writable}
+          canGiveFinalApproval={canGiveFinalApproval && projectIsActive && editingCase !== "new" && !!editingCase.workspace_writable}
           onClose={() => setEditingCase(null)}
           onSaved={(saved) => {
             // 2026-08 -- reported directly: Save shouldn't close this modal

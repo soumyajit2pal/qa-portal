@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
@@ -5,12 +6,14 @@ import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
 import {
-  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, DEPLOYMENT_ENVIRONMENTS, hasRole, hasDepartment,
-  SIGNOFF_EDITABLE_STATUSES, QA_DEPARTMENT, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
+  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, DEPLOYMENT_ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole,
+  isViewOnly,
+  SIGNOFF_EDITABLE_STATUSES, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
   QA_LEAD_GROUP_ROLES, validTargetPromotionOptions, validEnvironmentPromotion,
 } from '../../constants'
 import { SignOffOut, UserOut, FunctionalOut, FunctionalListOut, PageOut, ApprovalActionOut } from '../../types'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
+import ConfirmModal from '../../components/ConfirmModal'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
@@ -53,6 +56,12 @@ const EMPTY = {
   // submit if left blank -- see submit() below.
   validity_from: '', validity_to: '',
   exit_criteria_notes: '', open_defect_summary: '', residual_risk_notes: '',
+  known_limitations: '',
+  business_acceptance_status: '',
+  security_testing_status: '',
+  deployment_recommendation: '',
+  conditional_observations: '',
+
 }
 type SignOffForm = typeof EMPTY
 
@@ -63,8 +72,8 @@ function validityError(from: string, to: string): string | null {
 }
 
 function richTextRequiredError(form: Pick<SignOffForm, 'exit_criteria_notes' | 'open_defect_summary' | 'residual_risk_notes'>): string | null {
-  if (!form.exit_criteria_notes.trim()) return 'Exit Criteria Validation Notes are required.'
-  if (!form.open_defect_summary.trim()) return 'Open Defect Review Summary is required.'
+  if (!form.exit_criteria_notes.trim()) return 'Testing Scope Completed is required.'
+
   if (!form.residual_risk_notes.trim()) return 'Remarks are required.'
   return null
 }
@@ -190,6 +199,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
   const [exitCriteriaImages, setExitCriteriaImages] = useState<File[]>([])
   const [openDefectImages, setOpenDefectImages] = useState<File[]>([])
   const [residualRiskImages, setResidualRiskImages] = useState<File[]>([])
+  const [additionalImages, setAdditionalImages] = useState<Record<string, File[]>>({})
   function set<K extends keyof SignOffForm>(k: K, v: SignOffForm[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   const applyRequest = useCallback((r: FunctionalOut) => {
@@ -199,7 +209,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
       testing_request_id: r.request_id,
       application_name: r.application_name || '',
       application_owner: r.application_owner || '',
-      department: QA_DEPARTMENT,
+      department: r.department || '',
       change_request_ids: r.cr_number || '',
       technology_stack: r.technology_stack || '',
       release_version: r.release_version || '',
@@ -247,7 +257,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
 
   function clearSelection() {
     setSelectedRequest(null)
-    setForm((f) => ({ ...f, testing_request_id: '', application_name: '', application_owner: '', department: QA_DEPARTMENT, change_request_ids: '' }))
+    setForm((f) => ({ ...f, testing_request_id: '', application_name: '', application_owner: '', department: '', change_request_ids: '' }))
   }
 
   async function submit(e: React.FormEvent) {
@@ -257,8 +267,8 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     // Request ID(s) fields need this explicit check instead -- they're only
     // ever filled in via picking a Testing Request above.
     if (!selectedRequest) { setError('Pick a Testing Request ID first -- Application Name, Owner and CR Number/EPIC Number are derived from it.'); return }
-    if (!hasRole(user, 'ADMIN') && !hasDepartment(user, QA_DEPARTMENT)) {
-      setError(`QA Clearance is restricted to the ${QA_DEPARTMENT} department.`)
+    if (!hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')) {
+      setError('QA Clearance requires a QA permission profile in the active workspace.')
       return
     }
     const validityErr = validityError(form.validity_from, form.validity_to)
@@ -290,7 +300,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
       // never embedded inline (same as every other JiraRichTextField in the
       // app) -- they're combined with the explicitly-picked Supporting
       // Documents and uploaded together here.
-      const allFiles = [...files, ...exitCriteriaImages, ...openDefectImages, ...residualRiskImages]
+      const allFiles = [...files, ...exitCriteriaImages, ...openDefectImages, ...residualRiskImages, ...Object.values(additionalImages).flat()]
       if (allFiles.length > 0) {
         try { await api.uploadFiles(`/api/signoffs/${created.id}/documents`, allFiles) }
         catch (err) { setError(err) }
@@ -317,7 +327,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
         <div className="form-row">
           <Field label="Application Name *"><input required disabled value={form.application_name} onChange={() => {}} /></Field>
           <Field label="Application Owner *"><input required disabled value={form.application_owner} onChange={() => {}} /></Field>
-          <Field label="QA Approval Department *"><input required disabled value={form.department || QA_DEPARTMENT} onChange={() => {}} /></Field>
+          <Field label="Request Department *"><input required disabled value={form.department} onChange={() => {}} /></Field>
           <Field label="CR Number/EPIC Number *"><input required disabled value={form.change_request_ids} onChange={() => {}} /></Field>
           <Field label="Technology Stack *"><input required value={form.technology_stack} onChange={(e) => set('technology_stack', e.target.value)} /></Field>
           <Field label="Release Version *"><input required value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>
@@ -373,9 +383,21 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
             <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
-        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
-        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
+        <div className="section-title">Section E – QA Clearance Remarks</div>
+        <Field label="Testing Scope Completed *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Testing Scope Completed" placeholder="Describe the testing scope completed…" /></Field>
+        <Field label="Open Risks (if any)"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Risks (if any)" placeholder="Describe any remaining risks…" /></Field>
+        {([
+          ['known_limitations', 'Known Limitations'],
+          ['business_acceptance_status', 'Business Acceptance Status'],
+          ['security_testing_status', 'Security Testing Status'],
+          ['deployment_recommendation', 'Deployment Recommendation'],
+        ] as const).map(([key, label]) => <Field key={key} label={label}><JiraRichTextField value={form[key]} onChange={value => set(key, value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, [key]: images }))} ariaLabel={label} placeholder={`Enter ${label.toLowerCase()}…`} /></Field>)}
         <Field label="Remarks *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Remarks" placeholder="Add remarks…" /></Field>
+        {form.certificate_type === 'Conditional Clearance' && <>
+        <div className="section-title">Section F – Conditional Clearance Observations</div>
+        <p className="muted small">Optional. Leave blank to generate observations from linked open defects. If you enter observations, only your content is used in Section F; generated observations are not appended. Defect counts and clearance eligibility still use system data.</p>
+        <Field label="Conditional Clearance Observations"><JiraRichTextField value={form.conditional_observations} onChange={value => set('conditional_observations', value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, conditional_observations: images }))} ariaLabel="Conditional Clearance Observations" placeholder="Enter your observations, including functionality, severity, business impact, mitigation, owner and target date; or leave blank to use system data…" /></Field>
+        </>}
         <Field label="Supporting Documents">
           <input type="file" multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
           {files.length > 0 && (
@@ -412,12 +434,19 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
     validity_from: item.validity_from || '', validity_to: item.validity_to || '',
     exit_criteria_notes: item.exit_criteria_notes || '', open_defect_summary: item.open_defect_summary || '',
     residual_risk_notes: item.residual_risk_notes || '',
+    known_limitations: item.known_limitations || '',
+    business_acceptance_status: item.business_acceptance_status || '',
+    security_testing_status: item.security_testing_status || '',
+    deployment_recommendation: item.deployment_recommendation || '',
+    conditional_observations: item.conditional_observations || '',
+
   })
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [exitCriteriaImages, setExitCriteriaImages] = useState<File[]>([])
   const [openDefectImages, setOpenDefectImages] = useState<File[]>([])
   const [residualRiskImages, setResidualRiskImages] = useState<File[]>([])
+  const [additionalImages, setAdditionalImages] = useState<Record<string, File[]>>({})
   function set<K extends keyof typeof form>(k: K, v: (typeof form)[K]) { setForm((f) => ({ ...f, [k]: v })) }
 
   async function submit(e: React.FormEvent) {
@@ -442,7 +471,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
       // Same best-effort convention as NewSignOffModal above -- the edit
       // itself already succeeded, so a failed image upload shouldn't block
       // handing back the saved certificate.
-      const images = [...exitCriteriaImages, ...openDefectImages, ...residualRiskImages]
+      const images = [...exitCriteriaImages, ...openDefectImages, ...residualRiskImages, ...Object.values(additionalImages).flat()]
       if (images.length > 0) {
         try { await api.uploadFiles(`/api/signoffs/${item.id}/documents`, images) }
         catch (err) { setError(err) }
@@ -459,7 +488,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
           <Field label="Testing Request ID"><input disabled value={item.testing_request_id || ''} /></Field>
           <Field label="Application Name"><input disabled value={item.application_name} /></Field>
           <Field label="Application Owner"><input disabled value={item.application_owner || ''} /></Field>
-          <Field label="QA Approval Department"><input disabled value={item.department || QA_DEPARTMENT} /></Field>
+          <Field label="Request Department"><input disabled value={item.request_department || item.department || ''} /></Field>
         </div>
         <div className="form-row">
           <Field label="Certificate Type *">
@@ -507,9 +536,21 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
             <input type="date" min={form.validity_from || undefined} value={form.validity_to} onChange={(e) => set('validity_to', e.target.value)} />
           </Field>
         </div>
-        <Field label="Exit Criteria Validation Notes *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Exit Criteria Validation Notes" placeholder="Document validation performed against the exit criteria…" /></Field>
-        <Field label="Open Defect Review Summary *"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Defect Review Summary" placeholder="Summarize open defects, severity, ownership and disposition…" /></Field>
+        <div className="section-title">Section E – QA Clearance Remarks</div>
+        <Field label="Testing Scope Completed *"><JiraRichTextField value={form.exit_criteria_notes} onChange={(value) => set('exit_criteria_notes', value)} onImagesChange={setExitCriteriaImages} ariaLabel="Testing Scope Completed" placeholder="Describe the testing scope completed…" /></Field>
+        <Field label="Open Risks (if any)"><JiraRichTextField value={form.open_defect_summary} onChange={(value) => set('open_defect_summary', value)} onImagesChange={setOpenDefectImages} ariaLabel="Open Risks (if any)" placeholder="Describe any remaining risks…" /></Field>
+        {([
+          ['known_limitations', 'Known Limitations'],
+          ['business_acceptance_status', 'Business Acceptance Status'],
+          ['security_testing_status', 'Security Testing Status'],
+          ['deployment_recommendation', 'Deployment Recommendation'],
+        ] as const).map(([key, label]) => <Field key={key} label={label}><JiraRichTextField value={form[key]} onChange={value => set(key, value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, [key]: images }))} ariaLabel={label} placeholder={`Enter ${label.toLowerCase()}…`} /></Field>)}
         <Field label="Remarks *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Remarks" placeholder="Add remarks…" /></Field>
+        {form.certificate_type === 'Conditional Clearance' && <>
+        <div className="section-title">Section F – Conditional Clearance Observations</div>
+        <p className="muted small">Optional. Leave blank to generate observations from linked open defects. If you enter observations, only your content is used in Section F; generated observations are not appended. Defect counts and clearance eligibility still use system data.</p>
+        <Field label="Conditional Clearance Observations"><JiraRichTextField value={form.conditional_observations} onChange={value => set('conditional_observations', value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, conditional_observations: images }))} ariaLabel="Conditional Clearance Observations" placeholder="Enter your observations, including functionality, severity, business impact, mitigation, owner and target date; or leave blank to use system data…" /></Field>
+        </>}
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
           <button className="btn btn-primary" disabled={busy}>{busy ? 'Saving...' : 'Save Changes'}</button>
@@ -520,6 +561,21 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
   )
 }
 
+function CertificateEvidence({ item }: { item: SignOffOut }) {
+  const summary = item.certificate_summary
+  if (!summary) return <p className="muted">No frozen summary is available for this legacy certificate. Refreshing will require full reapproval.</p>
+  const changeIdentity = <dl className="certificate-change-identity"><dt>CR/EPIC Number</dt><dd>{summary.change_request_ids === undefined ? 'Not captured — refresh and reapproval required' : summary.change_request_ids || 'Not recorded'}</dd><dt>Change Description</dt><dd style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{summary.change_description === undefined ? 'Not captured — refresh and reapproval required' : summary.change_description || 'Not recorded'}</dd></dl>
+  return <section className="workflow-panel"><h3>Certificate evidence · revision {summary.revision}</h3>
+    <p>Captured {summary.captured_at}. These figures stay unchanged until explicitly refreshed. Refreshing invalidates prior approval.</p>
+    <p className="muted small">{summary.population_note}</p>
+    <h4>QA Test Case Execution Summary</h4>{changeIdentity}
+    <div style={{ overflowX: 'auto' }}><table className="workflow-table"><thead><tr><th>Total</th>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <th key={status}>{status}</th>)}<th>Pass %</th></tr></thead><tbody><tr><td>{summary.execution.total}</td>{['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed'].map(status => <td key={status}>{summary.execution.counts[status] || 0}</td>)}<td>{summary.execution.pass_pct ?? 'NA'}</td></tr></tbody></table></div>
+    <h4>QA Defect Status Summary</h4>{changeIdentity}<table className="workflow-table"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>{['Fix Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect'].map(status => <tr key={status}><td>{status}{status === 'Deferred' ? ' (Open)' : ''}</td><td>{summary.defects.counts[status] || 0}</td></tr>)}<tr><th>Total</th><td>{summary.defects.total}</td></tr></tbody></table>
+    <h4>Defect Severity-wise Breakdown</h4><table className="workflow-table"><thead><tr><th>Severity</th><th>Open</th><th>Closed / terminal</th><th>Total</th></tr></thead><tbody>{summary.severity.map(row => <tr key={row.severity}><td>{row.severity}</td><td>{row.open}</td><td>{row.closed}</td><td>{row.total}</td></tr>)}</tbody></table>
+    {summary.open_critical_high > 0 && <p role="status">Full Clearance is blocked: {summary.open_critical_high} Critical / High defect(s) remain open.</p>}
+  </section>
+}
+
 export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; onClose: () => void; onChanged: (s: SignOffOut) => void; users: UserOut[] }) {
   const { user } = useAuth()
   const [error, setError] = useState<unknown>(null)
@@ -527,6 +583,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
   const [comments, setComments] = useState('')
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [editing, setEditing] = useState(false)
+  const [confirmRefresh, setConfirmRefresh] = useState(false)
 
   const load = useCallback(async () => {
     try { setHistory(await api.get<ApprovalActionOut[]>(`/api/signoffs/${item.id}/history`)) }
@@ -560,11 +617,11 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
     } catch (err) { setError(err) } finally { setBusyAction(null) }
   }
 
-  const viewOnly = !!user?.roles?.includes('VIEW_ONLY')
+  const viewOnly = isViewOnly(user)
   const isRequester = (!viewOnly && item.requester_id === user?.id) || hasRole(user, 'ADMIN')
   const status = item.status
   const isAdmin = hasRole(user, 'ADMIN')
-  const isQADepartment = hasDepartment(user, QA_DEPARTMENT) || isAdmin
+  const isQADepartment = hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA') || isAdmin
 
   const canSubmit = isRequester && status === 'DRAFT'
   // SM_REJECTED ("Rejected by QA Lead" here) included alongside RETURNED_BY_*
@@ -624,6 +681,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
   const signatures = useMemo(() => {
     const byStage = new Map<string, RecordedElectronicSignature>()
     for (const item of history) {
+      if (item.decision === 'Approval reset') byStage.clear()
       const signature = recordedSignature(item)
       if (signature) byStage.set(signature.stage, signature)
     }
@@ -635,13 +693,13 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
       <ErrorText error={error} />
       <div className="grid grid-2">
         <div><strong>Application:</strong> {item.application_name}</div>
-        <div><strong>Status:</strong> <Badge status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /></div>
+        <div><strong>Status:</strong> <WorkflowStatusBadge record={item} workflow="signoff" status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /></div>
         <div><strong>Testing Request ID:</strong> {item.testing_request_id || '—'}</div>
+        <div><strong>Assigned Tester(s):</strong> {item.certificate_summary?.assigned_testers === undefined ? 'Not captured — refresh and reapproval required' : item.certificate_summary.assigned_testers.map(tester => tester.name).join(', ') || 'Not assigned'}</div>
         <div><strong>CR Number/EPIC Number:</strong> {item.change_request_ids || '—'}</div>
         <div><strong>Change Description:</strong> {item.change_description || '—'}</div>
         <div><strong>Application Owner:</strong> {item.application_owner || '—'}</div>
         <div><strong>Request Department:</strong> {item.request_department || '—'}</div>
-        <div><strong>QA Approval Department:</strong> {item.department || QA_DEPARTMENT}</div>
         <div><strong>Requested By (QA Team):</strong> {userName(users, item.requester_id) || '—'}</div>
         <div><strong>Approved By (QA Lead):</strong> {userName(users, item.reviewed_by_id) || '—'}</div>
         <div><strong>Approved By (Executive):</strong> {userName(users, item.approved_by_id) || '—'}</div>
@@ -657,12 +715,26 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
         <div><strong>Validity:</strong> {item.validity_from || '—'} to {item.validity_to || '—'}</div>
       </div>
 
-      <div className="section-title">Exit Criteria &amp; Risk</div>
+      <CertificateEvidence item={item} />
+      {(isRequester || user?.roles.includes('ADMIN')) && <button className="btn btn-sm" disabled={!!busyAction || ['SM_REJECTED', 'DEPT_HEAD_COE_REJECTED'].includes(status)} title={['SM_REJECTED', 'DEPT_HEAD_COE_REJECTED'].includes(status) ? 'Reopen the rejected certificate before refreshing summaries' : undefined} onClick={() => setConfirmRefresh(true)}>Refresh summaries & restart approval</button>}
+      {confirmRefresh && <ConfirmModal title="Refresh certificate evidence?" message={<p>This captures current linked results and returns the certificate to Draft. Existing approvals and clearance become invalid. QA Lead and Executive must approve the new revision.</p>} confirmLabel="Refresh & require reapproval" onCancel={() => setConfirmRefresh(false)} onConfirm={() => { setConfirmRefresh(false); void act('refresh-summary') }} />}
+      <div className="section-title">Section E – QA Clearance Remarks</div>
       <div className="grid grid-2">
-        <div><strong>Exit Criteria Validation Notes:</strong>{item.exit_criteria_notes ? <AuthenticatedMarkdown value={item.exit_criteria_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
-        <div><strong>Open Defect Review Summary:</strong>{item.open_defect_summary ? <AuthenticatedMarkdown value={item.open_defect_summary} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
-        <div><strong>Remarks:</strong>{item.residual_risk_notes ? <AuthenticatedMarkdown value={item.residual_risk_notes} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>
+        {([
+          ['exit_criteria_notes', 'Testing Scope Completed'], ['open_defect_summary', 'Open Risks (if any)'],
+          ['known_limitations', 'Known Limitations'], ['business_acceptance_status', 'Business Acceptance Status'],
+          ['security_testing_status', 'Security Testing Status'], ['deployment_recommendation', 'Deployment Recommendation'],
+          ['residual_risk_notes', 'Remarks'],
+        ] as const).map(([key, label]) => <div key={key}><strong>{label}:</strong>{item[key] ? <AuthenticatedMarkdown value={item[key]!} basePath={`/api/signoffs/${item.id}/documents`} /> : '—'}</div>)}
       </div>
+
+      {item.certificate_type === 'Conditional Clearance' && <>
+      <div className="section-title">Section F – Conditional Clearance Observations</div>
+      {(item.certificate_summary ? item.certificate_summary.conditional_observations : item.conditional_observations)?.trim()
+        ? <><p className="muted small">User-entered observations</p><AuthenticatedMarkdown value={(item.certificate_summary ? item.certificate_summary.conditional_observations : item.conditional_observations)!} basePath={`/api/signoffs/${item.id}/documents`} /></>
+        : <><p className="muted small">Generated from the frozen linked-defect evidence.</p>{item.certificate_summary?.observations?.length ? <Table rows={item.certificate_summary.observations} rowKey="defect_key" columns={[{ key: 'defect_key', header: 'Defect' }, { key: 'functionality', header: 'Functionality' }, { key: 'observation', header: 'Observation' }, { key: 'severity', header: 'Severity' }, { key: 'owner', header: 'Owner' }, { key: 'target_date', header: 'Target date' }]} /> : <p>{item.certificate_summary ? 'No open linked defect observations in the captured evidence.' : 'Refresh summaries to generate observations; full reapproval is required.'}</p>}</>}
+
+      </>}
 
       <div style={{ display: 'flex', gap: 8, margin: '10px 0 0', flexWrap: 'wrap', alignItems: 'center' }}>
         {/* Reported directly: "'Export PDF' is too much generic, once
@@ -737,7 +809,7 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
         <EditSignOffModal
           item={item}
           onClose={() => setEditing(false)}
-          onSaved={(updated) => { setEditing(false); onChanged(updated) }}
+          onSaved={(updated) => { setEditing(false); onChanged(updated); void load() }}
         />
       )}
     </Modal>
@@ -803,15 +875,14 @@ export default function SignOff() {
   // backend's now-widened POST /api/signoffs role gate (signoff.py's
   // create_signoff), so a QA Lead can raise a certificate themselves (e.g.
   // on behalf of a request whose assigned tester isn't available).
-  const canCreate = hasRole(user, 'ADMIN')
-    || (hasRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
+  const canCreate = hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
 
   return (
     <div>
       <ErrorText error={error} />
       <PageHeader
         title="QA Clearance Certificates" count={rows.length}
-        subtitle="COE - Quality Assurance clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive approval."
+        subtitle="Workspace QA clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive approval."
         actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Clearance Certificate</button>}
       />
       <Card>
@@ -855,7 +926,7 @@ export default function SignOff() {
           { key: 'approved_by_id', header: 'Approved By', render: (r) => userName(users, r.approved_by_id) || '—', filterValue: (r) => userName(users, r.approved_by_id) || '' },
           { key: 'certificate_type', header: 'Type' },
           { key: 'testing_type', header: 'Testing Type' },
-          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={SIGNOFF_STATUS_LABELS[r.status] || r.status} /> },
+          { key: 'status', header: 'Status', render: (r) => <WorkflowStatusBadge record={r} workflow="signoff" status={r.status} label={SIGNOFF_STATUS_LABELS[r.status] || r.status} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => SIGNOFF_PENDING_WITH[r.status] || '—', filterValue: (r) => SIGNOFF_PENDING_WITH[r.status] || '' },
         ]} rows={visibleRows} />
       </Card>

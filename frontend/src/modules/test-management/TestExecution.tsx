@@ -6,8 +6,8 @@ import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { ENVIRONMENTS, hasRole, hasDepartment, hasRetestEligibleHistory, QA_DEPARTMENT, TEST_CASE_PRIORITIES, TEST_CASE_TYPES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
-import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, QARequestListOut, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
+import { ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, TEST_CASE_PRIORITIES, TEST_CASE_TYPES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
+import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
@@ -41,7 +41,7 @@ const EmbeddedDefectDetail = React.lazy(() => import('./Defects')
 
 function CycleModal({ project, requests, users, folders, defaultFolderId, editing, onClose, onSaved }: {
   project: TestProjectOut
-  requests: QARequestListOut[]
+  requests: LinkedRequestRef[]
   users: UserOut[]
   // Reported directly: "Create Test Cycle Folder ... Under this folder
   // create test cycle." '' means Unfiled -- same convention as
@@ -52,6 +52,18 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
   onClose: () => void
   onSaved: (c: TestCycleOut) => void
 }) {
+  const [ownerCandidates, setOwnerCandidates] = useState<UserOut[]>([])
+  const [ownersLoading, setOwnersLoading] = useState(true)
+  const [ownersError, setOwnersError] = useState<unknown>(null)
+  useEffect(() => {
+    let active = true
+    setOwnersLoading(true); setOwnerCandidates([]); setOwnersError(null)
+    api.get<UserOut[]>(`/api/test-execution/projects/${project.id}/cycle-owner-candidates${editing ? `?cycle_id=${editing.id}` : ''}`)
+      .then(items => { if (active) setOwnerCandidates(items) })
+      .catch(error => { if (active) setOwnersError(error) })
+      .finally(() => { if (active) setOwnersLoading(false) })
+    return () => { active = false }
+  }, [project.id, editing?.id])
   const [name, setName] = useState(editing?.name || '')
   const [description, setDescription] = useState(editing?.description || '')
   const [folderId, setFolderId] = useState<number | ''>(editing ? (editing.folder_id ?? '') : defaultFolderId)
@@ -67,13 +79,13 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
   const [busy, setBusy] = useState(false)
   const { user } = useAuth()
   // 2026-08 Reassignment Requirement -- changing an already-set cycle owner
-  // is a reassignment: only the current owner, the QA Department Head, or
+  // is a reassignment: only the current owner, a workspace QA Executive, or
   // an Admin may pick a different one, and a reason becomes mandatory.
   // Setting an owner for the first time (creating a cycle, or editing one
   // that never had an owner) stays open to anyone who can edit the cycle at
   // all -- same broad gate this whole modal already runs under.
   const isAdmin = Boolean(user?.roles.includes('ADMIN'))
-  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
+  const isQADepartmentHead = isAdmin || (hasWorkspaceRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA'))
   const hasExistingOwner = !!editing?.owner_id
   const isCurrentOwner = !!editing && editing.owner_id === user?.id
   const canChangeOwner = !hasExistingOwner || isAdmin || isCurrentOwner || isQADepartmentHead
@@ -86,15 +98,15 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
     if (!name.trim()) { setError(new Error('Cycle name cannot be blank')); return }
     if (!startDate || !endDate) { setError(new Error('Start date and end date are required')); return }
     if (startDate > endDate) { setError(new Error('Start date cannot be after end date')); return }
-    if (!linkedRequest) { setError(new Error('Select a Functional QA Request')); return }
     if (isOwnerReassignment && !ownerReassignReason.trim()) { setError(new Error('A reassignment reason is required to change the cycle owner')); return }
     setBusy(true); setError(null)
     try {
       const payload = {
         name: name.trim(), description: description || null,
         start_date: startDate, end_date: endDate,
-        linked_request_type: 'Functional',
-        linked_request_id: Number(linkedRequest.split(':')[1]),
+        ...(linkedRequest
+          ? { linked_request_type: 'Functional', linked_request_id: Number(linkedRequest.split(':')[1]) }
+          : editing ? { linked_request_type: null, linked_request_id: null } : {}),
         cycle_type: cycleType || null,
         environment: environment || null, build: build || null,
         owner_id: ownerId || null,
@@ -153,19 +165,21 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
               ))}
             </select>
           </Field>
-          <Field label="Build">
+          <Field label="Build (required before execution)">
             <input value={build} onChange={(e) => setBuild(e.target.value)} placeholder="e.g. 2026.08.1" />
           </Field>
           <Field label="Owner">
             {canChangeOwner ? (
-              <SearchableSelect
+              <UserAssignSelect
                 value={ownerId === '' ? '' : String(ownerId)}
                 onChange={(v) => setOwnerId(v ? Number(v) : '')}
                 placeholder="-- Unassigned --"
-                options={[{ value: '', label: '-- Unassigned --' }, ...users.filter((u) => u.is_active).map((u) => ({ value: String(u.id), label: u.full_name }))]}
+                users={ownerCandidates}
+                clearable
+                clearLabel="-- Unassigned --"
               />
             ) : (
-              <input value={editing?.owner_name || 'Unassigned'} disabled title="Only the current owner, the QA Department Head, or an Administrator can reassign the cycle owner" />
+              <input value={editing?.owner_name || 'Unassigned'} disabled title="Only the current owner, a QA Executive in this workspace, or an Administrator can reassign the cycle owner" />
             )}
           </Field>
         </div>
@@ -174,11 +188,18 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
             <input className="reassign-reason-input" value={ownerReassignReason} onChange={(e) => setOwnerReassignReason(e.target.value)} placeholder="Required when changing an already-assigned owner…" />
           </Field>
         )}
-        <Field label="Functional QA Request *">
-          <SearchableSelect disabled={requestLinkLocked} value={linkedRequest} onChange={setLinkedRequest} placeholder="Select a Functional QA Request…" options={requests.flatMap((request) =>
-            request.linked_functional_requests.map((child) => ({ value: `Functional:${child.id}`, label: `${child.request_id} — ${request.application_name}` }))
-          )} />
-          <small className="muted">{requestLinkLocked ? 'Execution has started, so this Functional QA Request link is locked.' : 'Required. This Test Cycle executes the selected Functional QA Request.'}</small>
+        <Field label="Functional QA Request (optional)">
+          <SearchableSelect disabled={requestLinkLocked} value={linkedRequest} onChange={setLinkedRequest} placeholder="Select a Functional QA Request…" options={[
+            { value: '', label: 'No request (Standalone)' },
+            ...requests.map((request) => (
+              { value: `Functional:${request.id}`, label: `${request.request_id} — ${project.name}` }
+            )),
+          ]} />
+          <small className="muted">{requestLinkLocked
+            ? 'Functional execution has started, so this request link is locked.'
+            : requests.length
+              ? 'Leave blank for a standalone Test Cycle. A Functional request can be linked later.'
+              : `No Functional QA Request for ${project.name} exists in this workspace. You can create a standalone cycle or raise a matching request first.`}</small>
         </Field>
         <div className="grid grid-2">
           <Field label="Start Date *">
@@ -190,7 +211,7 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
         </div>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
-          <button className="btn btn-primary" disabled={busy || (isOwnerReassignment && !ownerReassignReason.trim())}>{busy ? 'Saving…' : editing ? 'Save Changes' : 'Create Cycle'}</button>
+          <ErrorText error={ownersError} /><button className="btn btn-primary" disabled={busy || ownersLoading || !!ownersError || (isOwnerReassignment && !ownerReassignReason.trim())}>{busy ? 'Saving…' : editing ? 'Save Changes' : 'Create Cycle'}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
         </div>
       </form>
@@ -300,7 +321,7 @@ function CycleFolderAccessModal({ folder, departments, onClose, onChanged }: {
   const grantedDepartments = new Set(grants.filter((g) => g.department).map((g) => g.department))
   const grantedUserIds = new Set(grants.filter((g) => g.user_id != null).map((g) => g.user_id))
   const departmentOptions = departments.filter((d) => !grantedDepartments.has(d.name))
-  const userOptions = allUsers.filter((u) => u.is_active && !grantedUserIds.has(u.id))
+  const userOptions = allUsers.filter((u) => isSelectableUser(u) && !grantedUserIds.has(u.id))
 
   return (
     <Modal title={`Folder access — ${folder.name}`} onClose={onClose}>
@@ -334,7 +355,7 @@ function CycleFolderAccessModal({ folder, departments, onClose, onChanged }: {
           </Field>
         ) : (
           <Field label="User">
-            <SearchableSelect value={userId} onChange={setUserId} placeholder="Select user…" options={userOptions.map((u) => ({ value: String(u.id), label: `${u.full_name} (${u.department || 'no department'})` }))} />
+            <UserAssignSelect value={userId} onChange={setUserId} placeholder="Select user…" users={userOptions} />
           </Field>
         )}
         <ErrorText error={error} />
@@ -355,9 +376,10 @@ function CycleFolderAccessModal({ folder, departments, onClose, onChanged }: {
 // containing ONLY linked_request_type/linked_request_id -- the backend's own
 // update_cycle allows exactly that shape through even once a cycle is
 // Completed, still rejecting anything broader.
-function LinkCycleRequestModal({ cycle, requests, onClose, onSaved }: {
+function LinkCycleRequestModal({ cycle, project, requests, onClose, onSaved }: {
   cycle: TestCycleOut
-  requests: QARequestListOut[]
+  project: TestProjectOut
+  requests: LinkedRequestRef[]
   onClose: () => void
   onSaved: (c: TestCycleOut) => void
 }) {
@@ -383,10 +405,12 @@ function LinkCycleRequestModal({ cycle, requests, onClose, onSaved }: {
       <form onSubmit={submit}>
         <p className="muted small">{cycle.cycle_key} is Completed and otherwise read-only. Its Functional QA Request can be replaced here for traceability and reporting.</p>
         <Field label="Functional QA Request *">
-          <SearchableSelect value={linkedRequest} onChange={setLinkedRequest} placeholder="Select a Functional QA Request…" options={requests.flatMap((request) =>
-            request.linked_functional_requests.map((child) => ({ value: `Functional:${child.id}`, label: `${child.request_id} — ${request.application_name}` }))
+          <SearchableSelect value={linkedRequest} onChange={setLinkedRequest} placeholder="Select a Functional QA Request…" options={requests.map((request) =>
+            ({ value: `Functional:${request.id}`, label: `${request.request_id} — ${project.name}` })
           )} />
-          <small className="muted">Required. Select the Functional QA Request executed by this cycle.</small>
+          <small className="muted">{requests.length
+            ? 'Required. Select the Functional QA Request executed by this cycle.'
+            : `No Functional QA Request for ${project.name} exists in this workspace.`}</small>
         </Field>
         <ErrorText error={error} />
         <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
@@ -398,10 +422,12 @@ function LinkCycleRequestModal({ cycle, requests, onClose, onSaved }: {
   )
 }
 
-function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, onError }: {
+function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount, blockedCount, onChanged, onError }: {
   cycle: TestCycleOut
   executionTotal: number
   executedCount: number
+  failedCount: number
+  blockedCount: number
   onChanged: (c: TestCycleOut) => void
   onError: (err: unknown) => void
 }) {
@@ -467,9 +493,9 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
         : cycle.status === 'Blocked'
           ? [{ label: 'Resume Execution', status: 'In Progress' }]
           : []
-  const unresolvedStatuses = new Set(['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened'])
-  const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && unresolvedStatuses.has(defect.status))
-  const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && unresolvedStatuses.has(defect.status))
+  const unresolvedStatuses = new Set(['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification'])
+  const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !defect.verified_builds?.some(v => v.environment === cycle.environment && v.build === cycle.build))
+  const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !defect.verified_builds?.some(v => v.environment === cycle.environment && v.build === cycle.build))
   const deferredDefects = completionDefects.filter((defect) => defect.status === 'Deferred')
   const residualMissingTarget = residualDefects.filter((defect) => !defect.target_release)
   const deferredMissingTarget = deferredDefects.filter((defect) => !defect.target_release)
@@ -478,7 +504,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
   const severitySummary = ['Critical', 'High', 'Medium', 'Low'].map((severity) => ({ severity, count: completionDefects.filter((defect) => defect.severity === severity).length }))
   const targetReleaseMissing = completionDefects.filter((defect) =>
     !defect.target_release && (
-      (['Medium', 'Low'].includes(defect.severity) && unresolvedStatuses.has(defect.status)) || defect.status === 'Deferred'
+      (['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !defect.verified_builds?.some(v => v.environment === cycle.environment && v.build === cycle.build)) || defect.status === 'Deferred'
     ))
   const completionBlockers = new Set(severeBlockers.map((defect) => defect.id))
   const missingTargetDefects = new Set(targetReleaseMissing.map((defect) => defect.id))
@@ -494,7 +520,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
   const visibleCompletionDefects = filteredCompletionDefects.slice((safeCompletionPage - 1) * completionPageSize, safeCompletionPage * completionPageSize)
   const firstVisibleDefect = filteredCompletionDefects.length ? (safeCompletionPage - 1) * completionPageSize + 1 : 0
   const lastVisibleDefect = Math.min(safeCompletionPage * completionPageSize, filteredCompletionDefects.length)
-  const hasCompletionBlockers = notExecutedCount > 0 || severeBlockers.length > 0 || targetReleaseMissing.length > 0 || (residualDefects.length > 0 && !canCompleteWithResidualRisk)
+  const hasCompletionBlockers = failedCount > 0 || blockedCount > 0 || notExecutedCount > 0 || severeBlockers.length > 0 || targetReleaseMissing.length > 0 || (residualDefects.length > 0 && !canCompleteWithResidualRisk)
   const needsResidualJustification = residualDefects.length > 0 && canCompleteWithResidualRisk && !remarks.trim()
   const completionState = hasCompletionBlockers ? 'blocked' : needsResidualJustification ? 'pending' : 'ready'
 
@@ -555,6 +581,9 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
             {busy ? 'Updating…' : action.label}
           </button>
         ))}
+        {cycle.status === 'Ready' && cycle.linked_request_key && (
+          <small className="muted">Start execution on {cycle.linked_request_key} first. The linked request must be Execution In Progress before this cycle can start.</small>
+        )}
       </div>
       {showBlock && (
         <Modal title={`Block ${cycle.cycle_key}?`} onClose={() => setShowBlock(false)} variant="dialog" preventBackdropClose>
@@ -586,7 +615,9 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
                 <div>
                   <strong>{hasCompletionBlockers ? 'This cycle is not ready to complete' : needsResidualJustification ? 'Residual-risk approval details required' : 'This cycle satisfies the completion checks'}</strong>
                   <p>
-                    {notExecutedCount > 0
+                    {failedCount > 0 || blockedCount > 0
+                      ? `${failedCount} failed and ${blockedCount} blocked testcase(s) must be resolved and retested before completion.`
+                      : notExecutedCount > 0
                       ? `Record results for ${notExecutedCount} remaining testcase(s).`
                       : severeBlockers.length > 0
                         ? `Resolve ${severeBlockers.length} open Critical/High defect(s) before completion.`
@@ -604,7 +635,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
                 {severitySummary.map((item) => <div key={item.severity} data-severity={item.severity.toLowerCase()}><small>{item.severity}</small><strong>{item.count}</strong><span>{['Critical', 'High'].includes(item.severity) ? 'Blocks completion when open' : 'Residual risk when open'}</span></div>)}
               </div>
               <section className="tm-completion-readiness" aria-label="Completion readiness">
-                <div className={notExecutedCount ? 'failed' : 'passed'}><i>{notExecutedCount ? '×' : '✓'}</i><span><strong>Execution results</strong><small>{executedCount} of {executionTotal} recorded</small></span></div>
+                <div className={notExecutedCount || failedCount || blockedCount ? 'failed' : 'passed'}><i>{notExecutedCount || failedCount || blockedCount ? '×' : '✓'}</i><span><strong>Execution results</strong><small>{executedCount} of {executionTotal} recorded · {failedCount} failed · {blockedCount} blocked</small></span></div>
                 <div className={severeBlockers.length ? 'failed' : 'passed'}><i>{severeBlockers.length ? '×' : '✓'}</i><span><strong>Critical/High defect gate</strong><small>{severeBlockers.length ? `${severeBlockers.length} open Critical/High defect(s)` : 'No open Critical/High defects'}</small></span></div>
                 <div className={targetReleaseMissing.length ? 'failed' : 'passed'}><i>{targetReleaseMissing.length ? '×' : '✓'}</i><span><strong>Target Releases</strong><small>{targetReleaseMissing.length ? `${targetReleaseMissing.length} missing` : 'All required releases set'}</small></span></div>
               </section>
@@ -657,7 +688,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, onChanged, o
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={busy || loadingCompletion || notExecutedCount > 0 || severeBlockers.length > 0 || deferredMissingTarget.length > 0 || residualMissingTarget.length > 0 || (residualDefects.length > 0 && (!canCompleteWithResidualRisk || !remarks.trim()))}
+                disabled={busy || loadingCompletion || Boolean(dialogError) || failedCount > 0 || blockedCount > 0 || notExecutedCount > 0 || severeBlockers.length > 0 || deferredMissingTarget.length > 0 || residualMissingTarget.length > 0 || (residualDefects.length > 0 && (!canCompleteWithResidualRisk || !remarks.trim()))}
                 onClick={() => transition('Completed', '', remarks.trim())}
               >
                 {busy ? 'Completing…' : 'Complete cycle'}
@@ -942,9 +973,10 @@ function TestCaseDetail({ label, value, wide = false, children }: {
   )
 }
 
-function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisting, onError }: {
+function InlineExecutionActions({ execution, canExecute, executionContextError, onChanged, onLinkExisting, onError }: {
   execution: TestExecutionOut
   canExecute: boolean
+  executionContextError?: string
   onChanged: (execution: TestExecutionOut) => void
   onLinkExisting: (execution: TestExecutionOut) => void
   onError: (error: unknown) => void
@@ -1007,7 +1039,7 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
   }, [open])
 
   async function saveResult() {
-    if (!result) return
+    if (!result || !canExecute || executionContextError) return
     setBusy(true)
     try {
       const saved = await api.patch<TestExecutionOut>(`/api/test-execution/executions/${execution.id}`, {
@@ -1020,7 +1052,7 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
       onChanged(saved)
       setResult('')
       setOpen(false)
-    } catch (error) { onError(error) } finally { setBusy(false) }
+    } catch (error) { setOpen(false); onError(error) } finally { setBusy(false) }
   }
 
   async function linkDefect(event: React.FormEvent) {
@@ -1038,7 +1070,7 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
 
   return (
     <div className="tm-inline-run" onClick={(event) => event.stopPropagation()}>
-      <button ref={runButtonRef} type="button" className="tm-play-button" disabled={!canExecute || busy} title={canExecute ? 'Record a result without opening the testcase' : 'Only the assigned runner can execute this testcase'} onClick={toggleRunPanel}><span>▶</span> Run</button>
+      <button ref={runButtonRef} type="button" className="tm-play-button" disabled={!canExecute || busy} title={executionContextError || (canExecute ? 'Record a result without opening the testcase' : 'Only the assigned runner can execute this testcase')} onClick={toggleRunPanel}><span>▶</span> Run</button>
       {latestCanLinkDefect && canExecute && <button type="button" className="tm-link-last-defect tm-governed-defect" onClick={() => navigate(`/defects?execution=${execution.id}`)}>Raise defect</button>}
       {latestCanLinkDefect && canExecute && <button type="button" className="tm-link-last-defect" onClick={() => onLinkExisting(execution)}>Link existing</button>}
       {latestCanLinkDefect && canExecute && <button type="button" className="tm-link-last-defect" onClick={() => { setLinkingDefect((value) => !value); setOpen(false) }}>Link external</button>}
@@ -1047,14 +1079,14 @@ function InlineExecutionActions({ execution, canExecute, onChanged, onLinkExisti
         <div className="tm-inline-result-options">{TEST_EXECUTION_STATUSES.filter((status) =>
           status !== 'Not Executed' && (status !== 'Retest Passed' || hasRetestEligibleHistory(execution.runs, execution.status))
         ).map((status) => {
-          const blocked = executionStatusGate(execution.linked_defects, execution.runs, status, undefined, execution.status)
+          const blocked = executionStatusGate(execution.linked_defects, execution.runs, status, undefined, execution.status, execution.id)
           const tone = status.toLowerCase().replace(/\s+/g, '-')
           return <button type="button" key={status} className={`${result === status ? 'selected ' : ''}result-${tone}`} disabled={!!blocked} title={blocked || undefined} onClick={() => setResult(status)}><i />{status}</button>
         })}</div>
-        {result && executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status) && (
-          <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status)}</small>
+        {result && executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status, execution.id) && (
+          <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status, execution.id)}</small>
         )}
-        <div className="tm-inline-run-actions"><span>{result ? `${result} selected` : 'Select one result'}</span><button type="button" className="btn btn-sm" onClick={() => { setResult(''); setOpen(false) }}>Cancel</button><button type="button" className="btn btn-sm btn-primary" disabled={!result || busy} onClick={saveResult}>{busy ? 'Saving…' : 'Save attempt'}</button></div>
+        <div className="tm-inline-run-actions"><span>{result ? `${result} selected` : 'Select one result'}</span><button type="button" className="btn btn-sm" onClick={() => { setResult(''); setOpen(false) }}>Cancel</button><button type="button" className="btn btn-sm btn-primary" disabled={!result || busy || !canExecute || !!executionContextError} onClick={saveResult}>{busy ? 'Saving…' : 'Save attempt'}</button></div>
       </div>, document.body)}
       {linkingDefect && latestRun && <form className="tm-inline-defect-panel" onSubmit={linkDefect}>
         <strong>Link to latest {latestRun.status.toLowerCase()} run</strong><small>Attempt #{latestRun.attempt_no} only</small>
@@ -1085,7 +1117,7 @@ function LinkExistingDefectModal({ execution, onClose, onLinked }: {
     // Load every page so an older governed defect does not disappear merely
     // because more than 100 open records exist. Triaged is actionable and
     // must be included as well.
-    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Deferred']
     const qs = new URLSearchParams({ page_size: '100' })
     openStatuses.forEach((s) => qs.append('status', s))
     let active = true
@@ -1207,7 +1239,7 @@ function DefectLinks({ executionId, run, readOnly, onChanged }: {
 
   useEffect(() => {
     if (!adding || linkMode !== 'internal' || internalDefects.length) return
-    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
+    const openStatuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Deferred']
     const qs = new URLSearchParams({ page_size: '100' })
     openStatuses.forEach((status) => qs.append('status', status))
     let active = true
@@ -1521,7 +1553,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   // not just a disabled option buried in the Result dropdown below. See
   // constants.ts's executionStatusGate / backend's matching
   // _execution_status_gate for where this is actually enforced.
-  const activeLinkedDefects = (execution.linked_defects || []).filter((d) => !['Deferred', 'Closed'].includes(d.status))
+  const activeLinkedDefects = (execution.linked_defects || []).filter((d) => (d.modern_workflow || !['Deferred', 'Closed'].includes(d.status)) && !d.verified_execution_ids?.includes(execution.id))
   const hasPriorFailedOrBlocked = hasRetestEligibleHistory(execution.runs, execution.status)
   return (
     <Modal title={`Record Result -- ${tc?.test_case_key || `Test Case #${execution.test_case_id}`}`} onClose={onClose} wide>
@@ -1612,18 +1644,18 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
           </ul>
         </div>
       )}
-      {!execution.assigned_to_id && <div className="info-banner">A COE - Quality Assurance QA Engineer or QA Lead must assign this testcase before an execution attempt can be recorded.</div>}
-      {execution.assigned_to_id && readOnly && <div className="info-banner">Only the assigned runner can record the next attempt. Any COE - Quality Assurance QA Engineer or QA Lead can reassign the testcase when needed.</div>}
+      {!execution.assigned_to_id && <div className="info-banner">A workspace QA Engineer or QA Lead must assign this testcase before an execution attempt can be recorded.</div>}
+      {execution.assigned_to_id && readOnly && <div className="info-banner">Only the assigned runner can record the next attempt. Any QA Engineer or QA Lead in this workspace can reassign the testcase when needed.</div>}
       {activeLinkedDefects.length > 0 && (
         <div className="info-banner warning">
-          <strong>Locked:</strong> This test case previously failed and has an active linked defect
+          <strong>Verification required:</strong> Linked defect verification does not cover this execution
           {' '}({activeLinkedDefects.map((d) => `${d.defect_key} · ${d.status}`).join(', ')}). The execution
-          status cannot be changed until all linked defects are Closed or Deferred.
+          status cannot be changed until verification requirements are met. Check the environment and build in Edit Cycle; a closed workflow defect still needs matching verification.
         </div>
       )}
       {activeLinkedDefects.length === 0 && hasPriorFailedOrBlocked && (
         <div className="info-banner">
-          The linked defect has been Closed or Deferred. Please retest the test case and select
+          The linked defect verification requirements are satisfied. Please retest the test case and select
           {' '}<strong>Retest Passed</strong> if it passes, or <strong>Fail</strong> if it fails again.
         </div>
       )}
@@ -1642,12 +1674,12 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
               {TEST_EXECUTION_STATUSES.filter((s) =>
                 s !== 'Not Executed' && (s !== 'Retest Passed' || hasPriorFailedOrBlocked)
               ).map((s) => {
-                const blocked = executionStatusGate(execution.linked_defects, execution.runs, s, defectId, execution.status)
+                const blocked = executionStatusGate(execution.linked_defects, execution.runs, s, defectId, execution.status, execution.id)
                 return <option key={s} value={s} disabled={!!blocked}>{s}{blocked ? ' (locked)' : ''}</option>
               })}
             </select>
-            {status && executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status) && (
-              <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status)}</small>
+            {status && executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status, execution.id) && (
+              <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status, execution.id)}</small>
             )}
           </Field>
           <Field label="Actual Result">
@@ -1727,7 +1759,7 @@ function BulkExecutionModal({ cycleId, executions, onClose, onExecuted }: {
   // caught before Confirm rather than after the backend rejects it (which
   // still happens regardless, see _execution_status_gate).
   const defectBlocked = selectedExecutions
-    .map((execution) => ({ execution, violation: executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status) }))
+    .map((execution) => ({ execution, violation: executionStatusGate(execution.linked_defects, execution.runs, status, defectId, execution.status, execution.id) }))
     .filter((row): row is { execution: TestExecutionOut; violation: string } => !!row.violation)
 
   function review(e: React.FormEvent) {
@@ -2024,9 +2056,9 @@ export default function TestExecution() {
   const canManageExecutionGovernance = hasRole(user, ...QA_LEAD_GROUP_ROLES) && (myAccess?.can_manage_execution_governance ?? false)
   const canDeleteCycle = canManageExecutionGovernance
   const canManageRunners = hasRole(user, ...CAN_EXEC_ROLES)
-    && (user?.roles.includes('ADMIN') || hasDepartment(user, QA_DEPARTMENT))
+    && hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   // 2026-08 Reassignment Requirement -- initially narrowed reassigning an
-  // already-assigned runner to the current runner / QA Department Head /
+  // already-assigned runner to the current runner / workspace QA Executive /
   // Admin, same as every other reassignment flow. Reported directly again:
   // "for test execution reassignment of testcase can be perform by any QA
   // user, otherwise it will be hectic for qa lead" -- unlike Functional/
@@ -2110,7 +2142,7 @@ export default function TestExecution() {
   const [cycleSidebarCollapsed, setCycleSidebarCollapsed] = useState(false)
   const [users, setUsers] = useState<UserOut[]>([])
   const [exportingCycle, setExportingCycle] = useState(false)
-  const [qaRequests, setQaRequests] = useState<QARequestListOut[]>([])
+  const [functionalRequestOptions, setFunctionalRequestOptions] = useState<LinkedRequestRef[]>([])
   const [linkingExistingExecution, setLinkingExistingExecution] = useState<TestExecutionOut | null>(null)
   // 2026-08 -- reported directly: "once test cycle completed, then test
   // cycle is locked to edit. that is okay, but give option to link QA
@@ -2145,19 +2177,29 @@ export default function TestExecution() {
     api.get<DepartmentOut[]>('/api/departments').then(setDepartments).catch(() => setDepartments([]))
   }, [])
 
-  // Picker data is loaded only when a control that needs it is reachable.
-  // This includes the Record Result dialog and the cycle table's inline
-  // assignment controls -- previously only New/Edit Cycle and Add Cases
-  // triggered the fetch, so Record Result received an empty users array and
-  // its otherwise-correct shared UserAssignSelect displayed "No matches".
+  // A parent workspace can display projects owned by a child. Load runner
+  // candidates against the cycle's creating workspace and clear the old
+  // project list immediately so a fast assignment cannot submit a stale user.
   useEffect(() => {
-    const runnerAssignmentVisible = Boolean(cycleId && canManageRunners)
-    if (!showNewCycle && !editingCycle && !showAddCases && !editingExecution && !runnerAssignmentVisible && !linkingCycleRequest) return
-    if (!users.length) api.get<UserOut[]>('/api/test-projects/eligible-users').then(setUsers).catch(setError)
-    if ((showNewCycle || editingCycle || linkingCycleRequest) && !qaRequests.length) {
-      api.get<PageOut<QARequestListOut>>('/api/qa-requests?page_size=100').then((p) => setQaRequests(p.items)).catch(setError)
+    if (!projectId) { setUsers([]); return }
+    let active = true
+    setUsers([])
+    api.get<UserOut[]>(`/api/test-projects/eligible-users?project_id=${projectId}${cycleId ? `&cycle_id=${cycleId}` : ''}`)
+      .then((rows) => { if (active) setUsers(rows) })
+      .catch((failure) => { if (active) setError(failure) })
+    return () => { active = false }
+  }, [projectId, cycleId])
+
+  // Request-link options are loaded only when a control that needs them is
+  // reachable. Runner candidates are handled separately above because their
+  // workspace boundary must change atomically with the selected project.
+  useEffect(() => {
+    if ((showNewCycle || editingCycle || linkingCycleRequest) && projectId) {
+      api.get<LinkedRequestRef[]>(`/api/test-execution/projects/${projectId}/functional-request-options`)
+        .then(setFunctionalRequestOptions)
+        .catch(setError)
     }
-  }, [showNewCycle, editingCycle, showAddCases, editingExecution, cycleId, canManageRunners, users.length, qaRequests.length, linkingCycleRequest])
+  }, [showNewCycle, editingCycle, linkingCycleRequest, projectId])
 
   useEffect(() => {
     if (!projectId) { setMyAccess(null); return }
@@ -2301,22 +2343,24 @@ export default function TestExecution() {
   const cycleExecutionTotal = executionSummary?.total ?? 0
   const progressRate = cycleExecutionTotal ? Math.round((executedCount / cycleExecutionTotal) * 100) : 0
   const selectedCycle = cycles.find((c) => c.id === cycleId)
+  const canEditSelectedCycle = canExec && !!selectedCycle?.workspace_writable
   const cycleIsLocked = !!selectedCycle && TEST_CYCLE_LOCKED_STATUSES.includes(selectedCycle.status)
   const cycleIsCompleted = selectedCycle?.status === 'Completed'
   const selectedProject = projects.find((project) => project.id === projectId)
   const projectIsActive = !!selectedProject?.is_active
   const runnerCandidates = useMemo(() => users.filter((candidate) => (
-    hasDepartment(candidate, QA_DEPARTMENT)
-    && candidate.is_active
-    && candidate.roles.some((role) => ['QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA'].includes(role))
+    isSelectableUser(candidate)
+    && candidate.roles.includes('QA_ENGINEER')
   )), [users])
+  const executionContextError = selectedCycle && (!selectedCycle.environment?.trim() || !selectedCycle.build?.trim())
+    ? 'Set the environment and tested build in Edit Cycle before recording execution.' : undefined
   const canExecuteRow = useCallback((execution: TestExecutionOut) => (
-    canExec && projectIsActive && selectedCycle?.status === 'In Progress'
-    && (!!user?.roles.includes('ADMIN') || execution.assigned_to_id === user?.id)
-  ), [canExec, projectIsActive, selectedCycle?.status, user])
+    canEditSelectedCycle && projectIsActive && !executionContextError && selectedCycle?.status === 'In Progress'
+    && execution.assigned_to_id === user?.id
+  ), [canEditSelectedCycle, projectIsActive, executionContextError, selectedCycle?.status, user])
   const canSelectRow = useCallback((execution: TestExecutionOut) => (
-    !cycleIsLocked && (canManageRunners || canExecuteRow(execution))
-  ), [canExecuteRow, canManageRunners, cycleIsLocked])
+    !!selectedCycle?.workspace_writable && !cycleIsLocked && (canManageRunners || canExecuteRow(execution))
+  ), [canExecuteRow, canManageRunners, cycleIsLocked, selectedCycle?.workspace_writable])
   const selectableExecutions = filteredExecutions.filter(canSelectRow)
   const selectedExecutions = executions.filter((execution) => selectedExecutionIds.has(execution.id))
   const bulkExecutionEligible = selectedExecutions.length > 0 && selectedExecutions.every(canExecuteRow)
@@ -2449,7 +2493,7 @@ export default function TestExecution() {
           <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)} title={`Open ${cycle.name} (${cycle.cycle_key})`}>
             <span className="tm-cycle-row-copy"><i aria-hidden="true" /><span><strong>{cycle.name}</strong><small>{cycle.cycle_key}</small></span></span><Badge status={cycle.status} />
           </button>
-          {canDeleteCycle && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title={`Delete ${cycle.name}`} aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}><IconTrash aria-hidden="true" /></button>}
+          {canDeleteCycle && cycle.workspace_writable && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title={`Delete ${cycle.name}`} aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}><IconTrash aria-hidden="true" /></button>}
         </li>
       ))}
       {cycles.length === 0 && <li className="tm-cycle-empty">No cycles here yet.</li>}
@@ -2544,7 +2588,7 @@ export default function TestExecution() {
                     <button type="button" className={`link-btn ${selectedCycleFolder === f.id ? 'active' : ''}`} onClick={() => setSelectedCycleFolder(f.id)}>
                       {f.access_grants.length ? <IconLock className="restricted" aria-hidden="true" /> : <IconFolder aria-hidden="true" />} <span className="tm-cycle-link-label">{f.name}</span> <em>{f.cycle_count}</em>
                     </button>
-                    {canExec && projectIsActive && (
+                    {canExec && f.workspace_writable && projectIsActive && (
                       <div className="tm-folder-actions">
                         <button type="button" className="tm-folder-action" title="Manage access" aria-label={`Manage access for ${f.name}`} onClick={() => setManagingCycleFolderAccess(f)}><IconLock aria-hidden="true" /></button>
                         <button type="button" className="tm-folder-action" title="Rename folder" aria-label={`Rename ${f.name}`} onClick={() => setEditingCycleFolder(f)}>✎</button>
@@ -2568,11 +2612,12 @@ export default function TestExecution() {
                 <div className="tm-cycle-command-copy">
                   <span>{selectedCycle?.cycle_key}</span>
                   <h3>{selectedCycle?.name}</h3>
+                  <span className="badge badge-gray">{selectedCycle?.workspace_writable ? "Your workspace" : `${selectedCycle?.origin_workspace_name || "Other workspace"} · Read-only`}</span>
                   <p>{selectedCycle?.description || 'Execute and monitor the selected test set.'}</p>
                   <div className="tm-cycle-context-row">
                     <div className="tm-cycle-meta">
-                      {selectedCycle && (canExec && projectIsActive && !cycleIsCompleted ? (
-                        <CycleStatusControl cycle={selectedCycle} executionTotal={cycleExecutionTotal} executedCount={executedCount} onChanged={(saved) => {
+                      {selectedCycle && (canEditSelectedCycle && projectIsActive && !cycleIsCompleted ? (
+                        <CycleStatusControl cycle={selectedCycle} executionTotal={cycleExecutionTotal} executedCount={executedCount} failedCount={executionSummary?.status_counts.Fail || 0} blockedCount={executionSummary?.status_counts.Blocked || 0} onChanged={(saved) => {
                           setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle))
                           api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=TEST_CYCLE&entity_id=${saved.id}`).then(setCycleActivity).catch(() => undefined)
                         }} onError={setError} />
@@ -2588,10 +2633,13 @@ export default function TestExecution() {
                       <div className="tm-cycle-request-link">
                         <b>Linked {selectedCycle.linked_request_type}</b><strong>{selectedCycle.linked_request_key}</strong>
                         {selectedCycle.linked_request_type === 'Functional' && !selectedCycle.linked_request_change_allowed && <span className="badge badge-gray">Link locked</span>}
-                        {canExec && projectIsActive && selectedCycle.status === 'Completed' && selectedCycle.linked_request_change_allowed && <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Change link</button>}
+                        {canEditSelectedCycle && projectIsActive && selectedCycle.status === 'Completed' && selectedCycle.linked_request_change_allowed && <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Change link</button>}
                       </div>
                     )}
-                    {!selectedCycle?.linked_request_key && canExec && projectIsActive && selectedCycle?.status === 'Completed' && (
+                    {!selectedCycle?.linked_request_key && (
+                      <span className="badge badge-gray">Standalone</span>
+                    )}
+                    {!selectedCycle?.linked_request_key && canEditSelectedCycle && projectIsActive && selectedCycle?.status === 'Completed' && (
                       <div className="tm-cycle-request-link tm-cycle-request-link--empty">
                         <button type="button" className="tm-cycle-request-link-action" onClick={() => setLinkingCycleRequest(selectedCycle)}>Link QA Request</button>
                       </div>
@@ -2599,11 +2647,11 @@ export default function TestExecution() {
                   </div>
                 </div>
                 <div className="tm-cycle-command-actions">
-                  {canExec && projectIsActive && !cycleIsLocked && <button className="btn" onClick={() => selectedCycle && setEditingCycle(selectedCycle)}>Edit Cycle</button>}
+                  {canEditSelectedCycle && projectIsActive && !cycleIsLocked && <button className="btn" onClick={() => selectedCycle && setEditingCycle(selectedCycle)}>Edit Cycle</button>}
                   <button className="btn" onClick={exportCycle} disabled={exportingCycle}>
                     {exportingCycle ? 'Exporting…' : 'Export Lifecycle'}
                   </button>
-                  {canExec && projectIsActive && !cycleIsLocked && <button className="btn btn-primary" onClick={() => setShowAddCases(true)}>+ Add test cases</button>}
+                  {canEditSelectedCycle && projectIsActive && !cycleIsLocked && <button className="btn btn-primary" onClick={() => setShowAddCases(true)}>+ Add test cases</button>}
                 </div>
                 {cycleIsLocked && (
                   <div className="info-banner">
@@ -2613,6 +2661,7 @@ export default function TestExecution() {
                   </div>
                 )}
               </div>
+              {executionContextError && <div role="alert" className="info-banner">{executionContextError}</div>}
               <section className="tm-execution-snapshot" aria-label="Cycle execution overview">
                 <div className="tm-snapshot-progress">
                   <div className="tm-snapshot-progress-copy">
@@ -2648,7 +2697,7 @@ export default function TestExecution() {
                 {TEST_EXECUTION_STATUSES.map((s) => <button key={s} className={resultFilter === s ? 'active' : ''} onClick={() => setResultFilter(s)}>{s} <span>{executionSummary?.status_counts[s] || 0}</span></button>)}
               </div>
               {selectedCycle && <LinkedDefects query={`cycle_id=${selectedCycle.id}`} title="Cycle Defects" />}
-              {canExec && projectIsActive && !cycleIsLocked && (
+              {canEditSelectedCycle && projectIsActive && !cycleIsLocked && (
                 <div className="tm-bulk-bar" role="region" aria-label={selectedExecutionIds.size > 1 ? 'Bulk testcase lifecycle actions' : 'Testcase lifecycle actions'}>
                   <strong>{selectedExecutionIds.size ? `${selectedExecutionIds.size} testcase${selectedExecutionIds.size !== 1 ? 's' : ''} selected` : 'Select one or more rows to assign, execute, or remove'}</strong>
                   <button type="button" className="btn btn-sm" disabled={!selectableExecutions.length} onClick={toggleVisibleExecutions}>{allVisibleSelected ? 'Clear visible' : `Select visible (${selectableExecutions.length})`}</button>
@@ -2664,11 +2713,11 @@ export default function TestExecution() {
                     const bulkHasReassignment = selectedExecutions.some((execution) => !!execution.assigned_to_id)
                     return (
                       <div className="tm-bulk-assign-group">
-                        <SearchableSelect
+                        <UserAssignSelect
                           value={bulkAssigneeId}
                           onChange={setBulkAssigneeId}
                           placeholder="Assign selected to…"
-                          options={runnerCandidates.map((runner) => ({ value: String(runner.id), label: runner.full_name }))}
+                          users={runnerCandidates}
                           style={{ minWidth: 190 }}
                         />
                         {bulkHasReassignment && (
@@ -2709,8 +2758,8 @@ export default function TestExecution() {
                   { key: 'select', header: <input type="checkbox" aria-label="Select all visible testcases" checked={allVisibleSelected} disabled={!selectableExecutions.length} onChange={toggleVisibleExecutions} onClick={(event) => event.stopPropagation()} />, filterable: false, render: (execution) => <input type="checkbox" aria-label={`Select ${execution.test_case?.test_case_key || `testcase ${execution.test_case_id}`}`} checked={selectedExecutionIds.has(execution.id)} disabled={!canSelectRow(execution)} title={canSelectRow(execution) ? 'Select for lifecycle actions' : execution.assigned_to_id ? `Assigned to ${execution.assigned_to_name || 'another runner'}` : 'Assign a runner before execution'} onChange={() => toggleExecutionSelection(execution.id)} onClick={(event) => event.stopPropagation()} /> },
                   { key: 'test_case', header: 'Test Case', render: (e) => <span className="tm-hierarchy-cell"><strong>{e.test_case?.test_case_key || `#${e.test_case_id}`}</strong><small>{[e.test_case?.module_name, `pinned v${e.pinned_version_label || e.test_case?.version || '1.0'}`].filter(Boolean).join(' · ')}{e.is_pinned_stale && <span className="badge badge-yellow" style={{ marginLeft: 6 }} title="A newer Approved version exists">Stale</span>}</small></span>, filterValue: (e) => `${e.test_case?.test_case_key || e.test_case_id} ${e.test_case?.module_name || ''}` },
                   { key: 'scenario', header: 'Scenario', render: (e) => e.test_case?.test_scenario || '—', filterValue: (e) => e.test_case?.test_scenario || '' },
-                  { key: 'assigned_to_name', header: 'Assigned To', render: (e) => (projectIsActive && !cycleIsLocked && (e.assigned_to_id ? canReassignExecution(e) : canManageRunners)) ? <div className="tm-table-assignee" onClick={(event) => event.stopPropagation()}><UserAssignSelect value={e.assigned_to_id ? String(e.assigned_to_id) : ''} onChange={(value) => handleRunnerChange(e, value)} users={runnerCandidates} placeholder="Assign runner…" />{e.assigned_to_id && <button type="button" title="Unassign" onClick={() => handleRunnerChange(e, '')}>×</button>}</div> : <span className={e.assigned_to_name ? '' : 'muted'}>{e.assigned_to_name || 'Unassigned'}</span>, filterValue: (e) => e.assigned_to_name || 'Unassigned' },
-                  { key: 'quick_run', header: 'Actions', filterable: false, render: (execution) => <InlineExecutionActions execution={execution} canExecute={canExecuteRow(execution)} onLinkExisting={setLinkingExistingExecution} onError={setError} onChanged={() => refreshExecutions()} /> },
+                  { key: 'assigned_to_name', header: 'Assigned To', render: (e) => (selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked && (e.assigned_to_id ? canReassignExecution(e) : canManageRunners)) ? <div className="tm-table-assignee" onClick={(event) => event.stopPropagation()}><UserAssignSelect value={e.assigned_to_id ? String(e.assigned_to_id) : ''} onChange={(value) => handleRunnerChange(e, value)} users={runnerCandidates} placeholder="Assign runner…" />{e.assigned_to_id && <button type="button" title="Unassign" onClick={() => handleRunnerChange(e, '')}>×</button>}</div> : <span className={e.assigned_to_name ? '' : 'muted'}>{e.assigned_to_name || 'Unassigned'}</span>, filterValue: (e) => e.assigned_to_name || 'Unassigned' },
+                  { key: 'quick_run', header: 'Actions', filterable: false, render: (execution) => <InlineExecutionActions execution={execution} executionContextError={executionContextError} canExecute={canExecuteRow(execution)} onLinkExisting={setLinkingExistingExecution} onError={setError} onChanged={() => refreshExecutions()} /> },
                   { key: 'run_count', header: 'Runs', render: (e) => <span className={`tm-run-count ${e.run_count ? 'has-runs' : ''}`}>{e.run_count || 0}</span> },
                   { key: 'status', header: 'Latest Result', render: (e) => <Badge status={e.status} /> },
                   { key: 'defects', header: 'Defects', render: (e) => { const defects = (e.runs || []).flatMap((run) => run.defects || []); return defects.length ? <span className="tm-table-defects">{defects.slice(-2).map((defect) => defect.defect_key).join(', ')}{defects.length > 2 ? ` +${defects.length - 2}` : ''}</span> : '—' }, filterValue: (e) => (e.runs || []).flatMap((run) => run.defects || []).map((defect) => defect.defect_key).join(' ') },
@@ -2725,7 +2774,7 @@ export default function TestExecution() {
                   <span><strong>Test Cycle Activity & Audit History</strong><small>Cycle comments, details, request links, and lifecycle changes only</small></span>
                   <em>{cycleAuditActivity.length}</em><b>{showActivity ? 'Hide' : 'Show'}</b>
                 </button>
-                {showActivity && <JiraActivity entityType="TEST_CYCLE" entityId={Number(cycleId)} items={cycleAuditActivity} onPosted={(item) => setCycleActivity((prev) => [...prev, item])} />}
+                {showActivity && <JiraActivity readOnly={!selectedCycle?.workspace_writable} entityType="TEST_CYCLE" entityId={Number(cycleId)} items={cycleAuditActivity} onPosted={(item) => setCycleActivity((prev) => [...prev, item])} />}
               </section>
             </>
           ) : (
@@ -2737,7 +2786,7 @@ export default function TestExecution() {
       {showNewCycle && projectId && projectIsActive && (
         <CycleModal
           project={selectedProject!}
-          requests={qaRequests.filter((request) => !selectedProject?.application_master_id || request.application_master_id === selectedProject.application_master_id)}
+          requests={functionalRequestOptions}
           users={users}
           folders={cycleFolders}
           defaultFolderId={typeof selectedCycleFolder === 'number' ? selectedCycleFolder : ''}
@@ -2765,7 +2814,7 @@ export default function TestExecution() {
       {editingCycle && projectId && projectIsActive && (
         <CycleModal
           project={selectedProject!}
-          requests={qaRequests.filter((request) => !selectedProject?.application_master_id || request.application_master_id === selectedProject.application_master_id)}
+          requests={functionalRequestOptions}
           users={users}
           folders={cycleFolders}
           defaultFolderId={typeof selectedCycleFolder === 'number' ? selectedCycleFolder : ''}
@@ -2825,7 +2874,8 @@ export default function TestExecution() {
       {linkingCycleRequest && projectIsActive && (
         <LinkCycleRequestModal
           cycle={linkingCycleRequest}
-          requests={qaRequests.filter((request) => !selectedProject?.application_master_id || request.application_master_id === selectedProject.application_master_id)}
+          project={selectedProject!}
+          requests={functionalRequestOptions}
           onClose={() => setLinkingCycleRequest(null)}
           onSaved={(saved) => { setCycles((current) => current.map((cycle) => cycle.id === saved.id ? saved : cycle)); setLinkingCycleRequest(null) }}
         />
@@ -2866,8 +2916,8 @@ export default function TestExecution() {
       {editingExecution && (
         <RecordResultModal
           execution={editingExecution}
-          readOnly={!canExec || !projectIsActive || cycleIsLocked || (!user?.roles.includes('ADMIN') && editingExecution.assigned_to_id !== user?.id)}
-          canAssign={canManageRunners && projectIsActive && !cycleIsLocked}
+          readOnly={!canEditSelectedCycle || !projectIsActive || cycleIsLocked || (!user?.roles.includes('ADMIN') && editingExecution.assigned_to_id !== user?.id)}
+          canAssign={canManageRunners && !!selectedCycle?.workspace_writable && projectIsActive && !cycleIsLocked}
           canReassign={projectIsActive && !cycleIsLocked && canReassignExecution(editingExecution)}
           canRemove={projectIsActive && !cycleIsLocked && removeFromCycleEligibility(editingExecution).eligible}
           removeBlockedReason={removeFromCycleEligibility(editingExecution).reason}

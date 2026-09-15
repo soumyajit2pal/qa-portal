@@ -1,3 +1,4 @@
+from ..deps import get_workflow_user, require_workflow_roles
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_
@@ -12,7 +13,8 @@ from ..deps import (
     can_give_final_approval, require_can_manage_project, get_or_404, get_project_or_404,
     require_project_visibility,
 )
-from ..constants import Role, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
+from ..constants import Role
+from ..workspace_service import require_active_workspace, selectable_workspace_ids
 
 router = APIRouter(prefix="/api/test-projects", tags=["test-management"])
 
@@ -21,6 +23,11 @@ router = APIRouter(prefix="/api/test-projects", tags=["test-management"])
 # Projects (create/edit) as well as author/execute test cases under them --
 # Admin always bypasses via require_roles/has_role.
 _MANAGE_ROLES = (Role.QA_ENGINEER, Role.QA_LEAD)
+
+
+def _validated_department_unit_id(db: Session, unit_id: Optional[int], department: str) -> Optional[int]:
+    # Child workspaces replaced department units as the project boundary.
+    return None
 
 
 # Reported directly: "while creating project with same project name you can
@@ -126,36 +133,53 @@ def _require_existing_cycle_links_match_application(db: Session, project_id: int
 
 
 @router.get("/eligible-users", response_model=List[schemas.UserOut])
-def list_eligible_test_management_users(db: Session = Depends(get_db),
+def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_id: Optional[int] = None,
+                                        db: Session = Depends(get_db),
                                         current_user: models.User = Depends(get_current_user)):
-    """Return the governed COE QA user pool for Test Management pickers.
+    """Return active QA users for the selected workspace or Test Project.
 
-    Every Test Management user picker (Project owner/members, default
-    Reviewer/QA Lead, per-item Reviewer/QA Lead reassignment, Cycle owner)
-    calls this endpoint instead of the app-wide `GET /api/auth/users` list
-    (which every other module still uses unfiltered, since Requesters/
-    Department Heads/Business Analysts etc. legitimately need users outside
-    COE - Quality Assurance). Filtered to
-    `constants.TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS`, which is intentionally
-    restricted to COE under the current governance policy.
-
-    Declared here (not in a shared/generic module) because this is the one
-    router every Test Management screen already depends on for its own
-    project list -- same reasoning as `list_test_projects`'s own docstring
-    above about being "the single entry point every Test Management screen
-    picks a project from."
+    A parent workspace can display projects owned by its children. Execution
+    runner pickers therefore pass ``project_id`` so candidates and assignment
+    validation use the project's owning workspace instead of the parent header.
+    Existing callers without a project retain selected-workspace behaviour.
     """
-    return (
+    if cycle_id is not None:
+        cycle = get_or_404(db, models.TestCycle, cycle_id, "Test Cycle")
+        require_project_visibility(db, cycle.project_id, current_user)
+        if project_id is not None and cycle.project_id != project_id:
+            raise HTTPException(400, "The selected cycle does not belong to this project")
+        from .test_execution import _runner_or_404
+        candidates = db.query(models.User).filter(
+            models.User.is_active == True,
+            models.User.role_assignments.any(models.UserRole.role == Role.QA_ENGINEER),
+        ).order_by(models.User.full_name).all()
+        eligible = []
+        for candidate in candidates:
+            try:
+                _runner_or_404(db, candidate.id,
+                               workspace_id=cycle.origin_workspace_id or cycle.project.qa_workspace_id,
+                               project=cycle.project)
+                eligible.append(candidate)
+            except HTTPException:
+                continue
+        return eligible
+    if project_id is not None:
+        project = get_project_or_404(db, project_id)
+        require_project_visibility(db, project.id, current_user)
+        workspace_id = project.qa_workspace_id
+    else:
+        workspace_id = require_active_workspace(current_user)
+    qa_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.ADMIN}
+    candidates = (
         db.query(models.User)
         .filter(
             models.User.is_active == True,  # noqa: E712
-            models.User.department_assignments.any(
-                models.UserDepartment.department.in_(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)
-            ),
+            models.User.role_assignments.any(models.UserRole.role.in_(qa_roles)),
         )
         .order_by(models.User.full_name)
         .all()
     )
+    return [user for user in candidates if workspace_id in selectable_workspace_ids(db, user)]
 
 
 @router.get("", response_model=pagination.Page[schemas.TestProjectOut])
@@ -229,11 +253,16 @@ def list_test_projects(include_inactive: bool = Query(False), params: pagination
             or_(
                 models.TestProjectViewGrant.user_id == current_user.id,
                 models.TestProjectViewGrant.department.in_(current_user.departments or ["__none__"]),
+                models.TestProjectViewGrant.workspace_id == getattr(current_user, "active_qa_workspace_id", None),
             ),
         )
         shared_project_ids = {project_id for (project_id,) in grant_query.all()}
     for row in result.items:
-        row.view_only = bool(own_scope is not None and not current_user.has_department(row.department))
+        cross_workspace = bool(
+            getattr(current_user, "active_qa_workspace_id", None) is not None
+            and row.qa_workspace_id != getattr(current_user, "active_qa_workspace_id", None)
+        )
+        row.view_only = cross_workspace or bool(own_scope is not None and not current_user.has_department(row.department))
         row.shared_with_you = row.id in shared_project_ids
     return pagination.to_page_response(result, params)
 
@@ -302,7 +331,7 @@ def list_test_project_summary_counts(
 
 @router.get("/{project_id}/my-access", response_model=schemas.TestProjectMyAccessOut)
 def get_my_project_access(project_id: int, db: Session = Depends(get_db),
-                          current_user: models.User = Depends(get_current_user)):
+                          current_user: models.User = Depends(get_workflow_user)):
     """SRS PRJ-005/GOV-001 -- what the signed-in user is actually allowed to
     do on THIS project, combining their project-level role (if they're a
     member) with the deps.py enforcement helpers that test_repository.py and
@@ -354,20 +383,21 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
     ).first()
     if not department_row:
         raise HTTPException(400, "The selected department is not active in the system department list")
+    department_unit_id = _validated_department_unit_id(db, payload.department_unit_id, department)
 
     owner_id = payload.owner_id or current_user.id
     if payload.owner_id:
         owner = get_or_404(db, models.User, payload.owner_id, "Selected owner")
-    if payload.default_reviewer_id in {current_user.id, owner_id}:
-        raise HTTPException(400, "The project creator or owner cannot also be selected as the Default Reviewer (Stage 1)")
-    if payload.default_reviewer_id and not db.query(models.User).get(payload.default_reviewer_id):
-        raise HTTPException(404, "Selected default Reviewer not found")
+        if not owner.show_in_user_dropdowns:
+            raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
+    workspace_id = require_active_workspace(current_user)
 
     obj = models.TestProject(
         name=name, application_master_id=application_master_id, department=department,
+        department_unit_id=department_unit_id,
+        qa_workspace_id=workspace_id,
         description=payload.description, is_active=True, owner_id=owner_id,
         created_by_id=current_user.id,
-        default_reviewer_id=payload.default_reviewer_id, default_qa_lead_id=payload.default_qa_lead_id,
     )
     db.add(obj)
     db.flush()
@@ -377,12 +407,6 @@ def create_test_project(payload: schemas.TestProjectCreate, db: Session = Depend
     db.add(models.TestProjectMember(
         project_id=obj.id, user_id=owner_id, project_role="Owner", added_by_id=current_user.id,
     ))
-    # 2026-08 "Simplified Test Management Review and Approval" requirement --
-    # no more auto-creating a Reviewer/Project Lead TestProjectMember row
-    # from default_reviewer_id/default_qa_lead_id. Stage 1/Stage 2 authority
-    # now comes entirely from the QA Group/QA Lead Group system-role model
-    # (see test_repository.py's review_test_case), not project membership --
-    # see ORACLE_MIGRATION_2026-07.md for the full writeup.
     db.commit()
     db.refresh(obj)
     return obj
@@ -418,7 +442,7 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
     # Engineer can always REQUEST activation/deactivation; only resolving
     # that request is QA-Lead-gated, via requested_active/is_qa_lead_or_admin
     # further down -- unrelated to who owns the project).
-    _DETAIL_FIELDS = {"name", "department", "application_master_id", "description", "owner_id",
+    _DETAIL_FIELDS = {"name", "department", "department_unit_id", "application_master_id", "description", "owner_id",
                        "default_reviewer_id", "default_qa_lead_id"}
     if _DETAIL_FIELDS & payload.model_fields_set:
         require_can_manage_project(obj, current_user)
@@ -456,6 +480,8 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
         new_owner_id = data.pop("owner_id")
         if new_owner_id is not None:
             new_owner = get_or_404(db, models.User, new_owner_id, "Selected owner")
+            if not new_owner.show_in_user_dropdowns:
+                raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
             obj.owner_id = new_owner_id
             # Reassigning ownership always ensures the new owner is at least
             # a member with the Owner project role, mirroring create's own
@@ -496,31 +522,20 @@ def update_test_project(project_id: int, payload: schemas.TestProjectUpdate, db:
         if not mapped_department:
             raise HTTPException(400, "The linked Application does not have a mapped department")
         data["department"] = mapped_department
+    effective_department = data.get("department", obj.department)
+    if "department_unit_id" in data:
+        obj.department_unit_id = _validated_department_unit_id(
+            db, data.pop("department_unit_id"), effective_department,
+        )
+    elif effective_department != obj.department and obj.department_unit_id:
+        old_unit = db.get(models.DepartmentUnit, obj.department_unit_id)
+        if not old_unit or not old_unit.department or old_unit.department.name != effective_department:
+            obj.department_unit_id = None
     for field in ("name", "department", "description"):
         if field in data and data[field] is not None:
             setattr(obj, field, data[field])
-    # APR-001 -- project-level default Reviewer/QA Lead. Explicit null is
-    # allowed (clears the default back to "unset"), unlike owner_id above
-    # which a project can never be without.
-    if "default_reviewer_id" in data:
-        new_reviewer_id = data.pop("default_reviewer_id")
-        if new_reviewer_id is not None and not db.query(models.User).get(new_reviewer_id):
-            raise HTTPException(404, "Selected default Reviewer not found")
-        if new_reviewer_id is not None and new_reviewer_id == obj.owner_id:
-            raise HTTPException(400, "The project owner cannot also be selected as the Default Reviewer (Stage 1)")
-        obj.default_reviewer_id = new_reviewer_id
-    if "default_qa_lead_id" in data:
-        new_qa_lead_id = data.pop("default_qa_lead_id")
-        obj.default_qa_lead_id = new_qa_lead_id
-
-    # 2026-08 "Simplified Test Management Review and Approval" requirement --
-    # no more auto-creating/updating a Reviewer/Project Lead TestProjectMember
-    # row from these defaults. default_reviewer_id/default_qa_lead_id are
-    # kept purely as legacy metadata (still read by test_repository.py's
-    # OLD-path Stage 2 approval notify list for projects with in-flight
-    # pre-existing drafts) -- new Stage 1/Stage 2 authority comes entirely
-    # from the QA Group/QA Lead Group system-role model, not project
-    # membership.
+    data.pop("default_reviewer_id", None)
+    data.pop("default_qa_lead_id", None)
 
     if requested_active is not None:
         if requested_active == obj.is_active:
@@ -576,6 +591,25 @@ def list_project_view_access(project_id: int, db: Session = Depends(get_db),
     )
 
 
+@router.get(
+    "/{project_id}/view-access-workspaces",
+    response_model=List[schemas.TestProjectWorkspaceOptionOut],
+)
+def list_project_view_access_workspaces(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Minimal active-workspace directory for the project sharing picker."""
+    obj = get_project_or_404(db, project_id)
+    require_project_visibility(db, obj.id, current_user)
+    require_can_manage_project(obj, current_user)
+    return db.query(models.QAWorkspace).filter(
+        models.QAWorkspace.is_active == True,  # noqa: E712
+        models.QAWorkspace.id != obj.qa_workspace_id,
+    ).order_by(models.QAWorkspace.name).all()
+
+
 @router.post("/{project_id}/view-access", response_model=schemas.TestProjectViewGrantOut)
 def create_project_view_grant(project_id: int, payload: schemas.TestProjectViewGrantCreate,
                                db: Session = Depends(get_db),
@@ -590,8 +624,9 @@ def create_project_view_grant(project_id: int, payload: schemas.TestProjectViewG
     require_can_manage_project(obj, current_user)
     department = (payload.department or "").strip() or None
     user_id = payload.user_id
-    if bool(department) == bool(user_id):
-        raise HTTPException(400, "Grant exactly one of a department or a user, not both and not neither.")
+    workspace_id = payload.workspace_id
+    if sum(value is not None for value in (department, user_id, workspace_id)) != 1:
+        raise HTTPException(400, "Grant exactly one department, user, or workspace.")
     if department:
         who = department
         department_row = db.query(models.Department).filter(
@@ -605,7 +640,7 @@ def create_project_view_grant(project_id: int, payload: schemas.TestProjectViewG
         existing = db.query(models.TestProjectViewGrant).filter_by(project_id=obj.id, department=department).first()
         if existing:
             raise HTTPException(409, f"{department} already has view access to this project")
-    else:
+    elif user_id is not None:
         target_user = get_or_404(db, models.User, user_id, "User")
         if target_user.has_department(obj.department):
             raise HTTPException(400, "This user is already in the project's own department -- no grant needed")
@@ -613,8 +648,24 @@ def create_project_view_grant(project_id: int, payload: schemas.TestProjectViewG
         existing = db.query(models.TestProjectViewGrant).filter_by(project_id=obj.id, user_id=user_id).first()
         if existing:
             raise HTTPException(409, f"{who} already has view access to this project")
+    else:
+        target_workspace = db.query(models.QAWorkspace).filter(
+            models.QAWorkspace.id == workspace_id,
+            models.QAWorkspace.is_active == True,  # noqa: E712
+        ).first()
+        if not target_workspace:
+            raise HTTPException(400, "Select an active workspace")
+        if target_workspace.id == obj.qa_workspace_id:
+            raise HTTPException(400, "The owning workspace already has full access -- no grant needed")
+        who = target_workspace.name
+        existing = db.query(models.TestProjectViewGrant).filter_by(
+            project_id=obj.id, workspace_id=target_workspace.id,
+        ).first()
+        if existing:
+            raise HTTPException(409, f"{who} already has view access to this project")
     grant = models.TestProjectViewGrant(
-        project_id=obj.id, department=department, user_id=user_id, granted_by_id=current_user.id,
+        project_id=obj.id, department=department, user_id=user_id,
+        workspace_id=workspace_id, granted_by_id=current_user.id,
     )
     db.add(grant)
     try:
@@ -646,7 +697,7 @@ def delete_project_view_grant(project_id: int, grant_id: int, db: Session = Depe
 @router.post("/{project_id}/activation-review", response_model=schemas.TestProjectOut)
 def review_project_activation(project_id: int, payload: schemas.TestProjectActivationReview,
                                db: Session = Depends(get_db),
-                               current_user: models.User = Depends(require_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
+                               current_user: models.User = Depends(require_workflow_roles(Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA))):
     """QA Lead (or Admin) resolves a pending activate/deactivate request from
     a QA Engineer -- Approve applies the requested value to is_active,
     Reject discards the request and leaves is_active untouched. Reported

@@ -13,13 +13,14 @@ from ..execution_cycles import cycle_unlink_allowed, require_cycle_unlinkable
 from ..database import get_db
 from ..database import SessionLocal
 from ..deps import (
-    get_current_user, require_roles, viewable_project_ids,
+    get_workflow_user as get_current_user, require_workflow_roles as require_roles, viewable_project_ids,
     require_can_execute_project, require_can_manage_execution_governance,
     can_view_cycle_folder, require_can_view_cycle_folder,
     get_project_or_404 as _get_project_or_404,
     require_project_visibility,
 )
-from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES, TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS
+from ..constants import Role, QAStatus, TEST_CYCLE_LOCKED_STATUSES
+from ..workspace_service import current_workspace_id, selectable_workspace_ids
 from .. import documents as doc_store
 from .. import reassignment
 from . import jobs
@@ -276,6 +277,11 @@ def _require_cycle_in_progress(cycle: models.TestCycle) -> None:
 _CYCLE_ITEM_NOT_READY_STATUSES = ("Draft", "In Review", "Review Completed", "Returned", "Rejected", "Archived")
 
 
+def _require_execution_context(environment, build):
+    if not (environment or '').strip() or not (build or '').strip():
+        raise HTTPException(400, "Set the Test Cycle environment and build in Edit Cycle before starting or recording execution. Enter the actual tested build; blank does not mean NA.")
+
+
 def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_date) -> None:
     """Validate that a cycle has a usable execution scope before it becomes
     Ready. Tester assignment is intentionally not a readiness prerequisite:
@@ -297,11 +303,18 @@ def _validate_cycle_ready(db: Session, cycle: models.TestCycle, start_date, end_
     if start_date > end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     link = cycle.child_request_link
-    if not link or link.child_type != "Functional":
-        raise HTTPException(400, "A Test Cycle must be linked to a Functional QA Request")
-    linked_request = db.query(models.FunctionalRequest).get(link.child_id)
-    if not linked_request or not linked_request.request_id:
-        raise HTTPException(400, "This cycle's Functional QA Request is no longer valid. Replace the link before continuing")
+    if link:
+        if link.child_type != "Functional":
+            raise HTTPException(400, "Only Functional QA Requests can be linked to Test Cycles")
+        linked_request = db.query(models.FunctionalRequest).get(link.child_id)
+        if not linked_request or not linked_request.request_id:
+            raise HTTPException(400, "This cycle's Functional QA Request is no longer valid. Replace or remove the link before continuing")
+        request_workspace_id = linked_request.qa_request.qa_workspace_id if linked_request.qa_request else None
+        if (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != request_workspace_id:
+            raise HTTPException(
+                400,
+                "The Test Cycle and Functional QA Request must belong to the same workspace",
+            )
     not_ready_items = [
         e.test_case.test_case_key for e in executions
         if e.pinned_version and e.pinned_version.status in _CYCLE_ITEM_NOT_READY_STATUSES and e.test_case
@@ -395,29 +408,61 @@ def _execution_or_404(db: Session, execution_id: int) -> models.TestExecution:
     return obj
 
 
-def _runner_or_404(db: Session, user_id: int) -> models.User:
+def _runner_or_404(db: Session, user_id: int, *, workspace_id: int | None = None, project: models.TestProject | None = None, cycle_owner: bool = False) -> models.User:
     target = db.query(models.User).get(user_id)
     if not target or not target.is_active:
         raise HTTPException(404, "Selected runner was not found or is inactive")
-    if not (set(target.roles) & {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA}):
-        raise HTTPException(400, "Runner must have the QA Engineer, QA Lead, or CM-QA role")
-    if not target.has_department(*TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
-        raise HTTPException(400, f"Runner must be mapped to one of: {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)}")
+    if not target.show_in_user_dropdowns:
+        raise HTTPException(400, "The selected user is hidden from assignment dropdowns")
+    # A runner is an execution assignee, so require the explicit operational
+    # role. QA Leads, QA executives, and Administrators may retain assignment
+    # administration privileges without automatically becoming runners.
+    if not (set(target.roles) & set(_EXEC_ROLES) if cycle_owner else Role.QA_ENGINEER in target.roles):
+        raise HTTPException(400, "Runner must have the QA Engineer (QA) role")
+    target_workspace_id = workspace_id if workspace_id is not None else current_workspace_id()
+    if target_workspace_id is None or target_workspace_id not in selectable_workspace_ids(db, target):
+        raise HTTPException(400, "Runner must have access to this Test Project's workspace")
+    from ..workflow_authority import admin_department_allowed
+    from ..workspace_service import inherited_workspace_access_mode
+    if inherited_workspace_access_mode(db, target, target_workspace_id) == 'PARENT_VIEWER' or Role.VIEW_ONLY in target.roles:
+        raise HTTPException(400, "Runner must have execution access in the cycle's workspace")
+    if project is not None and not admin_department_allowed(target, project.department):
+        raise HTTPException(400, "This administrator cannot execute outside their own department")
     return target
+
+
+@router.get("/projects/{project_id}/cycle-owner-candidates", response_model=List[schemas.UserOut])
+def cycle_owner_candidates(project_id: int, cycle_id: int | None = None,
+                           db: Session = Depends(get_db),
+                           current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
+    project = _get_project_or_404(db, project_id)
+    require_can_execute_project(db, project_id, current_user)
+    workspace_id = current_workspace_id() or project.qa_workspace_id
+    if cycle_id is not None:
+        cycle = _get_cycle_or_404(db, cycle_id)
+        if cycle.project_id != project_id:
+            raise HTTPException(400, "Cycle does not belong to this project")
+        workspace_id = cycle.origin_workspace_id or project.qa_workspace_id
+    eligible = []
+    for candidate in db.query(models.User).filter(models.User.is_active == True).order_by(models.User.full_name).all():
+        try:
+            _runner_or_404(db, candidate.id, workspace_id=workspace_id, project=project, cycle_owner=True)
+            eligible.append(candidate)
+        except HTTPException:
+            continue
+    return eligible
 
 
 def _require_qa_assignment_manager(current_user: models.User) -> None:
     """Assignment is available to the whole Test Management execution team.
 
-    require_roles(*_EXEC_ROLES) checks the QA role; this additional department
-    check prevents a mis-mapped QA role outside constants.
-    TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS from managing the shared execution
-    queue. Administrators retain the standard global bypass.
+    require_roles(*_EXEC_ROLES) checks both the QA permission profile and
+    membership in the selected workspace.
     """
     if current_user.has_role(Role.ADMIN):
         return
-    if not current_user.has_department(*TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
-        raise HTTPException(403, f"Only members of {', '.join(TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS)} can assign testcase runners")
+    if not current_user.has_qa_workspace_role(*_EXEC_ROLES, workspace_id=current_workspace_id()):
+        raise HTTPException(403, "Only QA members of the active workspace can assign testcase runners")
 
 
 def _validate_result_images(files: List[UploadFile]) -> None:
@@ -458,6 +503,7 @@ def _require_assigned_runner(obj: models.TestExecution, current_user: models.Use
 _DEFECT_RETEST_CLEAR_STATUSES = ("Deferred", "Closed")
 _DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES = (
     "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened",
+    "Ready for QA", "QA Testing", "Business Acceptance", "Ready for Release", "Production Verification",
 )
 
 
@@ -476,7 +522,11 @@ def _execution_lock_state(db: Session, execution_id: int):
         models.Defect.execution_id == execution_id,
         models.Defect.execution_links.any(models.DefectExecutionLink.execution_id == execution_id),
     )).all()
-    active_defects = [d for d in defects if d.status not in _DEFECT_RETEST_CLEAR_STATUSES]
+    from ..defect_workflow import verified_for
+    execution = db.get(models.TestExecution, execution_id) if any(getattr(d, 'workflow_json', None) for d in defects) else None
+    cycle = execution.cycle if execution else None
+    active_defects = [d for d in defects if (getattr(d, "workflow_json", None) or d.status not in _DEFECT_RETEST_CLEAR_STATUSES)
+                      and not (cycle and verified_for(d, cycle.environment, cycle.build))]
     has_prior_failed_or_blocked = db.query(models.TestExecutionRun.id).filter(
         models.TestExecutionRun.execution_id == execution_id,
         models.TestExecutionRun.status.in_(("Fail", "Blocked")),
@@ -529,8 +579,9 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
     if active_defects:
         names = ", ".join(f"{d.defect_key} ({d.status})" for d in active_defects)
         return (
-            f"this test case previously failed and has an active linked defect ({names}). The execution "
-            "status cannot be changed until all linked defects are Closed or Deferred."
+            f"Linked defect verification does not cover this execution ({names}). "
+            "Check the environment and build in Edit Cycle and verify the fix against that same environment/build. "
+            "Closed status alone does not establish matching verification for a workflow defect."
         )
     if status_value == "Retest Passed" and not has_prior_failed_or_blocked:
         return (
@@ -573,6 +624,7 @@ def _prepare_execution_update(db: Session, obj: models.TestExecution, status_val
     require_can_execute_project(db, cycle.project_id, current_user)
     _require_open_cycle(cycle)
     _require_cycle_in_progress(cycle)
+    _require_execution_context(cycle.environment, cycle.build)
     # SRS CYC-004/CYC-006 -- this slot is pinned to the exact TestCaseVersion
     # that was Approved when it was added (or last explicitly upgraded), and
     # stays executable even if the live testcase later moves into a new
@@ -977,10 +1029,41 @@ def list_cycles(project_id: int, params: pagination.PageParams = Depends(),
     return pagination.to_page_response(result, params)
 
 
+@router.get(
+    "/projects/{project_id}/functional-request-options",
+    response_model=List[schemas.LinkedRequestRef],
+)
+def list_functional_request_options(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Return Functional requests that can actually be linked to this project.
+
+    The cycle form previously loaded only the first page of the general QA
+    Request register and filtered it in the browser. Pagination and unrelated
+    register filters could therefore hide valid choices. This query applies
+    the same application and workspace rules enforced when the cycle is saved.
+    """
+    project = _get_project_or_404(db, project_id)
+    require_can_execute_project(db, project.id, current_user)
+    return (
+        db.query(models.FunctionalRequest)
+        .join(models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id)
+        .filter(
+            models.FunctionalRequest.request_id.isnot(None),
+            models.QARequest.qa_workspace_id == getattr(current_user, "active_qa_workspace_id", project.qa_workspace_id),
+            models.QARequest.application_master_id == project.application_master_id,
+        )
+        .order_by(models.FunctionalRequest.created_at.desc(), models.FunctionalRequest.id.desc())
+        .all()
+    )
+
+
 @router.post("/projects/{project_id}/cycles", response_model=schemas.TestCycleOut)
 def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    """Create a Test Cycle linked to the Functional request it executes."""
+    """Create a standalone or Functional-linked Test Cycle."""
     _require_active_project(db, project_id)
     require_can_execute_project(db, project_id, current_user)
     name = payload.name.strip()
@@ -989,23 +1072,25 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
     if payload.start_date > payload.end_date:
         raise HTTPException(400, "Start date cannot be after end date")
     if payload.owner_id:
-        owner = db.query(models.User).get(payload.owner_id)
-        if not owner:
-            raise HTTPException(404, "Selected cycle owner not found")
+        _runner_or_404(db, payload.owner_id, workspace_id=current_workspace_id(),
+                       project=_get_project_or_404(db, project_id), cycle_owner=True)
     if payload.folder_id is not None:
         folder = db.query(models.TestCycleFolder).filter_by(id=payload.folder_id, project_id=project_id).first()
         if not folder:
             raise HTTPException(404, "Selected folder not found in this project")
         require_can_view_cycle_folder(folder, current_user)
-    linked_request = db.query(models.FunctionalRequest).get(payload.linked_request_id)
-    if not linked_request or not linked_request.request_id:
-        raise HTTPException(404, "Functional QA Request not found")
     project = _get_project_or_404(db, project_id)
-    if project.application_master_id is None:
-        raise HTTPException(400, "Select an Application on this Test Project before creating a Test Cycle")
-    if (project.application_master_id is not None
-            and linked_request.application_master_id != project.application_master_id):
-        raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
+    linked_request = None
+    if payload.linked_request_id is not None:
+        linked_request = db.query(models.FunctionalRequest).get(payload.linked_request_id)
+        if not linked_request or not linked_request.request_id:
+            raise HTTPException(404, "Functional QA Request not found")
+        if (project.application_master_id is not None
+                and linked_request.application_master_id != project.application_master_id):
+            raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
+        request_workspace_id = linked_request.qa_request.qa_workspace_id if linked_request.qa_request else None
+        if getattr(current_user, "active_qa_workspace_id", project.qa_workspace_id) != request_workspace_id:
+            raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
     obj = models.TestCycle(
         project_id=project_id, name=name, description=payload.description,
         start_date=payload.start_date, end_date=payload.end_date, created_by_id=current_user.id,
@@ -1024,10 +1109,11 @@ def create_cycle(project_id: int, payload: schemas.TestCycleCreate, db: Session 
             db, "TEST_CYCLE", obj.id, "CYCLE_OWNER", current_user,
             [], [obj.owner_id], "Assigned during cycle creation",
         )
-    obj.child_request_link = models.TestCycleChildRequestLink(
-        child_type="Functional", child_id=linked_request.id,
-        child_key=linked_request.request_id,
-    )
+    if linked_request is not None:
+        obj.child_request_link = models.TestCycleChildRequestLink(
+            child_type="Functional", child_id=linked_request.id,
+            child_key=linked_request.request_id,
+        )
     db.commit()
     db.refresh(obj)
     _attach_request_link_permissions(db, [obj])
@@ -1079,34 +1165,37 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         new_status = data["status"]
         transition_action = _validate_cycle_transition(previous_status, new_status, blocking_reason)
         if new_status == "Completed":
-            # A cycle represents the complete execution set, so it cannot be
-            # closed while any testcase slot still has its initial
-            # "Not Executed" state. Keep this server-side even though the UI
-            # also disables completion: API clients and stale browser tabs
-            # must not be able to bypass the lifecycle rule.
+            # Recorded is not the same as successfully completed. Validate
+            # every slot, independent of defect links, roles and UI pagination.
             incomplete_executions = db.query(models.TestExecution).options(
                 joinedload(models.TestExecution.test_case)
             ).filter(
                 models.TestExecution.cycle_id == obj.id,
-                models.TestExecution.status == "Not Executed",
+                or_(models.TestExecution.status.is_(None),
+                    models.TestExecution.status.notin_(("Pass", "Retest Passed", "NA"))),
             ).all()
             if incomplete_executions:
                 labels = ", ".join(
-                    execution.test_case.test_case_key
-                    if execution.test_case else f"Testcase #{execution.test_case_id}"
+                    f"{execution.test_case.test_case_key if execution.test_case else f'Testcase #{execution.test_case_id}'} ({execution.status or 'Not Executed'})"
                     for execution in incomplete_executions[:8]
                 )
                 suffix = "…" if len(incomplete_executions) > 8 else ""
                 raise HTTPException(
                     400,
-                    f"Every testcase must be executed before completing this Test Cycle. "
-                    f"{len(incomplete_executions)} testcase(s) are still Not Executed: {labels}{suffix}",
+                    "Cannot complete this Test Cycle while testcases are Failed, Blocked or Not Executed. "
+                    "Every testcase must be Pass, Retest Passed or NA. "
+                    f"{len(incomplete_executions)} testcase(s) require attention: {labels}{suffix}",
                 )
             severe = db.query(models.Defect).filter(
-                models.Defect.cycle_id == obj.id,
+                or_(models.Defect.cycle_id == obj.id,
+                    models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == obj.id))),
                 models.Defect.severity.in_(("Critical", "High")),
-                models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
+                or_(models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
+                    and_(models.Defect.workflow_json.isnot(None), models.Defect.status == "Closed",
+                         models.Defect.resolution_type == "Fixed")),
             ).all()
+            from ..defect_workflow import verified_for
+            severe = [d for d in severe if not verified_for(d, obj.environment, obj.build)]
             if severe:
                 labels = ", ".join(defect.defect_key for defect in severe[:8])
                 raise HTTPException(
@@ -1116,7 +1205,8 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     f"Blocking defects: {labels}",
                 )
             invalid_deferred = db.query(models.Defect).filter(
-                models.Defect.cycle_id == obj.id,
+                or_(models.Defect.cycle_id == obj.id,
+                    models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == obj.id))),
                 models.Defect.status == "Deferred",
                 or_(models.Defect.target_release.is_(None), models.Defect.target_release == ""),
             ).all()
@@ -1128,10 +1218,14 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
                     + ", ".join(defect.defect_key for defect in invalid_deferred),
                 )
             residual = db.query(models.Defect).filter(
-                models.Defect.cycle_id == obj.id,
+                or_(models.Defect.cycle_id == obj.id,
+                    models.Defect.execution_links.any(models.DefectExecutionLink.execution.has(models.TestExecution.cycle_id == obj.id))),
                 models.Defect.severity.in_(("Medium", "Low")),
-                models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
+                or_(models.Defect.status.in_(_DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES),
+                    and_(models.Defect.workflow_json.isnot(None), models.Defect.status == "Closed",
+                         models.Defect.resolution_type == "Fixed")),
             ).all()
+            residual = [d for d in residual if not verified_for(d, obj.environment, obj.build)]
             if residual:
                 # 2026-08 whole-module simplification: QA Lead Group system
                 # role only -- the old per-project "Project Lead"/"Owner"
@@ -1172,8 +1266,8 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     else:
         _require_open_cycle(obj)
     if "owner_id" in data and data["owner_id"] is not None:
-        if not db.query(models.User).get(data["owner_id"]):
-            raise HTTPException(404, "Selected cycle owner not found")
+        _runner_or_404(db, data["owner_id"], workspace_id=obj.origin_workspace_id or obj.project.qa_workspace_id,
+                       project=obj.project, cycle_owner=True)
     if "folder_id" in data and data["folder_id"] is not None:
         folder = db.query(models.TestCycleFolder).filter_by(id=data["folder_id"], project_id=obj.project_id).first()
         if not folder:
@@ -1190,7 +1284,11 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     owner_reason = None
     if is_owner_reassignment:
         previous_owner = db.query(models.User).get(previous_owner_id)
-        reassignment.require_can_reassign(current_user, previous_owner_id, previous_owner.departments if previous_owner else None)
+        reassignment.require_can_reassign(
+            current_user, previous_owner_id,
+            previous_owner.departments if previous_owner else None,
+            qa_workspace_id=(obj.origin_workspace_id or obj.project.qa_workspace_id) if obj.project else None,
+        )
         owner_reason = reassignment.require_reason(payload.reason)
     start_date = data.get("start_date", obj.start_date)
     end_date = data.get("end_date", obj.end_date)
@@ -1202,38 +1300,64 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
     link_changed = "linked_request_type" in data or "linked_request_id" in data
     link_type = data.pop("linked_request_type", None)
     link_id = data.pop("linked_request_id", None)
-    if link_changed and (link_type != "Functional" or link_id is None):
-        raise HTTPException(400, "A Test Cycle must be linked to a Functional QA Request")
+    if link_changed and link_id is not None and link_type != "Functional":
+        raise HTTPException(400, "Only Functional QA Requests can be linked to Test Cycles")
     if (link_changed and obj.child_request_link
             and (link_type, link_id) != (previous_link_type, obj.linked_request_id)):
         _require_cycle_request_link_change_allowed(db, obj.child_request_link)
+    if transition_action == "Start Execution":
+        from ..execution_cycles import require_request_execution_started
+        # Check both the existing and proposed link before mutating anything.
+        # A combined relink/unlink + start request must not bypass the gate.
+        request_ids = set()
+        if obj.child_request_link:
+            if obj.child_request_link.child_type != "Functional":
+                raise HTTPException(400, "Only Functional QA Requests can be linked to Test Cycles")
+            request_ids.add(obj.child_request_link.child_id)
+        if link_changed and link_id is not None:
+            request_ids.add(link_id)
+        for request_id in sorted(request_ids):
+            linked_request = (db.query(models.FunctionalRequest).filter_by(id=request_id)
+                              .populate_existing().with_for_update().first())
+            if not linked_request:
+                raise HTTPException(404, "Linked Functional QA Request not found")
+            require_request_execution_started(linked_request)
+    if transition_action in ("Start Execution", "Resume Execution") or (
+        obj.status == "In Progress" and ("build" in data or "environment" in data)
+    ):
+        _require_execution_context(data.get("environment", obj.environment), data.get("build", obj.build))
     for field, value in data.items():
         setattr(obj, field, value)
     if link_changed:
-        linked_request = db.query(models.FunctionalRequest).get(link_id)
-        if not linked_request or not linked_request.request_id:
-            raise HTTPException(404, "Functional QA Request not found")
-        if (obj.project.application_master_id is not None
-                and linked_request.application_master_id != obj.project.application_master_id):
-            raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
-        if obj.child_request_link:
-            obj.child_request_link.child_type = "Functional"
-            obj.child_request_link.child_id = linked_request.id
-            obj.child_request_link.child_key = linked_request.request_id
+        if link_id is None:
+            obj.child_request_link = None
         else:
-            obj.child_request_link = models.TestCycleChildRequestLink(
-                child_type="Functional", child_id=linked_request.id, child_key=linked_request.request_id,
-            )
-    if not obj.child_request_link or obj.child_request_link.child_type != "Functional":
-        raise HTTPException(400, "A Test Cycle must be linked to a Functional QA Request")
+            linked_request = db.query(models.FunctionalRequest).get(link_id)
+            if not linked_request or not linked_request.request_id:
+                raise HTTPException(404, "Functional QA Request not found")
+            if (obj.project.application_master_id is not None
+                    and linked_request.application_master_id != obj.project.application_master_id):
+                raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
+            request_workspace_id = linked_request.qa_request.qa_workspace_id if linked_request.qa_request else None
+            if (obj.origin_workspace_id or obj.project.qa_workspace_id) != request_workspace_id:
+                raise HTTPException(400, "The Test Cycle and Functional QA Request must belong to the same workspace")
+            if obj.child_request_link:
+                obj.child_request_link.child_type = "Functional"
+                obj.child_request_link.child_id = linked_request.id
+                obj.child_request_link.child_key = linked_request.request_id
+            else:
+                obj.child_request_link = models.TestCycleChildRequestLink(
+                    child_type="Functional", child_id=linked_request.id, child_key=linked_request.request_id,
+                )
     if obj.project.application_master_id is None:
         raise HTTPException(400, "Select an Application on this Test Project before continuing Test Lifecycle")
-    current_linked_request = db.query(models.FunctionalRequest).get(obj.child_request_link.child_id)
-    if not current_linked_request or not current_linked_request.request_id:
-        raise HTTPException(400, "This cycle's Functional QA Request is no longer valid. Replace the link before continuing")
-    if (obj.project.application_master_id is not None
-            and current_linked_request.application_master_id != obj.project.application_master_id):
-        raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
+    if obj.child_request_link:
+        current_linked_request = db.query(models.FunctionalRequest).get(obj.child_request_link.child_id)
+        if not current_linked_request or not current_linked_request.request_id:
+            raise HTTPException(400, "This cycle's Functional QA Request is no longer valid. Replace or remove the link before continuing")
+        if (obj.project.application_master_id is not None
+                and current_linked_request.application_master_id != obj.project.application_master_id):
+            raise HTTPException(400, "Select a Functional QA Request for this Test Project's application")
     # 2026-08 "Test Approval Workflow" refactor, section 7 -- validated
     # against the FULLY-UPDATED obj (after link changes above have
     # already been applied in this same request), not the pre-update
@@ -1258,9 +1382,12 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
         new_link_type = obj.linked_request_type
         new_link_key = obj.linked_request_key
         if (previous_link_type, previous_link_key) != (new_link_type, new_link_key):
-            decision = "Request Linked"
-            comments = f"Linked {new_link_type} request {new_link_key}."
-            if previous_link_key:
+            decision = "Request Linked" if new_link_key else "Request Unlinked"
+            comments = (
+                f"Linked {new_link_type} request {new_link_key}."
+                if new_link_key else f"Removed Functional request {previous_link_key}; cycle is now standalone."
+            )
+            if new_link_key and previous_link_key:
                 comments += f" Replaced {previous_link_type} request {previous_link_key}."
             db.add(models.ApprovalAction(
                 entity_type="TEST_CYCLE", entity_id=obj.id, step_name="Request Link",
@@ -1309,10 +1436,19 @@ def unlink_cycle_request(cycle_id: int, db: Session = Depends(get_db),
     link = obj.child_request_link
     if not link:
         raise HTTPException(404, "This test cycle does not have a linked request")
-    raise HTTPException(
-        400,
-        "A Test Cycle link is mandatory. Replace the Functional QA Request from Edit Cycle instead.",
-    )
+    _require_cycle_request_link_change_allowed(db, link)
+    previous_key = link.child_key
+    obj.child_request_link = None
+    db.add(models.ApprovalAction(
+        entity_type="TEST_CYCLE", entity_id=obj.id, step_name="Request Link",
+        actor_id=current_user.id, actor_role=current_user.roles_csv,
+        decision="Request Unlinked",
+        comments=f"Removed Functional request {previous_key}; cycle is now standalone.",
+    ))
+    db.commit()
+    db.refresh(obj)
+    _attach_request_link_permissions(db, [obj])
+    return obj
 
 
 @router.delete("/cycles/{cycle_id}")
@@ -1408,7 +1544,7 @@ def list_executions(
     _get_cycle_or_404(db, cycle_id)
     q = db.query(models.TestExecution).filter(models.TestExecution.cycle_id == cycle_id).options(*_LIST_EXECUTION_EAGER_LOADS)
     if assignment == "mine":
-        if not any(current_user.has_department(department) for department in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
+        if not current_user.has_qa_workspace_role(*_EXEC_ROLES, workspace_id=current_workspace_id()):
             raise HTTPException(403, "My execution assignments are restricted to the QA group")
         q = q.filter(models.TestExecution.assigned_to_id == current_user.id)
     elif assignment == "unassigned":
@@ -1520,7 +1656,7 @@ def list_my_executions(db: Session = Depends(get_db),
     active-project and in-progress-cycle rules while loading the exact rows
     assigned to the current user only.
     """
-    if not any(current_user.has_department(department) for department in TEST_MANAGEMENT_ELIGIBLE_DEPARTMENTS):
+    if not current_user.has_qa_workspace_role(*_EXEC_ROLES, workspace_id=current_workspace_id()):
         raise HTTPException(403, "My execution assignments are restricted to the QA group")
     q = (
         db.query(models.TestExecution)
@@ -1830,15 +1966,22 @@ def queue_test_cycle_export(
     cycle = _get_cycle_or_404(db, cycle_id)
     filename = f"{cycle.cycle_key}_test_lifecycle.xlsx"
     user_id = current_user.id
+    actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
 
     def build(job_id: str):
         with SessionLocal() as worker_db:
             worker_user = worker_db.query(models.User).get(user_id)
             if not worker_user:
                 raise RuntimeError("The user who started this export no longer exists")
-            jobs.update(job_id, progress=15)
-            response = export_test_cycle(cycle_id, worker_db, worker_user)
-            return asyncio.run(jobs.save_streaming_response(job_id, response, filename))
+            worker_user.active_qa_workspace_id = actor_workspace_id
+            from ..workflow_authority import workflow_context
+            with workflow_context(worker_user):
+                from ..project_workspace_ownership import bind_actor
+                bind_actor(worker_db, worker_user)
+                worker_db.info['workflow_actor'] = worker_user
+                jobs.update(job_id, progress=15)
+                response = export_test_cycle(cycle_id, worker_db, worker_user)
+                return asyncio.run(jobs.save_streaming_response(job_id, response, filename))
 
     return jobs.enqueue(background_tasks, "TEST_CYCLE_EXPORT", user_id, build)
 
@@ -1858,7 +2001,9 @@ def add_test_cases_to_cycle(cycle_id: int, payload: schemas.TestExecutionAdd, db
     assigned_runner = None
     if payload.assigned_to_id is not None:
         _require_qa_assignment_manager(current_user)
-        assigned_runner = _runner_or_404(db, payload.assigned_to_id)
+        assigned_runner = _runner_or_404(
+            db, payload.assigned_to_id, workspace_id=(cycle.origin_workspace_id or cycle.project.qa_workspace_id), project=cycle.project,
+        )
     requested_ids = list(dict.fromkeys(payload.test_case_ids))
     already = set()
     # Only inspect requested IDs. The previous query loaded every testcase
@@ -2015,6 +2160,7 @@ def add_test_cases_from_server_selection(
         raise HTTPException(400, "Pick at least one test case")
     if len(selected_ids) > 500:
         user_id = current_user.id
+        actor_workspace_id = getattr(current_user, "active_qa_workspace_id", None)
         assigned_to_id = payload.assigned_to_id
 
         def add_in_background(job_id: str):
@@ -2022,20 +2168,26 @@ def add_test_cases_from_server_selection(
                 worker_user = worker_db.query(models.User).get(user_id)
                 if not worker_user:
                     raise RuntimeError("The user who started this job no longer exists")
-                jobs.update(job_id, progress=15)
-                created_rows = add_test_cases_to_cycle(
-                    cycle_id,
-                    schemas.TestExecutionAdd(
-                        test_case_ids=selected_ids,
-                        assigned_to_id=assigned_to_id,
-                    ),
-                    worker_db,
-                    worker_user,
-                )
-                return {
-                    "created_count": len(created_rows),
-                    "skipped_count": len(selected_ids) - len(created_rows),
-                }
+                worker_user.active_qa_workspace_id = actor_workspace_id
+                from ..workflow_authority import workflow_context
+                with workflow_context(worker_user):
+                    from ..project_workspace_ownership import bind_actor
+                    bind_actor(worker_db, worker_user)
+                    worker_db.info['workflow_actor'] = worker_user
+                    jobs.update(job_id, progress=15)
+                    created_rows = add_test_cases_to_cycle(
+                        cycle_id,
+                        schemas.TestExecutionAdd(
+                            test_case_ids=selected_ids,
+                            assigned_to_id=assigned_to_id,
+                        ),
+                        worker_db,
+                        worker_user,
+                    )
+                    return {
+                        "created_count": len(created_rows),
+                        "skipped_count": len(selected_ids) - len(created_rows),
+                    }
 
         job = jobs.enqueue(background_tasks, "ADD_TESTCASES_TO_CYCLE", user_id, add_in_background)
         return {
@@ -2060,7 +2212,7 @@ def add_test_cases_from_server_selection(
 def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
                      db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    """COE - Quality Assurance runner management for one testcase slot in a
+    """QA runner management for one testcase slot in a
     cycle.
 
     2026-08 Reassignment CR, reported directly: "Everywhere the system
@@ -2094,7 +2246,9 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
         reassignment.require_reason(payload.reason)
     target = None
     if payload.assigned_to_id is not None:
-        target = _runner_or_404(db, payload.assigned_to_id)
+        target = _runner_or_404(
+            db, payload.assigned_to_id, workspace_id=(cycle.origin_workspace_id or cycle.project.qa_workspace_id), project=cycle.project,
+        )
     obj.assigned_to_id = target.id if target else None
     obj.assigned_by_id = current_user.id
     obj.assigned_at = models.now()
@@ -2163,7 +2317,9 @@ def bulk_assign_executions(cycle_id: int, payload: schemas.TestExecutionBulkAssi
         raise HTTPException(400, "Select at least one testcase for bulk assignment")
     if len(execution_ids) > 100:
         raise HTTPException(400, "Bulk assignment supports at most 100 testcases at a time")
-    target = _runner_or_404(db, payload.assigned_to_id)
+    target = _runner_or_404(
+        db, payload.assigned_to_id, workspace_id=(cycle.origin_workspace_id or cycle.project.qa_workspace_id), project=cycle.project,
+    )
     executions = db.query(models.TestExecution).filter(models.TestExecution.id.in_(execution_ids)).all()
     found_by_id = {execution.id: execution for execution in executions}
     missing = [str(execution_id) for execution_id in execution_ids if execution_id not in found_by_id]

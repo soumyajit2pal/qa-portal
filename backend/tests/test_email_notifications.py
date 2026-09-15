@@ -117,7 +117,7 @@ class EmailNotificationTests(unittest.TestCase):
             step_name="Waiting For Fix", decision="Awaiting Fix",
         )
 
-        route = _notification_route(None, action, target)
+        route = email_notifications._unfiltered_notification_route(None, action, target)
 
         self.assertEqual(route.recipient_ids, {41})
         self.assertEqual(route.recipient_label, "Requester")
@@ -125,9 +125,9 @@ class EmailNotificationTests(unittest.TestCase):
 
     def test_defect_mail_routes_cover_every_lifecycle_audience(self):
         parent = SimpleNamespace(requester_id=41)
-        with patch("app.email_notifications._role_user_ids", return_value={11, 12}):
+        with patch("app.email_notifications._workspace_role_user_ids", return_value={11, 12}):
             for stage in ("New",):
-                route = _defect_notification_route(None, SimpleNamespace(status=stage))
+                route = _defect_notification_route(None, SimpleNamespace(status=stage, qa_workspace_id=10))
                 with self.subTest(stage=stage):
                     self.assertEqual(route.recipient_ids, {11, 12})
                     self.assertEqual(route.recipient_label, "QA Defect Team")
@@ -323,8 +323,8 @@ class EmailNotificationTests(unittest.TestCase):
             db.close()
             engine.dispose()
 
-    def test_group_owner_is_not_suppressed_by_department_membership(self):
-        """An active workflow group receives the mail before an individual is assigned."""
+    def test_wrong_department_group_member_is_excluded(self):
+        """An SM outside the request department must not receive approval mail."""
         engine = create_engine("sqlite:///:memory:")
         models.Base.metadata.create_all(engine, tables=[
             models.User.__table__, models.UserRole.__table__, models.UserDepartment.__table__,
@@ -337,8 +337,7 @@ class EmailNotificationTests(unittest.TestCase):
             db.add_all([
                 requester, sm,
                 models.UserRole(user_id=2, role=Role.SM),
-                # Deliberately different from the request department: group
-                # notification ownership must not disappear because of this.
+                # Deliberately different: this user cannot approve the request.
                 models.UserDepartment(user_id=2, department="IT"),
                 models.QARequest(id=10, request_id="TQA-REQ-10", application_name="Portal", department="Operations", requester_id=1),
                 models.FunctionalRequest(id=20, request_id="TQA-FUNC-20", requester_id=1, qa_request_id=10, status=QAStatus.SM_APPROVAL_PENDING),
@@ -348,7 +347,7 @@ class EmailNotificationTests(unittest.TestCase):
             settings = {"SMTP_ENABLED": "true", "SMTP_HOST": "smtp.example.com", "SMTP_FROM_ADDRESS": "qa-portal@example.com"}
             with patch.dict(os.environ, settings, clear=False), patch("app.email_notifications.deliver_pending_async"):
                 db.commit()
-            self.assertEqual([item.recipient_email for item in db.query(models.EmailNotification).all()], ["sm@example.com"])
+            self.assertEqual([item.recipient_email for item in db.query(models.EmailNotification).all()], [])
         finally:
             db.close()
             engine.dispose()
@@ -366,6 +365,7 @@ class EmailNotificationTests(unittest.TestCase):
             sm = models.User(id=2, username="sm", full_name="SM", email="sm@example.com", login_type="STANDARD")
             db.add_all([
                 requester, sm, models.UserRole(user_id=2, role=Role.SM),
+                models.UserDepartment(user_id=2, department="Operations"),
                 models.QARequest(id=10, request_id="TQA-REQ-10", application_name="Portal", department="Operations", requester_id=1),
                 models.FunctionalRequest(id=20, request_id="TQA-FUNC-20", requester_id=1, qa_request_id=10, status=QAStatus.SM_APPROVAL_PENDING),
             ])
@@ -401,6 +401,7 @@ class EmailNotificationTests(unittest.TestCase):
             sm = models.User(id=2, username="sm", full_name="SM", email="sm@example.com", login_type="STANDARD")
             db.add_all([
                 requester, sm, models.UserRole(user_id=2, role=Role.SM),
+                models.UserDepartment(user_id=2, department="Operations"),
                 models.QARequest(id=10, request_id="TQA-REQ-10", application_name="Portal", department="Operations", requester_id=1),
                 models.FunctionalRequest(id=20, request_id="TQA-FUNC-20", requester_id=1, qa_request_id=10, status=QAStatus.SM_APPROVAL_PENDING),
                 models.SASTRequest(id=21, request_id="TQA-SAST-21", application_name="Portal", requester_id=1, qa_request_id=10, status="SM_APPROVAL_PENDING"),
@@ -504,8 +505,8 @@ class EmailNotificationTests(unittest.TestCase):
             db.add_all([
                 author, reviewer,
                 models.UserRole(user_id=2, role=Role.QA_ENGINEER),
-                models.UserDepartment(user_id=2, department="COE - Quality Assurance"),
-                models.TestProject(id=10, project_key="TQA-PRJ-10", name="Portal Tests", department="COE - Quality Assurance"),
+                models.UserDepartment(user_id=2, department="IT - Software"),
+                models.TestProject(id=10, project_key="TQA-PRJ-10", name="Portal Tests", department="IT - Software"),
                 models.TestCase(id=20, test_case_key="TQA-TC-20", project_id=10, status="Recommendation Pending"),
                 models.TestCase(id=21, test_case_key="TQA-TC-21", project_id=10, status="Recommendation Pending"),
                 models.ApprovalAction(entity_type="TEST_CASE", entity_id=20, actor_id=1, step_name="Test Case Approval Workflow", decision="Submitted"),
@@ -547,8 +548,8 @@ class EmailNotificationTests(unittest.TestCase):
             db.add_all([
                 author, reviewer,
                 models.UserRole(user_id=2, role=Role.QA_ENGINEER),
-                models.UserDepartment(user_id=2, department="COE - Quality Assurance"),
-                models.TestProject(id=10, project_key="TQA-PRJ-10", name="Portal Tests", department="COE - Quality Assurance"),
+                models.UserDepartment(user_id=2, department="IT - Software"),
+                models.TestProject(id=10, project_key="TQA-PRJ-10", name="Portal Tests", department="IT - Software"),
                 models.TestCase(id=20, test_case_key="TQA-TC-20", project_id=10, status="Recommendation Pending"),
                 models.ApprovalAction(entity_type="TEST_CASE", entity_id=20, actor_id=1, step_name="Test Case Approval Workflow", decision="Submitted"),
             ])

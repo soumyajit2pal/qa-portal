@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from app.deps import (
+    _enforce_parent_workspace_viewer_request,
     _enforce_view_only_request,
     dashboard_department_scope,
     require_department_visibility,
@@ -108,6 +109,27 @@ class ScopedQAAccessTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as raised:
             _enforce_view_only_request(write_request, viewer)
         self.assertEqual(raised.exception.status_code, 403)
+
+    def test_parent_workspace_viewer_allows_reads_and_rejects_business_writes(self):
+        read_request = Request({
+            "type": "http", "method": "GET", "path": "/api/defects",
+            "raw_path": b"/api/defects", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("test", 80), "client": ("test", 1),
+        })
+        _enforce_parent_workspace_viewer_request(read_request, "PARENT_VIEWER")
+
+        write_request = Request({
+            "type": "http", "method": "POST", "path": "/api/defects",
+            "raw_path": b"/api/defects", "query_string": b"", "headers": [],
+            "scheme": "http", "server": ("test", 80), "client": ("test", 1),
+        })
+        with self.assertRaises(HTTPException) as raised:
+            _enforce_parent_workspace_viewer_request(write_request, "PARENT_VIEWER")
+        self.assertEqual(raised.exception.status_code, 403)
+
+        # Parent Admin uses the user's normal permission profile and is not
+        # converted into a read-only account.
+        _enforce_parent_workspace_viewer_request(write_request, "PARENT_ADMIN")
 
     def test_standard_requester_cannot_read_qa_tester_analytics(self):
         requester = models.User(

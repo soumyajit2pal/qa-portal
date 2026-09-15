@@ -9,12 +9,16 @@ from sqlalchemy.orm import Session, aliased, joinedload, selectinload
 
 from .. import models, cache
 from ..database import get_db
-from ..deps import get_current_user, dashboard_department_scope
+from ..deps import (
+    get_current_user, dashboard_department_scope, active_qa_workspace_scope,
+    active_qa_workspace_scope_ids,
+    department_unit_visibility_condition, viewable_project_ids,
+)
 from ..pagination import PageParams
 from ..xlsx_export import new_workbook, add_summary_sheet, add_table_sheet, workbook_response
 from ..constants import (
     Role, QAStatus, GATEWAY_TERMINAL_STATUSES, SAST_DAST_TERMINAL_STATUSES, SUPPRESSION_TERMINAL_STATUSES,
-    QA_DEPARTMENT, QA_REQUEST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
+    QA_REQUEST_TERMINAL_STATUSES, PERFORMANCE_TERMINAL_STATUSES,
     SAST_DAST_STATUS_LABELS, PERFORMANCE_STATUS_LABELS,
 )
 
@@ -27,7 +31,8 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard-analytics"])
 # opt-in flag like the shared request-list endpoints (list_requests/
 # list_functional/list_sast/list_dast/list_performance) use, since there's no
 # other consumer whose existing behaviour needs preserving.
-def _join_qa_department(query, model, scope):
+def _join_qa_department(query, model, scope, db: Session | None = None,
+                        current_user: models.User | None = None):
     """Joins `model` (FunctionalRequest/SASTRequest/DASTRequest/
     PerformanceRequest -- whichever the query's base/most-recently-joined
     entity already is) to its parent QARequest and filters to `scope`, if
@@ -39,18 +44,40 @@ def _join_qa_department(query, model, scope):
     qa_request_id (already department=None today) is naturally excluded by
     this inner join, same as it already reads as unscoped/departmentless
     everywhere else in the app."""
-    if scope is None:
+    # The authenticated principal is the authoritative source for dashboard
+    # scope.  Request-local ContextVar state exists for older shared helpers,
+    # but using it here allowed an aggregate request to run without a
+    # workspace while the detail endpoint (correctly) enforced one.  That
+    # produced rows which opened as "belongs to another workspace".
+    from ..workspace_service import current_workspace_scope_ids
+    workspace_ids = (
+        active_qa_workspace_scope_ids(current_user)
+        if current_user is not None
+        else current_workspace_scope_ids()
+    )
+    if scope is None and not workspace_ids:
         return query
     # 2026-08 "one user can be on multiple departments" CR -- scope is now a
     # list of departments (dashboard_department_scope's own docstring), so
     # this is an `.in_()` membership filter, not `==`.
     query = query.join(models.QARequest, model.qa_request_id == models.QARequest.id)
+    if workspace_ids:
+        query = query.filter(models.QARequest.qa_workspace_id.in_(workspace_ids))
     if scope is not None:
         query = query.filter(models.QARequest.department.in_(scope))
+    if db is not None and current_user is not None:
+        team_scope = department_unit_visibility_condition(
+            db, current_user,
+            models.QARequest.department, models.QARequest.department_unit_id,
+        )
+        if team_scope is not None:
+            query = query.filter(team_scope)
     return query
 
 
-def _scope_fortify_suppression_requests(query, model, scope):
+def _scope_fortify_suppression_requests(query, model, scope,
+                                         db: Session | None = None,
+                                         current_user: models.User | None = None):
     """Apply department visibility consistently across Suppression analytics.
 
     Current SAST/DAST rows resolve their department through their parent QA
@@ -59,7 +86,13 @@ def _scope_fortify_suppression_requests(query, model, scope):
     figures already use that persisted value, so use it as a fallback for the
     Fortify figures on the same tab.
     """
-    if scope is None:
+    from ..workspace_service import current_workspace_scope_ids
+    workspace_ids = (
+        active_qa_workspace_scope_ids(current_user)
+        if current_user is not None
+        else current_workspace_scope_ids()
+    )
+    if scope is None and not workspace_ids:
         return query
     query = query.join(
         models.QARequest,
@@ -71,14 +104,26 @@ def _scope_fortify_suppression_requests(query, model, scope):
         if model is models.SASTRequest
         else models.SuppressionRequest.dast_request_id == model.id
     )
-    has_scoped_suppression = db_exists().where(
-        suppression_link,
-        models.SuppressionRequest.department.in_(scope),
-    )
-    return query.filter(or_(
+    predicates = [models.QARequest.qa_workspace_id.in_(workspace_ids)] if workspace_ids else []
+    if scope is None:
+        scoped = query.filter(*predicates)
+    else:
+        has_scoped_suppression = db_exists().where(
+            suppression_link,
+            models.SuppressionRequest.department.in_(scope),
+        )
+        scoped = query.filter(*predicates, or_(
         models.QARequest.department.in_(scope),
         has_scoped_suppression,
-    ))
+        ))
+    if db is not None and current_user is not None:
+        team_scope = department_unit_visibility_condition(
+            db, current_user,
+            models.QARequest.department, models.QARequest.department_unit_id,
+        )
+        if team_scope is not None:
+            scoped = scoped.filter(team_scope)
+    return scoped
 
 
 def _date_bounds(date_from: str | None, date_to: str | None):
@@ -102,9 +147,60 @@ def _in_period(query, column, date_from: str | None, date_to: str | None):
     return query
 
 
+def _workspace_direct(query, model, current_user: models.User | None = None):
+    """Apply the authenticated active workspace to directly-owned records."""
+    from ..workspace_service import current_workspace_scope_ids
+    workspace_ids = (
+        active_qa_workspace_scope_ids(current_user)
+        if current_user is not None
+        else current_workspace_scope_ids()
+    )
+    return query.filter(model.qa_workspace_id.in_(workspace_ids)) if workspace_ids else query
+
+
+def _scope_defect_records(query, db, current_user):
+    from .defects import _scoped_defects
+    visible_ids = _scoped_defects(db, current_user).with_entities(models.Defect.id).subquery()
+    return query.filter(models.Defect.id.in_(select(visible_ids.c.id)))
+
+
+def _scope_qa_requests(query, db: Session, current_user: models.User):
+    """Apply the active workspace, department, and unit to a QARequest query."""
+    query = _workspace_direct(query, models.QARequest, current_user)
+    team_scope = department_unit_visibility_condition(
+        db, current_user,
+        models.QARequest.department, models.QARequest.department_unit_id,
+    )
+    return query.filter(team_scope) if team_scope is not None else query
+
+
+def _suppression_team_scope_condition(db: Session, current_user: models.User):
+    """Resolve a suppression's team through its mandatory SAST/DAST parent."""
+    team_scope = department_unit_visibility_condition(
+        db, current_user,
+        models.QARequest.department, models.QARequest.department_unit_id,
+    )
+    if team_scope is None:
+        return None
+    return or_(
+        models.SuppressionRequest.sast_request.has(
+            models.SASTRequest.qa_request.has(team_scope),
+        ),
+        models.SuppressionRequest.dast_request.has(
+            models.DASTRequest.qa_request.has(team_scope),
+        ),
+    )
+
+
+def _scope_suppressions(query, db: Session, current_user: models.User):
+    query = _workspace_direct(query, models.SuppressionRequest, current_user)
+    team_scope = _suppression_team_scope_condition(db, current_user)
+    return query.filter(team_scope) if team_scope is not None else query
+
+
 _DASHBOARD_REQUEST_PAGE_SIZES = {5, 10, 25, 50, 100}
 _DASHBOARD_REQUEST_TERMINAL_STATUSES = {
-    "QA Request": set(GATEWAY_TERMINAL_STATUSES),
+    "QA Request": {"CANCELLED", "CLOSED"},
     "Functional QA": set(QA_REQUEST_TERMINAL_STATUSES),
     "SAST": set(SAST_DAST_TERMINAL_STATUSES),
     "DAST": set(SAST_DAST_TERMINAL_STATUSES),
@@ -147,7 +243,8 @@ def _decode_dashboard_request_cursor(value: str | None) -> tuple[datetime.dateti
         raise HTTPException(400, "Invalid dashboard request page cursor.") from exc
 
 
-def _dashboard_requests_scope_predicate(model, qa_model, scope_name: str, current_user, visible_scope: list | None):
+def _dashboard_requests_scope_predicate(model, qa_model, scope_name: str, current_user,
+                                        visible_scope: list | None, db: Session):
     """Filter one branch of the unified dashboard request feed.
 
     ``mine`` keeps the existing requester's-own-record behaviour while
@@ -167,8 +264,19 @@ def _dashboard_requests_scope_predicate(model, qa_model, scope_name: str, curren
             select(qa_model.id).where(qa_model.department.in_(departments))
         )
 
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    workspace_predicate = None
+    if workspace_ids:
+        workspace_predicate = (
+            qa_model.qa_workspace_id.in_(workspace_ids)
+            if model is qa_model
+            else model.qa_request_id.in_(select(qa_model.id).where(qa_model.qa_workspace_id.in_(workspace_ids)))
+        )
+
     if scope_name == "mine":
         clauses = [model.requester_id == current_user.id]
+        if workspace_predicate is not None:
+            clauses.append(workspace_predicate)
         if visible_scope is not None:
             clauses.append(department_predicate(visible_scope))
         return clauses
@@ -176,7 +284,28 @@ def _dashboard_requests_scope_predicate(model, qa_model, scope_name: str, curren
     # Use a SQL comparison rather than a Python Boolean literal here: Oracle
     # has no BOOLEAN SQL type, while ``1 = 0`` is portable and guarantees an
     # empty result for an account with no department membership.
-    return [department_predicate(departments)] if departments else [literal(1) == literal(0)]
+    clauses = [department_predicate(departments)] if departments else [literal(1) == literal(0)]
+    if workspace_predicate is not None:
+        clauses.append(workspace_predicate)
+    team_scope = department_unit_visibility_condition(
+        db, current_user, qa_model.department, qa_model.department_unit_id,
+    )
+    if team_scope is not None:
+        clauses.append(
+            team_scope if model is qa_model else
+            model.qa_request_id.in_(select(qa_model.id).where(team_scope))
+        )
+    return clauses
+
+
+def _request_lifecycle_status(qa, child_specs):
+    """A raised gateway is active until every linked testing workflow is terminal."""
+    children = [db_exists(select(model.id).where(model.qa_request_id == qa.id)) for _, model in child_specs]
+    unfinished = [db_exists(select(model.id).where(
+        model.qa_request_id == qa.id,
+        or_(model.status.is_(None), model.status.notin_(_DASHBOARD_REQUEST_TERMINAL_STATUSES[kind])),
+    )) for kind, model in child_specs]
+    return case((and_(qa.status == 'RAISED', or_(*children), ~or_(*unfinished)), literal('CLOSED')), else_=qa.status)
 
 
 @router.get("/requests")
@@ -205,11 +334,13 @@ def dashboard_requests(
     visible_scope = dashboard_department_scope(current_user)
 
     def filters(model, qa_model):
-        predicates = _dashboard_requests_scope_predicate(model, qa_model, scope, current_user, visible_scope)
+        predicates = _dashboard_requests_scope_predicate(model, qa_model, scope, current_user, visible_scope, db)
         if start:
             predicates.append(model.created_at >= start)
         if end:
             predicates.append(model.created_at <= end)
+        if model is not models.QARequest:
+            predicates.append(model.qa_request_id.is_(None))
         return predicates
 
     qa = models.QARequest
@@ -231,6 +362,8 @@ def dashboard_requests(
         ("DAST", dast),
         ("Performance", performance),
     )
+    lifecycle_status = _request_lifecycle_status(qa, child_specs)
+
     def child_source(model):
         # Department visibility is applied by the requester-first EXISTS
         # predicate in `_dashboard_requests_scope_predicate`, not a JOIN.
@@ -239,10 +372,10 @@ def dashboard_requests(
     # Each branch groups directly on its base table.  This lets Oracle use the
     # requester/date composites and avoids materialising the full feed merely
     # to calculate the three cards above the table.
+    parent_states = select(lifecycle_status.label("status")).where(*filters(qa, qa)).subquery()
     count_statements = [
-        select(
-            literal("QA Request").label("type"), qa.status.label("status"), func.count().label("count"),
-        ).where(*filters(qa, qa)).group_by(qa.status)
+        select(literal("QA Request").label("type"), parent_states.c.status, func.count().label("count"))
+        .select_from(parent_states).group_by(parent_states.c.status)
     ]
     for request_type, model in child_specs:
         count_statements.append(
@@ -348,7 +481,7 @@ def dashboard_requests(
         for row in db.execute(
             select(
                 qa.id, qa.request_id, qa.application_name, qa.department,
-                qa.status, qa.requester_id, qa.created_at, change_description_preview,
+                lifecycle_status.label("status"), qa.requester_id, qa.created_at, change_description_preview,
             ).where(qa.id.in_(qa_ids))
         ).mappings():
             detail_by_key[("QA Request", row["id"])] = dict(row)
@@ -367,6 +500,20 @@ def dashboard_requests(
         ).mappings():
             detail_by_key[(request_type, row["id"])] = dict(row)
 
+    # Children stay with their parent and do not affect root pagination or totals.
+    # Use visibility checks, but the reporting date belongs to the main request.
+    linked_by_parent = {}
+    if qa_ids:
+        for request_type, model in child_specs:
+            rows = db.execute(select(model.id, model.request_id, model.status, model.qa_request_id)
+                .where(model.qa_request_id.in_(qa_ids), *_dashboard_requests_scope_predicate(
+                    model, qa, scope, current_user, visible_scope, db))
+                .order_by(model.id)).mappings()
+            for row in rows:
+                linked_by_parent.setdefault(row['qa_request_id'], []).append({
+                    'id': row['id'], 'request_id': row['request_id'], 'status': row['status'], 'type': request_type,
+                })
+
     items = []
     for feed_row in page_keys:
         item = detail_by_key.get((feed_row["type"], feed_row["id"]))
@@ -379,6 +526,7 @@ def dashboard_requests(
         item["uid"] = f"{item['type']}-{item['id']}"
         item["request_id"] = item["request_id"] or f"Draft #{item['id']}"
         item["application_name"] = item["application_name"] or "—"
+        item["children"] = linked_by_parent.get(item["id"], []) if item["type"] == "QA Request" else []
         items.append(item)
     return {
         "items": items,
@@ -394,7 +542,8 @@ def dashboard_requests(
     }
 
 
-def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction]) -> dict[tuple[str, int], tuple[str | None, str | None, str | None, int | None]]:
+def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction],
+                              current_user: models.User) -> dict[tuple[str, int], tuple[str | None, str | None, str | None, int | None]]:
     """Load dashboard activity references and departments in batches.
 
     ApprovalAction is deliberately polymorphic, so the generic approvals feed
@@ -436,10 +585,11 @@ def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction]) ->
         ).all()
         linked_qa_ids.update(row.qa_request_id for row in defect_rows if row.qa_request_id)
 
-    qa_rows = db.query(
+    qa_query = db.query(
         models.QARequest.id, models.QARequest.request_id, models.QARequest.department,
         models.QARequest.status, models.QARequest.requester_id,
-    ).filter(models.QARequest.id.in_(qa_ids | linked_qa_ids)).all() if qa_ids or linked_qa_ids else []
+    ).filter(models.QARequest.id.in_(qa_ids | linked_qa_ids))
+    qa_rows = _scope_qa_requests(qa_query, db, current_user).all() if qa_ids or linked_qa_ids else []
     qa_by_id = {row.id: row for row in qa_rows}
     for qa_id in qa_ids:
         qa = qa_by_id.get(qa_id)
@@ -449,7 +599,13 @@ def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction]) ->
     for entity_type, fetched in child_rows.items():
         for row in fetched:
             qa = qa_by_id.get(row.qa_request_id)
-            result[(entity_type, row.id)] = (row.request_id, qa.department if qa else None, None, None)
+            # Absence from qa_by_id means the parent was filtered out by the
+            # active workspace/team boundary.  Do not turn that into a
+            # department-less activity row: QA-wide roles have no department
+            # filter and would otherwise see it from another workspace.
+            if qa is None:
+                continue
+            result[(entity_type, row.id)] = (row.request_id, qa.department, None, None)
             # Legacy SAST_DAST rows use SAST when ids happen to overlap,
             # exactly as the generic approval endpoint does.
             if entity_type == "SAST" or ("SAST_DAST", row.id) not in result:
@@ -457,25 +613,34 @@ def _recent_activity_metadata(db: Session, rows: list[models.ApprovalAction]) ->
 
     for row in defect_rows:
         qa = qa_by_id.get(row.qa_request_id)
-        result[("DEFECT", row.id)] = (row.defect_key, qa.department if qa else None, None, None)
+        if qa is not None:
+            result[("DEFECT", row.id)] = (row.defect_key, qa.department, None, None)
 
     direct_specs = (("SIGNOFF", models.QASignOff, models.QASignOff.certificate_id, models.QASignOff.department),)
     for entity_type, model, ref_column, department_column in direct_specs:
         ids = ids_by_type.get(entity_type, set())
         if ids:
-            for row in db.query(model.id, ref_column, department_column).filter(model.id.in_(ids)).all():
+            query = db.query(model.id, ref_column, department_column).filter(model.id.in_(ids))
+            if model is models.QASignOff:
+                query = query.join(
+                    models.FunctionalRequest,
+                    models.QASignOff.testing_request_id == models.FunctionalRequest.request_id,
+                ).join(models.QARequest, models.FunctionalRequest.qa_request_id == models.QARequest.id)
+                query = _scope_qa_requests(query, db, current_user)
+            for row in query.all():
                 result[(entity_type, row.id)] = (row[1], row[2], None, None)
 
     suppression_ids = ids_by_type.get("SUPPRESSION", set())
     if suppression_ids:
-        suppression_rows = db.query(
+        suppression_query = db.query(
             models.SuppressionRequest.id, models.SuppressionRequest.suppression_id,
             models.SuppressionRequest.department,
         ).outerjoin(models.SASTRequest, models.SuppressionRequest.sast_request_id == models.SASTRequest.id) \
          .outerjoin(models.DASTRequest, models.SuppressionRequest.dast_request_id == models.DASTRequest.id) \
          .outerjoin(models.QARequest, or_(models.SASTRequest.qa_request_id == models.QARequest.id,
                                           models.DASTRequest.qa_request_id == models.QARequest.id)) \
-         .filter(models.SuppressionRequest.id.in_(suppression_ids)).all()
+         .filter(models.SuppressionRequest.id.in_(suppression_ids))
+        suppression_rows = _scope_suppressions(suppression_query, db, current_user).all()
         for row in suppression_rows:
             result[("SUPPRESSION", row.id)] = (row.suppression_id, row.department, None, None)
     return result
@@ -505,15 +670,18 @@ def recent_activity(
         rows = query.offset(offset).limit(batch_size).all()
         if not rows:
             break
-        metadata = _recent_activity_metadata(db, rows)
+        metadata = _recent_activity_metadata(db, rows, current_user)
         actor_ids = {row.actor_id for row in rows if row.actor_id}
         actor_names = dict(db.query(models.User.id, models.User.full_name).filter(models.User.id.in_(actor_ids)).all()) if actor_ids else {}
         for row in rows:
-            request_ref, department, qa_status, requester_id = metadata.get((row.entity_type, row.entity_id), (None, None, None, None))
+            resolved = metadata.get((row.entity_type, row.entity_id))
+            if resolved is None:
+                continue
+            request_ref, department, qa_status, requester_id = resolved
             if (row.entity_type == "QA_REQUEST" and not current_user.has_role(Role.ADMIN)
                     and qa_status in {"DRAFT", "CANCELLED"} and requester_id != current_user.id):
                 continue
-            if scope and department not in scope:
+            if scope is not None and department not in scope:
                 continue
             items.append({
                 "id": row.id, "entity_type": row.entity_type, "entity_id": row.entity_id,
@@ -693,30 +861,76 @@ def _require_qa_dashboard_access(current_user: models.User) -> None:
         raise HTTPException(403, "QA tester analytics are restricted to the QA team")
 
 
+def _workspace_qa_testers(db: Session, current_user: models.User):
+    """QA contributors who are active members of the selected workspace."""
+    query = (db.query(models.User)
+             .join(models.UserRole, models.UserRole.user_id == models.User.id)
+             .filter(models.User.is_active == True,  # noqa: E712
+                     models.UserRole.role.in_([Role.QA_ENGINEER, Role.SECURITY_ANALYST])))
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_ids:
+        query = query.filter(models.User.qa_workspace_memberships.any(and_(
+            models.QAWorkspaceMember.workspace_id.in_(workspace_ids),
+            models.QAWorkspaceMember.is_active == True,  # noqa: E712
+        )))
+    return query.distinct().order_by(models.User.full_name).all()
+
+
+def _scoped_contribution_query(db: Session, model, current_user: models.User):
+    """Base contribution query constrained to the current workspace.
+
+    Repository/execution records are owned by Test Projects, while governed
+    defects are owned by QA Requests.  Applying the appropriate owner here
+    keeps the QA Tester Overview, its export, and its drilldown on the same
+    tenant boundary as the rest of Dashboard.
+    """
+    if model is models.Defect:
+        return _scope_qa_requests(
+            db.query(model).join(models.QARequest, model.qa_request_id == models.QARequest.id),
+            db, current_user,
+        )
+    project_ids = viewable_project_ids(db, current_user)
+    query = db.query(model)
+    if model is models.TestCase:
+        return query.filter(models.TestCase.project_id.in_(project_ids)) if project_ids is not None else query
+    if model is models.TestExecutionRun:
+        query = (query.join(models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id)
+                 .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id))
+        return query.filter(models.TestCycle.project_id.in_(project_ids)) if project_ids is not None else query
+    return query
+
+
 def _grouped_actor_counts(db: Session, model, actor_column, date_column,
-                          tester_ids: list[int], date_from: str | None, date_to: str | None) -> dict[int, int]:
+                          tester_ids: list[int], date_from: str | None, date_to: str | None,
+                          current_user: models.User) -> dict[int, int]:
     if not tester_ids:
         return {}
     query = _in_period(
-        db.query(actor_column.label("tester_id"), func.count(model.id).label("item_count")),
+        _scoped_contribution_query(db, model, current_user).with_entities(
+            actor_column.label("tester_id"), func.count(model.id).label("item_count")
+        ),
         date_column, date_from, date_to,
     ).filter(actor_column.in_(tester_ids)).group_by(actor_column)
     return {int(tester_id): int(item_count) for tester_id, item_count in query.all()}
 
 
 def _grouped_last_activity(db: Session, model, actor_column, date_column,
-                           tester_ids: list[int], date_from: str | None, date_to: str | None) -> dict[int, datetime.datetime]:
+                           tester_ids: list[int], date_from: str | None, date_to: str | None,
+                           current_user: models.User) -> dict[int, datetime.datetime]:
     if not tester_ids:
         return {}
     query = _in_period(
-        db.query(actor_column.label("tester_id"), func.max(date_column).label("last_at")),
+        _scoped_contribution_query(db, model, current_user).with_entities(
+            actor_column.label("tester_id"), func.max(date_column).label("last_at")
+        ),
         date_column, date_from, date_to,
     ).filter(actor_column.in_(tester_ids)).group_by(actor_column)
     return {int(tester_id): last_at for tester_id, last_at in query.all() if last_at}
 
 
 def _add_contribution_metrics(db: Session, rows: dict[int, dict],
-                              date_from: str | None, date_to: str | None) -> dict:
+                              date_from: str | None, date_to: str | None,
+                              current_user: models.User) -> dict:
     """Attach period-based authoring/execution/defect/project metrics.
 
     Testcase count uses identity rows, never versions. Retests use the
@@ -752,11 +966,11 @@ def _add_contribution_metrics(db: Session, rows: dict[int, dict],
     latest_by_tester: dict[int, datetime.datetime] = {}
     for field, model, actor_column, date_column in count_specs:
         for tester_id, count in _grouped_actor_counts(
-            db, model, actor_column, date_column, tester_ids, date_from, date_to,
+            db, model, actor_column, date_column, tester_ids, date_from, date_to, current_user,
         ).items():
             rows[tester_id][field] = count
         for tester_id, activity_at in _grouped_last_activity(
-            db, model, actor_column, date_column, tester_ids, date_from, date_to,
+            db, model, actor_column, date_column, tester_ids, date_from, date_to, current_user,
         ).items():
             if tester_id not in latest_by_tester or activity_at > latest_by_tester[tester_id]:
                 latest_by_tester[tester_id] = activity_at
@@ -772,12 +986,16 @@ def _add_contribution_metrics(db: Session, rows: dict[int, dict],
         "QA Lead Approval Pending": "qa_lead_approval_pending",
         "Approved": "testcases_approved",
     }
-    pending_rows = _in_period(
-        db.query(
+    project_ids = viewable_project_ids(db, current_user)
+    pending_query = db.query(
             models.TestCase.created_by_id,
             models.TestCase.status,
             func.count(models.TestCase.id),
-        ),
+        )
+    if project_ids is not None:
+        pending_query = pending_query.filter(models.TestCase.project_id.in_(project_ids))
+    pending_rows = _in_period(
+        pending_query,
         models.TestCase.created_at, date_from, date_to,
     ).filter(
         models.TestCase.created_by_id.in_(tester_ids),
@@ -792,6 +1010,7 @@ def _add_contribution_metrics(db: Session, rows: dict[int, dict],
     ).join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
       .filter(models.TestExecution.assigned_to_id.in_(tester_ids),
               models.TestCycle.status != "Completed")
+      .filter(models.TestCycle.project_id.in_(project_ids) if project_ids is not None else literal(True))
       .group_by(models.TestExecution.assigned_to_id).all())
     for tester_id, count in current_assignments:
         rows[int(tester_id)]["current_execution_assignments"] = int(count)
@@ -801,23 +1020,33 @@ def _add_contribution_metrics(db: Session, rows: dict[int, dict],
     testcase_pairs = _in_period(
         db.query(models.TestCase.created_by_id, models.TestCase.project_id),
         models.TestCase.created_at, date_from, date_to,
-    ).filter(models.TestCase.created_by_id.in_(tester_ids)).distinct().all()
+    ).filter(models.TestCase.created_by_id.in_(tester_ids))
+    if project_ids is not None:
+        testcase_pairs = testcase_pairs.filter(models.TestCase.project_id.in_(project_ids))
+    testcase_pairs = testcase_pairs.distinct().all()
     run_pairs = _in_period(
         db.query(models.TestExecutionRun.executed_by_id, models.TestCycle.project_id)
           .join(models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id)
           .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id),
         models.TestExecutionRun.executed_at, date_from, date_to,
-    ).filter(models.TestExecutionRun.executed_by_id.in_(tester_ids)).distinct().all()
+    ).filter(models.TestExecutionRun.executed_by_id.in_(tester_ids))
+    if project_ids is not None:
+        run_pairs = run_pairs.filter(models.TestCycle.project_id.in_(project_ids))
+    run_pairs = run_pairs.distinct().all()
     defect_report_pairs = _in_period(
         db.query(models.Defect.reporter_id, models.TestCycle.project_id)
           .join(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id),
         models.Defect.reported_at, date_from, date_to,
-    ).filter(models.Defect.reporter_id.in_(tester_ids)).distinct().all()
+    ).outerjoin(models.QARequest, models.Defect.qa_request_id == models.QARequest.id) \
+     .filter(models.Defect.reporter_id.in_(tester_ids))
+    defect_report_pairs = _scope_defect_records(defect_report_pairs, db, current_user).distinct().all()
     defect_retest_pairs = _in_period(
         db.query(models.Defect.retest_tester_id, models.TestCycle.project_id)
           .join(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id),
         models.Defect.retest_at, date_from, date_to,
-    ).filter(models.Defect.retest_tester_id.in_(tester_ids)).distinct().all()
+    ).outerjoin(models.QARequest, models.Defect.qa_request_id == models.QARequest.id) \
+     .filter(models.Defect.retest_tester_id.in_(tester_ids))
+    defect_retest_pairs = _scope_defect_records(defect_retest_pairs, db, current_user).distinct().all()
     for tester_id, project_id in testcase_pairs + run_pairs + defect_report_pairs + defect_retest_pairs:
         if tester_id and project_id:
             project_sets[int(tester_id)].add(int(project_id))
@@ -859,24 +1088,17 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
     data but remain blocked from mutations by the shared request guard. Shared
     requests divide their load across assigned testers."""
     _require_qa_dashboard_access(current_user)
-    qa_testers = (db.query(models.User)
-                  .join(models.UserRole, models.UserRole.user_id == models.User.id)
-                  .filter(models.User.is_active == True,  # noqa: E712
-                          models.UserRole.role.in_([Role.QA_ENGINEER, Role.SECURITY_ANALYST]),
-                          models.User.department_assignments.any(
-                              models.UserDepartment.department == QA_DEPARTMENT
-                          ))
-                  .distinct().order_by(models.User.full_name).all())
+    qa_testers = _workspace_qa_testers(db, current_user)
     # Period filters apply only to completed-work history below. Capacity is
     # a current-state view, so an active assignment must never disappear just
     # because its request was raised before the selected reporting window.
-    functional_requests = _join_qa_department(db.query(models.FunctionalRequest), models.FunctionalRequest, None) \
+    functional_requests = _join_qa_department(db.query(models.FunctionalRequest), models.FunctionalRequest, None, db, current_user) \
         .filter(models.FunctionalRequest.status.in_(TESTER_WORKLOAD_STATUSES)).all()
-    performance_requests = _join_qa_department(db.query(models.PerformanceRequest), models.PerformanceRequest, None) \
+    performance_requests = _join_qa_department(db.query(models.PerformanceRequest), models.PerformanceRequest, None, db, current_user) \
         .filter(models.PerformanceRequest.status.in_(PERFORMANCE_TESTER_WORKLOAD_STATUSES)).all()
-    sast_requests = _join_qa_department(db.query(models.SASTRequest), models.SASTRequest, None) \
+    sast_requests = _join_qa_department(db.query(models.SASTRequest), models.SASTRequest, None, db, current_user) \
         .filter(models.SASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all()
-    dast_requests = _join_qa_department(db.query(models.DASTRequest), models.DASTRequest, None) \
+    dast_requests = _join_qa_department(db.query(models.DASTRequest), models.DASTRequest, None, db, current_user) \
         .filter(models.DASTRequest.status.in_(SECURITY_ANALYST_WORKLOAD_STATUSES)).all()
 
     def role_label(user) -> str:
@@ -967,7 +1189,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
         (models.DASTRequest, "DAST", SAST_DAST_TERMINAL_STATUSES, "security_analyst_id"),
     ]
     for model, source, terminal_statuses, assignment_field in completed_sources:
-        completed = (_join_qa_department(_in_period(db.query(model), model.updated_at, date_from, date_to), model, None)
+        completed = (_join_qa_department(_in_period(db.query(model), model.updated_at, date_from, date_to), model, None, db, current_user)
                      .filter(model.status.in_(terminal_statuses)).all())
         for request in completed:
             raw_assignment = getattr(request, assignment_field)
@@ -987,7 +1209,7 @@ def qa_tester_workload(date_from: str | None = Query(None), date_to: str | None 
                     "is_current": False,
                 })
 
-    contribution_summary = _add_contribution_metrics(db, rows, date_from, date_to)
+    contribution_summary = _add_contribution_metrics(db, rows, date_from, date_to, current_user)
 
     for row in rows.values():
         row["assignments"].sort(key=lambda item: item["updated_at"] or datetime.datetime.min, reverse=True)
@@ -1026,15 +1248,21 @@ def qa_tester_contribution_detail(
     tester = db.query(models.User).filter(models.User.id == tester_id).first()
     if not tester:
         raise HTTPException(404, "QA tester not found")
+    if tester_id not in {row.id for row in _workspace_qa_testers(db, current_user)}:
+        # Do not disclose whether an account exists in another workspace.
+        raise HTTPException(404, "QA tester not found in this workspace")
 
     activities: list[dict] = []
+    project_ids = viewable_project_ids(db, current_user)
 
-    defect_rows = _in_period(
+    defect_query = _in_period(
         db.query(models.Defect, models.TestCycle, models.TestProject)
           .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
-          .outerjoin(models.TestProject, models.TestCycle.project_id == models.TestProject.id),
+          .outerjoin(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+          .outerjoin(models.QARequest, models.Defect.qa_request_id == models.QARequest.id),
         models.Defect.reported_at, date_from, date_to,
-    ).filter(models.Defect.reporter_id == tester_id) \
+    ).filter(models.Defect.reporter_id == tester_id)
+    defect_rows = _scope_defect_records(defect_query, db, current_user) \
      .order_by(models.Defect.reported_at.desc(), models.Defect.id.desc()).limit(limit).all()
     for defect, cycle, project in defect_rows:
         activities.append({
@@ -1048,12 +1276,14 @@ def qa_tester_contribution_detail(
             "route": f"/defects?open={defect.defect_key}",
         })
 
-    retest_rows = _in_period(
+    retest_query = _in_period(
         db.query(models.Defect, models.TestCycle, models.TestProject)
           .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
-          .outerjoin(models.TestProject, models.TestCycle.project_id == models.TestProject.id),
+          .outerjoin(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
+          .outerjoin(models.QARequest, models.Defect.qa_request_id == models.QARequest.id),
         models.Defect.retest_at, date_from, date_to,
-    ).filter(models.Defect.retest_tester_id == tester_id) \
+    ).filter(models.Defect.retest_tester_id == tester_id)
+    retest_rows = _scope_defect_records(retest_query, db, current_user) \
      .order_by(models.Defect.retest_at.desc(), models.Defect.id.desc()).limit(limit).all()
     for defect, cycle, project in retest_rows:
         activities.append({
@@ -1068,7 +1298,7 @@ def qa_tester_contribution_detail(
             "route": f"/defects?open={defect.defect_key}",
         })
 
-    run_rows = _in_period(
+    run_query = _in_period(
         db.query(models.TestExecutionRun, models.TestExecution, models.TestCase,
                  models.TestCycle, models.TestProject)
           .join(models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id)
@@ -1076,7 +1306,10 @@ def qa_tester_contribution_detail(
           .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
           .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id),
         models.TestExecutionRun.executed_at, date_from, date_to,
-    ).filter(models.TestExecutionRun.executed_by_id == tester_id) \
+    ).filter(models.TestExecutionRun.executed_by_id == tester_id)
+    if project_ids is not None:
+        run_query = run_query.filter(models.TestCycle.project_id.in_(project_ids))
+    run_rows = run_query \
      .order_by(models.TestExecutionRun.executed_at.desc(), models.TestExecutionRun.id.desc()).limit(limit).all()
     for run, execution, test_case, cycle, project in run_rows:
         activities.append({
@@ -1089,12 +1322,15 @@ def qa_tester_contribution_detail(
             "route": f"/test-execution?project={project.id}&cycle={cycle.id}",
         })
 
-    assignment_rows = (db.query(models.TestExecution, models.TestCase, models.TestCycle, models.TestProject)
+    assignment_query = (db.query(models.TestExecution, models.TestCase, models.TestCycle, models.TestProject)
                        .join(models.TestCase, models.TestExecution.test_case_id == models.TestCase.id)
                        .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
                        .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
                        .filter(models.TestExecution.assigned_to_id == tester_id,
-                               models.TestCycle.status != "Completed")
+                               models.TestCycle.status != "Completed"))
+    if project_ids is not None:
+        assignment_query = assignment_query.filter(models.TestCycle.project_id.in_(project_ids))
+    assignment_rows = (assignment_query
                        .order_by(models.TestExecution.assigned_at.desc(), models.TestExecution.id.desc())
                        .limit(limit).all())
     current_assignments = [{
@@ -1127,7 +1363,7 @@ def qa_tester_contribution_detail(
     # the management drill-down only needs Defects, Retests and Executions.
     # Preserve accurate Projects coverage with one compact grouped query,
     # without loading or serializing hundreds of testcase rows.
-    testcase_project_rows = _in_period(
+    testcase_project_query = _in_period(
         db.query(
             models.TestProject.id,
             models.TestProject.project_key,
@@ -1135,7 +1371,10 @@ def qa_tester_contribution_detail(
             func.max(models.TestCase.created_at),
         ).join(models.TestCase, models.TestCase.project_id == models.TestProject.id),
         models.TestCase.created_at, date_from, date_to,
-    ).filter(models.TestCase.created_by_id == tester_id).group_by(
+    ).filter(models.TestCase.created_by_id == tester_id)
+    if project_ids is not None:
+        testcase_project_query = testcase_project_query.filter(models.TestProject.id.in_(project_ids))
+    testcase_project_rows = testcase_project_query.group_by(
         models.TestProject.id, models.TestProject.project_key, models.TestProject.name,
     ).all()
     for project_id, project_key, project_name, last_created_at in testcase_project_rows:
@@ -1170,14 +1409,7 @@ def export_qa_tester_contribution(
 ):
     """Excel evidence pack for the visible management contribution scope."""
     _require_qa_dashboard_access(current_user)
-    qa_testers = (db.query(models.User)
-                  .join(models.UserRole, models.UserRole.user_id == models.User.id)
-                  .filter(models.User.is_active == True,  # noqa: E712
-                          models.UserRole.role.in_([Role.QA_ENGINEER, Role.SECURITY_ANALYST]),
-                          models.User.department_assignments.any(
-                              models.UserDepartment.department == QA_DEPARTMENT
-                          ))
-                  .distinct().order_by(models.User.full_name).all())
+    qa_testers = _workspace_qa_testers(db, current_user)
     rows = {
         user.id: {
             "tester_id": user.id, "tester_name": user.full_name,
@@ -1185,7 +1417,7 @@ def export_qa_tester_contribution(
         }
         for user in qa_testers
     }
-    summary = _add_contribution_metrics(db, rows, date_from, date_to)
+    summary = _add_contribution_metrics(db, rows, date_from, date_to, current_user)
     result_rows = list(rows.values())
     if search:
         needle = search.strip().lower()
@@ -1301,7 +1533,7 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
     # Functional Testing Request (see models.FunctionalRequest).
     requests = _join_qa_department(
         _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at, date_from, date_to),
-        models.FunctionalRequest, scope).all()
+        models.FunctionalRequest, scope, db, current_user).all()
     active_projects = len({
         r.cr_number or r.epic_number
         for r in requests
@@ -1317,10 +1549,10 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
     # open findings across the portal, not a raw historical row count.
     sast_ids = [r.id for r in _join_qa_department(
         _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
-        models.SASTRequest, scope).all()]
+        models.SASTRequest, scope, db, current_user).all()]
     dast_ids = [r.id for r in _join_qa_department(
         _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
-        models.DASTRequest, scope).all()]
+        models.DASTRequest, scope, db, current_user).all()]
     sast_findings = sum(s.total_count for s in _latest_scan_by_request(db, "SAST", sast_ids).values())
     dast_findings = sum(s.total_count for s in _latest_scan_by_request(db, "DAST", dast_ids).values())
 
@@ -1331,17 +1563,15 @@ def project_wise(date_from: str | None = Query(None), date_to: str | None = Quer
     # so the Dashboard banner looked stuck even after it was cleared.
     # Now counts the same things everywhere: QA Requests awaiting a decision,
     # plus SAST/DAST requests still "Requested", plus open Suppressions.
-    _pending_suppressions_q = _in_period(
+    _pending_suppressions_q = _scope_suppressions(_in_period(
         db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to
-    ).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
-    if scope is not None:
-        _pending_suppressions_q = _pending_suppressions_q.filter(models.SuppressionRequest.department.in_(scope))
+    ), db, current_user).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
     pending_approvals = (
         len([r for r in requests if r.status in PENDING_APPROVAL_STATUSES])
         + _join_qa_department(_in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to).filter(
-            models.SASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)), models.SASTRequest, scope).count()
+            models.SASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)), models.SASTRequest, scope, db, current_user).count()
         + _join_qa_department(_in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to).filter(
-            models.DASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)), models.DASTRequest, scope).count()
+            models.DASTRequest.status.in_(SAST_DAST_PENDING_APPROVAL_STATUSES)), models.DASTRequest, scope, db, current_user).count()
         + _pending_suppressions_q.count()
     )
 
@@ -1408,7 +1638,9 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     scope = dashboard_department_scope(current_user)
     # 2026-08 CR -- scope is now a list; join it into a stable, readable cache
     # key segment (sorted so department order never produces a cache miss).
-    cache_key = f"dashboard:summary:v5:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
+    workspace_ids = active_qa_workspace_scope_ids(current_user)
+    workspace_scope_key = ",".join(str(value) for value in workspace_ids) or "all"
+    cache_key = f"dashboard:summary:v9:ws-{workspace_scope_key}:{','.join(sorted(scope)) if scope else 'all'}:{date_from or ''}:{date_to or ''}"
     cached = cache.get_json(cache_key)
     if cached is not None:
         return cached
@@ -1416,7 +1648,7 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     child_requests_total = 0
     active_requests_count = 0
     for model, terminal_statuses in _ACTIVE_REQUEST_MODELS:
-        q = _join_qa_department(_in_period(db.query(model), model.created_at, date_from, date_to), model, scope)
+        q = _join_qa_department(_in_period(db.query(model), model.created_at, date_from, date_to), model, scope, db, current_user)
         child_requests_total += q.count()
         active_requests_count += q.filter(model.status.notin_(list(terminal_statuses) + ["DRAFT"])).count()
 
@@ -1425,13 +1657,11 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     # today's date rather than the full now() datetime `_date_bounds` uses
     # elsewhere in this file.
     today = models.now().date()
-    nearing_release_q = db.query(models.QARequest).filter(
+    nearing_release_q = _scope_qa_requests(db.query(models.QARequest), db, current_user).filter(
         models.QARequest.target_release_date.isnot(None),
         models.QARequest.target_release_date >= today,
         models.QARequest.target_release_date <= today + datetime.timedelta(days=14),
     )
-    if scope is not None:
-        nearing_release_q = nearing_release_q.filter(models.QARequest.department.in_(scope))
     nearing_release_count = nearing_release_q.count()
 
     critical_pending_q = db.query(models.FunctionalRequest).filter(
@@ -1441,7 +1671,7 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
         ]),
         models.FunctionalRequest.priority == "Critical",
     )
-    critical_pending_q = _join_qa_department(critical_pending_q, models.FunctionalRequest, scope)
+    critical_pending_q = _join_qa_department(critical_pending_q, models.FunctionalRequest, scope, db, current_user)
     critical_pending_count = critical_pending_q.count()
 
     # QA Lifecycle Health (LifecycleStepper) only ever reads each row's own
@@ -1451,17 +1681,16 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     # counts (not pre-bucketed into the 6 lifecycle stages here) so the
     # stage grouping stays defined in exactly one place -- Dashboard.tsx's
     # own STATUS_STAGE_INDEX -- instead of two copies that could drift.
-    functional_status_q = _join_qa_department(db.query(models.FunctionalRequest), models.FunctionalRequest, scope)
+    functional_status_q = _join_qa_department(db.query(models.FunctionalRequest), models.FunctionalRequest, scope, db, current_user)
     functional_status_counts = dict(
         functional_status_q.with_entities(models.FunctionalRequest.status, func.count(models.FunctionalRequest.id))
         .group_by(models.FunctionalRequest.status).all()
     )
 
-    defect_q = _in_period(db.query(models.Defect), models.Defect.reported_at, date_from, date_to)
-    if scope is not None:
-        defect_q = defect_q.join(
-            models.QARequest, models.Defect.qa_request_id == models.QARequest.id,
-        ).filter(models.QARequest.department.in_(scope))
+    defect_q = _in_period(db.query(models.Defect), models.Defect.reported_at, date_from, date_to).outerjoin(
+        models.QARequest, models.Defect.qa_request_id == models.QARequest.id,
+    )
+    defect_q = _scope_defect_records(defect_q, db, current_user)
     defects_total = defect_q.count()
     defects_open = defect_q.filter(models.Defect.status.notin_(["Closed", "Rejected", "Duplicate", "Not a Defect"])).count()
     defects_resolved = defect_q.filter(models.Defect.resolved_at.isnot(None)).count()
@@ -1563,7 +1792,7 @@ def dashboard_attention_detail(
             )
             .filter(
                 models.ApprovalAction.entity_type == "DEFECT",
-                models.ApprovalAction.decision == "Resolved",
+                models.ApprovalAction.decision.in_(("Resolved", "Ready for QA")),
             )
             .group_by(models.ApprovalAction.entity_id)
             .subquery()
@@ -1587,7 +1816,7 @@ def dashboard_attention_detail(
                 models.TestCase.test_case_key.label("test_case_id"),
                 resolver.full_name.label("resolver_name"),
             )
-            .join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
+            .outerjoin(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
             .outerjoin(models.TestCycle, models.Defect.cycle_id == models.TestCycle.id)
             .outerjoin(models.TestProject, models.TestCycle.project_id == models.TestProject.id)
             .outerjoin(models.TestCase, models.Defect.primary_test_case_id == models.TestCase.id)
@@ -1595,9 +1824,10 @@ def dashboard_attention_detail(
             .outerjoin(models.ApprovalAction, models.ApprovalAction.id == latest_resolution.c.action_id)
             .outerjoin(resolver, resolver.id == models.ApprovalAction.actor_id)
         )
-        query = _in_period(query, models.Defect.reported_at, date_from, date_to)
-        if scope is not None:
-            query = query.filter(models.QARequest.department.in_(scope))
+        query = _scope_defect_records(
+            _in_period(query, models.Defect.reported_at, date_from, date_to),
+            db, current_user,
+        )
         search = (getattr(params, "search", None) or "").strip().casefold()
         if search:
             pattern = f"%{search}%"
@@ -1700,14 +1930,15 @@ def dashboard_attention_detail(
                 resolved_count, reopened_defect_count, reopen_event_count,
             )
             .select_from(models.Defect)
-            .join(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
+            .outerjoin(models.QARequest, models.Defect.qa_request_id == models.QARequest.id)
             .join(latest_resolution, latest_resolution.c.defect_id == models.Defect.id)
             .join(models.ApprovalAction, models.ApprovalAction.id == latest_resolution.c.action_id)
             .join(resolver, resolver.id == models.ApprovalAction.actor_id)
         )
-        resolution_query = _in_period(resolution_query, models.Defect.reported_at, date_from, date_to)
-        if scope is not None:
-            resolution_query = resolution_query.filter(models.QARequest.department.in_(scope))
+        resolution_query = _scope_defect_records(
+            _in_period(resolution_query, models.Defect.reported_at, date_from, date_to),
+            db, current_user,
+        )
         resolution_activity = [{
             "resolver_id": resolver_id,
             "resolver_name": resolver_name,
@@ -1739,7 +1970,7 @@ def dashboard_attention_detail(
             _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.created_at, date_from, date_to),
             models.FunctionalRequest,
             scope,
-        ).filter(models.FunctionalRequest.status.in_(ACTIVE_QA_STATUSES)).all()
+        db, current_user).filter(models.FunctionalRequest.status.in_(ACTIVE_QA_STATUSES)).all()
         grouped = {}
         for request in requests:
             project_id = request.cr_number or request.epic_number
@@ -1804,8 +2035,8 @@ def dashboard_attention_detail(
         rows = []
         for kind, model, path in (("SAST", models.SASTRequest, "/sast"), ("DAST", models.DASTRequest, "/dast")):
             requests = _join_qa_department(
-                _in_period(db.query(model), model.created_at, date_from, date_to), model, scope
-            ).all()
+                _in_period(db.query(model), model.created_at, date_from, date_to), model, scope,
+            db, current_user).all()
             by_id = {request.id: request for request in requests}
             for request_id, scan in _latest_scan_by_request(db, kind, by_id).items():
                 if scan.total_count <= 0:
@@ -1844,17 +2075,15 @@ def dashboard_attention_detail(
             ("DAST", models.DASTRequest, SAST_DAST_PENDING_APPROVAL_STATUSES, "/dast"),
         ):
             requests = _join_qa_department(
-                _in_period(db.query(model), model.created_at, date_from, date_to), model, scope
-            ).filter(model.status.in_(statuses)).all()
+                _in_period(db.query(model), model.created_at, date_from, date_to), model, scope,
+            db, current_user).filter(model.status.in_(statuses)).all()
             for request in requests:
                 row = _attention_request_row(kind, request, f"{path}?open={request.request_id}")
                 row["pending_with"] = pending_with.get(request.status, "Workflow owner")
                 rows.append(row)
-        suppressions = _in_period(
+        suppressions = _scope_suppressions(_in_period(
             db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to
-        ).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
-        if scope is not None:
-            suppressions = suppressions.filter(models.SuppressionRequest.department.in_(scope))
+        ), db, current_user).filter(models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
         suppression_pending_with = {
             "Draft": "Requester",
             "SM_APPROVAL_PENDING": "SM",
@@ -1893,8 +2122,8 @@ def dashboard_attention_detail(
         ("Performance", models.PerformanceRequest, PERFORMANCE_TERMINAL_STATUSES, "/performance"),
     ):
         requests = _join_qa_department(
-            _in_period(db.query(model), model.created_at, date_from, date_to), model, scope
-        ).filter(model.status.notin_(list(terminal_statuses) + ["DRAFT"])).all()
+            _in_period(db.query(model), model.created_at, date_from, date_to), model, scope,
+        db, current_user).filter(model.status.notin_(list(terminal_statuses) + ["DRAFT"])).all()
         rows.extend(
             _attention_request_row(kind, request, f"{path}?open={request.request_id}")
             for request in requests
@@ -1913,7 +2142,7 @@ def security_sast(date_from: str | None = Query(None), date_to: str | None = Que
                   db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
     reqs = _join_qa_department(
-        _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to), models.SASTRequest, scope).all()
+        _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to), models.SASTRequest, scope, db, current_user).all()
     # Reported directly: "in dashboard sast dast findings showing 0
     # result." Used to read models.SASTFinding -- see
     # _latest_scan_by_request's own comment for why that's always empty
@@ -1954,7 +2183,7 @@ def security_dast(date_from: str | None = Query(None), date_to: str | None = Que
                   db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
     reqs = _join_qa_department(
-        _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to), models.DASTRequest, scope).all()
+        _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to), models.DASTRequest, scope, db, current_user).all()
     # Reported directly: "in dashboard sast dast findings showing 0
     # result." Used to read models.DASTFinding -- see
     # _latest_scan_by_request's own comment (and security_sast's matching
@@ -2052,7 +2281,7 @@ def security_insight_details(
     reqs = _join_qa_department(
         _in_period(db.query(model), model.created_at, date_from, date_to),
         model, dashboard_department_scope(current_user),
-    ).all()
+    db, current_user).all()
     scans = _latest_scan_by_request(db, kind, [r.id for r in reqs]) if metric in ("vulnerabilities", "severity", "remediation") else {}
     return _security_insight_detail(kind, metric, value, reqs, scans, params)
 
@@ -2062,12 +2291,13 @@ def security_insight_details(
 def suppression_dashboard(date_from: str | None = Query(None), date_to: str | None = Query(None),
                           db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     scope = dashboard_department_scope(current_user)
-    q = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to)
+    q = _scope_suppressions(
+        _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.created_at, date_from, date_to),
+        db, current_user,
+    )
     # SuppressionRequest.department is a real column (auto-populated at
     # creation time, see its own column comment in models.py) -- unlike
     # Functional/SAST/DAST/Performance, no join needed here.
-    if scope is not None:
-        q = q.filter(models.SuppressionRequest.department.in_(scope))
     sups = q.all()
     open_sups = [s for s in sups if s.status not in SUPPRESSION_TERMINAL_STATUSES]
     # A suppression request can cover several findings (models.SuppressionItem)
@@ -2083,12 +2313,12 @@ def suppression_dashboard(date_from: str | None = Query(None), date_to: str | No
         _in_period(db.query(models.SASTRequest), models.SASTRequest.created_at, date_from, date_to),
         models.SASTRequest,
         scope,
-    ).all()
+    db, current_user).all()
     dast_reqs = _scope_fortify_suppression_requests(
         _in_period(db.query(models.DASTRequest), models.DASTRequest.created_at, date_from, date_to),
         models.DASTRequest,
         scope,
-    ).all()
+    db, current_user).all()
     latest_fortify_scans = [
         *_latest_scan_by_request(db, "SAST", [r.id for r in sast_reqs]).values(),
         *_latest_scan_by_request(db, "DAST", [r.id for r in dast_reqs]).values(),
@@ -2149,7 +2379,7 @@ def fortify_suppression_details(
             _in_period(db.query(model), model.created_at, date_from, date_to),
             model,
             scope,
-        ).all()
+        db, current_user).all()
         by_id = {request.id: request for request in requests}
         for request_id, scan in _latest_scan_by_request(db, kind, by_id).items():
             suppressed_count = int(getattr(scan, field_name, 0) or 0)
@@ -2285,7 +2515,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     for r in _join_qa_department(
             _in_period(db.query(models.FunctionalRequest), models.FunctionalRequest.updated_at, date_from, date_to)
             .filter(models.FunctionalRequest.status.in_(list(STAGE_LABELS.keys()))),
-            models.FunctionalRequest, scope).all():
+            models.FunctionalRequest, scope, db, current_user).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
@@ -2300,7 +2530,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     for r in _join_qa_department(
             _in_period(db.query(models.SASTRequest), models.SASTRequest.updated_at, date_from, date_to).filter(
                 models.SASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)),
-            models.SASTRequest, scope).all():
+            models.SASTRequest, scope, db, current_user).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
@@ -2316,7 +2546,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     for r in _join_qa_department(
             _in_period(db.query(models.DASTRequest), models.DASTRequest.updated_at, date_from, date_to).filter(
                 models.DASTRequest.status.notin_(SAST_DAST_TERMINAL_STATUSES)),
-            models.DASTRequest, scope).all():
+            models.DASTRequest, scope, db, current_user).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
@@ -2332,7 +2562,7 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
     for r in _join_qa_department(
             _in_period(db.query(models.PerformanceRequest), models.PerformanceRequest.updated_at, date_from, date_to)
             .filter(models.PerformanceRequest.status.notin_(PERFORMANCE_TERMINAL_STATUSES)),
-            models.PerformanceRequest, scope).all():
+            models.PerformanceRequest, scope, db, current_user).all():
         age = _age_days(r.updated_at)
         items.append({
             "project_id": r.request_id, "epic_number": r.cr_number or r.epic_number or r.application_name,
@@ -2354,10 +2584,8 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
         "RETURNED_BY_DEPARTMENT_HEAD": "Requester",
         "SECURITY_TEAM_VERIFICATION": "Security Team",
     }
-    _suppression_q = _in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to).filter(
+    _suppression_q = _scope_suppressions(_in_period(db.query(models.SuppressionRequest), models.SuppressionRequest.updated_at, date_from, date_to), db, current_user).filter(
         models.SuppressionRequest.status.notin_(SUPPRESSION_TERMINAL_STATUSES))
-    if scope is not None:
-        _suppression_q = _suppression_q.filter(models.SuppressionRequest.department.in_(scope))
     for s in _suppression_q.all():
         age = _age_days(s.updated_at)
         team = _SUPPRESSION_STAGE_TEAM.get(s.status, "Requester")
@@ -2388,32 +2616,40 @@ def three_w_dashboard(date_from: str | None = Query(None), date_to: str | None =
 
 @router.get("/3w/{project_id}")
 def three_w_project_detail(project_id: str, db: Session = Depends(get_db),
-                            current_user: models.User = Depends(get_current_user)):
-    """Drill-down: selecting a Project ID shows its full lifecycle + audit trail."""
-    req = db.query(models.FunctionalRequest).filter(models.FunctionalRequest.request_id == project_id).first()
-    if not req:
-        return {"detail": "Project not found"}
+                            current_user: models.User = Depends(get_current_user),
+                            source: str = "Functional Testing Request"):
+    """Resolve the selected workflow rather than searching only Functional requests."""
+    sources = {
+        'Functional Testing Request': (models.FunctionalRequest, 'FUNCTIONAL_REQUEST', models.ReadinessChecklistItem, 'functional_request_id'),
+        'SAST Request': (models.SASTRequest, 'SAST', models.SASTChecklistItem, 'sast_request_id'),
+        'DAST Request': (models.DASTRequest, 'DAST', models.DASTChecklistItem, 'dast_request_id'),
+        'Performance Request': (models.PerformanceRequest, 'PERFORMANCE', models.PerformanceChecklistItem, 'performance_request_id'),
+        'Suppression Request': (models.SuppressionRequest, 'SUPPRESSION', None, None),
+    }
+    if source not in sources:
+        raise HTTPException(400, 'Unknown request source')
+    model, entity_type, checklist_model, checklist_key = sources[source]
     scope = dashboard_department_scope(current_user)
-    if scope and req.department not in scope:
-        # Same department scoping as the 3W list above (see
-        # dashboard_department_scope) -- without this, a scoped user could
-        # still drill into an out-of-department project's own lifecycle/audit
-        # trail directly by its request_id even though the list itself
-        # already hides it. Reuses the same "not found" shape as a genuinely
-        # missing project rather than a 403, so this isn't distinguishable
-        # from "this project ID doesn't exist" -- consistent with how the
-        # list simply omits it instead of showing a blocked placeholder.
-        return {"detail": "Project not found"}
-    history = (db.query(models.ApprovalAction)
-               .filter_by(entity_type="FUNCTIONAL_REQUEST", entity_id=req.id)
-               .order_by(models.ApprovalAction.created_at).all())
-    checklist = db.query(models.ReadinessChecklistItem).filter_by(functional_request_id=req.id).all()
+    query = (_scope_suppressions(db.query(model), db, current_user) if entity_type == 'SUPPRESSION'
+             else _join_qa_department(db.query(model), model, scope, db, current_user))
+    identifier = model.suppression_id if entity_type == 'SUPPRESSION' else model.request_id
+    req = query.filter(identifier == project_id).first()
+    if not req:
+        raise HTTPException(404, 'Request not found or unavailable in this workspace')
+    if entity_type in ('SAST', 'DAST'):
+        from .sast_dast import _sast_dast_history_rows
+        history = _sast_dast_history_rows(db, entity_type, req.id)
+    else:
+        history = (db.query(models.ApprovalAction)
+                   .filter_by(entity_type=entity_type, entity_id=req.id)
+                   .order_by(models.ApprovalAction.created_at).all())
+    checklist = db.query(checklist_model).filter_by(**{checklist_key: req.id}).all() if checklist_model else []
     return {
-        "project_id": req.request_id,
+        "project_id": project_id,
         "application_name": req.application_name,
         "status": req.status,
-        "priority": req.priority,
-        "risk_rating": req.risk_rating,
+        "priority": getattr(req, "priority", None),
+        "risk_rating": getattr(req, "risk_rating", None),
         "ageing_days": _age_days(req.updated_at),
         "lifecycle": [
             {"step": h.step_name, "decision": h.decision, "actor_role": h.actor_role,
@@ -2421,6 +2657,6 @@ def three_w_project_detail(project_id: str, db: Session = Depends(get_db),
             for h in history
         ],
         "readiness_checklist": [
-            {"item": c.item, "owner": c.owner, "complete": c.is_complete} for c in checklist
+            {"item": c.item, "owner": getattr(c, "owner", None) or getattr(c, "data_required", None), "complete": c.is_complete} for c in checklist
         ],
     }

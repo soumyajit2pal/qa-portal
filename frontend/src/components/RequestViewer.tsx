@@ -5,6 +5,7 @@ import { RequestViewerContext } from '../hooks/useRequestNavigation'
 import { RequestLookupError, RequestTarget, requestRoutes, requestTarget, resolveRequestId } from '../requestNavigation'
 import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, SuppressionOut, SignOffOut, UserOut } from '../types'
 import { Modal } from './Common'
+import { IconSearch } from './Icons'
 import ModuleBoundary from './ModuleBoundary'
 import { RequestDetail as QA } from '../QARequests/RequestDetail'
 
@@ -89,26 +90,37 @@ export default function RequestViewer({ children }: { children: React.ReactNode 
       void open(destination)
     }}>
       {children}
-      {target && (error ? <Modal title={missing ? "Request not found" : "Unable to open request"} onClose={close} variant="dialog" compact preventBackdropClose>
-        <div className={`action-error-dialog ${missing ? 'request-viewer-not-found' : ''}`} role="alert">
-          <div className="action-error-dialog-icon">{missing ? '?' : '!'}</div>
+      {target && (error ? missing ? <Modal title="Search result" onClose={close} variant="dialog" compact preventBackdropClose>
+        <div className="request-not-found-state" role="alert">
+          <span className="request-not-found-icon" aria-hidden="true"><IconSearch width={24} height={24} /></span>
+          <span className="request-not-found-eyebrow">No result found</span>
+          <h3>We couldn’t find this request</h3>
+          <p>The request may not exist, may have been removed, or may be outside your workspace access.</p>
+          <div className="request-not-found-query">
+            <span>Request ID</span>
+            <code>{target.identifier}</code>
+          </div>
+          <div className="request-viewer-error-actions">
+            <button className="btn btn-primary" onClick={tryAnotherId}>Search another ID</button>
+            <button className="btn" onClick={close}>Close</button>
+          </div>
+        </div>
+      </Modal> : <Modal title="Unable to open request" onClose={close} variant="dialog" compact preventBackdropClose>
+        <div className="action-error-dialog" role="alert">
+          <div className="action-error-dialog-icon">!</div>
           <div>
-            <strong>{missing ? 'No matching request' : 'Request details could not be loaded'}</strong>
-            <span>{systemFailure && httpError.status ? `Service error · HTTP ${httpError.status}` : missing ? 'Search result' : 'Reason'}</span>
+            <strong>Request details could not be loaded</strong>
+            <span>{systemFailure && httpError.status ? `Service error · HTTP ${httpError.status}` : 'Reason'}</span>
             <p>{errorMessage}</p>
             {systemFailure && httpError.reference && <small className="action-error-reference">Technical reference: {httpError.reference}</small>}
           </div>
         </div>
         <div className="action-error-guidance">
           <strong>What to do</strong>
-          <p>{missing
-            ? 'Check the complete request ID and search again. The ID must match exactly.'
-            : 'Try loading the request again. If the problem continues, close this message and contact the portal administrator.'}</p>
+          <p>Try loading the request again. If the problem continues, close this message and contact the portal administrator.</p>
         </div>
         <div className="request-viewer-error-actions">
-          {missing
-            ? <button className="btn btn-primary" onClick={tryAnotherId}>Try another ID</button>
-            : <button className="btn btn-primary" onClick={() => void open(target)}>Retry</button>}
+          <button className="btn btn-primary" onClick={() => void open(target)}>Retry</button>
           <button className="btn" onClick={close}>Close</button>
         </div>
       </Modal> : <ModuleBoundary key={`${target.path}:${target.identifier}`} moduleName="Request details">

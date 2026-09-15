@@ -1,3 +1,4 @@
+import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
 import {useSearchParams} from 'react-router-dom'
@@ -10,7 +11,7 @@ import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import RequestDelegation from '../../components/RequestDelegation'
-import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasRole, hasDepartment, canManageReadinessEvidence, QA_DEPARTMENT } from '../../constants'
+import { SEVERITIES, PRIORITIES, ENVIRONMENTS, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceRole, isViewOnly, canManageReadinessEvidence } from '../../constants'
 import { DASTOut, DASTListOut, DASTTargetOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
@@ -101,7 +102,7 @@ function DASTFormModal({
   // checklist evidence controls inside it need their own explicit check.
   const { user: modalUser } = useAuth()
   const isAdminModal = hasRole(modalUser, 'ADMIN')
-  const viewOnlyModal = !!modalUser?.roles?.includes('VIEW_ONLY')
+  const viewOnlyModal = isViewOnly(modalUser)
   const isActiveDelegateModal = !viewOnlyModal && editing.active_delegation?.status === 'ACTIVE' && editing.active_delegation.assigned_to_id === modalUser?.id
   const isRequesterModal = isActiveDelegateModal || isAdminModal || (!viewOnlyModal && editing.requester_id === modalUser?.id && !editing.active_delegation)
   const sameDeptModal = hasDepartment(modalUser, editing.department)
@@ -486,7 +487,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
     setShowNewSuppression(true)
   }
   const isAdmin = hasRole(user, 'ADMIN')
-  const viewOnly = !!user?.roles?.includes('VIEW_ONLY')
+  const viewOnly = isViewOnly(user)
   const isRequester = (!viewOnly && req.requester_id === user?.id) || isAdmin
   const status = req.status
   const sameDept = hasDepartment(user, req.department)
@@ -496,8 +497,8 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   // ORACLE_MIGRATION_2026-07.md section 59.
   const isAssignedQALead = isAdmin || hasRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   const isAssignedAnalyst = isAdmin || (hasRole(user, 'SECURITY_ANALYST') && req.security_analyst_id === user?.id)
-  const qaLeads = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('QA_LEAD'))
-  const securityAnalysts = users.filter((u) => u.is_active && hasDepartment(u, QA_DEPARTMENT) && (u.roles || []).includes('SECURITY_ANALYST'))
+  const qaLeads = users.filter((u) => u.is_active && hasWorkspaceRole(u, 'QA_LEAD'))
+  const securityAnalysts = users.filter((u) => u.is_active && hasWorkspaceRole(u, 'SECURITY_ANALYST'))
 
   // Edit access -- see the matching (and more detailed) comment in
   // SAST.tsx's canEditDetails for the full reasoning; same rule here.
@@ -572,7 +573,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
   // 2026-08 Reassignment CR -- see SAST.tsx's identical comment for the
   // full reasoning, including the later QA_LEAD carve-out. Mirrors
   // sast_dast.py's _require_can_reassign_security_analyst exactly.
-  const isQADepartmentHead = isAdmin || (hasRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA') && hasDepartment(user, QA_DEPARTMENT))
+  const isQADepartmentHead = isAdmin || (hasWorkspaceRole(user, 'CHIEF_MANAGER_QA', 'AGM_QA'))
   const canReassignSecurityAnalyst = isAssignedAnalyst || isQADepartmentHead || hasRole(user, 'QA_LEAD')
   const canAssignSecurityAnalyst =
     (isInitialAnalystAssignment ? isAssignedQALead : canReassignSecurityAnalyst) &&
@@ -699,7 +700,7 @@ export function DASTDetail({ req, onClose, onChanged, users }: {
           )}
           <DetailSection title="Status">
             <DetailField label="Status">
-              <Badge status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status) || suppressionAwareStatusLabel(status, hasOpenSuppression)} />
+              <WorkflowStatusBadge record={req} status={status} label={applicationNameAwareStatusLabel(status, req.application_master_status) || suppressionAwareStatusLabel(status, hasOpenSuppression)} />
               {req.needs_dept_head_reapproval && (
                 <span className="badge badge-yellow" style={{ marginLeft: 8 }}>
                   Department Head re-approval required after changes
@@ -1229,7 +1230,7 @@ export default function DAST() {
           { key: 'security_lead_id', header: 'Assigned Group', render: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '—', filterValue: (r) => assignedGroupFor(r.status, r.application_master_status)?.label || '' },
           { key: 'priority', header: 'Priority', render: (r) => r.priority || '—' },
           { key: 'risk_category', header: 'Risk' },
-          { key: 'status', header: 'Status', render: (r) => <Badge status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status) || suppressionAwareStatusLabel(r.status, r.has_open_suppression)} /> },
+          { key: 'status', header: 'Status', render: (r) => <WorkflowStatusBadge record={r} status={r.status} label={applicationNameAwareStatusLabel(r.status, r.application_master_status) || suppressionAwareStatusLabel(r.status, r.has_open_suppression)} /> },
           { key: 'pending_with', header: 'Pending With', render: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '—'), filterValue: (r) => applicationNameAwareStatusLabel(r.status, r.application_master_status) ? 'Application Owner' : (SAST_DAST_PENDING_WITH[r.status] || '') },
           { key: 'findings', header: 'Findings', render: (r) => r.findings_count, filterValue: (r) => String(r.findings_count) },
           { key: 'source', header: 'Source', render: (r) => (

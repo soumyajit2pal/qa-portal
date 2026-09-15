@@ -100,13 +100,13 @@ function QuickResultActions({ execution, onChanged, onError }: {
               status !== 'Not Executed'
               && (status !== 'Retest Passed' || hasRetestEligibleHistory(execution.runs, execution.status))
             ).map((status) => {
-              const blocked = executionStatusGate(execution.linked_defects, execution.runs, status, undefined, execution.status)
+              const blocked = executionStatusGate(execution.linked_defects, execution.runs, status, undefined, execution.status, execution.id)
               const tone = status.toLowerCase().replace(/\s+/g, '-')
               return <button type="button" key={status} className={`${result === status ? 'selected ' : ''}result-${tone}`} disabled={!!blocked} title={blocked || undefined} onClick={() => setResult(status)}><i />{status}</button>
             })}
           </div>
-          {result && executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status) && (
-            <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status)}</small>
+          {result && executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status, execution.id) && (
+            <small className="tm-inline-defect-gate-note">{executionStatusGate(execution.linked_defects, execution.runs, result, undefined, execution.status, execution.id)}</small>
           )}
           <div className="tm-inline-run-actions">
             <span>{result ? `${result} selected` : 'Select one result'}</span>
@@ -256,8 +256,8 @@ export default function MyExecutions() {
       ), filterValue: (row) => row.execution.status },
     { key: 'actions', header: '', filterable: false, render: (row) => (
         <div className="my-execution-actions">
-          <QuickResultActions execution={row.execution} onChanged={updateExecution} onError={setError} />
-          <QuickDefectLink execution={row.execution} onChanged={updateExecution} onError={setError} />
+          {row.cycle.workspace_writable ? <><QuickResultActions execution={row.execution} onChanged={updateExecution} onError={setError} />
+          <QuickDefectLink execution={row.execution} onChanged={updateExecution} onError={setError} /></> : <span className="badge badge-gray">{row.cycle.origin_workspace_name || 'Other workspace'} · Read-only</span>}
           <button type="button" className="btn btn-sm" onClick={(e) => { e.stopPropagation(); navigate(`/test-execution?project=${row.project.id}&cycle=${row.cycle.id}`) }}>Open cycle</button>
         </div>
       ) },
