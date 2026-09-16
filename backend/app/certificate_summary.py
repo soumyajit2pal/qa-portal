@@ -62,10 +62,29 @@ def assigned_testers_label(snapshot):
     return ', '.join(item['name'] for item in snapshot['assigned_testers']) or 'Not assigned'
 
 
+def require_linked_security_closed(db, source):
+    """A Functional clearance waits for every security sibling of its parent request."""
+    if not source.qa_request_id or not source.qa_request:
+        return
+    selected = {value.strip().upper() for value in (source.qa_request.request_types or '').split(',')}
+    pending = []
+    for label, model in [('SAST', models.SASTRequest), ('DAST', models.DASTRequest)]:
+        siblings = db.query(model).filter_by(qa_request_id=source.qa_request_id).order_by(model.id).all()
+        if label in selected and not siblings:
+            pending.append(f'{label} child request missing')
+        pending.extend(f'{label} {item.request_id or "(no ID)"} ({item.status or "no status"})'
+                       for item in siblings if item.status != 'CLOSED')
+    if pending:
+        raise HTTPException(409,
+            'QA Clearance cannot be raised until every linked SAST/DAST request is Closed: '
+            + ', '.join(pending))
+
+
 def capture(db, obj):
     source = db.query(models.FunctionalRequest).filter_by(request_id=obj.testing_request_id).first()
     if not source or not source.qa_request or source.qa_request.qa_workspace_id != obj.qa_workspace_id:
         raise HTTPException(400, 'The certificate must link to a Functional Request in its workspace')
+    require_linked_security_closed(db, source)
     cycles = db.query(models.TestCycle.id).join(models.TestCycleChildRequestLink).filter(
         models.TestCycleChildRequestLink.child_type == 'Functional', models.TestCycleChildRequestLink.child_id == source.id)
     # A certificate is scoped to the declared tested environment/build.

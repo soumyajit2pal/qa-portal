@@ -20,6 +20,30 @@ from app.constants import GatewayStatus, QAStatus, Role
 
 
 class EmailNotificationTests(unittest.TestCase):
+    def test_sla_breach_check_is_queued_once_per_hour(self):
+        with (
+            patch.object(email_notifications, "_last_sla_check", None),
+            patch("app.email_notifications.time.monotonic", side_effect=[100.0, 200.0, 3801.0]),
+            patch("app.sla_notifications.queue_breaches") as queue_breaches,
+        ):
+            email_notifications._queue_sla_breaches_if_due()
+            email_notifications._queue_sla_breaches_if_due()
+            email_notifications._queue_sla_breaches_if_due()
+
+        self.assertEqual(queue_breaches.call_count, 2)
+
+    def test_failed_sla_breach_check_can_be_retried(self):
+        with (
+            patch.object(email_notifications, "_last_sla_check", None),
+            patch("app.email_notifications.time.monotonic", side_effect=[100.0, 101.0]),
+            patch("app.sla_notifications.queue_breaches", side_effect=[RuntimeError("database unavailable"), None]) as queue_breaches,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+                email_notifications._queue_sla_breaches_if_due()
+            email_notifications._queue_sla_breaches_if_due()
+
+        self.assertEqual(queue_breaches.call_count, 2)
+
     def test_smtp_is_disabled_by_default(self):
         with patch.dict(os.environ, {"SMTP_ENABLED": "false"}, clear=False):
             ready, reason = smtp_readiness()

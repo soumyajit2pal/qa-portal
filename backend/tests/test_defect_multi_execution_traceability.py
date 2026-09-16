@@ -132,3 +132,7 @@ def test_incomplete_traceability_includes_unlinked_but_excludes_additional_links
         params = SimpleNamespace(search=None, status=None, sort_by=None, sort_order='desc')
         result = defects.list_defects(queue='incomplete-traceability', params=params, db=db, current_user=SimpleNamespace(id=1))
         assert result == [1]
+        # The Defect Management "No execution link" queue must match the
+        # traceability report: an additional execution is a valid link.
+        result = defects.list_defects(queue='unlinked', params=params, db=db, current_user=SimpleNamespace(id=1))
+        assert result == [1]

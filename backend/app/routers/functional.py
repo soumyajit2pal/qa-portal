@@ -7,7 +7,7 @@ from sqlalchemy import and_, func, literal, or_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 
-from .. import models, pagination, schemas
+from .. import models, pagination, schemas, certificate_summary
 from ..database import get_db
 from ..deps import (
     get_workflow_user as get_current_user, require_workflow_roles as require_roles, require_same_department, require_not_requester,
@@ -20,7 +20,12 @@ from ..pdf_export import build_request_detail_pdf
 from .. import documents as doc_store
 from .. import application_names as app_names
 from .. import reassignment
-from ..execution_cycles import execution_cycle_choice, require_cycle_startable, require_cycles_completed
+from ..execution_cycles import (
+    execution_cycle_choice,
+    require_cycle_startable,
+    require_cycle_unlinkable,
+    require_cycles_completed,
+)
 
 router = APIRouter(prefix="/api/functional-requests", tags=["functional"])
 
@@ -908,6 +913,7 @@ def request_signoff(req_id: int, payload: schemas.RequestSignoffIn = schemas.Req
     # on a request they own, same "QA Lead group OR current tester" shape
     # as tester reassignment.
     _require_assigned_qa_lead_or_current_tester(obj, current_user, "request sign-off on this request")
+    certificate_summary.require_linked_security_closed(db, obj)
     # The frontend now creates the QA Clearance Certificate (POST /api/signoffs)
     # right before calling this, via SignOff.tsx's NewSignOffModal opened from
     # this request's own "Request Sign-off" button -- link it immediately
@@ -1054,7 +1060,6 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.ChecklistI
     item.is_complete = payload.is_complete
     if payload.is_complete:
         item.approved_by_id = current_user.id
-        import datetime
         item.approved_at = models.now()
     else:
         item.approved_by_id = None

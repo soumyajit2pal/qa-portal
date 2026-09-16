@@ -5,6 +5,8 @@ import { AuditLogOut, AuditSummary } from '../../types'
 import { Card, ErrorText, Modal, PageHeader, Table } from '../../components/Common'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
+import { useAuth } from '../../context/AuthContext'
+import { hasRole } from '../../constants'
 
 const EVENT_TYPES = ['', 'AUTHENTICATION', 'ACCESS_MANAGEMENT', 'DATA_CHANGE', 'ACCESS']
 
@@ -18,6 +20,7 @@ function prettyDetails(raw?: string | null): string {
 }
 
 export default function AuditLog() {
+  const { user } = useAuth()
   const [eventType, setEventType] = useState('')
   const [outcome, setOutcome] = useState('')
   const [search, setSearch] = useState('')
@@ -64,7 +67,10 @@ export default function AuditLog() {
       <PageHeader
         title="Audit Log" count={total}
         subtitle="Immutable record of sign-ins, failed access, API activity, data changes, and user/role administration. Passwords, tokens, and request bodies are never captured."
-        actions={<button className="btn btn-primary" onClick={() => api.downloadFile(`/api/audit/export?${exportQuery}`, 'qualityhub-audit-log.csv')}>Export CSV</button>}
+        actions={<>
+          {hasRole(user, 'ADMIN') && <button className="btn" onClick={() => api.downloadFile('/api/audit/user-access-report', 'qualityops-user-access-report.xlsx').catch(setError)}>Download user access report</button>}
+          <button className="btn btn-primary" onClick={() => api.downloadFile(`/api/audit/export?${exportQuery}`, 'qualityhub-audit-log.csv').catch(setError)}>Export CSV</button>
+        </>}
       />
 
       <div className="audit-summary-grid">

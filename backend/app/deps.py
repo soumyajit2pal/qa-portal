@@ -28,6 +28,7 @@ _VIEW_ONLY_ROLE_GATED_READ_PREFIXES = (
     "/api/approvals",
     "/api/dashboard",
     "/api/export",
+    "/api/reports",
     "/api/test-projects",
     "/api/test-repository",
     "/api/test-execution",
@@ -57,12 +58,21 @@ def _enforce_view_only_request(
     Logout and completion of the user's own required LDAP email are the only
     non-read self-service operations allowed.
     """
-    if Role.VIEW_ONLY not in user.roles:
+    if Role.VIEW_ONLY not in user.roles and Role.SCALE_6_PLUS not in user.roles:
         return
     if request.method.upper() in _SAFE_READ_METHODS:
         return
     if request.url.path in _VIEW_ONLY_SELF_SERVICE_PATHS:
         return
+    if Role.SCALE_6_PLUS in user.roles:
+        if request.url.path in {
+            "/api/workspaces/preference/current", "/api/qa-workspaces/preference/current",
+        } or request.url.path.endswith("/export-xlsx/jobs"):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Scale 6+ access is read-only across all workspaces.",
+        )
     selected_workspace_id = getattr(user, "active_qa_workspace_id", None)
     selected_workspace = (
         db.get(models.QAWorkspace, selected_workspace_id)
@@ -106,7 +116,7 @@ def _enforce_parent_workspace_viewer_request(request: Request, access_mode: str 
     if request.url.path in (
         _VIEW_ONLY_SELF_SERVICE_PATHS
         | {"/api/workspaces/preference/current", "/api/qa-workspaces/preference/current"}
-    ):
+    ) or request.url.path.endswith("/export-xlsx/jobs"):
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -214,8 +224,8 @@ def _resolve_current_user(request: Request, token: str, db: Session) -> models.U
     )
     set_current_workspace_scope_ids(user.active_workspace_scope_ids)
     access_mode = inherited_workspace_access_mode(db, user, selected_workspace_id)
-    _enforce_parent_workspace_viewer_request(request, access_mode)
     _enforce_view_only_request(request, user, db)
+    _enforce_parent_workspace_viewer_request(request, access_mode)
     from .workflow_authority import configure_request
     configure_request(db, user, request, workflow=bool(getattr(request.state, "workflow_operation", False)))
     from .project_workspace_ownership import bind_actor, guard_request
@@ -319,7 +329,7 @@ def require_roles(*roles, workflow=False):
         view_only_read = request.method.upper() in _SAFE_READ_METHODS
         view_only_export_job = request.url.path.endswith("/export-xlsx/jobs")
         if (
-            Role.VIEW_ONLY in current_user.roles
+            (Role.VIEW_ONLY in current_user.roles or Role.SCALE_6_PLUS in current_user.roles)
             and (view_only_read or view_only_export_job)
             and request.url.path.startswith(_VIEW_ONLY_ROLE_GATED_READ_PREFIXES)
         ):
@@ -459,14 +469,14 @@ def require_department_visibility(
 
 def active_qa_workspace_scope(current_user: models.User) -> Optional[int]:
     """Workspace selected for this request, or None for non-QA users."""
-    if current_user.has_role(Role.ADMIN) or current_user.qa_workspace_access:
+    if current_user.has_role(Role.ADMIN) or current_user.has_role(Role.SCALE_6_PLUS) or current_user.qa_workspace_access:
         return getattr(current_user, "active_qa_workspace_id", None)
     return None
 
 
 def active_qa_workspace_scope_ids(current_user: models.User) -> tuple[int, ...]:
     """Selected workspace plus accessible direct children for parent views."""
-    if not (current_user.has_role(Role.ADMIN) or current_user.qa_workspace_access):
+    if not (current_user.has_role(Role.ADMIN) or current_user.has_role(Role.SCALE_6_PLUS) or current_user.qa_workspace_access):
         return ()
     from .workspace_service import current_workspace_scope_ids
     scope = current_workspace_scope_ids()

@@ -4,7 +4,7 @@ from typing import List
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index,
+    Column, Integer, BigInteger, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index,
     UniqueConstraint, CheckConstraint, text, and_
 )
 from sqlalchemy.orm import relationship, foreign
@@ -479,6 +479,7 @@ class QAWorkspace(Base):
 
     name = Column(String(150), unique=True, nullable=False)
     description = Column(Text, nullable=True)
+    document_portal_quota_bytes = Column(BigInteger, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     is_default = Column(Boolean, nullable=False, default=False)
     parent_workspace_id = Column(
@@ -1700,6 +1701,9 @@ class SecurityScanResult(Base):
     id = pk_column()
     request_type = Column(String(8), nullable=False, index=True)
     request_id = Column(Integer, nullable=False, index=True)
+    # Rows sharing this key were imported by one Start Scan / Rescan action.
+    # Each row still belongs to one independently-scanned URL/repository.
+    execution_key = Column(String(36), nullable=True)
     application_name = Column(String(150), nullable=False)
     application_version = Column(String(100), nullable=False)
     provider = Column(String(40), nullable=False, default="Fortify SSC")
@@ -1716,6 +1720,10 @@ class SecurityScanResult(Base):
     suppressed_total_count = Column(Integer, nullable=False, default=0)
     audit_url = Column(String(1000))
     filters_json = Column(Text)
+    # Immutable copy of the SAST repositories / DAST target URLs selected
+    # for this import.  The request targets remain editable before scanning,
+    # so history must retain the labels that were actually covered then.
+    targets_json = Column(Text)
     imported_by_id = Column(Integer, ForeignKey("qap_users.id"), nullable=True)
     imported_at = Column(DateTime, default=now, nullable=False)
 
@@ -1725,6 +1733,13 @@ class SecurityScanResult(Base):
     def filters(self):
         try:
             return json.loads(self.filters_json or "[]")
+        except (TypeError, ValueError):
+            return []
+
+    @property
+    def targets(self):
+        try:
+            return json.loads(self.targets_json or "[]")
         except (TypeError, ValueError):
             return []
 
@@ -3918,6 +3933,7 @@ Index("ix_qap_sast_qa_req", SASTRequest.qa_request_id)
 Index("ix_qap_dast_qa_req", DASTRequest.qa_request_id)
 Index("ix_qap_perf_qa_req", PerformanceRequest.qa_request_id)
 Index("ix_qap_signoff_testreq", QASignOff.testing_request_id)
+Index("ix_scan_result_execution", SecurityScanResult.execution_key)
 
 # Deliberately NOT added, with reasons (IDX-005/IDX-006 diligence):
 #   - TestExecution(cycle_id, test_case_id): already exactly covered by the

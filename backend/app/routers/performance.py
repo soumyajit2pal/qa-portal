@@ -550,7 +550,6 @@ def update_checklist_item(req_id: int, item_id: int, payload: schemas.Performanc
     item.is_complete = payload.is_complete
     if payload.is_complete:
         item.approved_by_id = current_user.id
-        import datetime
         item.approved_at = models.now()
     else:
         item.approved_by_id = None

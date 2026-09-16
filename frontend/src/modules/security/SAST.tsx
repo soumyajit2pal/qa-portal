@@ -1,5 +1,5 @@
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
-import { useRequestNavigation } from '../../hooks/useRequestNavigation'
+import { useRequestNavigation, useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
 import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
@@ -16,7 +16,7 @@ import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH
 import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
-import { SecurityFindingsNextAction, SecurityRemediationAssignment, SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
+import { SecurityFindingsNextAction, SecurityRemediationAssignment, SecurityFixDialog, SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
 import { NewSuppressionModal } from './Suppression'
 
 // One "SAST component" = one repository, with its own branch/commit/tech
@@ -340,6 +340,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   // through with no confirmation dialog, since the system already knows the
   // answer from the latest imported scan.
   const [showRescan, setShowRescan] = useState(false)
+  const [showMarkFixed, setShowMarkFixed] = useState(false)
   // Reported directly: "while clicking on Scan or Rescan, give warning
   // message saying are you ready to retrieve the result or are you sure
   // scan has been completed" -- Start Scan/Rescan both import whatever is
@@ -415,12 +416,10 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
     } finally { setBusy(false) }
   }
 
-  async function startScan(applicationName: string, applicationVersion: string) {
+  async function startScan(scans: { target_id: number; application_name: string; application_version: string }[]) {
     setBusy(true); setScanError(null)
     try {
-      const response = await api.post<{ request: SASTOut; scan_result: SecurityScanResultOut }>(`/api/sast-requests/${req.id}/start-scan`, {
-        application_name: applicationName, application_version: applicationVersion,
-      })
+      const response = await api.post<{ request: SASTOut; scan_results: SecurityScanResultOut[] }>(`/api/sast-requests/${req.id}/start-scan`, { scans })
       onChanged(response.request)
       setShowStartScan(false)
       setTab('findings')
@@ -432,12 +431,10 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   // 2026-08 "Findings Validation" doc -- re-imports fresh Fortify SSC
   // results into a NEW scan record (see routers/sast_dast.py::_rescan_scan);
   // status is unchanged by this call, only the scan data refreshes.
-  async function rescan(applicationName: string, applicationVersion: string) {
+  async function rescan(scans: { target_id: number; application_name: string; application_version: string }[]) {
     setBusy(true); setScanError(null)
     try {
-      const response = await api.post<{ request: SASTOut; scan_result: SecurityScanResultOut }>(`/api/sast-requests/${req.id}/rescan`, {
-        application_name: applicationName, application_version: applicationVersion,
-      })
+      const response = await api.post<{ request: SASTOut; scan_results: SecurityScanResultOut[] }>(`/api/sast-requests/${req.id}/rescan`, { scans })
       onChanged(response.request)
       setShowRescan(false)
       await loadScan()
@@ -1067,7 +1064,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
             onValidateFindings={validateFindings}
             onRescan={() => setShowRescanConfirm(true)}
             onAssignToRequester={() => act('assign-to-requester')}
-            onMarkFixed={() => act('mark-fixed')}
+            onMarkFixed={() => setShowMarkFixed(true)}
             onInitiateSuppression={initiateSuppression}
             onLinkSuppression={() => setShowLinkSuppression(true)}
           />
@@ -1079,6 +1076,17 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
       {tab === 'history' && (
         <JiraActivity entityType="SAST" entityId={req.id} items={history} onPosted={(item) => setHistory((prev) => [...prev, item])} />
       )}
+
+      {showMarkFixed && <SecurityFixDialog
+        kind="SAST" targets={req.components.map(component => ({ id: component.id, label: component.repository_url || 'Repository URL not recorded', previousCommit: component.commit_id }))} currentScans={scanSummary?.current_results || []}
+        onClose={() => setShowMarkFixed(false)}
+        onSubmit={async targets => {
+          const updated = await api.post<SASTOut>(`/api/sast-requests/${req.id}/mark-fixed`, { targets })
+          onChanged(updated)
+          setShowMarkFixed(false)
+          await load()
+        }}
+      />}
 
       <ReadinessPassError error={readinessPassError} />
 
@@ -1114,12 +1122,13 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
           onCancel={() => setShowRescanConfirm(false)}
         />
       )}
-      {showStartScan && <SecurityScanDialog kind="SAST" initialApplicationName={req.application_name} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
+      {showStartScan && <SecurityScanDialog kind="SAST" initialApplicationName={req.application_name} targets={req.components.filter(component => component.repository_url).map(component => ({ id: component.id, label: component.repository_url!, detail: [component.git_branch, component.commit_id].filter(Boolean).join(' · ') || null }))} busy={busy} error={scanError} onClose={() => setShowStartScan(false)} onStart={startScan} />}
       {showRescan && (
         <SecurityScanDialog
           kind="SAST" mode="rescan"
           initialApplicationName={scanResults[0]?.application_name || req.application_name}
-          initialApplicationVersion={scanResults[0]?.application_version}
+          targets={req.components.filter(component => component.repository_url).map(component => ({ id: component.id, label: component.repository_url!, detail: [component.git_branch, component.commit_id].filter(Boolean).join(' · ') || null }))}
+          initialScans={scanSummary?.current_results || []}
           busy={busy} error={scanError}
           onClose={() => setShowRescan(false)}
           onStart={rescan}
@@ -1162,6 +1171,7 @@ function userName(users: UserOut[], id?: number | null): string | null {
 }
 
 export default function SAST() {
+  const viewerManagedDeepLinks = useViewerManagedDeepLinks()
   // SRS 7.2 PAG-006 -- the list only ever holds the lightweight SASTListOut
   // shape; opening a request fetches the full SASTOut record fresh via
   // GET /api/sast-requests/{id} before SASTDetail (which needs every field)
@@ -1200,6 +1210,7 @@ export default function SAST() {
   // full reasoning; the gateway's "Linked Requests" table opens a specific
   // SAST request here via `?open=<request_id>`.
   useEffect(() => {
+    if (viewerManagedDeepLinks) return
     const recordId = Number(searchParams.get('openId'))
     const openId = searchParams.get('open')
     if (Number.isInteger(recordId) && recordId > 0) {
@@ -1210,7 +1221,7 @@ export default function SAST() {
       openRequest(match.id)
     } else return
     setSearchParams((p) => { p.delete('open'); p.delete('openId'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams, openRequest])
+  }, [rows, searchParams, setSearchParams, openRequest, viewerManagedDeepLinks])
 
   return (
     <div>

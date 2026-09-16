@@ -916,6 +916,12 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const showActions = !viewOnly && (canEdit || canLinkExecution || canReassignDefect || allowedTransitions.length > 0)
   const traceRows = defectTraceRows(defect)
   const traceCycleCount = new Set(traceRows.map((row) => row.cycle_id || row.cycle_key).filter(Boolean)).size
+  const productionImpact = defect.workflow_state?.production_impact || (defect.environment === 'Production' ? 'Reported in Production' : 'Not assessed')
+  const stageOwnerId = defect.status === 'Business Acceptance' ? defect.workflow_state?.business_owner_id
+    : ['Ready for Release', 'Production Verification'].includes(defect.status) ? defect.workflow_state?.release_owner_id
+    : ['Ready for QA', 'QA Testing', 'Retest'].includes(defect.status) ? defect.retest_tester_id : defect.assignee_id
+  const stageOwner = users.find((candidate) => candidate.id === stageOwnerId)?.full_name
+    || (stageOwnerId === defect.assignee_id ? defect.assignee_name : null)
   function runAction(action: () => void) {
     setActionsOpen(false)
     action()
@@ -930,7 +936,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   return <>
     <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} wide>
       <div className="defect-detail-hero">
-        <div className="defect-detail-summary"><span className="defect-detail-kicker">{defect.application_name} · {defect.module_feature}</span><div><Badge status={defect.status} /><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><span className="defect-priority-pill">{defect.priority}</span>{!linkedExecutionIds.size && <span className="badge badge-yellow">Execution link missing</span>}</div></div>
+        <div className="defect-detail-summary"><span className="defect-detail-kicker">DEFECT OVERVIEW · {defect.application_name} · {defect.module_feature}</span><div><Badge status={defect.status} /><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity} severity</span><span className="defect-priority-pill">{defect.priority}</span>{defect.workflow_state?.blocked && <span className="badge badge-yellow">Blocked</span>}</div></div>
         {showActions && <div className="defect-actions" ref={actionsRef}>
           <button type="button" className="btn btn-primary btn-sm defect-actions-trigger" aria-haspopup="menu" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}>
             Actions <span aria-hidden="true">⌄</span>
@@ -949,6 +955,12 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
           </div>}
         </div>}
       </div>
+      <section className="defect-overview-grid" aria-label="Defect at a glance">
+        <div className="defect-overview-fact"><span>Current stage</span><strong>{defect.status}</strong><small>{defect.workflow ? `Workflow version ${defect.workflow.version}` : 'Legacy defect workflow'}</small></div>
+        <div className={`defect-overview-fact impact-${productionImpact.toLowerCase().replace(/\s+/g, '-')}`}><span>Production impact</span><strong>{productionImpact === 'Affected' ? 'Production affected' : productionImpact === 'Unaffected' ? 'Production unaffected' : productionImpact}</strong><small>{productionImpact === 'Affected' ? 'Production verification required' : productionImpact === 'Unaffected' ? 'Issue limited to test environments' : 'Review the observation and assessment'}</small></div>
+        <div className="defect-overview-fact"><span>Responsible now</span><strong>{stageOwner || 'Not assigned yet'}</strong><small>{defect.assigned_team || 'Department not assigned'}</small></div>
+        <div className={`defect-overview-fact ${traceRows.length ? 'trace-linked' : 'trace-missing'}`}><span>Execution trace</span><strong>{traceRows.length ? `${traceRows.length} linked testcase${traceRows.length === 1 ? '' : 's'}` : 'No execution linked'}</strong><small>{traceRows.length ? `Across ${traceCycleCount || 1} test cycle${traceCycleCount === 1 ? '' : 's'}` : 'Link a failed or blocked execution to complete traceability'}</small></div>
+      </section>
       {!defect.qa_request_id && !viewOnly && (manager || assignee || defect.reporter_id === user?.id) && !['Closed', 'Duplicate', 'Rejected', 'Not a Defect'].includes(defect.status) && <LinkDefectRequest defect={defect} onChanged={onChanged} />}
       {defect.workflow && <DefectWorkflowPanel key={`${defect.id}-${defect.workflow_revision}`} defect={defect} users={users} departments={departments} onChanged={onChanged} />}
       {!defect.workflow && <div className="defect-lifecycle">
@@ -961,12 +973,15 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
         {legacyAssigned && <div className="defect-lifecycle-legacy"><strong>Assigned</strong><span>Owner assigned · ready to start work</span></div>}
         {lifecycleIndex < 0 && !terminalOutcomes.includes(defect.status) && <div className="defect-lifecycle-exception"><strong>{defect.status}</strong><span>Exception workflow state</span></div>}
       </div>}
-      <div className="defect-trace-grid">
-        <button disabled={!defect.qa_request_id} onClick={() => openTrace(`/qa-requests?open=${defect.qa_request_id}`)}><small>QA Request</small><strong>{defect.qa_request_key || (defect.qa_request_id ? `#${defect.qa_request_id}` : 'Not linked (optional)')}</strong></button>
-        <button disabled={!defect.cycle_id || !defect.project_id} onClick={() => defect.cycle_id && defect.project_id && openTrace(`/test-execution?project=${defect.project_id}&cycle=${defect.cycle_id}`)}><small>Test Cycle</small><strong>{defect.cycle_key || 'Not linked'}</strong></button>
-        <button disabled={!defect.test_case_key} onClick={() => defect.test_case_key && openTrace(`/test-repository?${defect.project_id ? `project=${defect.project_id}&` : ''}open=${encodeURIComponent(defect.test_case_key)}`)}><small>Test Case</small><strong>{defect.test_case_key || 'Not linked'}</strong></button>
-        <button disabled={!defect.execution_id || !defect.cycle_id || !defect.project_id} onClick={() => defect.execution_id && defect.cycle_id && defect.project_id && openTrace(`/test-execution?project=${defect.project_id}&cycle=${defect.cycle_id}&execution=${defect.execution_id}`)}><small>Test Results</small><strong>{defect.execution_id ? `${defect.test_case_key || 'Test case'} in ${defect.cycle_key || 'linked cycle'}` : 'Not linked'}</strong></button>
-      </div>
+      <section className="defect-linked-work" aria-label="Linked work">
+        <div className="defect-linked-work-head"><div><span className="defect-section-label">TRACEABILITY</span><h4>Linked work</h4></div><small>Open a linked record to follow the defect back to its source.</small></div>
+        <div className="defect-trace-grid">
+          <div><span>QA request</span>{defect.qa_request_id ? <button type="button" onClick={() => openTrace(`/qa-requests?open=${defect.qa_request_id}`)}>{defect.qa_request_key || `Request #${defect.qa_request_id}`} ↗</button> : <strong>Not linked <small>Optional</small></strong>}</div>
+          <div><span>Test cycle</span>{defect.cycle_id && defect.project_id ? <button type="button" onClick={() => openTrace(`/test-execution?project=${defect.project_id}&cycle=${defect.cycle_id}`)}>{defect.cycle_key || `Cycle #${defect.cycle_id}`} ↗</button> : <strong>Not linked</strong>}</div>
+          <div><span>Test case</span>{defect.test_case_key ? <button type="button" onClick={() => openTrace(`/test-repository?${defect.project_id ? `project=${defect.project_id}&` : ''}open=${encodeURIComponent(defect.test_case_key!)}`)}>{defect.test_case_key} ↗</button> : <strong>Not linked</strong>}</div>
+          <div><span>Test result</span>{defect.execution_id && defect.cycle_id && defect.project_id ? <button type="button" onClick={() => openTrace(`/test-execution?project=${defect.project_id}&cycle=${defect.cycle_id}&execution=${defect.execution_id}`)}>{defect.execution_status || 'Open execution'} ↗</button> : <strong>Not linked</strong>}</div>
+        </div>
+      </section>
       {/* Keep large trace sets bounded. The former chip row expanded once per
           additional execution and overwhelmed the detail page at realistic
           volumes. This summary remains constant-height; the complete set is
@@ -1210,6 +1225,14 @@ export default function Defects() {
     retest: dashboard?.retest_count || 0,
     closed: dashboard?.closed || 0,
   }
+  const queueDescriptions = {
+    all: 'Every defect visible in your workspace and department scope.',
+    attention: 'Open critical and high severity defects that need priority review.',
+    mine: 'Defects assigned to you or reported by you.',
+    unlinked: 'Defects without a primary or additional execution link.',
+    retest: 'Fixes waiting for QA, business, or production verification.',
+    closed: 'Defects with a recorded closure decision.',
+  }
   const hasFilters = !!(search || status || severity || priority)
   const clearFilters = () => { setSearch(''); setStatus(''); setSeverity(''); setPriority('') }
   const ageInDays = (reportedAt: string) => Math.max(0, Math.floor((Date.now() - new Date(reportedAt).getTime()) / 86400000))
@@ -1237,16 +1260,16 @@ export default function Defects() {
       <div className="defect-command-actions"><button className="btn btn-sm" onClick={() => api.downloadFile('/api/defects/export-xlsx', 'defect-management-register.xlsx')}>Export</button>{canCreateDefect && <><button className="btn btn-sm" onClick={() => setCreateMode('standalone')}>+ New defect</button><button className="btn btn-primary btn-sm" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ Report from execution</button></>}</div>
     </header>
     <ErrorText error={error} title="Defect Management could not be loaded" />
-    <section className="defect-health-strip">
+    <section className="defect-health-strip" aria-label="Defect overview">
       <div className="primary"><span>Open exposure</span><strong>{dashboard?.open || 0}</strong><small>defects require workflow action</small></div>
-      <div className="danger"><span>High attention</span><strong>{queueCounts.attention}</strong><small>critical or high severity</small></div>
-      <div className="warning"><span>Traceability gaps</span><strong>{queueCounts.unlinked}</strong><small>not linked to an execution</small></div>
-      <div className="success"><span>Resolved / Retest</span><strong>{queueCounts.retest}</strong><small>waiting for validation</small></div>
-      <div className="neutral"><span>Closed</span><strong>{dashboard?.closed || 0}</strong><small>{dashboard?.reopened || 0} reopened · {dashboard?.deferred || 0} deferred</small></div>
+      <button type="button" className={`danger ${queue === 'attention' ? 'active' : ''}`} aria-pressed={queue === 'attention'} onClick={() => setQueue('attention')}><span>Needs attention</span><strong>{queueCounts.attention}</strong><small>Open critical or high severity · View queue →</small></button>
+      <button type="button" className={`warning ${queue === 'unlinked' ? 'active' : ''}`} aria-pressed={queue === 'unlinked'} onClick={() => setQueue('unlinked')}><span>Execution gaps</span><strong>{queueCounts.unlinked}</strong><small>No execution linked · View queue →</small></button>
+      <button type="button" className={`success ${queue === 'retest' ? 'active' : ''}`} aria-pressed={queue === 'retest'} onClick={() => setQueue('retest')}><span>Awaiting verification</span><strong>{queueCounts.retest}</strong><small>QA, business or production · View queue →</small></button>
+      <button type="button" className={`neutral ${queue === 'closed' ? 'active' : ''}`} aria-pressed={queue === 'closed'} onClick={() => setQueue('closed')}><span>Closed</span><strong>{dashboard?.closed || 0}</strong><small>{dashboard?.reopened || 0} reopened · {dashboard?.deferred || 0} deferred</small></button>
     </section>
     <section className="defect-workspace-card">
-      <nav className="defect-queue-tabs" aria-label="Defect queues">{([['all', 'All defects'], ['attention', 'Needs attention'], ['mine', 'My work'], ['unlinked', 'Unlinked'], ['retest', 'Ready for retest'], ['closed', 'Closed']] as const).map(([key, label]) => <button key={key} className={queue === key ? 'active' : ''} onClick={() => setQueue(key)}><span>{label}</span><b>{queueCounts[key]}</b></button>)}</nav>
-      <div className="defect-register-head"><div><span>DEFECT REGISTER</span><h3>{total} {total === 1 ? 'record' : 'records'} in this view</h3></div>{dashboard && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
+      <nav className="defect-queue-tabs" aria-label="Defect queues">{([['all', 'All defects'], ['attention', 'Needs attention'], ['mine', 'My work'], ['unlinked', 'No execution link'], ['retest', 'Verification queue'], ['closed', 'Closed']] as const).map(([key, label]) => <button type="button" key={key} className={queue === key ? 'active' : ''} aria-current={queue === key ? 'page' : undefined} onClick={() => setQueue(key)}><span>{label}</span><b>{queueCounts[key]}</b></button>)}</nav>
+      <div className="defect-register-head"><div><span>DEFECT REGISTER · {queue.replace('-', ' ').toUpperCase()}</span><h3>{total} {total === 1 ? 'record' : 'records'} in this view</h3><p>{queueDescriptions[queue]}</p></div>{dashboard && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
       <div className="defect-toolbar"><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search ID, title, application or module…" /></label><select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><select value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
       <Table<DefectListOut>
         tableId="defect-management" rowKey="id" rows={defects}
@@ -1257,7 +1280,7 @@ export default function Defects() {
         { key: 'severity', header: 'Risk', render: (defect) => <span className="defect-risk-cell"><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity}</span><small>{defect.priority}</small></span> },
         { key: 'status', header: 'Workflow', render: (defect) => <span className="defect-workflow-cell"><Badge status={defect.status} /><small>{defect.assignee_name || 'Unassigned'}</small><small className="defect-workflow-department">{defect.assigned_team || 'Department not assigned'}</small></span> },
         { key: 'cycle_key', header: 'Traceability', render: (defect) => <span className={`defect-trace-cell ${!defect.execution_id ? 'incomplete' : ''}`}><strong>{defect.qa_request_key || (defect.qa_request_id ? `Request #${defect.qa_request_id}` : 'No QA request linked')}</strong><small>{defect.cycle_key || 'No cycle'} · {defect.test_case_key || 'No testcase'}</small></span> },
-        { key: 'reported_at', header: 'Reported / Age', render: (defect) => <span className="defect-age-cell"><strong>{formatDateIST(defect.reported_at)}</strong><small>{ageInDays(defect.reported_at)}d open · {defect.reporter_name}</small></span> },
+        { key: 'reported_at', header: 'Reported / Age', render: (defect) => <span className="defect-age-cell"><strong>{formatDateIST(defect.reported_at)}</strong><small>{ageInDays(defect.reported_at)}d since reported · {defect.reporter_name}</small></span> },
       ]} />
       {!defects.length && <div className="tm-empty"><strong>{dashboard?.total ? 'No defects match this view' : 'No governed defects yet'}</strong><span>{dashboard?.total ? 'Change the queue or clear filters to see more records.' : 'Open a defect now, or report one directly from a Failed/Blocked execution.'}</span></div>}
     </section>

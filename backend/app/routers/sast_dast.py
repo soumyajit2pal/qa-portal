@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import uuid
 from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -585,57 +586,96 @@ def _start_configuration(db: Session, obj, current_user):
     )
 
 
-def _import_scan_result(db: Session, obj, kind: str, application_name: str, application_version: str, current_user):
-    """Shared Fortify SSC import -- one immutable SecurityScanResult row per
-    call. Used by both Start Scan (the very first import, CONFIGURATION ->
-    SCANNING) and Rescan (2026-08, "Findings Validation" requirement doc:
-    "Each rescan shall create a new scan execution record. Previous scan
-    records shall remain unchanged. System shall maintain scan history." --
-    previously only Start Scan ever called SSC at all; the old "Rescan
-    Decision" action was just the analyst's own Passed/Failed guess with no
-    fresh data behind it)."""
-    try:
-        snapshot = FortifySSCClient(kind).retrieve_snapshot(application_name, application_version)
-    except FortifySSCError as exc:
-        # Do not advance the workflow if SSC cannot resolve/import the exact
-        # application version selected by the analyst.
-        raise HTTPException(502, str(exc)) from exc
-    scan_result = models.SecurityScanResult(
-        request_type=kind, request_id=obj.id,
-        application_name=snapshot.application_name,
-        application_version=snapshot.application_version,
-        provider="Fortify SSC", provider_version_id=snapshot.project_version_id,
-        critical_count=snapshot.critical_count, high_count=snapshot.high_count,
-        medium_count=snapshot.medium_count, low_count=snapshot.low_count,
-        total_count=snapshot.total_count, audit_url=snapshot.audit_url,
-        suppressed_critical_count=snapshot.suppressed_critical_count,
-        suppressed_high_count=snapshot.suppressed_high_count,
-        suppressed_medium_count=snapshot.suppressed_medium_count,
-        suppressed_low_count=snapshot.suppressed_low_count,
-        suppressed_total_count=snapshot.suppressed_total_count,
-        filters_json=json.dumps(snapshot.filters), imported_by_id=current_user.id,
-    )
-    db.add(scan_result)
-    return scan_result, snapshot
+def _selected_scan_targets(obj, kind: str, target_ids: list[int] | None) -> list[dict]:
+    rows = list(obj.components if kind == "SAST" else obj.targets)
+    available = {row.id: row for row in rows}
+    selected_ids = list(available) if target_ids is None else target_ids
+    missing = [target_id for target_id in selected_ids if target_id not in available]
+    if missing:
+        raise HTTPException(400, "One or more selected scan targets do not belong to this request. Refresh and try again.")
+    if not selected_ids:
+        noun = "repository" if kind == "SAST" else "application URL"
+        raise HTTPException(400, f"Add at least one {noun} before starting a scan.")
+    snapshots = []
+    for target_id in selected_ids:
+        row = available[target_id]
+        if kind == "SAST":
+            label = (row.repository_url or "").strip()
+            detail = " · ".join(part for part in [row.git_branch, row.commit_id] if part)
+        else:
+            label = (row.application_url or "").strip()
+            detail = (row.environment or "").strip()
+        if not label:
+            raise HTTPException(400, "Every selected scan target must have a URL.")
+        snapshots.append({"id": target_id, "label": label, "detail": detail or None})
+    return snapshots
+
+
+def _import_scan_results(db: Session, obj, kind: str, scans: list[schemas.SecurityTargetScanIn], current_user,
+                         required_target_ids: set[int] | None = None):
+    """Import one independent Fortify result per selected URL/repository.
+
+    All rows share an execution key so the workflow treats the action as one
+    Initial Scan or Rescan, while findings and history remain target-specific.
+    Retrieval finishes for every target before any row is added, preventing a
+    partly-imported batch when one Fortify identity is invalid.
+    """
+    configured_ids = {row.id for row in (obj.components if kind == "SAST" else obj.targets)}
+    required_ids = configured_ids if required_target_ids is None else required_target_ids
+    submitted_ids = {scan.target_id for scan in scans}
+    if submitted_ids != required_ids or not submitted_ids.issubset(configured_ids):
+        noun = "repository" if kind == "SAST" else "application URL"
+        raise HTTPException(400, f"Configure a separate scan for every {noun} on this request.")
+    target_snapshots = {row["id"]: row for row in _selected_scan_targets(obj, kind, [scan.target_id for scan in scans])}
+    retrieved = []
+    for scan in scans:
+        try:
+            snapshot = FortifySSCClient(kind).retrieve_snapshot(scan.application_name, scan.application_version)
+        except FortifySSCError as exc:
+            label = target_snapshots[scan.target_id]["label"]
+            raise HTTPException(502, f"{label}: {exc}") from exc
+        retrieved.append((scan, snapshot))
+
+    execution_key = str(uuid.uuid4())
+    results = []
+    for scan, snapshot in retrieved:
+        target = target_snapshots[scan.target_id]
+        result = models.SecurityScanResult(
+            request_type=kind, request_id=obj.id, execution_key=execution_key,
+            application_name=snapshot.application_name,
+            application_version=snapshot.application_version,
+            provider="Fortify SSC", provider_version_id=snapshot.project_version_id,
+            critical_count=snapshot.critical_count, high_count=snapshot.high_count,
+            medium_count=snapshot.medium_count, low_count=snapshot.low_count,
+            total_count=snapshot.total_count, audit_url=snapshot.audit_url,
+            suppressed_critical_count=snapshot.suppressed_critical_count,
+            suppressed_high_count=snapshot.suppressed_high_count,
+            suppressed_medium_count=snapshot.suppressed_medium_count,
+            suppressed_low_count=snapshot.suppressed_low_count,
+            suppressed_total_count=snapshot.suppressed_total_count,
+            filters_json=json.dumps(snapshot.filters), targets_json=json.dumps([target]), imported_by_id=current_user.id,
+        )
+        db.add(result)
+        results.append(result)
+    return results
 
 
 def _start_scan(db: Session, obj, payload: schemas.SecurityScanStartIn, current_user):
     _require(obj, "CONFIGURATION", "Start scan")
     _require_assigned_security_analyst(obj, current_user)
     kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
-    scan_result, snapshot = _import_scan_result(
-        db, obj, kind, payload.application_name, payload.application_version, current_user,
-    )
+    scan_results = _import_scan_results(db, obj, kind, payload.scans, current_user)
     obj.status = "SCANNING"
     _log(
         db, obj, "Configuration", current_user, "SSC Results Imported / Scanning Started",
-        f"Fortify SSC application '{snapshot.application_name}', version '{snapshot.application_version}', "
-        f"provider version ID {snapshot.project_version_id}; {snapshot.total_count} finding(s) across filter sets.",
+        f"Imported {len(scan_results)} independent target scan(s); "
+        f"{sum(result.total_count for result in scan_results)} finding(s) across targets.",
     )
     db.commit()
     db.refresh(obj)
-    db.refresh(scan_result)
-    return obj, scan_result
+    for result in scan_results:
+        db.refresh(result)
+    return obj, scan_results
 
 
 # 2026-08 "Findings Validation" requirement doc -- Rescan and Mark Scan
@@ -692,6 +732,18 @@ def _sast_dast_named_assignment(model, user_id: int):
     )
 
 
+def _pending_scan_target_ids(db: Session, obj, kind: str) -> set[int]:
+    current_results = _current_scan_results(_scan_results(db, kind, obj.id))
+    current_by_target = {
+        target["id"]: result for result in current_results for target in result.targets
+        if target.get("id") is not None
+    }
+    return {
+        target.id for target in (obj.components if kind == "SAST" else obj.targets)
+        if target.id not in current_by_target or _scan_open_count(current_by_target[target.id]) > 0
+    }
+
+
 def _rescan_scan(db: Session, obj, kind: str, payload: schemas.SecurityScanStartIn, current_user):
     """Reported directly, full requirement doc pasted with a status-flow
     diagram: "Assigned for Rescan" (RESCAN) -> re-run the scan -> "Scanning"
@@ -708,19 +760,23 @@ def _rescan_scan(db: Session, obj, kind: str, payload: schemas.SecurityScanStart
     first Start Scan."""
     _require(obj, "RESCAN", "Rescan")
     _require_assigned_security_analyst(obj, current_user)
-    scan_result, snapshot = _import_scan_result(
-        db, obj, kind, payload.application_name, payload.application_version, current_user,
-    )
+    pending_ids = _pending_scan_target_ids(db, obj, kind)
+    if not pending_ids:
+        raise HTTPException(400, "Every target is already clear. No rescan is required.")
+    _selected_scan_targets(obj, kind, [scan.target_id for scan in payload.scans])
+    pending_scans = [scan for scan in payload.scans if scan.target_id in pending_ids]
+    scan_results = _import_scan_results(db, obj, kind, pending_scans, current_user, required_target_ids=pending_ids)
     obj.status = "SCANNING"
     _log(
         db, obj, "Rescan", current_user, "Rescan Imported / Scanning Started",
-        f"Fortify SSC application '{snapshot.application_name}', version '{snapshot.application_version}', "
-        f"provider version ID {snapshot.project_version_id}; {snapshot.total_count} finding(s) across filter sets.",
+        f"Imported {len(scan_results)} independent target rescan(s); "
+        f"{sum(result.total_count for result in scan_results)} finding(s) across targets.",
     )
     db.commit()
     db.refresh(obj)
-    db.refresh(scan_result)
-    return obj, scan_result
+    for result in scan_results:
+        db.refresh(result)
+    return obj, scan_results
 
 
 def _mark_scan_complete(db: Session, obj, kind: str, payload: schemas.CommentIn, current_user, sup_filter_col):
@@ -736,8 +792,7 @@ def _mark_scan_complete(db: Session, obj, kind: str, payload: schemas.CommentIn,
     results = _scan_results(db, kind, obj.id)
     if not results:
         raise HTTPException(400, "Start a scan and import Fortify SSC results before marking this scan complete.")
-    current_scan = results[0]
-    open_count = _scan_open_count(current_scan)
+    open_count = _batch_open_count(_current_scan_results(results))
     if open_count > 0:
         raise HTTPException(
             400,
@@ -769,12 +824,36 @@ def _scan_results(db: Session, kind: str, request_id: int):
         .order_by(models.SecurityScanResult.imported_at.asc(), models.SecurityScanResult.id.asc())
         .all()
     )
-    for index, row in enumerate(rows):
-        row.scan_no = index + 1
-        row.scan_type = "Initial Scan" if index == 0 else "Rescan"
+    batch_numbers = {}
+    for row in rows:
+        # Legacy rows had no execution key and therefore each represent one
+        # historical execution. New multi-target rows share a UUID.
+        batch_key = row.execution_key or f"legacy-{row.id}"
+        if batch_key not in batch_numbers:
+            batch_numbers[batch_key] = len(batch_numbers) + 1
+        row.scan_no = batch_numbers[batch_key]
+        row.scan_type = "Initial Scan" if row.scan_no == 1 else "Rescan"
         row.status = "Completed"
     rows.reverse()
     return rows
+
+
+def _current_scan_results(results) -> list:
+    from ..security_scan_state import current_scan_results
+    return current_scan_results(results)
+
+
+def _initial_scan_results(results) -> list:
+    if not results:
+        return []
+    first_scan_no = min(row.scan_no for row in results)
+    return [row for row in results if row.scan_no == first_scan_no]
+
+
+def _batch_open_count(rows) -> int:
+    # Targets are independent scans, so their open finding counts are
+    # additive. Within a target, overlapping Fortify filters still use max.
+    return sum(_scan_open_count(row) for row in rows)
 
 
 def _scan_open_count(scan_result) -> int:
@@ -801,8 +880,10 @@ def _scan_summary(db: Session, kind: str, request_id: int, sup_filter_col) -> di
     results = _scan_results(db, kind, request_id)
     if not results:
         return {"initial": None, "current": None, "total_rescans": 0, "open_findings": 0, "suppressed_findings": 0}
-    current_scan = results[0]
-    initial_scan = results[-1]
+    current_results = _current_scan_results(results)
+    initial_results = _initial_scan_results(results)
+    current_scan = current_results[0]
+    initial_scan = initial_results[0]
     suppressed_findings = (
         db.query(models.SuppressionItem)
         .join(models.SuppressionRequest, models.SuppressionItem.suppression_request_id == models.SuppressionRequest.id)
@@ -810,8 +891,10 @@ def _scan_summary(db: Session, kind: str, request_id: int, sup_filter_col) -> di
         .count()
     )
     return {
-        "initial": initial_scan, "current": current_scan, "total_rescans": len(results) - 1,
-        "open_findings": _scan_open_count(current_scan), "suppressed_findings": suppressed_findings,
+        "initial": initial_scan, "current": current_scan,
+        "initial_results": initial_results, "current_results": current_results,
+        "total_rescans": max(current_scan.scan_no - 1, 0),
+        "open_findings": _batch_open_count(current_results), "suppressed_findings": suppressed_findings,
     }
 
 
@@ -824,7 +907,7 @@ def _close_request(db: Session, obj, current_user):
     _require_assigned_security_analyst(obj, current_user)
     kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
     results = _scan_results(db, kind, obj.id)
-    if results and _scan_open_count(results[0]) > 0:
+    if results and _batch_open_count(_current_scan_results(results)) > 0:
         raise HTTPException(
             400,
             "Cannot close this request until every current scan filter shows 0 findings. Perform a rescan first.",
@@ -886,8 +969,7 @@ def _validate_findings(db: Session, obj, current_user, sup_filter_col, kind: str
     results = _scan_results(db, kind, obj.id)
     if not results:
         raise HTTPException(400, "Start a scan and import Fortify SSC results before validating findings.")
-    current_scan = results[0]
-    open_count = _scan_open_count(current_scan)
+    open_count = _batch_open_count(_current_scan_results(results))
     if open_count <= 0:
         obj.status = "SECURITY_COMPLETE"
         _log(db, obj, "Scanning", current_user, "Finding Validation",
@@ -923,7 +1005,7 @@ def _assign_to_requester(db: Session, obj, kind: str, current_user):
     _require(obj, "REMEDIATION", "Assign to requester")
     _require_assigned_security_analyst(obj, current_user)
     results = _scan_results(db, kind, obj.id)
-    open_count = _scan_open_count(results[0]) if results else 0
+    open_count = _batch_open_count(_current_scan_results(results)) if results else 0
     if open_count <= 0:
         raise HTTPException(400, "No open findings on the latest scan -- nothing to assign for remediation.")
     _log(db, obj, "Remediation", current_user, "Assigned To Requester", None)
@@ -934,7 +1016,7 @@ def _assign_to_requester(db: Session, obj, kind: str, current_user):
     return obj
 
 
-def _mark_fixed(db: Session, obj, current_user, sup_filter_col):
+def _mark_fixed(db: Session, obj, current_user, sup_filter_col, payload: schemas.SecurityFixIn):
     """Requester (or their active Delegate for Input) marks the fix as
     submitted -- hands it back to the Security Lead (transient Assigned To
     Lead) and moves straight into Rescan.
@@ -1001,7 +1083,22 @@ def _mark_fixed(db: Session, obj, current_user, sup_filter_col):
             "Cannot mark fixed -- suppression request(s) still pending a decision: "
             + ", ".join(pending) + ". Wait for it to be approved or rejected first.",
         )
-    _log(db, obj, "Waiting For Fix", current_user, "Fix Submitted", "Assigned to Lead for rescan")
+    kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
+    pending_ids = _pending_scan_target_ids(db, obj, kind)
+    supplied_ids = {target.target_id for target in payload.targets}
+    if not pending_ids or supplied_ids != pending_ids:
+        raise HTTPException(400, "Provide the latest commit ID / code hash for every target awaiting remediation. Refresh the findings and try again.")
+    configured = {target.id: target for target in (obj.components if kind == "SAST" else obj.targets)}
+    evidence = ["Assigned to Lead for rescan. Latest remediation code references:"]
+    for fix in payload.targets:
+        target = configured[fix.target_id]
+        url = target.repository_url if kind == "SAST" else target.application_url
+        previous = target.commit_id if kind == "SAST" else None
+        evidence.append(f"{url} — Latest commit ID / code hash: {fix.commit_id}"
+                        + (f" (previous: {previous})" if previous else ""))
+        if kind == "SAST":
+            target.commit_id = fix.commit_id
+    _log(db, obj, "Waiting For Fix", current_user, "Fix Submitted", "\n".join(evidence))
     obj.status = "RESCAN"
     _log(db, obj, "Rescan", current_user, "Rescanning", None)
     if delegation:
@@ -1057,7 +1154,7 @@ def _mark_report_ready(db: Session, obj, current_user, sup_filter_col):
     _require_assigned_security_analyst(obj, current_user)
     kind = "SAST" if isinstance(obj, models.SASTRequest) else "DAST"
     results = _scan_results(db, kind, obj.id)
-    if results and _scan_open_count(results[0]) > 0:
+    if results and _batch_open_count(_current_scan_results(results)) > 0:
         raise HTTPException(
             400,
             "Cannot mark Report Ready until every current scan filter shows 0 findings. Perform a rescan first.",
@@ -1301,7 +1398,7 @@ def sast_assign_security_analyst(req_id: int, payload: schemas.AssignSecurityAna
 def sast_start_scan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj, result = _start_scan(db, _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True), payload, current_user)
-    return {"request": obj, "scan_result": result}
+    return {"request": obj, "scan_results": result}
 
 
 @router.get("/api/sast-requests/{req_id}/scan-results", response_model=List[schemas.SecurityScanResultOut])
@@ -1322,7 +1419,7 @@ def sast_scan_summary(req_id: int, db: Session = Depends(get_db),
 def sast_rescan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj, result = _rescan_scan(db, _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True), "SAST", payload, current_user)
-    return {"request": obj, "scan_result": result}
+    return {"request": obj, "scan_results": result}
 
 
 @router.post("/api/sast-requests/{req_id}/mark-scan-complete", response_model=schemas.SASTOut)
@@ -1353,9 +1450,9 @@ def sast_assign_to_requester(req_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/api/sast-requests/{req_id}/mark-fixed", response_model=schemas.SASTOut)
-def sast_mark_fixed(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def sast_mark_fixed(req_id: int, payload: schemas.SecurityFixIn, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.SASTRequest, req_id, "SAST", lock=True)
-    return _mark_fixed(db, obj, current_user, models.SuppressionRequest.sast_request_id)
+    return _mark_fixed(db, obj, current_user, models.SuppressionRequest.sast_request_id, payload)
 
 
 @router.post("/api/sast-requests/{req_id}/mark-report-ready", response_model=schemas.SASTOut)
@@ -1791,7 +1888,7 @@ def dast_assign_security_analyst(req_id: int, payload: schemas.AssignSecurityAna
 def dast_start_scan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session = Depends(get_db),
                      current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj, result = _start_scan(db, _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True), payload, current_user)
-    return {"request": _dast_out(obj, current_user), "scan_result": result}
+    return {"request": _dast_out(obj, current_user), "scan_results": result}
 
 
 @router.get("/api/dast-requests/{req_id}/scan-results", response_model=List[schemas.SecurityScanResultOut])
@@ -1812,7 +1909,7 @@ def dast_scan_summary(req_id: int, db: Session = Depends(get_db),
 def dast_rescan(req_id: int, payload: schemas.SecurityScanStartIn, db: Session = Depends(get_db),
                  current_user: models.User = Depends(require_roles(Role.SECURITY_ANALYST))):
     obj, result = _rescan_scan(db, _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True), "DAST", payload, current_user)
-    return {"request": _dast_out(obj, current_user), "scan_result": result}
+    return {"request": _dast_out(obj, current_user), "scan_results": result}
 
 
 @router.post("/api/dast-requests/{req_id}/mark-scan-complete", response_model=schemas.DASTOut)
@@ -1845,9 +1942,9 @@ def dast_assign_to_requester(req_id: int, db: Session = Depends(get_db),
 
 
 @router.post("/api/dast-requests/{req_id}/mark-fixed", response_model=schemas.DASTOut)
-def dast_mark_fixed(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def dast_mark_fixed(req_id: int, payload: schemas.SecurityFixIn, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     obj = _get_or_404(db, models.DASTRequest, req_id, "DAST", lock=True)
-    obj = _mark_fixed(db, obj, current_user, models.SuppressionRequest.dast_request_id)
+    obj = _mark_fixed(db, obj, current_user, models.SuppressionRequest.dast_request_id, payload)
     return _dast_out(obj, current_user)
 
 

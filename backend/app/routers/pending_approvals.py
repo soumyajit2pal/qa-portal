@@ -346,7 +346,6 @@ def _readiness_items(db: Session, user: models.User) -> List[dict]:
         return []
     results: List[dict] = []
     workspace_ids = active_qa_workspace_scope_ids(user)
-    is_admin = user.has_role(Role.ADMIN)
     for (model, entity_type, path, module_label, labels, lead_column, assigned_status,
          verification_status) in _READINESS_MODULES:
         q = db.query(model).filter(model.status.in_([assigned_status, verification_status]))

@@ -1,4 +1,5 @@
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
+import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../../api";
@@ -1858,6 +1859,7 @@ export function FunctionalDetail({
 }
 
 export default function Functional() {
+  const viewerManagedDeepLinks = useViewerManagedDeepLinks();
   const [users, setUsers] = useState<UserOut[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
   const [assignedOnly, setAssignedOnly] = useState(false);
@@ -1900,6 +1902,7 @@ export default function Functional() {
   // when it is not on the module list's currently loaded page.  `open` is
   // retained as a backward-compatible fallback for older deep links.
   useEffect(() => {
+    if (viewerManagedDeepLinks) return;
     const recordId = Number(searchParams.get("openId"));
     const openId = searchParams.get("open");
     if (Number.isInteger(recordId) && recordId > 0) {
@@ -1919,7 +1922,7 @@ export default function Functional() {
       },
       { replace: true }
     );
-  }, [requests, searchParams, setSearchParams, openRequest]);
+  }, [requests, searchParams, setSearchParams, openRequest, viewerManagedDeepLinks]);
 
   return (
     <div>

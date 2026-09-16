@@ -46,6 +46,7 @@ from ..deps import (
 )
 from ..constants import TEST_CYCLE_LOCKED_STATUSES
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
+from .defects import _scoped_defects
 
 router = APIRouter(prefix="/api/test-reports", tags=["test-management"])
 
@@ -115,8 +116,8 @@ def repository_health(project_id: int, db: Session = Depends(get_db),
 
     def group_by(key_fn):
         counts = {}
-        for case in cases:
-            key = key_fn(case) or "Unspecified"
+        for test_case in cases:
+            key = key_fn(test_case) or "Unspecified"
             counts[key] = counts.get(key, 0) + 1
         return [{"key": key, "count": count, "filters": {"project_id": project_id}}
                 for key, count in sorted(counts.items(), key=lambda kv: -kv[1])]
@@ -713,3 +714,130 @@ def project_portfolio(db: Session = Depends(get_db), current_user: models.User =
         "ownership": [{"owner": owner, "project_count": count} for owner, count in
                      sorted(ownership.items(), key=lambda kv: -kv[1])],
     }
+
+
+@router.get("/export/{report_id}")
+def export_catalogue_report(
+    report_id: str,
+    project_id: Optional[int] = None,
+    cycle_id: Optional[int] = None,
+    search: Optional[str] = Query(None, max_length=150),
+    requirement_type: str = Query("all", pattern="^(all|epic|cr|feature|story|unmapped)$"),
+    resolver_id: Optional[int] = None,
+    reopened_only: bool = False,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Download every catalogue view with the same scope and filters as its screen."""
+    if report_id not in {"traceability", "health", "cycle-progress", "defects", "incomplete-defects", "version-impact", "portfolio"}:
+        raise HTTPException(404, "Report not found")
+    if report_id in {"traceability", "health", "defects", "version-impact"} and project_id is None:
+        raise HTTPException(400, "Select a Test Project to export this report")
+    if report_id == "cycle-progress" and cycle_id is None:
+        raise HTTPException(400, "Select a Test Cycle to export this report")
+    if report_id == "traceability":
+        return export_requirements_traceability(project_id, search, requirement_type, db, current_user)
+
+    workbook = new_workbook()
+    metadata = [("Generated at", models.now())]
+    metrics = []
+    population_note = ""
+    title = ""
+    scope_key = "all-visible"
+
+    if report_id == "health":
+        data = repository_health(project_id, db, current_user)
+        title, scope_key, population_note = "Repository Health", data["project_key"], data["population_note"]
+        metadata.append(("Project", scope_key))
+        metrics = [("Test cases", data["total_cases"]), ("Average age (days)", data["average_age_days"]),
+                   ("Never executed", data["never_executed_count"])]
+        add_table_sheet(workbook, "Health Breakdown", title, ["Category", "Value", "Count"],
+                        [[label, row["key"], row["count"]] for label, field in
+                         [("Status", "by_status"), ("Module", "by_module"), ("Priority", "by_priority"),
+                          ("Test type", "by_test_type"), ("Owner", "by_owner")]
+                         for row in data[field]], subtitle=population_note)
+
+    elif report_id == "cycle-progress":
+        data = cycle_progress(cycle_id, db, current_user)
+        if project_id is not None:
+            cycle = db.query(models.TestCycle).get(cycle_id)
+            if cycle.project_id != project_id:
+                raise HTTPException(400, "Selected cycle does not belong to the selected project")
+        title, scope_key, population_note = "Cycle Progress", data["cycle_key"], data["population_note"]
+        metadata.extend([("Cycle", scope_key), ("Cycle status", data["cycle_status"])])
+        metrics = [("Test cases", data["total_items"]), ("Completion (%)", data["completion_pct"]),
+                   ("Assigned", data["assigned_count"]), ("Unassigned", data["unassigned_count"])]
+        add_table_sheet(workbook, "Results", title, ["Result", "Count"],
+                        [[row["status"], row["count"]] for row in data["by_status"]], subtitle=population_note)
+
+    elif report_id == "defects":
+        data = defect_quality(project_id, resolver_id, reopened_only, 10 ** 9, 0, db, current_user)
+        title, scope_key, population_note = "Defect Quality", data["project_key"], data["population_note"]
+        metadata.extend([("Project", scope_key), ("Resolver filter", resolver_id or "All"),
+                         ("Reopened only", reopened_only)])
+        metrics = [("Governed defects", data["total_governed_defects"]), ("Matching register rows", data["total_items"]),
+                   ("Open defects", data["open_defects"]), ("Resolved history", data["resolved_defects"]),
+                   ("Reopened defects", data["reopened_defects"]), ("Retest success (%)", data["retest_success_rate_pct"])]
+        add_table_sheet(workbook, "Defect Register", title,
+                        ["Defect ID", "Title", "QA Request", "Application", "Module", "Severity", "Status",
+                         "Cycles", "Test Cases", "Resolved By", "Reopen Count", "Target Release", "Updated At"],
+                        [[row["defect_key"], row["title"], row["qa_request_key"], row["application_name"],
+                          row["module_feature"], row["severity"], row["status"], ", ".join(row["cycle_keys"]),
+                          ", ".join(row["test_case_keys"]), row["resolved_by_name"], row["reopen_count"],
+                          row["target_release"], row["updated_at"]] for row in data["items"]],
+                        subtitle=population_note, date_headers={"Updated At"}, status_headers={"Status"})
+        add_table_sheet(workbook, "Resolution Activity", "Resolution Activity",
+                        ["Resolver", "Resolved Defects", "Reopened Defects", "Reopen Events"],
+                        [[row["resolver_name"], row["resolved_defects"], row["reopened_defects"], row["reopen_events"]]
+                         for row in data["resolution_activity"]])
+        add_table_sheet(workbook, "Defect Breakdown", "Governed Defect Breakdown", ["Category", "Value", "Count"],
+                        [[label, row["key"], row["count"]] for label, field in
+                         [("Module", "by_module"), ("Status", "by_status")] for row in data[field]])
+
+    elif report_id == "version-impact":
+        data = version_impact(project_id, 10 ** 9, 0, db, current_user)
+        title, scope_key, population_note = "Version Impact", data["project_key"], data["population_note"]
+        metadata.append(("Project", scope_key))
+        metrics = [("Cycles with stale items", data["cycles_with_stale_items"])]
+        add_table_sheet(workbook, "Stale Cycles", title,
+                        ["Cycle", "Status", "Stale Items", "Upgradeable", "Permanently Pinned"],
+                        [[row["cycle_key"], row["cycle_status"], row["stale_item_count"],
+                          row["upgradeable_count"], row["permanently_pinned_count"]] for row in data["items"]],
+                        subtitle=population_note, status_headers={"Status"})
+
+    elif report_id == "portfolio":
+        data = project_portfolio(db, current_user)
+        title, population_note = "Project Portfolio", data["population_note"]
+        metadata.append(("Scope", "Visible Test Projects"))
+        metrics = [("Active projects", data["active_project_count"]), ("Inactive projects", data["inactive_project_count"]),
+                   ("Archived projects", data["archived_project_count"]), ("Cycles", data["cycle_count"])]
+        add_table_sheet(workbook, "Cycle Status", title, ["Status", "Cycles"],
+                        [[row["status"], row["count"]] for row in data["cycles_by_status"]], subtitle=population_note)
+        add_table_sheet(workbook, "Ownership", "Project Ownership", ["Owner", "Projects"],
+                        [[row["owner"], row["project_count"]] for row in data["ownership"]])
+        add_table_sheet(workbook, "Creation Trend", "Cycle Creation Trend (180 days)", ["Month", "Cycles"],
+                        [[row["month"], row["count"]] for row in data["cycle_creation_trend"]])
+
+    else:  # incomplete-defects: identical visibility, link rule and search to the defect queue.
+        title = "Incomplete Defect Traceability"
+        population_note = "Visible defects without a primary or additional execution link; request, cycle and testcase links alone do not complete execution traceability."
+        query = _scoped_defects(db, current_user).filter(
+            models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any())
+        if search and search.strip():
+            needle = f"%{search.strip()}%"
+            query = query.filter(or_(models.Defect.defect_key.ilike(needle), models.Defect.title.ilike(needle),
+                                     models.Defect.application_name.ilike(needle), models.Defect.module_feature.ilike(needle)))
+        defects = query.order_by(models.Defect.created_at.desc(), models.Defect.id.desc()).all()
+        metadata.extend([("Scope", "Visible defects"), ("Search", search or "All records")])
+        metrics = [("Incomplete defects", len(defects))]
+        add_table_sheet(workbook, "Defects Missing Execution", title,
+                        ["Defect ID", "Title", "Application", "Module", "Status", "Severity", "QA Request",
+                         "Cycle", "Primary Test Case", "Traceability Gap"],
+                        [[defect.defect_key, defect.title, defect.application_name, defect.module_feature,
+                          defect.status, defect.severity, defect.qa_request_key, defect.cycle_key,
+                          defect.test_case_key, "Missing execution link"] for defect in defects],
+                        subtitle=population_note, status_headers={"Status"})
+
+    add_summary_sheet(workbook, title, population_note, metadata, metrics)
+    safe_scope = "".join(char for char in scope_key if char.isalnum() or char in "-_")
+    return workbook_response(workbook, f"{safe_scope or 'visible'}-{report_id}.xlsx")

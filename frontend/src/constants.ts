@@ -105,7 +105,7 @@ export const DASHBOARD_DEPARTMENT_UNRESTRICTED_ROLES: string[] = [
 
 export function isViewOnly(user?: RoleBearer | null): boolean {
   if (!user) return false
-  if (user.roles?.includes('VIEW_ONLY')) return true
+  if (user.roles?.includes('VIEW_ONLY') || user.roles?.includes('SCALE_6_PLUS')) return true
   const selected = activeWorkspaceId(user)
   return uniqueWorkspaceAccess(user).some((access) => (
     access.workspace_id === selected && access.role === 'PARENT_WORKSPACE_VIEWER'
@@ -892,9 +892,12 @@ export interface ReportDef {
 }
 
 export const REPORTS: ReportDef[] = [
+  { key: 'all-data-report', label: 'All Data Report', group: 'Overview', description: 'A guided workspace overview, status breakdown, and separate details for requests, testing, defects, and governance.' },
   { key: 'qa-request-summary', label: 'QA Request Register', group: 'Operational', description: 'Gateway requests with child Functional status and per-type priority/risk.' },
   { key: 'functional-request-register', label: 'Functional Request Register', group: 'Operational', description: 'Functional workflow status, change/release context, QA Lead and tester assignments.' },
   { key: 'test-cycle-summary', label: 'Test Cycle Execution Summary', group: 'Operational', description: 'Cycle scope, assignment coverage, completion and latest execution results.' },
+  { key: 'testcase-register', label: 'Testcase Register', group: 'Operational', description: 'Every current testcase with requirement IDs, project, status, version, creator and created/imported date.' },
+  { key: 'execution-attempt-register', label: 'Execution Attempt History', group: 'Operational', description: 'Each immutable test run, including failures followed by retests, runner, result and linked defects.' },
   { key: 'defect-retest-register', label: 'Defect & Retest Register', group: 'Operational', description: 'Governed defect lifecycle, ownership, resolution and retest evidence.' },
   { key: 'performance-testing', label: 'Performance Testing Register', group: 'Operational', description: 'Performance requests, workload target, environment, assignment and report state.' },
   { key: 'sast-scan', label: 'SAST Scan Register', group: 'Security', description: 'SAST requests, application/build, workflow state and finding volume.' },
@@ -906,7 +909,9 @@ export const REPORTS: ReportDef[] = [
   { key: 'testcase-approval-summary', label: 'Testcase Approval Backlog', group: 'Management', description: 'Draft, recommendation, QA Lead approval and approved counts by project.' },
   { key: 'application-quality-scorecard', label: 'Application Quality Scorecard', group: 'Management', description: 'Cross-module request, testing, defect and issued clearance position by application.' },
   { key: 'qa-signoff-register', label: 'QA Clearance Register', group: 'Management', description: 'Certificate workflow, validity, signatories and final issuance status.' },
+  { key: 'qa-clearance-evidence', label: 'QA Clearance Evidence Summary', group: 'Management', description: 'Frozen test execution and defect figures from each certificate revision, with assigned testers.' },
   { key: 'audit-evidence', label: 'Approval Audit Evidence', group: 'Management', description: 'Chronological workflow decisions with actor, role, comments and timestamp.' },
+  { key: 'document-portal-inventory', label: 'Document Portal Inventory', group: 'Documents', description: 'Files in your selected workspace: relative folder, type, size and last-modified date. Document Portal access required.' },
 ]
 
 // ---- Test Management (Project Management / Test Repository / Test Execution) ----

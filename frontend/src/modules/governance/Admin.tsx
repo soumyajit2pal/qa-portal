@@ -746,6 +746,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
   const [name, setName] = useState('')
   const [key, setKey] = useState('')
   const [parentWorkspaceId, setParentWorkspaceId] = useState('')
+  const [newQuotaGb, setNewQuotaGb] = useState('')
   const [candidateSearch, setCandidateSearch] = useState('')
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([])
   const [candidateWorkspaceAccess, setCandidateWorkspaceAccess] = useState<Record<number, string>>({})
@@ -756,6 +757,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>('members')
   const [editName, setEditName] = useState('')
   const [editDescription, setEditDescription] = useState('')
+  const [editQuotaGb, setEditQuotaGb] = useState('')
   const [editParentId, setEditParentId] = useState('')
   const [editingHierarchy, setEditingHierarchy] = useState(false)
   const [editActive, setEditActive] = useState(true)
@@ -779,6 +781,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
     if (!selected) return
     setEditName(selected.name)
     setEditDescription(selected.description || '')
+    setEditQuotaGb(selected.document_portal_quota_bytes ? String(Number((selected.document_portal_quota_bytes / 1024**3).toFixed(3))) : '')
     setEditParentId(selected.parent_workspace_id ? String(selected.parent_workspace_id) : '')
     setEditingHierarchy(false)
     setEditActive(selected.is_active)
@@ -886,6 +889,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
     setSelectedId(workspace.id)
     setEditName(workspace.name)
     setEditDescription(workspace.description || '')
+    setEditQuotaGb(workspace.document_portal_quota_bytes ? String(Number((workspace.document_portal_quota_bytes / 1024**3).toFixed(3))) : '')
     setEditParentId(workspace.parent_workspace_id ? String(workspace.parent_workspace_id) : '')
     setEditingHierarchy(false)
     setEditActive(workspace.is_active)
@@ -901,8 +905,13 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
   async function createWorkspace(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError(null)
     try {
-      await api.post('/api/workspaces', { workspace_key: key, name, parent_workspace_id: parentWorkspaceId ? Number(parentWorkspaceId) : null, is_active: true })
-      setName(''); setKey(''); setParentWorkspaceId(''); setShowCreateWorkspace(false); await load()
+      const quotaBytes = Math.round(Number(newQuotaGb) * 1024**3)
+      if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 1) throw new Error('Enter a positive Document Portal storage limit.')
+      const parent = workspaces.find((workspace) => String(workspace.id) === parentWorkspaceId)
+      if (parent && (!parent.document_portal_quota_bytes || quotaBytes > parent.document_portal_quota_bytes))
+        throw new Error('The child storage limit must be no higher than the configured parent limit.')
+      await api.post('/api/workspaces', { workspace_key: key, name, parent_workspace_id: parentWorkspaceId ? Number(parentWorkspaceId) : null, is_active: true, document_portal_quota_bytes: quotaBytes })
+      setName(''); setKey(''); setParentWorkspaceId(''); setNewQuotaGb(''); setShowCreateWorkspace(false); await load()
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
@@ -999,8 +1008,21 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
     if (!selected || !editName.trim()) return
     setBusy(true); setError(null)
     try {
+      const shownQuota = selected.document_portal_quota_bytes
+        ? String(Number((selected.document_portal_quota_bytes / 1024**3).toFixed(3))) : ''
+      const quotaBytes = editQuotaGb === shownQuota && selected.document_portal_quota_bytes != null
+        ? selected.document_portal_quota_bytes
+        : Math.round(Number(editQuotaGb) * 1024**3)
+      if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 1) throw new Error('Enter a positive Document Portal storage limit.')
+      const parent = workspaces.find((workspace) => String(workspace.id) === editParentId)
+      if (parent && (!parent.document_portal_quota_bytes || quotaBytes > parent.document_portal_quota_bytes))
+        throw new Error('The child storage limit must be no higher than the configured parent limit.')
+      if (!parent && workspaces.some((workspace) => workspace.parent_workspace_id === selected.id &&
+        (workspace.document_portal_quota_bytes || 0) > quotaBytes))
+        throw new Error('The parent storage limit must be at least as high as each child limit.')
       await api.patch(`/api/workspaces/${selected.id}`, {
         name: editName.trim(), description: editDescription.trim() || null,
+        document_portal_quota_bytes: quotaBytes,
         parent_workspace_id: editParentId ? Number(editParentId) : null,
         is_active: editActive,
       })
@@ -1090,7 +1112,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
         <nav className="workspace-detail-tabs" aria-label={`${selected.name} settings`}>
           <button type="button" className={workspacePanel === 'members' ? 'active' : ''} aria-current={workspacePanel === 'members' ? 'page' : undefined} onClick={() => setWorkspacePanel('members')}><strong>Members</strong><small>{members.length} people with access</small></button>
           <button type="button" className={workspacePanel === 'administrators' ? 'active' : ''} aria-current={workspacePanel === 'administrators' ? 'page' : undefined} onClick={() => setWorkspacePanel('administrators')}><strong>Local admins</strong><small>{visibleCoordinators.length} department assignments</small></button>
-          <button type="button" className={workspacePanel === 'settings' ? 'active' : ''} aria-current={workspacePanel === 'settings' ? 'page' : undefined} onClick={() => setWorkspacePanel('settings')}><strong>Settings</strong><small>Name, parent, and status</small></button>
+          <button type="button" className={workspacePanel === 'settings' ? 'active' : ''} aria-current={workspacePanel === 'settings' ? 'page' : undefined} onClick={() => setWorkspacePanel('settings')}><strong>Settings</strong><small>Name, storage, parent, and status</small></button>
         </nav>
         {workspacePanel === 'members' && <section className="workspace-members-section">
           <div className="workspace-members-heading">
@@ -1175,6 +1197,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
             </div>}
             {workspaces.some((workspace) => workspace.parent_workspace_id === selected.id) && <small className="muted">This workspace already has children. Move or remove them before placing this workspace under another parent.</small>}
             <Field label="Description"><textarea value={editDescription} onChange={(event) => setEditDescription(event.target.value)} rows={3} placeholder="What work belongs in this workspace?" /></Field>
+            <Field label="Maximum Document Portal storage (GB) *"><input type="number" min="0.001" step="0.001" value={editQuotaGb} onChange={(event) => setEditQuotaGb(event.target.value)} placeholder="Set a workspace storage limit" required /><small className="muted">{editParentId ? 'This child limit cannot exceed the parent limit. Its files stay in its own folder, while uploads also count against the shared parent limit.' : 'For a parent workspace, this limit covers its own files and every child workspace. Lowering it keeps existing files and blocks uploads above the cap.'}</small></Field>
             <label className="workspace-active-toggle"><input type="checkbox" checked={editActive} onChange={(event) => setEditActive(event.target.checked)} disabled={selected.is_default} /><span><strong>Active workspace</strong><small>Inactive workspaces cannot be selected. Existing records remain retained.</small></span></label>
             <button type="submit" className="btn btn-primary" disabled={busy || !editName.trim()}>{busy ? 'Saving…' : 'Save settings'}</button>
           </form>
@@ -1193,6 +1216,7 @@ function QAWorkspaceManager({ onManageUser, departments }: { onManageUser: (user
         </Field>
         <Field label="Workspace name *"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="Example: DBD Quality Assurance" required /></Field>
         <Field label="Short key *"><input value={key} onChange={(event) => setKey(event.target.value.toUpperCase())} placeholder="Example: DBD-QA" required /><small className="muted">A short, unique code used to identify the workspace.</small></Field>
+        <Field label="Maximum Document Portal storage (GB) *"><input type="number" min="0.001" step="0.001" value={newQuotaGb} onChange={(event) => setNewQuotaGb(event.target.value)} placeholder="Enter a storage limit" required /><small className="muted">{parentWorkspaceId ? 'This child limit cannot exceed its parent limit. Child files stay in their own folder and share the parent storage budget.' : 'This top-level limit also covers any child workspaces added later. There is no preset storage limit.'}</small></Field>
         <div className="modal-actions"><button type="button" className="btn" onClick={() => setShowCreateWorkspace(false)}>Cancel</button><button className="btn btn-primary" disabled={busy}>{busy ? 'Creating…' : 'Create workspace'}</button></div>
       </form>
     </Modal>}
@@ -1300,11 +1324,12 @@ export default function Admin() {
         eyebrow="Administration"
         title={sectionMeta[section].title} count={sectionMeta[section].count}
         subtitle={sectionMeta[section].subtitle}
-        actions={section === 'users' ? (
+        actions={section === 'users' ? <>
+          <button className="btn" onClick={() => api.downloadFile('/api/audit/user-access-report', 'qualityops-user-access-report.xlsx').catch(setError)}>Download user access report</button>
           <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
             <IconPlus width={14} height={14} /> Create User
           </button>
-        ) : undefined}
+        </> : undefined}
       />
 
       <div className="admin-navigation-shell">

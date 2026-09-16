@@ -1,7 +1,8 @@
 import base64
 import datetime
+from collections import Counter, defaultdict
+from types import SimpleNamespace
 import json
-from collections import Counter
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import and_, case, exists as db_exists, func, literal, or_, select, union_all
@@ -732,8 +733,21 @@ def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
         .all()
     )
     latest: dict = {}
+    grouped = defaultdict(list)
     for row in rows:
-        latest[row.request_id] = row
+        grouped[row.request_id].append(row)
+    count_fields = ("critical_count", "high_count", "medium_count", "low_count", "total_count",
+                    "suppressed_critical_count", "suppressed_high_count", "suppressed_medium_count",
+                    "suppressed_low_count", "suppressed_total_count")
+    for request_id, request_rows in grouped.items():
+        representative = request_rows[-1]
+        from ..security_scan_state import current_scan_results
+        batch = current_scan_results(list(reversed(request_rows)))
+        values = {column.name: getattr(representative, column.name) for column in models.SecurityScanResult.__table__.columns}
+        values.update({field: sum(int(getattr(row, field) or 0) for row in batch) for field in count_fields})
+        values["filters"] = representative.filters
+        values["targets"] = [target for row in batch for target in row.targets]
+        latest[request_id] = SimpleNamespace(**values)
     return latest
 
 # Statuses that represent "work still in flight" for a QA Request (i.e. not a

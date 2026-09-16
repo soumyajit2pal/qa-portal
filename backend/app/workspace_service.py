@@ -222,7 +222,7 @@ def active_workspace_scope_ids(
             models.QAWorkspace.is_active == True,  # noqa: E712
         )
     }
-    inherited = user.has_role(Role.ADMIN) or any(
+    inherited = user.has_role(Role.ADMIN) or user.has_role(Role.SCALE_6_PLUS) or any(
         membership.is_active
         and membership.workspace_id == selected
         and membership.role in PARENT_WORKSPACE_ROLES
@@ -243,6 +243,8 @@ def inherited_workspace_access_mode(db: Session, user: models.User, workspace_id
         return None
     if user.has_role(Role.ADMIN):
         return "PARENT_ADMIN"
+    if user.has_role(Role.SCALE_6_PLUS):
+        return "PARENT_VIEWER"
     direct_roles = {
         membership.role for membership in user.qa_workspace_memberships
         if membership.is_active and membership.workspace_id == workspace_id
@@ -274,6 +276,10 @@ def selectable_workspace_ids(db: Session, user: models.User) -> set[int]:
     same hierarchy boundary as Parent Viewer/Admin: it applies to every active
     direct child. Assigning the coordinator on a child remains child-only.
     """
+    if user.has_role(Role.SCALE_6_PLUS):
+        return {workspace_id for (workspace_id,) in db.query(models.QAWorkspace.id).filter(
+            models.QAWorkspace.is_active == True,  # noqa: E712
+        )}
     ids = active_workspace_ids(user)
     privileged_parent_ids = {
         membership.workspace_id for membership in user.qa_workspace_memberships

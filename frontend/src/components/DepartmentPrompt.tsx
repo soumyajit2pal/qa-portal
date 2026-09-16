@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext'
 import { Modal, ErrorText } from './Common'
 import { IconSearch } from './Icons'
 import { DepartmentOut } from '../types'
+import AppVersion from './AppVersion'
 
 // Shown once, right after a person's first-ever LDAP login (see
 // models.User.needs_department_selection / App.tsx's Protected wrapper) --
@@ -79,6 +80,7 @@ export default function DepartmentPrompt() {
           <button type="button" className="btn" onClick={logout}>Log out instead</button>
         </div>
       </form>
+      <div className="access-pending-version"><AppVersion /></div>
     </Modal>
   )
 }

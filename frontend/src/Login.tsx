@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import { IconApprove, IconCertificate, IconEyeOff, IconLock, IconShield, IconUsers, IconWorkflow } from './components/Icons'
 import { ErrorText } from './components/Common'
+import AppVersion from './components/AppVersion'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -129,6 +130,7 @@ export default function Login() {
       <footer className="login-page-footer">
         Developed By <strong>Soumyajit Pal</strong><span>•</span>Quality Assurance Department - IT
         <span>•</span>© 2026 All rights reserved.
+        <span>•</span><AppVersion />
       </footer>
     </main>
   )

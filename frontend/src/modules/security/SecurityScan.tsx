@@ -2,13 +2,13 @@ import { useRequestNavigation } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState } from 'react'
 
 import { api } from '../../api'
-import { formatDateIST, formatDateTimeIST } from '../../time'
+import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { hasWorkflowRole as hasRole, SUPPRESSION_TERMINAL_STATUSES } from '../../constants'
 import { EmptyState, ErrorText, Field, Modal, Table, TableColumn } from '../../components/Common'
 import { SecurityScanResultOut, SecurityScanSummaryOut, SuppressionOut } from '../../types'
 
-// One row per (scan, filter set) -- see findingsByFilter/the Scan History
+// One row per scan and Fortify filter set in Scan History
 // section below. A plain flat row shape (rather than nesting filters inside
 // a scan_no group) so the shared Table component's per-column filter
 // dropdowns and Columns toggle (reported directly: "in table filter option
@@ -26,13 +26,15 @@ interface ScanHistoryRow {
   low_count: number
   total_count: number
   status: string
+  targets: string
 }
 
 const SCAN_HISTORY_COLUMNS: TableColumn<ScanHistoryRow>[] = [
   { key: 'scan_no', header: 'Scan No' },
   { key: 'scan_type', header: 'Type' },
+  { key: 'targets', header: 'Scanned Targets' },
   { key: 'filter_title', header: 'Filter' },
-  { key: 'imported_at', header: 'Scan Date', render: (r) => formatDateIST(r.imported_at) },
+  { key: 'imported_at', header: 'Imported At', render: (r) => formatDateTimeIST(r.imported_at) },
   { key: 'critical_count', header: 'Critical' },
   { key: 'high_count', header: 'High' },
   { key: 'medium_count', header: 'Medium' },
@@ -41,7 +43,50 @@ const SCAN_HISTORY_COLUMNS: TableColumn<ScanHistoryRow>[] = [
   { key: 'status', header: 'Status' },
 ]
 
-export function SecurityScanDialog({ kind, mode = 'start', initialApplicationName, initialApplicationVersion, busy, error, onClose, onStart }: {
+function targetNeedsRemediation(id: number | undefined, scans: SecurityScanResultOut[]) {
+  const previous = id == null ? scans[0] : scans.find(scan => scan.targets.some(target => target.id === id))
+  return !previous || Math.max(previous.total_count || 0, ...previous.filters.map(filter => filter.total_count || 0)) > 0
+}
+
+export function SecurityFixDialog({ kind, targets, currentScans, onClose, onSubmit }: {
+  kind: 'SAST' | 'DAST'
+  targets: { id: number; label: string; previousCommit?: string | null }[]
+  currentScans: SecurityScanResultOut[]
+  onClose: () => void
+  onSubmit: (targets: { target_id: number; commit_id: string }[]) => Promise<void>
+}) {
+  const [rows, setRows] = useState(() => targets.filter(target => targetNeedsRemediation(target.id, currentScans)).map(target => ({ ...target, commitId: '' })))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const complete = rows.length > 0 && rows.every(row => row.commitId.trim())
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault()
+    if (!complete || busy) return
+    setBusy(true); setError(null)
+    try {
+      await onSubmit(rows.map(row => ({ target_id: row.id, commit_id: row.commitId.trim() })))
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+
+  return <Modal title={`Mark ${kind} Fixes Complete`} onClose={() => { if (!busy) onClose() }} variant="dialog" preventBackdropClose wide>
+    <form className="security-scan-start" onSubmit={submit} aria-busy={busy}>
+      <div className="security-scan-intro"><strong>Identify the code containing each fix</strong><span>{kind === 'SAST' ? 'Enter the latest commit ID or code hash for each repository awaiting remediation.' : 'Enter the source commit ID or deployed artifact hash containing the fix for each application URL.'} These references will be recorded with your name and submission date in the activity history.</span></div>
+      {targets.length > rows.length && <p className="muted small">Already-clear targets remain unchanged and do not require a new code reference.</p>}
+      {rows.map((row, index) => <div className="security-scan-target-row" key={row.id}>
+        <strong>{row.label}</strong>
+        {row.previousCommit && <p className="muted small">Previously recorded commit: {row.previousCommit}</p>}
+        <Field label="Latest commit ID / code hash *"><input required maxLength={500} autoFocus={index === 0} disabled={busy} value={row.commitId} onChange={event => setRows(current => current.map(target => target.id === row.id ? { ...target, commitId: event.target.value } : target))} placeholder="Commit ID or code/artifact hash" /></Field>
+      </div>)}
+      {!rows.length && <p>No target is awaiting remediation. Refresh the findings before continuing.</p>}
+      <p className="muted small">Submitting returns the request to the assigned Security Analyst for rescan.</p>
+      <ErrorText error={error} />
+      <div className="modal-actions"><button className="btn btn-primary" disabled={busy || !complete}>{busy ? 'Submitting…' : 'Mark Fixed & Send for Rescan'}</button><button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button></div>
+    </form>
+  </Modal>
+}
+
+export function SecurityScanDialog({ kind, mode = 'start', initialApplicationName, targets, initialScans, busy, error, onClose, onStart }: {
   kind: 'SAST' | 'DAST'
   // 2026-08 "Findings Validation" doc -- Rescan re-uses this exact dialog
   // (same Application Name/Version identity, same SSC import call) rather
@@ -49,20 +94,35 @@ export function SecurityScanDialog({ kind, mode = 'start', initialApplicationNam
   // fields start prefilled from the latest scan (Rescan) or blank (Start).
   mode?: 'start' | 'rescan'
   initialApplicationName?: string | null
-  initialApplicationVersion?: string | null
+  targets: { id: number; label: string; detail?: string | null }[]
+  initialScans?: SecurityScanResultOut[]
   busy: boolean
   error: unknown
   onClose: () => void
-  onStart: (applicationName: string, applicationVersion: string) => Promise<void>
+  onStart: (scans: { target_id: number; application_name: string; application_version: string }[]) => Promise<void>
 }) {
-  const [applicationName, setApplicationName] = useState(initialApplicationName || '')
-  const [applicationVersion, setApplicationVersion] = useState(initialApplicationVersion || '')
+  const previousByTarget = new Map((initialScans || []).flatMap(scan => scan.targets.map(target => [target.id, scan] as const)))
   const isRescan = mode === 'rescan'
+  const pendingTargets = targets.filter(target => {
+    if (!isRescan) return true
+    return targetNeedsRemediation(target.id, initialScans || [])
+  })
+  const retainedTargets = targets.filter(target => !pendingTargets.some(pending => pending.id === target.id))
+  const [rows, setRows] = useState(() => pendingTargets.map(target => {
+    const previous = previousByTarget.get(target.id)
+    return { ...target, applicationName: previous?.application_name || initialApplicationName || '', applicationVersion: previous?.application_version || '' }
+  }))
+
+  function update(id: number, values: Partial<(typeof rows)[number]>) {
+    setRows(current => current.map(row => row.id === id ? { ...row, ...values } : row))
+  }
+
+  const complete = rows.length > 0 && rows.every(row => row.applicationName.trim() && row.applicationVersion.trim())
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
-    if (!applicationName.trim() || !applicationVersion.trim()) return
-    await onStart(applicationName.trim(), applicationVersion.trim())
+    if (!complete) return
+    await onStart(rows.map(row => ({ target_id: row.id, application_name: row.applicationName.trim(), application_version: row.applicationVersion.trim() })))
   }
 
   return (
@@ -72,22 +132,28 @@ export function SecurityScanDialog({ kind, mode = 'start', initialApplicationNam
           <strong>{isRescan ? 'Re-import the latest Fortify SSC analysis' : 'Import the matching Fortify SSC analysis'}</strong>
           <span>
             {isRescan
-              ? 'Confirm (or update) the Application Name and Version, then re-check Fortify SSC for the latest results. This creates a new scan record -- the previous scan stays exactly as it was.'
-              : 'Enter the exact Application Name and Version used in Fortify. QualityOps will validate them, import the severity summary, and then move this request to Scanning.'}
+              ? 'Only targets with findings pending are rescanned. Confirm their Fortify Application Name and Version.'
+              : 'Select the targets scanned and enter the exact Fortify Application Name and Version for each one. Every target is imported independently.'}
           </span>
         </div>
-        <div className="form-row">
-          <Field label="Application Name *">
-            <input required autoFocus disabled={busy} value={applicationName} onChange={(event) => setApplicationName(event.target.value)} placeholder="Exact Fortify application name" />
-          </Field>
-          <Field label="Application Version *">
-            <input required disabled={busy} value={applicationVersion} onChange={(event) => setApplicationVersion(event.target.value)} placeholder="For example: 1, 1.1 or 2026.08" />
-          </Field>
-        </div>
-        <p className="muted small">The selected version must already exist and have processed results in Fortify SSC.</p>
+        <fieldset className="security-scan-targets">
+          <legend>{kind === 'SAST' ? 'Repository scans *' : 'URL scans *'}</legend>
+          <p className="muted small">{isRescan ? 'Each pending target produces its own new result and history entry.' : 'Every configured target requires a separate Fortify scan and produces its own findings.'}</p>
+          {retainedTargets.length > 0 && <p className="muted small">Already clear — latest results retained, no new scan history: {retainedTargets.map(target => target.label).join(', ')}</p>}
+          {rows.length ? rows.map((row, index) => (
+            <div className="security-scan-target-row" key={row.id}>
+              <div className="security-scan-target-choice"><span><strong>{row.label}</strong>{row.detail && <small>{row.detail}</small>}</span></div>
+              <div className="form-row">
+                <Field label="Fortify Application Name *"><input autoFocus={index === 0} required disabled={busy} value={row.applicationName} onChange={event => update(row.id, { applicationName: event.target.value })} placeholder="Exact Fortify application name" /></Field>
+                <Field label="Fortify Application Version *"><input required disabled={busy} value={row.applicationVersion} onChange={event => update(row.id, { applicationVersion: event.target.value })} placeholder="For example: 1, 1.1 or 2026.08" /></Field>
+              </div>
+            </div>
+          )) : <span className="muted">{isRescan ? 'Every target is already clear. No rescan is required.' : 'No configured scan target is available. Add one in request details before starting the scan.'}</span>}
+        </fieldset>
+        <p className="muted small">Every selected application/version must already exist and have processed results in Fortify SSC. Nothing is saved if any target import fails.</p>
         <ErrorText error={error} />
         <div className="modal-actions">
-          <button className="btn btn-primary" disabled={busy || !applicationName.trim() || !applicationVersion.trim()}>
+          <button className="btn btn-primary" disabled={busy || !complete}>
             {busy ? <><span className="api-activity-spinner" aria-hidden="true" /> Importing SSC Results…</> : (isRescan ? 'Rescan' : 'Validate & Start Scan')}
           </button>
           <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
@@ -98,51 +164,55 @@ export function SecurityScanDialog({ kind, mode = 'start', initialApplicationNam
   )
 }
 
-// Shared by the full scan result (SecurityScanResultOut) and each individual
-// filter set breakdown (SecurityScanFilterOut) below -- both have the same
-// critical/high/medium/low/total_count fields.
-function severityBreakdown(counts: { critical_count: number; high_count: number; medium_count: number; low_count: number; total_count: number }) {
-  return (
-    <div className="security-scan-severity-grid">
-      <div className="critical"><small>Critical</small><strong>{counts.critical_count}</strong></div>
-      <div className="high"><small>High</small><strong>{counts.high_count}</strong></div>
-      <div className="medium"><small>Medium</small><strong>{counts.medium_count}</strong></div>
-      <div className="low"><small>Low</small><strong>{counts.low_count}</strong></div>
-      <div className="total"><small>Total</small><strong>{counts.total_count}</strong></div>
-    </div>
-  )
-}
+const FINDING_COUNT_COLUMNS = ['critical_count', 'high_count', 'medium_count', 'low_count', 'total_count'] as const
 
-// 2026-08 -- reported directly: "show initial scan findings and Current
-// Scan findings but split Filter and total also individual level not
-// security + quick like that" -- each filter set (Security Auditor View,
-// Quick View, ...) gets its own full severityBreakdown card, with its own
-// independent Total; filter sets are never added together into one combined
-// number (see fortify_ssc.py's retrieve_snapshot for why -- they're
-// overlapping views of the same issues, not disjoint subsets of them).
-function findingsByFilter(scan: SecurityScanResultOut) {
-  const filters = Array.isArray(scan.filters) ? scan.filters : []
-  if (!filters.length) return severityBreakdown(scan)
-  return (
-    <>
-      {filters.map((filter) => (
-        <div key={filter.guid} className="security-scan-filter-breakdown">
-          <span className="security-scan-filter-label">{filter.title}</span>
-          {severityBreakdown(filter)}
-        </div>
-      ))}
-    </>
-  )
-}
-
-function suppressedFindingsBreakdown(scan: SecurityScanResultOut) {
-  return severityBreakdown({
+function TargetFindings({ scan, initialScan }: { scan: SecurityScanResultOut; initialScan?: SecurityScanResultOut }) {
+  const pending = targetNeedsRemediation(scan.targets?.[0]?.id, [scan])
+  const filtersFor = (result?: SecurityScanResultOut) => !result ? [] : result.filters.length ? result.filters : [{ ...result, title: 'Security Auditor View', guid: 'auditor' }]
+  const currentFilters = filtersFor(scan)
+  const initialFilters = filtersFor(initialScan)
+  const views = [...new Set([...currentFilters, ...initialFilters].map(filter => filter.title))]
+  const suppressed = {
     critical_count: scan.suppressed_critical_count ?? 0,
     high_count: scan.suppressed_high_count ?? 0,
     medium_count: scan.suppressed_medium_count ?? 0,
     low_count: scan.suppressed_low_count ?? 0,
     total_count: scan.suppressed_total_count ?? 0,
-  })
+  }
+
+  return <details className={`security-findings-target ${pending ? 'is-pending' : 'is-clear'}`} open={pending}>
+    <summary>
+      <span className="security-findings-target-identity"><strong>{scan.targets?.[0]?.label || 'Legacy target not captured'}</strong><small>{scan.application_name} · Version {scan.application_version}</small></span>
+      <span className={`security-findings-target-status ${pending ? 'pending' : 'clear'}`}>{pending ? 'Fix pending' : 'Clear · no rescan needed'}</span>
+      <span className="security-findings-expand" aria-hidden="true">⌄</span>
+    </summary>
+    <div className="security-findings-target-body">
+      <div className="security-findings-target-context">
+        <span><small>Initial import</small>{initialScan ? formatDateTimeIST(initialScan.imported_at) : 'Not captured'}</span>
+        <span><small>Latest import</small>{formatDateTimeIST(scan.imported_at)}</span>
+        {scan.audit_url && <a href={scan.audit_url} target="_blank" rel="noreferrer">Review in Fortify SSC ↗</a>}
+      </div>
+      {scan.targets?.[0]?.detail && <p className="security-findings-code-reference">Scanned reference: {scan.targets[0].detail}</p>}
+      <div className="security-findings-comparison-scroll">
+        <table className="security-findings-comparison">
+          <caption>Initial and current findings for this target, separated by Fortify view</caption>
+          <thead><tr><th scope="col">Fortify view</th><th scope="col">Result</th><th scope="col">Critical</th><th scope="col">High</th><th scope="col">Medium</th><th scope="col">Low</th><th scope="col">Total</th></tr></thead>
+          <tbody>
+            {views.map(view => {
+              const first = initialFilters.find(filter => filter.title === view)
+              const latest = currentFilters.find(filter => filter.title === view)
+              return <React.Fragment key={view}>
+                <tr className="initial"><th scope="rowgroup" rowSpan={2}>{view}</th><th scope="row">Initial</th>{FINDING_COUNT_COLUMNS.map(key => <td key={key}>{first ? first[key] : '—'}</td>)}</tr>
+                <tr className="current"><th scope="row">Current</th>{FINDING_COUNT_COLUMNS.map(key => <td className={key.replace('_count', '')} key={key}>{latest ? latest[key] : '—'}</td>)}</tr>
+              </React.Fragment>
+            })}
+            <tr className="suppressed"><th scope="row">Suppressed · Auditor view</th><th scope="row">Current</th>{FINDING_COUNT_COLUMNS.map(key => <td key={key}>{suppressed[key]}</td>)}</tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="security-findings-note">Suppressed findings are separate from active counts. “—” means this view was not captured in that import.</p>
+    </div>
+  </details>
 }
 
 const FINDINGS_NEXT_STEP: Record<string, { title: string; description: string }> = {
@@ -431,84 +501,15 @@ export function SecurityScanResults({
   }
   const current = summary.current
   const initial = summary.initial
+  const currentResults = summary.current_results?.length ? summary.current_results : [current]
+  const initialResults = summary.initial_results?.length ? summary.initial_results : [initial]
+  const targetLabel = (scan: SecurityScanResultOut) => scan.targets?.[0]?.label || 'Legacy target not captured'
 
   return (
-    <section className="security-scan-results" aria-label="Fortify SSC scan results">
+    <section className="security-scan-results security-findings-register" aria-label="Fortify SSC scan results">
       <header>
-        <div><small>{current.provider} · Latest imported result</small><strong>{current.application_name} <span>v{current.application_version}</span></strong><p>Imported {formatDateTimeIST(current.imported_at)} · Provider version ID {current.provider_version_id}</p></div>
-        {current.audit_url && <a className="btn btn-sm" href={current.audit_url} target="_blank" rel="noreferrer">Open in Fortify SSC ↗</a>}
+        <div><small>{current.provider}</small><strong>Findings by {kind === 'SAST' ? 'repository' : 'application URL'}</strong><p>Initial and latest results together for each target. Clear targets retain their verified results during selective rescans.</p></div>
       </header>
-
-      {/* 4.1 Scan Summary grid removed -- reported directly ("this part is
-          not required") right after it shipped, since 4.2's per-filter
-          Initial/Current breakdown below already covers Initial/Current
-          Scan Findings, and this summary strip's numbers (esp. Current
-          Scan Findings vs Open Findings both reading the same value) read
-          as redundant/confusing next to it. */}
-
-      {/* 4.2 Findings Display -- Initial vs Current shown separately, and
-          each split by filter set (Security Auditor View, Quick View, ...)
-          rather than one combined number -- see findingsByFilter above. */}
-      <div className="security-scan-findings-compare">
-        <div>
-          <strong>Initial Scan Findings</strong>
-          {findingsByFilter(initial)}
-        </div>
-        <div>
-          <strong>Current Scan Findings</strong>
-          {findingsByFilter(current)}
-        </div>
-      </div>
-
-      <section className="security-scan-suppressed-summary" aria-label="Latest Fortify suppressed findings">
-        <header>
-          <span className="security-scan-suppressed-icon" aria-hidden="true">S</span>
-          <div>
-            <small>Current Fortify state · Security Auditor View</small>
-            <strong>Suppressed Findings</strong>
-            <p>
-              {current.application_name} v{current.application_version} · These findings are suppressed in Fortify SSC and are not included in the active finding totals above.
-            </p>
-          </div>
-        </header>
-        {suppressedFindingsBreakdown(current)}
-      </section>
-
-      {/* 4.3 Scan History -- reported directly: "also split by filter,
-          currently fixed to Security Auditor View only ... instead of
-          total findings show all like critical, high etc" -- one row per
-          (scan, filter set) now, with the full severity breakdown instead
-          of one combined Findings number. Falls back to the scan's own
-          top-level counts if a legacy row has no filters recorded. Uses the
-          shared Table component (not a hand-rolled <table>) so it gets the
-          same per-column filter dropdowns / Columns toggle every other
-          table in the app has -- reported directly: "in table filter
-          option is missing". */}
-      <div className="security-scan-history-table">
-        <strong>Scan History</strong>
-        <Table
-          rowKey="id"
-          columns={SCAN_HISTORY_COLUMNS}
-          rows={results.flatMap((r): ScanHistoryRow[] => {
-            const filters = Array.isArray(r.filters) ? r.filters : []
-            return (
-              filters.length > 0 ? filters : [{
-                guid: 'total', title: '—',
-                critical_count: r.critical_count, high_count: r.high_count,
-                medium_count: r.medium_count, low_count: r.low_count, total_count: r.total_count,
-              }]
-            ).map((f) => ({
-              id: `${r.id}-${f.guid}`,
-              scan_no: r.scan_no, scan_type: r.scan_type, filter_title: f.title,
-              imported_at: r.imported_at,
-              critical_count: f.critical_count, high_count: f.high_count,
-              medium_count: f.medium_count, low_count: f.low_count, total_count: f.total_count,
-              status: r.status,
-            }))
-          })}
-        />
-      </div>
-
       {/* 4.4 Action Buttons -- each gate is now specific to the ONE status
           it applies from (see the props above), so at most one of
           Validate Findings / Rescan / Assign to Requester is ever shown at
@@ -600,6 +601,61 @@ export function SecurityScanResults({
           )}
         </div>
       )}
+      <div className="security-findings-overview" aria-label="Target findings overview">
+        <span><b>{currentResults.length}</b> {kind === 'SAST' ? 'repositories' : 'application URLs'}</span>
+        <span className="pending"><b>{currentResults.filter(scan => targetNeedsRemediation(scan.targets?.[0]?.id, [scan])).length}</b> with findings pending</span>
+        <span className="clear"><b>{currentResults.filter(scan => !targetNeedsRemediation(scan.targets?.[0]?.id, [scan])).length}</b> clear</span>
+      </div>
+      <p className="security-findings-note">Review one target at a time. Fortify views can overlap; their totals are shown separately and are not added together.</p>
+      <div className="security-findings-targets">
+        {[...currentResults].sort((a, b) => targetLabel(a).localeCompare(targetLabel(b))).map(scan => {
+          const targetId = scan.targets?.[0]?.id
+          const initialScan = initialResults.find(first => targetId != null
+            ? first.targets.some(target => target.id === targetId)
+            : first.id === initial.id)
+          return <TargetFindings key={scan.id} scan={scan} initialScan={initialScan} />
+        })}
+      </div>
+
+      {/* 4.3 Scan History -- reported directly: "also split by filter,
+          currently fixed to Security Auditor View only ... instead of
+          total findings show all like critical, high etc" -- one row per
+          (scan, filter set) now, with the full severity breakdown instead
+          of one combined Findings number. Falls back to the scan's own
+          top-level counts if a legacy row has no filters recorded. Uses the
+          shared Table component (not a hand-rolled <table>) so it gets the
+          same per-column filter dropdowns / Columns toggle every other
+          table in the app has -- reported directly: "in table filter
+          option is missing". */}
+      <details className="security-findings-history">
+        <summary><span>Scan history</span><small>{results.length} target scan records · expand to review imports and rescans</small></summary>
+        <div className="security-scan-history-table">
+        <Table
+          rowKey="id"
+          columns={SCAN_HISTORY_COLUMNS}
+          rows={results.flatMap((r): ScanHistoryRow[] => {
+            const filters = Array.isArray(r.filters) ? r.filters : []
+            return (
+              filters.length > 0 ? filters : [{
+                guid: 'total', title: '—',
+                critical_count: r.critical_count, high_count: r.high_count,
+                medium_count: r.medium_count, low_count: r.low_count, total_count: r.total_count,
+              }]
+            ).map((f) => ({
+              id: `${r.id}-${f.guid}`,
+              scan_no: r.scan_no, scan_type: r.scan_type, filter_title: f.title,
+              imported_at: r.imported_at,
+              critical_count: f.critical_count, high_count: f.high_count,
+              medium_count: f.medium_count, low_count: f.low_count, total_count: f.total_count,
+              status: r.status,
+              targets: r.targets?.map(target => target.label).join(', ') || 'Legacy scan — not captured',
+            }))
+          })}
+        />
+        </div>
+      </details>
+
+
     </section>
   )
 }

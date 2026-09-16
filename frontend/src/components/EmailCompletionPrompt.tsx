@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { ErrorText, Modal } from './Common'
+import AppVersion from './AppVersion'
 
 // LDAP authentication can succeed even when the directory's mail attribute
 // is blank. This modal is deliberately non-dismissible: workflow mail is a
@@ -56,6 +57,7 @@ export default function EmailCompletionPrompt() {
           <button type="button" className="btn" onClick={logout} disabled={busy}>Log out</button>
         </div>
       </form>
+      <div className="access-pending-version"><AppVersion /></div>
     </Modal>
   )
 }

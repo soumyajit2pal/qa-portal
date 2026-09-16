@@ -4,6 +4,11 @@ import { RequestTarget, requestTarget } from '../requestNavigation'
 
 export const RequestViewerContext = createContext<((target: RequestTarget) => void) | null>(null)
 
+/** Module pages defer request-ID deep links to the shared viewer when mounted inside it. */
+export function useViewerManagedDeepLinks(): boolean {
+  return useContext(RequestViewerContext) !== null
+}
+
 /** Open request destinations in place; preserve normal navigation elsewhere. */
 export function useRequestNavigation(): NavigateFunction {
   const navigate = useNavigate()

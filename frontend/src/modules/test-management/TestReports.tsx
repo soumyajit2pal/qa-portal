@@ -82,7 +82,7 @@ function Pager({ offset, limit, total, onOffset }: { offset: number; limit: numb
 
 const PAGE_SIZE = 5
 
-function RequirementsTraceabilityPanel({ projectId }: { projectId: number }) {
+function RequirementsTraceabilityPanel({ projectId, onExportPath }: { projectId: number; onExportPath: (path: string | null) => void }) {
   const navigate = useNavigate()
   const [data, setData] = useState<RequirementTraceabilityOut | null>(null)
   const [search, setSearch] = useState('')
@@ -92,6 +92,12 @@ function RequirementsTraceabilityPanel({ projectId }: { projectId: number }) {
   const [pageSize, setPageSize] = useState(PAGE_SIZE)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    const params = new URLSearchParams({ project_id: String(projectId), requirement_type: requirementType })
+    if (appliedSearch) params.set('search', appliedSearch)
+    onExportPath(`/api/test-reports/export/traceability?${params}`)
+  }, [projectId, requirementType, appliedSearch, onExportPath])
 
   useEffect(() => { setOffset(0); setSearch(''); setAppliedSearch(''); setRequirementType('all') }, [projectId])
   useEffect(() => {
@@ -236,11 +242,15 @@ function RepositoryHealthPanel({ projectId }: { projectId: number }) {
   )
 }
 
-function CycleProgressPanel({ projectId }: { projectId: number }) {
+function CycleProgressPanel({ projectId, onExportPath }: { projectId: number; onExportPath: (path: string | null) => void }) {
   const [cycles, setCycles] = useState<TestCycleOut[]>([])
   const [cycleId, setCycleId] = useState<number | ''>('')
   const [data, setData] = useState<CycleProgressOut | null>(null)
   const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    onExportPath(cycleId ? `/api/test-reports/export/cycle-progress?project_id=${projectId}&cycle_id=${cycleId}` : null)
+  }, [cycleId, projectId, onExportPath])
 
   useEffect(() => {
     setCycleId(''); setData(null)
@@ -290,7 +300,7 @@ function CycleProgressPanel({ projectId }: { projectId: number }) {
   )
 }
 
-function DefectQualityPanel({ projectId }: { projectId: number }) {
+function DefectQualityPanel({ projectId, onExportPath }: { projectId: number; onExportPath: (path: string | null) => void }) {
   const navigate = useNavigate()
   const [data, setData] = useState<DefectQualityOut | null>(null)
   const [offset, setOffset] = useState(0)
@@ -299,6 +309,12 @@ function DefectQualityPanel({ projectId }: { projectId: number }) {
   const [resolverPage, setResolverPage] = useState(1)
   const [expandedResolverId, setExpandedResolverId] = useState<number | null>(null)
   const [error, setError] = useState<unknown>(null)
+  useEffect(() => {
+    const params = new URLSearchParams({ project_id: String(projectId) })
+    if (resolverFilter) params.set('resolver_id', String(resolverFilter.id))
+    if (resolverFilter?.reopened) params.set('reopened_only', 'true')
+    onExportPath(`/api/test-reports/export/defects?${params}`)
+  }, [projectId, resolverFilter, onExportPath])
   useEffect(() => { setOffset(0); setResolverFilter(null); setResolverSearch(''); setResolverPage(1); setExpandedResolverId(null) }, [projectId])
   useEffect(() => {
     setData(null)
@@ -425,12 +441,17 @@ function ProjectPortfolioPanel() {
   )
 }
 
-function IncompleteDefectTraceabilityPanel() {
+function IncompleteDefectTraceabilityPanel({ onExportPath }: { onExportPath: (path: string | null) => void }) {
   const navigate = useNavigate()
   const [data, setData] = useState<PageOut<DefectListOut> | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
+  useEffect(() => {
+    const params = new URLSearchParams()
+    if (search) params.set('search', search)
+    onExportPath(`/api/test-reports/export/incomplete-defects${params.size ? `?${params}` : ''}`)
+  }, [search, onExportPath])
   useEffect(() => {
     let active = true
     setData(null); setError(null)
@@ -470,6 +491,9 @@ export default function TestReports() {
   const [projectId, setProjectId] = useState<number | ''>('')
   const [tab, setTab] = useState<ReportTab>('traceability')
   const [error, setError] = useState<unknown>(null)
+  const [activeExportPath, setActiveExportPath] = useState<string | null>(null)
+  const [exportingTab, setExportingTab] = useState<ReportTab | null>(null)
+  const updateExportPath = useCallback((path: string | null) => setActiveExportPath(path), [])
 
   const load = useCallback(async () => {
     try {
@@ -481,6 +505,27 @@ export default function TestReports() {
   useEffect(() => { load() }, [load])
 
   const activeTab = useMemo(() => TABS.find((t) => t.id === tab)!, [tab])
+  const exportReport = async (report: typeof TABS[number]) => {
+    if (report.scope !== 'none' && !projectId) {
+      setError(new Error('Select a Test Project before exporting this report.'))
+      return
+    }
+    setError(null)
+    setExportingTab(report.id)
+    try {
+      let path = report.id === tab && activeExportPath ? activeExportPath : `/api/test-reports/export/${report.id}`
+      if (report.scope !== 'none' && !path.includes('project_id=')) {
+        path += `?project_id=${projectId}`
+      }
+      if (report.id === 'cycle-progress' && !path.includes('cycle_id=')) {
+        const page = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${projectId}/cycles?page_size=100`)
+        if (!page.items.length) throw new Error('This project has no Test Cycle to export.')
+        path += `${path.includes('?') ? '&' : '?'}cycle_id=${page.items[0].id}`
+      }
+      await api.downloadFile(path, `test-report-${report.id}.xlsx`)
+    } catch (err) { setError(err) }
+    finally { setExportingTab(null) }
+  }
 
   return (
     <div className="tm-page">
@@ -497,11 +542,15 @@ export default function TestReports() {
             <strong>{TABS.length} views</strong>
           </div>
           {TABS.map((t, index) => (
-            <button key={t.id} className={tab === t.id ? 'active' : ''} onClick={() => setTab(t.id)}>
-              <span className="tm-report-nav-index">{String(index + 1).padStart(2, '0')}</span>
-              <span><strong>{t.label}</strong><small>{TAB_DESCRIPTIONS[t.id]}</small></span>
-              <i>›</i>
-            </button>
+            <div key={t.id} className={`tm-report-catalogue-item ${tab === t.id ? 'active' : ''}`}>
+              <button type="button" className="tm-report-select" onClick={() => { setActiveExportPath(null); setTab(t.id) }} aria-current={tab === t.id ? 'page' : undefined}>
+                <span className="tm-report-nav-index">{String(index + 1).padStart(2, '0')}</span>
+                <span><strong>{t.label}</strong><small>{TAB_DESCRIPTIONS[t.id]}</small></span>
+              </button>
+              <button type="button" className="tm-report-export" onClick={() => exportReport(t)} disabled={exportingTab !== null || (t.scope !== 'none' && !projectId)} aria-label={`Export ${t.label} report`} title={`Export ${t.label} as Excel`}>
+                {exportingTab === t.id ? 'Exporting…' : 'Export'}
+              </button>
+            </div>
           ))}
         </aside>
         <div className="tm-report-content">
@@ -516,7 +565,7 @@ export default function TestReports() {
                 <Field label="Project scope">
                   <SearchableSelect
                     value={projectId === '' ? '' : String(projectId)}
-                    onChange={(v) => setProjectId(v ? Number(v) : '')}
+                    onChange={(v) => { setActiveExportPath(null); setProjectId(v ? Number(v) : '') }}
                     placeholder={projects.length ? 'Select a project...' : 'No Test Projects yet'}
                     options={projects.map((p) => ({ value: String(p.id), label: `${p.project_key} · ${p.name}` }))}
                   />
@@ -527,11 +576,11 @@ export default function TestReports() {
           <div className="tm-report-content-body">
             {activeTab.scope !== 'none' && !projectId && <div className="tm-report-empty"><strong>Select a project</strong><span>Choose a project scope to generate this report.</span></div>}
             {tab === 'portfolio' && <ProjectPortfolioPanel />}
-            {tab === 'incomplete-defects' && <IncompleteDefectTraceabilityPanel />}
-            {projectId && tab === 'traceability' && <RequirementsTraceabilityPanel key={projectId} projectId={projectId} />}
+            {tab === 'incomplete-defects' && <IncompleteDefectTraceabilityPanel onExportPath={updateExportPath} />}
+            {projectId && tab === 'traceability' && <RequirementsTraceabilityPanel key={projectId} projectId={projectId} onExportPath={updateExportPath} />}
             {projectId && tab === 'health' && <RepositoryHealthPanel projectId={projectId} />}
-            {projectId && tab === 'cycle-progress' && <CycleProgressPanel projectId={projectId} />}
-            {projectId && tab === 'defects' && <DefectQualityPanel projectId={projectId} />}
+            {projectId && tab === 'cycle-progress' && <CycleProgressPanel projectId={projectId} onExportPath={updateExportPath} />}
+            {projectId && tab === 'defects' && <DefectQualityPanel projectId={projectId} onExportPath={updateExportPath} />}
             {projectId && tab === 'version-impact' && <VersionImpactPanel projectId={projectId} />}
           </div>
         </div>

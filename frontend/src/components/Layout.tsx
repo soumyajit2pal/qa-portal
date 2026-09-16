@@ -3,7 +3,7 @@ import { api } from '../api'
 import React, { useEffect, useState, useRef, ReactNode } from 'react'
 import {NavLink, useLocation} from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_LABELS, QA_REQUEST_CREATOR_ROLES, hasRole, hasWorkspaceRole, uniqueWorkspaceAccess, WorkspaceAccessEntry } from '../constants'
+import { ROLE_LABELS, QA_REQUEST_CREATOR_ROLES, hasRole, hasWorkspaceRole, isViewOnly, uniqueWorkspaceAccess, WorkspaceAccessEntry } from '../constants'
 import { QAWorkspaceOut, UserOut } from '../types'
 import {
   IconGrid, IconEdit, IconFolder, IconShield, IconTarget, IconEyeOff,
@@ -13,6 +13,7 @@ import {
 } from './Icons'
 import ClearableSearchInput from './ClearableSearchInput'
 import SearchableSelect from './SearchableSelect'
+import AppVersion from './AppVersion'
 
 interface NavItem {
   to: string
@@ -81,7 +82,7 @@ function navGroups(user: UserOut | null, workspaceOptions: WorkspaceAccessEntry[
         // SRS EXE-002 "My Executions" -- the signed-in user's own actionable
         // items across every authorized project, one cross-project view
         // instead of hunting through each project's own Test Execution page.
-        ...(hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
+        ...(!isViewOnly(user) && hasWorkspaceRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
           ? [{ to: '/my-executions', label: 'My Executions', icon: IconCheckCircle }]
           : []),
         // SRS section 11 -- the 5 reporting views (repository health, cycle
@@ -119,12 +120,12 @@ function navGroups(user: UserOut | null, workspaceOptions: WorkspaceAccessEntry[
   // items below merged into the one Administration group rather than two
   // separately-labeled groups.
   const adminItems: NavItem[] = []
-  if (hasRole(user, 'ADMIN')) {
+  if (!isViewOnly(user) && hasRole(user, 'ADMIN')) {
     adminItems.push({ to: '/admin', label: 'Users & Access', icon: IconUsers })
     adminItems.push({ to: '/checklist-config', label: 'Readiness Checklist Config', icon: IconCheckCircle })
     adminItems.push({ to: '/request-type-config', label: 'Request Type Config', icon: IconEdit })
   }
-  if (uniqueWorkspaceAccess(user).some((access) => access.role === 'PARENT_WORKSPACE_ADMIN')) {
+  if (!isViewOnly(user) && uniqueWorkspaceAccess(user).some((access) => access.role === 'PARENT_WORKSPACE_ADMIN')) {
     adminItems.push({ to: '/workspace-admin', label: 'Workspace Members', icon: IconUsers })
   }
   // Do not show the narrower Department Coordinator workspace merely because
@@ -142,7 +143,7 @@ function navGroups(user: UserOut | null, workspaceOptions: WorkspaceAccessEntry[
       || assignment.workspace_id === selectedWorkspace?.parent_workspace_id
     ),
   )
-  if (isDepartmentCoordinator) {
+  if (!isViewOnly(user) && isDepartmentCoordinator) {
     adminItems.push({ to: '/department-admin', label: 'Department Coordinator', icon: IconUsers })
   }
   if (adminItems.length > 0) {
@@ -570,6 +571,7 @@ export default function Layout({ children }: { children?: ReactNode }) {
           <span>Quality Assurance Department - IT</span>
           <span>·</span>
           <span>© 2026 All rights reserved.</span>
+          <AppVersion />
         </div>
       </div>
     </div>

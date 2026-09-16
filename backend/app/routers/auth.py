@@ -280,7 +280,22 @@ def renew(response: Response, token: str = Depends(oauth2_scheme),
 
 
 @router.get("/me", response_model=schemas.UserOut)
-def me(current_user: models.User = Depends(get_current_user)):
+def me(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    if current_user.has_role(Role.SCALE_6_PLUS):
+        out = schemas.UserOut.model_validate(current_user)
+        workspaces = db.query(models.QAWorkspace).filter(
+            models.QAWorkspace.is_active == True,  # noqa: E712
+        ).order_by(models.QAWorkspace.name).all()
+        access = [schemas.QAWorkspaceAccessOut(
+            id=-row.id, workspace_id=row.id, role="WORKSPACE_VIEWER", is_active=True,
+            workspace_name=row.name, workspace_key=row.workspace_key,
+            parent_workspace_id=row.parent_workspace_id,
+            parent_workspace_name=row.parent_workspace_name,
+            parent_workspace_key=row.parent_workspace_key,
+        ) for row in workspaces]
+        out.workspace_access = access
+        out.qa_workspace_access = access
+        return out
     return current_user
 
 

@@ -1,4 +1,5 @@
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
+import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
@@ -814,6 +815,7 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
 }
 
 export default function Performance() {
+  const viewerManagedDeepLinks = useViewerManagedDeepLinks()
   // SRS 7.2 PAG-006 -- the list only ever holds the lightweight
   // PerformanceListOut shape; opening a request fetches the full
   // PerformanceOut record fresh via GET /api/performance-requests/{id}
@@ -852,6 +854,7 @@ export default function Performance() {
   // full reasoning; the gateway's "Linked Requests" table opens a specific
   // Performance request here via `?open=<request_id>`.
   useEffect(() => {
+    if (viewerManagedDeepLinks) return
     const recordId = Number(searchParams.get('openId'))
     const openId = searchParams.get('open')
     if (Number.isInteger(recordId) && recordId > 0) {
@@ -862,7 +865,7 @@ export default function Performance() {
       openRequest(match.id)
     } else return
     setSearchParams((p) => { p.delete('open'); p.delete('openId'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams, openRequest])
+  }, [rows, searchParams, setSearchParams, openRequest, viewerManagedDeepLinks])
 
   return (
     <div>

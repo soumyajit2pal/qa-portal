@@ -6,10 +6,14 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.execution_cycles import execution_cycle_choice, require_cycle_startable, require_cycle_unlinkable, require_cycles_completed
+from app.routers import functional
 from app.schemas import TestCycleCreate as CycleCreateSchema, TestCycleUpdate as CycleUpdateSchema
 
 
 class FunctionalExecutionCycleRequirementTests(unittest.TestCase):
+    def test_functional_unlink_endpoint_uses_the_shared_cycle_guard(self):
+        self.assertIs(functional.require_cycle_unlinkable, require_cycle_unlinkable)
+
     def test_cycle_creation_allows_a_standalone_cycle(self):
         cycle = CycleCreateSchema(
             name="Regression",

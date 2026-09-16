@@ -1,7 +1,9 @@
 import datetime
+from collections import Counter, defaultdict
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, false, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .. import models
@@ -10,6 +12,7 @@ from ..deps import (
     get_current_user, dashboard_department_scope, resolve_entity_department,
     resolve_entity_workspace_id, active_qa_workspace_scope_ids, viewable_project_ids,
 )
+from ..workspace_service import selectable_workspace_ids
 from ..constants import QAStatus, GatewayStatus, REQUEST_TYPES, Role
 from ..pdf_export import (
     DIGITAL_SIGNATURE_METHOD,
@@ -17,6 +20,7 @@ from ..pdf_export import (
     parse_electronic_signature,
     qa_clearance_export_status,
 )
+from ..workspace_service import workspace_context
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -97,7 +101,9 @@ def _user_name_map(db: Session, ids) -> dict[int, str]:
     clean_ids = sorted({int(value) for value in ids if value})
     if not clean_ids:
         return {}
-    return {user.id: user.full_name for user in db.query(models.User).filter(models.User.id.in_(clean_ids)).all()}
+    return {user.id: user.full_name for user in db.query(models.User).filter(
+        _batched_ids(models.User.id, clean_ids),
+    ).all()}
 
 
 def _workspace_child(query, model, current_user: models.User):
@@ -329,6 +335,66 @@ def testcase_approval_summary(date_from: str | None = None, date_to: str | None 
     } for project in projects if not (date_from or date_to) or counts.get(project.id)]
 
 
+@router.get("/testcase-register")
+def testcase_register(date_from: str | None = None, date_to: str | None = None,
+                      db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """One row per current testcase identity; created date includes imports."""
+    project_ids = viewable_project_ids(db, current_user)
+    q = db.query(models.TestCase).join(models.TestProject, models.TestCase.project_id == models.TestProject.id)
+    if project_ids is not None:
+        q = q.filter(_batched_ids(models.TestCase.project_id, project_ids))
+    q = q.filter(models.TestCase.is_deleted == False)  # noqa: E712 - Oracle Boolean comparison
+    q = _in_period(q, models.TestCase.created_at, date_from, date_to)
+    rows = q.options(joinedload(models.TestCase.project), joinedload(models.TestCase.created_by)).order_by(
+        models.TestCase.created_at.desc(), models.TestCase.id.desc()).all()
+    return [{
+        "Test Case ID": item.test_case_key,
+        "Project ID": item.project.project_key,
+        "Project Name": item.project.name,
+        "Department": item.project.department,
+        "EPIC": item.epic_id, "CR Number": item.cr_number,
+        "Feature": item.feature_id, "User Story": item.user_story_id,
+        "Scenario": item.test_scenario, "Module": item.module_name,
+        "Type": item.test_type, "Priority": item.priority,
+        "Status": item.status, "Version": item.version,
+        "Created By": item.created_by_name or "Unknown creator",
+        "Created / Imported At": item.created_at,
+    } for item in rows]
+
+
+@router.get("/execution-attempt-register")
+def execution_attempt_register(date_from: str | None = None, date_to: str | None = None,
+                               db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Every immutable attempt, including failed results superseded by retest."""
+    q = (db.query(models.TestExecutionRun)
+         .join(models.TestExecution, models.TestExecutionRun.execution_id == models.TestExecution.id)
+         .join(models.TestCycle, models.TestExecution.cycle_id == models.TestCycle.id)
+         .join(models.TestProject, models.TestCycle.project_id == models.TestProject.id))
+    project_ids = viewable_project_ids(db, current_user)
+    if project_ids is not None:
+        q = q.filter(_batched_ids(models.TestProject.id, project_ids))
+    q = _in_period(q, models.TestExecutionRun.executed_at, date_from, date_to)
+    rows = q.options(
+        joinedload(models.TestExecutionRun.execution).joinedload(models.TestExecution.cycle).joinedload(models.TestCycle.project),
+        joinedload(models.TestExecutionRun.execution).joinedload(models.TestExecution.test_case),
+        joinedload(models.TestExecutionRun.execution).joinedload(models.TestExecution.pinned_version),
+        joinedload(models.TestExecutionRun.executed_by),
+        selectinload(models.TestExecutionRun.defects),
+    ).order_by(models.TestExecutionRun.executed_at.desc(), models.TestExecutionRun.id.desc()).all()
+    return [{
+        "Project ID": item.execution.cycle.project.project_key,
+        "Department": item.execution.cycle.project.department,
+        "Cycle ID": item.execution.cycle.cycle_key,
+        "Test Case ID": item.execution.test_case.test_case_key if item.execution.test_case else None,
+        "Pinned Version": item.execution.pinned_version.version if item.execution.pinned_version else None,
+        "Attempt": item.attempt_no, "Result": item.status,
+        "Executed By": item.executed_by_name or "Unknown runner",
+        "Executed At": item.executed_at,
+        "Actual Result": item.actual_result,
+        "Defects": ", ".join(sorted({link.defect_key for link in item.defects} | ({item.defect_id} if item.defect_id else set()))),
+    } for item in rows]
+
+
 def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
     """Reported directly: "in dashboard sast dast findings showing 0
     result." Every "Findings" figure below used to read
@@ -356,8 +422,21 @@ def _latest_scan_by_request(db: Session, kind: str, request_ids) -> dict:
         .all()
     )
     latest: dict = {}
+    grouped = defaultdict(list)
     for row in rows:
-        latest[row.request_id] = row
+        grouped[row.request_id].append(row)
+    count_fields = ("critical_count", "high_count", "medium_count", "low_count", "total_count",
+                    "suppressed_critical_count", "suppressed_high_count", "suppressed_medium_count",
+                    "suppressed_low_count", "suppressed_total_count")
+    for request_id, request_rows in grouped.items():
+        representative = request_rows[-1]
+        from ..security_scan_state import current_scan_results
+        batch = current_scan_results(list(reversed(request_rows)))
+        values = {column.name: getattr(representative, column.name) for column in models.SecurityScanResult.__table__.columns}
+        values.update({field: sum(int(getattr(row, field) or 0) for row in batch) for field in count_fields})
+        values["filters"] = representative.filters
+        values["targets"] = [target for row in batch for target in row.targets]
+        latest[request_id] = SimpleNamespace(**values)
     return latest
 
 
@@ -442,16 +521,23 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
     imported_by = _user_name_map(db, [scan.imported_by_id for scan in scans])
     start, end = _period_bounds(date_from, date_to)
     scan_numbers: dict[int, int] = {}
+    batch_numbers: dict[tuple[int, str], int] = {}
     out = []
     for scan in scans:
-        scan_numbers[scan.request_id] = scan_numbers.get(scan.request_id, 0) + 1
+        batch_key = scan.execution_key or f"legacy-{scan.id}"
+        lookup = (scan.request_id, batch_key)
+        if lookup not in batch_numbers:
+            scan_numbers[scan.request_id] = scan_numbers.get(scan.request_id, 0) + 1
+            batch_numbers[lookup] = scan_numbers[scan.request_id]
         if start and scan.imported_at < start:
             continue
         if end and scan.imported_at > end:
             continue
 
         request = by_id[scan.request_id]
-        scan_no = scan_numbers[scan.request_id]
+        scan_no = batch_numbers[lookup]
+        scan_targets = scan.targets or []
+        target_labels = [str(target.get("label") or "").strip() for target in scan_targets if target.get("label")]
         filters = scan.filters or [{
             "title": "Security Auditor View",
             "critical_count": scan.critical_count,
@@ -472,6 +558,8 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
                 "Request ID": request.request_id,
                 "Application": scan.application_name,
                 "Application Version": scan.application_version,
+                "Selected Scan Targets": "\n".join(target_labels) or "Not captured (legacy scan)",
+                "Selected Target Count": len(target_labels) if scan_targets else None,
                 "Department": request.department,
                 "Workflow Status": request.status,
                 "Scan No": scan_no,
@@ -497,13 +585,14 @@ def _security_observation_history(kind: str, date_from: str | None, date_to: str
             }
             if kind == "SAST":
                 row.update({
+                    "Repository URLs": "\n".join(target_labels) or "Not captured (legacy scan)",
                     "Build": request.build_number,
                     "CR Number/EPIC Number": request.cr_number or request.epic_number,
                 })
             else:
                 row.update({
-                    "Application URL": request.application_url,
-                    "Environment": request.environment,
+                    "Application URLs": "\n".join(target_labels) or "Not captured (legacy scan)",
+                    "Target Environments": "\n".join(str(target.get("detail") or "—") for target in scan_targets) if scan_targets else "Not captured (legacy scan)",
                     "CR Number/EPIC Number": request.cr_number or request.epic_number,
                 })
             out.append(row)
@@ -678,8 +767,8 @@ def quality_scorecard(date_from: str | None = None, date_to: str | None = None, 
     } for app in sorted(qa_counts)]
 
 
-@router.get("/qa-signoff-register")
-def qa_signoff_register(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def _visible_signoffs(db: Session, current_user: models.User,
+                      date_from: str | None = None, date_to: str | None = None):
     q = db.query(models.QASignOff).options(joinedload(models.QASignOff.source_functional_request))
     scope = dashboard_department_scope(current_user)
     if scope is not None:
@@ -690,7 +779,12 @@ def qa_signoff_register(date_from: str | None = None, date_to: str | None = None
     workspace_ids = active_qa_workspace_scope_ids(current_user)
     if workspace_ids:
         q = q.filter(models.QASignOff.qa_workspace_id.in_(workspace_ids))
-    rows = _in_period(q, models.QASignOff.created_at, date_from, date_to).order_by(models.QASignOff.created_at.desc()).all()
+    return _in_period(q, models.QASignOff.created_at, date_from, date_to)
+
+
+@router.get("/qa-signoff-register")
+def qa_signoff_register(date_from: str | None = None, date_to: str | None = None, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    rows = _visible_signoffs(db, current_user, date_from, date_to).order_by(models.QASignOff.created_at.desc()).all()
     names = _user_name_map(db, [
         user_id for item in rows
         for user_id in (item.requester_id, item.reviewed_by_id, item.approved_by_id)
@@ -717,6 +811,46 @@ def qa_signoff_register(date_from: str | None = None, date_to: str | None = None
         "Validity From": item.validity_from, "Validity To": item.validity_to,
         "Created At": item.created_at, "Last Updated": item.updated_at,
     } for item in rows]
+
+
+@router.get("/qa-clearance-evidence")
+def qa_clearance_evidence(date_from: str | None = None, date_to: str | None = None,
+                          db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Frozen certificate figures, not recalculated live lifecycle counts."""
+    rows = _visible_signoffs(db, current_user, date_from, date_to).order_by(models.QASignOff.created_at.desc()).all()
+    result = []
+    for item in rows:
+        snapshot = item.certificate_summary or {}
+        execution = snapshot.get("execution") or {}
+        defects = snapshot.get("defects") or {}
+        execution_counts = execution.get("counts") or {}
+        defect_counts = defects.get("counts") or {}
+        severity = snapshot.get("severity") or []
+        result.append({
+            "Certificate ID": item.certificate_id,
+            "Testing Request ID": item.testing_request_id,
+            "Application": item.application_name,
+            "Department": item.request_department,
+            "Certificate Type": item.certificate_type,
+            "Status": qa_clearance_export_status(item.status),
+            "Evidence Revision": snapshot.get("revision"),
+            "Evidence Captured At": snapshot.get("captured_at"),
+            "Assigned Testers": ", ".join(tester.get("name", "") for tester in snapshot.get("assigned_testers", []) if tester.get("name")) if "assigned_testers" in snapshot else "Not captured in this revision",
+            "Test Cases": execution.get("total"),
+            "Pass": execution_counts.get("Pass"), "Fail": execution_counts.get("Fail"),
+            "Blocked": execution_counts.get("Blocked"), "NA": execution_counts.get("NA"),
+            "Retest Passed": execution_counts.get("Retest Passed"),
+            "Not Executed": execution_counts.get("Not Executed"),
+            "Pass %": execution.get("pass_pct"),
+            "Defects": defects.get("total"),
+            "Open Defects": sum(int(severity_row.get("open") or 0) for severity_row in severity),
+            "Open Critical / High": snapshot.get("open_critical_high"),
+            "Deferred": defect_counts.get("Deferred"),
+            "Closed": defect_counts.get("Closed"),
+        })
+    return result
+
+
 
 
 @router.get("/audit-evidence")
@@ -753,10 +887,303 @@ def audit_evidence(date_from: str | None = None, date_to: str | None = None, db:
     return out
 
 
+_ALL_DATA_MODULES = (
+    "QA Request", "Functional Request", "SAST Request", "DAST Request",
+    "Performance Request", "Suppression Request", "Test Project", "Test Cycle", "Testcase",
+    "Test Execution", "Execution Attempt", "Defect", "Defect Severity", "QA Clearance",
+)
+
+
+def _batched_ids(column, values):
+    """Oracle limits one IN expression to 1,000 values."""
+    ids = sorted(set(values))
+    if not ids:
+        return false()
+    return or_(*(column.in_(ids[start:start + 900]) for start in range(0, len(ids), 900)))
+
+
+def _within_period(value, start, end):
+    return value is not None and (start is None or value >= start) and (end is None or value <= end)
+
+
+def all_data_report(date_from: str | None = None, date_to: str | None = None,
+                    db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Workspace-wise operational counts, status breakdowns and record details.
+
+    The parent request is one change; child Functional/SAST/DAST/Performance
+    workflows are separate rows, never counted as additional QA Requests.
+    Project content is attributed to its creating workspace, including when
+    another workspace has been granted read access to the shared project.
+    """
+    start, end = _period_bounds(date_from, date_to)
+    workspace_names = {row.id: row.name for row in db.query(models.QAWorkspace).all()}
+    organisation_view = current_user.has_role(Role.SCALE_6_PLUS) or current_user.has_role(Role.ADMIN)
+    scope_ids = set(selectable_workspace_ids(db, current_user))
+    if organisation_view:
+        scope_ids = {row.id for row in db.query(models.QAWorkspace).filter(
+            models.QAWorkspace.is_active == True,  # noqa: E712
+        ).all()}
+    selected_id = getattr(current_user, "active_qa_workspace_id", None)
+
+    with workspace_context(selected_id, scope_ids):
+        return _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_names, organisation_view)
+
+
+def _all_data_report_rows(db, current_user, start, end, scope_ids, workspace_names, organisation_view):
+
+    def workspace_name(workspace_id):
+        return workspace_names.get(workspace_id, f"Workspace #{workspace_id}") if workspace_id else "Unassigned / Legacy"
+
+    details = []
+    counts = defaultdict(Counter)
+
+    def add(workspace_id, module, record_id, status_value, *, parent="", description="",
+            context="", department="", testcases="", metrics="", defects="",
+            severity="", created=None):
+        if not _within_period(created, start, end):
+            return
+        status_label = status_value or "Unknown"
+        name = workspace_name(workspace_id)
+        counts[(name, module)][status_label] += 1
+        if module == "Defect":
+            counts[(name, "Defect Severity")][severity or "Unknown"] += 1
+        details.append({
+            "Workspace": name, "Row Type": "Record", "Module": module,
+            "Record ID": record_id or "", "Parent / Linked ID": parent or "",
+            "Description": description or "", "Application / Project": context or "",
+            "Department": department or "", "Status": status_label, "Count": "",
+            "Testcases": testcases, "Execution Results": metrics or "",
+            "Defects": defects, "Created At": created,
+        })
+
+    # Existing gateway visibility protects private Draft/Cancelled requests.
+    # Child workflows are checked against those same visible parents.
+    if organisation_view:
+        parent_query = db.query(models.QARequest).filter(or_(
+            _batched_ids(models.QARequest.qa_workspace_id, scope_ids),
+            models.QARequest.qa_workspace_id.is_(None),
+        ))
+        if not current_user.has_role(Role.ADMIN):
+            parent_query = parent_query.filter(or_(
+                models.QARequest.status.notin_(_GATEWAY_PRIVATE_STATUSES),
+                models.QARequest.requester_id == current_user.id,
+            ))
+        parents = parent_query.all()
+    else:
+        parents = _visible_qa_requests(db, current_user).all()
+    parent_by_id = {row.id: row for row in parents}
+    parent_ids = set(parent_by_id)
+    for row in parents:
+        add(row.qa_workspace_id, "QA Request", row.request_id or f"Draft #{row.id}", row.status,
+            description=row.change_description, context=row.application_name,
+            department=row.department, created=row.created_at)
+
+    child_types = (
+        ("Functional Request", models.FunctionalRequest),
+        ("SAST Request", models.SASTRequest),
+        ("DAST Request", models.DASTRequest),
+        ("Performance Request", models.PerformanceRequest),
+    )
+    for module, model in child_types:
+        predicate = _batched_ids(model.qa_request_id, parent_ids)
+        # Standalone security requests predate workspace attribution. Only
+        # organisation-wide viewers may see them in the legacy bucket.
+        if organisation_view and model is not models.FunctionalRequest:
+            predicate = or_(predicate, model.qa_request_id.is_(None))
+        rows = db.query(model).filter(predicate).all()
+        for row in rows:
+            parent = parent_by_id.get(row.qa_request_id)
+            if row.qa_request_id and parent is None:
+                continue
+            add(parent.qa_workspace_id if parent else None, module, row.request_id, row.status,
+                parent=parent.request_id if parent else "",
+                description=parent.change_description if parent else "",
+                context=parent.application_name if parent else getattr(row, "application_name", ""),
+                department=parent.department if parent else "",
+                created=row.created_at)
+
+    workspace_predicate = _batched_ids(models.SuppressionRequest.qa_workspace_id, scope_ids)
+    if organisation_view:
+        workspace_predicate = or_(workspace_predicate, models.SuppressionRequest.qa_workspace_id.is_(None))
+    suppression_query = db.query(models.SuppressionRequest).filter(workspace_predicate)
+    department_scope = dashboard_department_scope(current_user)
+    if department_scope is not None:
+        suppression_query = suppression_query.filter(models.SuppressionRequest.department.in_(department_scope))
+    for row in suppression_query.all():
+        add(row.qa_workspace_id, "Suppression Request", row.suppression_id, row.status,
+            description=row.scan_type, context=row.application_name,
+            department=row.department, created=row.created_at)
+
+    project_query = db.query(models.TestProject)
+    if organisation_view:
+        project_query = project_query.filter(or_(
+            _batched_ids(models.TestProject.qa_workspace_id, scope_ids),
+            models.TestProject.qa_workspace_id.is_(None),
+        ))
+    else:
+        visible_project_ids = viewable_project_ids(db, current_user)
+        if visible_project_ids is not None:
+            project_query = project_query.filter(_batched_ids(models.TestProject.id, visible_project_ids))
+    projects = project_query.all()
+    projects_by_id = {row.id: row for row in projects}
+    project_ids = set(projects_by_id)
+
+    testcases = db.query(models.TestCase).filter(
+        _batched_ids(models.TestCase.project_id, project_ids),
+        models.TestCase.is_deleted == False,  # noqa: E712
+    ).all()
+    testcase_by_id = {row.id: row for row in testcases}
+    project_case_counts = Counter(row.project_id for row in testcases)
+    cycles = db.query(models.TestCycle).filter(_batched_ids(models.TestCycle.project_id, project_ids)).all()
+    cycle_by_id = {row.id: row for row in cycles}
+    project_cycle_counts = Counter(row.project_id for row in cycles)
+    executions = db.query(models.TestExecution).filter(
+        _batched_ids(models.TestExecution.cycle_id, cycle_by_id),
+    ).all()
+    execution_by_id = {row.id: row for row in executions}
+    execution_people = _user_name_map(db, (
+        person_id for row in executions for person_id in (row.assigned_to_id, row.executed_by_id)
+    ))
+    cycle_results = defaultdict(Counter)
+    cycle_assigned = Counter()
+    for row in executions:
+        cycle_results[row.cycle_id][row.status or "Unknown"] += 1
+        if row.assigned_to_id:
+            cycle_assigned[row.cycle_id] += 1
+    attempt_counts = Counter()
+    execution_ids = [row.id for row in executions]
+    runs = []
+    for start_index in range(0, len(execution_ids), 900):
+        batch = execution_ids[start_index:start_index + 900]
+        runs.extend(db.query(models.TestExecutionRun).filter(
+            models.TestExecutionRun.execution_id.in_(batch),
+        ).all())
+    attempt_counts.update(row.execution_id for row in runs)
+    cycle_attempts = Counter()
+    for row in executions:
+        cycle_attempts[row.cycle_id] += attempt_counts[row.id]
+
+    defects = _visible_defects(db, current_user).options(
+        joinedload(models.Defect.qa_request),
+        joinedload(models.Defect.cycle).joinedload(models.TestCycle.project),
+    ).all()
+    if organisation_view:
+        seen_defect_ids = {row.id for row in defects}
+        legacy_defects = db.query(models.Defect).filter(
+            models.Defect.qa_workspace_id.is_(None),
+            models.Defect.qa_request_id.is_(None),
+            models.Defect.cycle_id.is_(None),
+        ).all()
+        defects.extend(row for row in legacy_defects if row.id not in seen_defect_ids)
+    cycle_defects = Counter(row.cycle_id for row in defects if row.cycle_id)
+    project_defects = Counter(
+        row.cycle.project_id for row in defects if row.cycle and row.cycle.project_id
+    )
+
+    for row in projects:
+        state = "Archived" if row.is_archived else "Active" if row.is_active else "Inactive"
+        add(row.qa_workspace_id, "Test Project", row.project_key, state,
+            description=row.name, department=row.department,
+            testcases=project_case_counts[row.id],
+            metrics=f"Cycles {project_cycle_counts[row.id]}",
+            defects=project_defects[row.id], created=row.created_at)
+    for row in testcases:
+        project = projects_by_id[row.project_id]
+        add(row.origin_workspace_id or project.qa_workspace_id, "Testcase",
+            row.test_case_key, row.status, parent=project.project_key,
+            description=row.test_scenario or row.description, context=project.name,
+            department=project.department, created=row.created_at)
+    for row in cycles:
+        project = projects_by_id[row.project_id]
+        results = cycle_results[row.id]
+        result_text = f"Assigned {cycle_assigned[row.id]} · Unassigned {sum(results.values()) - cycle_assigned[row.id]} · " + " · ".join(
+            f"{status} {results[status]}" for status in (
+                "Pass", "Fail", "Blocked", "NA", "Retest Passed", "Not Executed",
+            )
+        ) + f" · Attempts {cycle_attempts[row.id]}"
+        add(row.origin_workspace_id or project.qa_workspace_id, "Test Cycle",
+            row.cycle_key, row.status, parent=project.project_key,
+            description=row.name, context=project.name, department=project.department,
+            testcases=sum(results.values()), metrics=result_text,
+            defects=cycle_defects[row.id], created=row.created_at)
+    for row in executions:
+        cycle = cycle_by_id[row.cycle_id]
+        project = projects_by_id[cycle.project_id]
+        case = testcase_by_id.get(row.test_case_id)
+        people = " · ".join(value for value in (
+            f"Assigned {execution_people.get(row.assigned_to_id, f'User #{row.assigned_to_id}')}" if row.assigned_to_id else "Unassigned",
+            f"Last runner {execution_people.get(row.executed_by_id, f'User #{row.executed_by_id}')}" if row.executed_by_id else "",
+        ) if value)
+        add(cycle.origin_workspace_id or project.qa_workspace_id, "Test Execution",
+            case.test_case_key if case else f"Execution #{row.id}", row.status,
+            parent=cycle.cycle_key, description=case.test_scenario if case else "",
+            context=project.name, department=project.department,
+            metrics=f"Attempts {attempt_counts[row.id]} · {people}", created=row.created_at)
+    for row in runs:
+        execution = execution_by_id[row.execution_id]
+        cycle = cycle_by_id[execution.cycle_id]
+        project = projects_by_id[cycle.project_id]
+        case = testcase_by_id.get(execution.test_case_id)
+        add(cycle.origin_workspace_id or project.qa_workspace_id, "Execution Attempt",
+            f"{case.test_case_key if case else f'Execution #{execution.id}'} / {row.attempt_no}",
+            row.status, parent=cycle.cycle_key, description=row.actual_result,
+            context=project.name, department=project.department, created=row.executed_at)
+    for row in defects:
+        workspace_id = row.qa_workspace_id or (
+            row.qa_request.qa_workspace_id if row.qa_request else None
+        ) or (
+            (row.cycle.origin_workspace_id or row.cycle.project.qa_workspace_id)
+            if row.cycle and row.cycle.project else None
+        )
+        add(workspace_id, "Defect", row.defect_key, row.status,
+            parent=row.cycle.cycle_key if row.cycle else row.qa_request_key,
+            description=row.title, context=row.application_name,
+            department=row.department or (row.qa_request.department if row.qa_request else ""),
+            metrics=f"Severity {row.severity or 'Unknown'}", severity=row.severity,
+            created=row.reported_at)
+
+    clearance_predicate = _batched_ids(models.QASignOff.qa_workspace_id, scope_ids)
+    if organisation_view:
+        clearance_predicate = or_(clearance_predicate, models.QASignOff.qa_workspace_id.is_(None))
+    clearance_query = db.query(models.QASignOff).filter(clearance_predicate)
+    if department_scope is not None:
+        clearance_query = (clearance_query.join(
+            models.FunctionalRequest,
+            models.FunctionalRequest.request_id == models.QASignOff.testing_request_id,
+        ).join(
+            models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id,
+        ).filter(models.QARequest.department.in_(department_scope)))
+    for row in clearance_query.all():
+        add(row.qa_workspace_id, "QA Clearance", row.certificate_id, row.status,
+            parent=row.testing_request_id, description=row.certificate_type,
+            context=row.application_name, department=row.request_department,
+            created=row.created_at)
+
+    summaries = []
+    workspace_labels = {workspace_name(workspace_id) for workspace_id in scope_ids}
+    workspace_labels.update(name for name, _ in counts)
+    for name in sorted(workspace_labels):
+        for module in _ALL_DATA_MODULES:
+            statuses = counts[(name, module)]
+            for status_label, count in [("Total", sum(statuses.values())), *sorted(statuses.items())]:
+                summaries.append({
+                    "Workspace": name, "Row Type": "Summary", "Module": module,
+                    "Record ID": "", "Parent / Linked ID": "", "Description": "",
+                    "Application / Project": "", "Department": "", "Status": status_label,
+                    "Count": count, "Testcases": "", "Execution Results": "",
+                    "Defects": "", "Created At": "",
+                })
+    details.sort(key=lambda row: (row["Workspace"], row["Module"], str(row["Record ID"])))
+    return summaries + details
+
+
 REPORT_REGISTRY = {
+    "all-data-report": all_data_report,
     "qa-request-summary": qa_request_summary,
     "functional-request-register": functional_request_register,
     "test-cycle-summary": test_cycle_summary,
+    "testcase-register": testcase_register,
+    "execution-attempt-register": execution_attempt_register,
     "defect-retest-register": defect_retest_register,
     "performance-testing": performance_testing_report,
     "sast-scan": sast_scan_report,
@@ -768,5 +1195,6 @@ REPORT_REGISTRY = {
     "testcase-approval-summary": testcase_approval_summary,
     "application-quality-scorecard": quality_scorecard,
     "qa-signoff-register": qa_signoff_register,
+    "qa-clearance-evidence": qa_clearance_evidence,
     "audit-evidence": audit_evidence,
 }

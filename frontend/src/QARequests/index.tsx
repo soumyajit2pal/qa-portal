@@ -1,5 +1,5 @@
 import WorkflowStatusBadge from '../components/WorkflowStatusBadge'
-import { useRequestNavigation } from '../hooks/useRequestNavigation'
+import { useRequestNavigation, useViewerManagedDeepLinks } from '../hooks/useRequestNavigation'
 import React, { useCallback, useEffect, useState } from "react";
 import {useLocation} from "react-router-dom"
 import { api, HttpError, subscribeToApiMutations } from "../api";
@@ -65,6 +65,7 @@ function linkedRequestsFor(row: QARequestListOut): LinkedRequestSearchResult[] {
 // (RequestDetail). See ./buildSteps.ts, ./validation.ts and ./steps/* for how
 // the wizard itself is put together.
 export default function QARequests() {
+  const viewerManagedDeepLinks = useViewerManagedDeepLinks();
   const { user } = useAuth();
   const location = useLocation();
   const navigate = useRequestNavigation();
@@ -207,6 +208,7 @@ export default function QARequests() {
   // Pending Approvals and other deep links can open the parent gateway's
   // drawer immediately instead of landing on its filtered list first.
   useEffect(() => {
+    if (viewerManagedDeepLinks) return;
     const recordId = Number(new URLSearchParams(location.search).get("openId"));
     const openId = new URLSearchParams(location.search).get("open");
     if (Number.isInteger(recordId) && recordId > 0) {
@@ -222,7 +224,7 @@ export default function QARequests() {
     params.delete("open");
     params.delete("openId");
     navigate(`${location.pathname}${params.toString() ? `?${params}` : ""}`, { replace: true });
-  }, [requests, location.search, location.pathname, navigate, openRequest]);
+  }, [requests, location.search, location.pathname, navigate, openRequest, viewerManagedDeepLinks]);
 
   function clearSearch() {
     setSearch("");

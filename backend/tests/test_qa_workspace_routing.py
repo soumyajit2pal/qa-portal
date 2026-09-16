@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from app import models
+from app.document_portal_storage import workspace_root as portal_workspace_root
 from app.constants import SEED_DEPARTMENTS
 from app.workspace_service import (
     active_workspace_ids, active_workspace_scope_ids, ensure_administrator_workspace_memberships,
@@ -15,7 +16,7 @@ from app.workspace_service import (
 )
 from app.routers.qa_workspaces import _ensure_workspace_fallback
 from app.routers.qa_workspaces import (
-    add_department_coordinator, create_workspace, list_workspace_member_candidates, replace_members,
+    add_department_coordinator, create_workspace, update_workspace, list_workspace_member_candidates, replace_members,
 )
 from app.routers import auth as auth_router
 from app.auth import create_access_token
@@ -742,7 +743,10 @@ def test_administrator_is_added_to_every_existing_workspace():
     assert administrator.preferred_qa_workspace_id == workspaces[0].id
 
 
-def test_new_workspace_contains_every_system_administrator():
+def test_new_workspace_contains_every_system_administrator(tmp_path, monkeypatch):
+    from app.routers import qa_workspaces
+    monkeypatch.setattr(qa_workspaces, 'DOCUMENT_ROOT', tmp_path)
+    monkeypatch.setattr(qa_workspaces, 'workspace_root', lambda workspace, create=False: portal_workspace_root(workspace, repository_root=tmp_path, create=create))
     db = _session()
     first = models.User(
         username="admin-one", full_name="Admin One", hashed_password="x", is_active=True,
@@ -755,12 +759,45 @@ def test_new_workspace_contains_every_system_administrator():
     db.add_all([first, second]); db.flush()
 
     workspace = create_workspace(
-        schemas.QAWorkspaceCreate(workspace_key="NEW", name="New Workspace"),
+        schemas.QAWorkspaceCreate(workspace_key="NEW", name="New Workspace", document_portal_quota_bytes=1024),
         db=db,
         current_user=first,
     )
 
     assert {member.user_id for member in workspace.members if member.is_active} == {first.id, second.id}
+    assert (tmp_path / 'New Workspace' / '.qualityops-workspace-id').read_text() == str(workspace.id)
+    assert workspace.document_portal_quota_bytes == 1024
+
+
+def test_child_workspace_limit_is_bounded_by_parent_when_created_or_changed(monkeypatch, tmp_path):
+    from app.routers import qa_workspaces
+    monkeypatch.setattr(qa_workspaces, 'DOCUMENT_ROOT', tmp_path)
+    monkeypatch.setattr(qa_workspaces, 'workspace_root',
+                        lambda workspace, create=False: portal_workspace_root(
+                            workspace, repository_root=tmp_path, create=create))
+    db = _session()
+    admin = models.User(username='quota-admin', full_name='Quota Admin', hashed_password='x',
+                        is_active=True, role_assignments=[models.UserRole(role='ADMIN')])
+    db.add(admin); db.flush()
+    parent = create_workspace(schemas.QAWorkspaceCreate(
+        workspace_key='PARENT', name='Parent Quota', document_portal_quota_bytes=5),
+        db=db, current_user=admin)
+    with pytest.raises(HTTPException) as too_large:
+        create_workspace(schemas.QAWorkspaceCreate(
+            workspace_key='LARGE', name='Large Child', parent_workspace_id=parent.id,
+            document_portal_quota_bytes=6), db=db, current_user=admin)
+    assert too_large.value.status_code == 400
+    child = create_workspace(schemas.QAWorkspaceCreate(
+        workspace_key='CHILD', name='Child Quota', parent_workspace_id=parent.id,
+        document_portal_quota_bytes=5), db=db, current_user=admin)
+    with pytest.raises(HTTPException) as child_change:
+        update_workspace(child.id, schemas.QAWorkspaceUpdate(document_portal_quota_bytes=6),
+                         db=db, current_user=admin)
+    assert child_change.value.status_code == 400
+    with pytest.raises(HTTPException) as parent_change:
+        update_workspace(parent.id, schemas.QAWorkspaceUpdate(document_portal_quota_bytes=4),
+                         db=db, current_user=admin)
+    assert parent_change.value.status_code == 400
 
 
 def test_system_administrator_cannot_be_removed_from_workspace():

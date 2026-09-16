@@ -107,7 +107,7 @@ def _get_client():
                 decode_responses=True,
             )
             client.ping()
-        except Exception as exc:
+        except Exception:
             redis_circuit.record_failure()
             if not _warned_unavailable:
                 logger.warning("Redis at %s is unreachable; caching will retry.", _masked(REDIS_URL), exc_info=True)

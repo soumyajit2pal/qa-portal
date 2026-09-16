@@ -194,6 +194,7 @@ export interface QAWorkspaceOut {
   workspace_key: string
   name: string
   description?: string | null
+  document_portal_quota_bytes?: number | null
   is_active: boolean
   is_default: boolean
   parent_workspace_id?: number | null
@@ -586,6 +587,7 @@ export interface SecurityScanResultOut {
   id: number
   request_type: 'SAST' | 'DAST'
   request_id: number
+  execution_key?: string | null
   application_name: string
   application_version: string
   provider: string
@@ -602,6 +604,7 @@ export interface SecurityScanResultOut {
   suppressed_total_count: number
   audit_url?: string | null
   filters: SecurityScanFilterOut[]
+  targets: { id: number; label: string; detail?: string | null }[]
   imported_by_id?: number | null
   imported_at: string
   // 2026-08 "Findings Validation" doc, section 4.3 Scan History -- derived
@@ -616,6 +619,8 @@ export interface SecurityScanResultOut {
 export interface SecurityScanSummaryOut {
   initial?: SecurityScanResultOut | null
   current?: SecurityScanResultOut | null
+  initial_results: SecurityScanResultOut[]
+  current_results: SecurityScanResultOut[]
   total_rescans: number
   open_findings: number
   suppressed_findings: number

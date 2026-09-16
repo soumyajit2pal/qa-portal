@@ -77,7 +77,8 @@ def _in_batches(values: List[int], size: int = _ORACLE_IN_BATCH_SIZE):
 
 def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
                            search: Optional[str] = None, priority: Optional[str] = None,
-                           test_type: Optional[str] = None):
+                           test_type: Optional[str] = None,
+                           created_by_id: Optional[int] = None):
     """Approved project testcases not already present in ``cycle``.
 
     The correlated NOT EXISTS is intentionally resolved by Oracle. It
@@ -113,6 +114,8 @@ def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
         query = query.filter(models.TestCase.priority == priority.strip())
     if test_type and test_type.strip():
         query = query.filter(models.TestCase.test_type == test_type.strip())
+    if created_by_id is not None:
+        query = query.filter(models.TestCase.created_by_id == created_by_id)
     return query
 
 
@@ -1686,6 +1689,26 @@ def list_my_executions(db: Session = Depends(get_db),
     ]
 
 
+@router.get("/cycles/{cycle_id}/candidate-authors", response_model=List[schemas.TestCaseCandidateAuthor])
+def list_cycle_candidate_authors(
+    cycle_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Creators of approved, unlinked testcases in this cycle's project."""
+    cycle = _get_cycle_or_404(db, cycle_id)
+    require_can_execute_project(db, cycle.project_id, current_user)
+    rows = (
+        _cycle_candidate_query(db, cycle)
+        .join(models.User, models.User.id == models.TestCase.created_by_id)
+        .with_entities(models.User.id, models.User.full_name)
+        .distinct()
+        .order_by(models.User.full_name, models.User.id)
+        .all()
+    )
+    return [{"id": author_id, "name": name} for author_id, name in rows]
+
+
 @router.get("/cycles/{cycle_id}/candidate-test-cases", response_model=schemas.TestCaseCandidatePage)
 def list_cycle_candidate_test_cases(
     cycle_id: int,
@@ -1694,6 +1717,7 @@ def list_cycle_candidate_test_cases(
     search: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     test_type: Optional[str] = Query(None),
+    created_by_id: Optional[int] = Query(None, ge=1),
     sort_order: Literal["newest", "oldest"] = Query("newest"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
@@ -1706,7 +1730,7 @@ def list_cycle_candidate_test_cases(
     """
     cycle = _get_cycle_or_404(db, cycle_id)
     require_can_execute_project(db, cycle.project_id, current_user)
-    base = _cycle_candidate_query(db, cycle, search, priority, test_type)
+    base = _cycle_candidate_query(db, cycle, search, priority, test_type, created_by_id)
     total = base.order_by(None).count()
     page_query = base
     if cursor is not None:
@@ -1714,7 +1738,7 @@ def list_cycle_candidate_test_cases(
             models.TestCase.id < cursor if sort_order == "newest" else models.TestCase.id > cursor
         )
     id_order = models.TestCase.id.desc() if sort_order == "newest" else models.TestCase.id.asc()
-    rows = page_query.order_by(id_order).limit(page_size + 1).all()
+    rows = page_query.options(joinedload(models.TestCase.created_by)).order_by(id_order).limit(page_size + 1).all()
     has_more = len(rows) > page_size
     items = rows[:page_size]
     return {
@@ -2150,7 +2174,7 @@ def add_test_cases_from_server_selection(
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
     if payload.selection_mode == "all_matching":
-        query = _cycle_candidate_query(db, cycle, payload.search, payload.priority, payload.test_type)
+        query = _cycle_candidate_query(db, cycle, payload.search, payload.priority, payload.test_type, payload.created_by_id)
         for id_batch in _in_batches(list(dict.fromkeys(payload.excluded_ids))):
             query = query.filter(~models.TestCase.id.in_(id_batch))
         selected_ids = [row[0] for row in query.with_entities(models.TestCase.id).order_by(models.TestCase.id).all()]

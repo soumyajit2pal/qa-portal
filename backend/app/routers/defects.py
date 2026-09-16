@@ -498,7 +498,7 @@ def list_defects(severity: Optional[str] = None,
     elif queue == "mine":
         q = q.filter(or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id))
     elif queue == "unlinked":
-        q = q.filter(models.Defect.execution_id.is_(None))
+        q = q.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any())
     elif queue == "incomplete-traceability":
         # Additional execution links also establish traceability. Request,
         # cycle or testcase links alone do not establish an execution trail.
@@ -585,7 +585,7 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
     mine_count = base.filter(
         or_(models.Defect.assignee_id == current_user.id, models.Defect.reporter_id == current_user.id),
     ).with_entities(func.count(models.Defect.id)).scalar() or 0
-    unlinked_count = base.filter(models.Defect.execution_id.is_(None)).with_entities(func.count(models.Defect.id)).scalar() or 0
+    unlinked_count = base.filter(models.Defect.execution_id.is_(None), ~models.Defect.execution_links.any()).with_entities(func.count(models.Defect.id)).scalar() or 0
     retest_count = sum(by_status.get(s, 0) for s in _RETEST_STATUSES)
 
     return {

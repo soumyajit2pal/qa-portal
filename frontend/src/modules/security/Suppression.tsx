@@ -1,5 +1,5 @@
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
-import { useRequestNavigation } from '../../hooks/useRequestNavigation'
+import { useRequestNavigation, useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import {useSearchParams} from 'react-router-dom'
 import { api } from '../../api'
@@ -815,6 +815,7 @@ function worstSeverity(items: { severity: string }[]): string | null {
 }
 
 export default function Suppression() {
+  const viewerManagedDeepLinks = useViewerManagedDeepLinks()
   const { user } = useAuth()
   const navigate = useRequestNavigation()
   const [rows, setRows] = useState<SuppressionOut[]>([])
@@ -837,6 +838,7 @@ export default function Suppression() {
   // the Linked Requests table jump straight to a specific suppression's
   // detail drawer instead of just landing on this list.
   useEffect(() => {
+    if (viewerManagedDeepLinks) return
     const recordId = Number(searchParams.get('openId'))
     const openId = searchParams.get('open')
     if (Number.isInteger(recordId) && recordId > 0) {
@@ -847,7 +849,7 @@ export default function Suppression() {
       setSelected(match)
     } else return
     setSearchParams((p) => { p.delete('open'); p.delete('openId'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams])
+  }, [rows, searchParams, setSearchParams, viewerManagedDeepLinks])
 
   // "Initiate Suppression Request" (SecurityScan.tsx, findings tab) links
   // here as `?new=1&scan_type=SAST&request_id=123` -- opens the New

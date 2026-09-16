@@ -20,6 +20,7 @@ import ModuleBoundary from './components/ModuleBoundary'
 import ApiActivityIndicator from './components/ApiActivityIndicator'
 import GlobalButtonTooltips from './components/GlobalButtonTooltips'
 import GlobalToastCenter from './components/GlobalToastCenter'
+import AppVersion from './components/AppVersion'
 
 const Help = lazy(() => import('./Help'))
 
@@ -131,6 +132,7 @@ function AccessApprovalPending() {
           </button>
           <button className="btn" onClick={logout}>Log out</button>
         </div>
+        <div className="access-pending-version"><AppVersion /></div>
       </section>
     </main>
   )
@@ -176,6 +178,7 @@ function WorkspaceAccessRequired() {
           </button>
           <button className="btn" onClick={logout}>Log out</button>
         </div>
+        <div className="access-pending-version"><AppVersion /></div>
       </section>
     </main>
   )
@@ -315,7 +318,7 @@ function PublicHelp() {
             <img className="bank-wordmark public-bank-wordmark" src="/bank-of-maharashtra-wordmark.png" alt="Bank of Maharashtra" />
           </div>
         </Link>
-        <Link to="/login" className="public-help-back">← Back to sign in</Link>
+        <div className="public-help-actions"><AppVersion /><Link to="/login" className="public-help-back">← Back to sign in</Link></div>
       </div>
       <Help />
     </div>

@@ -20,6 +20,7 @@ from ..pdf_export import StructuredTableValue, build_request_detail_pdf
 from .. import documents as doc_store
 
 router = APIRouter(prefix="/api/suppressions", tags=["suppression"])
+_PRIVATE_STATUSES = ("Draft",)
 
 # ---------------------------------------------------------------------------
 # Suppression request lifecycle (Application Owner step removed entirely):
@@ -72,15 +73,31 @@ def _unit_visibility_condition(db: Session, user: models.User):
 
 
 def _require_visible(db: Session, obj: "models.SuppressionRequest", user: models.User) -> None:
+    # A Draft is private scratch work until its requester explicitly submits
+    # it into the governed approval workflow. Department membership alone
+    # must not expose it to an SM or any other colleague.
+    if obj.status in _PRIVATE_STATUSES and obj.created_by_id != user.id and not user.has_role(Role.ADMIN):
+        raise HTTPException(404, "Suppression request not found")
     require_department_visibility(
         user,
         obj.department,
         requester_id=obj.created_by_id,
+        entity_workspace_id=obj.qa_workspace_id,
     )
     require_department_unit_visibility(
         db, user, obj.department, _request_department_unit_id(obj),
         requester_id=obj.created_by_id,
     )
+
+
+def _apply_private_status_visibility(query, user: models.User):
+    """Keep pre-submission suppression drafts private to their author."""
+    if user.has_role(Role.ADMIN):
+        return query
+    return query.filter(or_(
+        models.SuppressionRequest.status.notin_(_PRIVATE_STATUSES),
+        models.SuppressionRequest.created_by_id == user.id,
+    ))
 
 
 def _can_edit_details(obj: "models.SuppressionRequest", user: models.User,
@@ -283,6 +300,7 @@ def list_suppressions(db: Session = Depends(get_db), current_user: models.User =
     workspace_ids = active_qa_workspace_scope_ids(current_user)
     if workspace_ids:
         q = q.filter(models.SuppressionRequest.qa_workspace_id.in_(workspace_ids))
+    q = _apply_private_status_visibility(q, current_user)
     return q.order_by(models.SuppressionRequest.created_at.desc()).all()
 
 
@@ -319,7 +337,6 @@ def get_suppression(sup_id: int, db: Session = Depends(get_db), current_user: mo
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
     require_entity_workspace_visibility(db, current_user, "SUPPRESSION", obj.id)
-    _require_visible(db, obj, current_user)
     return obj
 
 

@@ -1006,8 +1006,30 @@ class ScanCompletionIn(BaseModel):
     comments: Optional[str] = None
 
 
-class SecurityScanStartIn(BaseModel):
-    """Fortify SSC identity selected when entering the Scanning stage."""
+class SecurityTargetFixIn(BaseModel):
+    target_id: int
+    commit_id: str = Field(min_length=1, max_length=500)
+
+    @field_validator("commit_id", mode="before")
+    @classmethod
+    def normalize_commit_id(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class SecurityFixIn(BaseModel):
+    targets: List[SecurityTargetFixIn] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_targets(self):
+        ids = [target.target_id for target in self.targets]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Provide one latest commit ID / code hash per target")
+        return self
+
+
+class SecurityTargetScanIn(BaseModel):
+    """Fortify identity for one independently-scanned URL/repository."""
+    target_id: int
     application_name: str
     application_version: str
 
@@ -1018,6 +1040,27 @@ class SecurityScanStartIn(BaseModel):
         if not normalized:
             raise ValueError("Application Name and Version are required")
         return normalized
+
+
+class SecurityScanStartIn(BaseModel):
+    """One Start Scan / Rescan batch containing independent target scans."""
+    scans: List[SecurityTargetScanIn]
+
+    @field_validator("scans")
+    @classmethod
+    def validate_scans(cls, value):
+        if not value:
+            raise ValueError("Configure at least one target scan")
+        ids = [item.target_id for item in value]
+        if any(item <= 0 for item in ids) or len(ids) != len(set(ids)):
+            raise ValueError("Each valid scan target can be configured once")
+        return value
+
+
+class SecurityScanTargetOut(BaseModel):
+    id: int
+    label: str
+    detail: Optional[str] = None
 
 
 class SecurityScanFilterOut(BaseModel):
@@ -1035,6 +1078,7 @@ class SecurityScanResultOut(ORMModel):
     id: int
     request_type: str
     request_id: int
+    execution_key: Optional[str] = None
     application_name: str
     application_version: str
     provider: str
@@ -1051,6 +1095,7 @@ class SecurityScanResultOut(ORMModel):
     suppressed_total_count: int = 0
     audit_url: Optional[str] = None
     filters: List[SecurityScanFilterOut] = []
+    targets: List[SecurityScanTargetOut] = []
     imported_by_id: Optional[int] = None
     imported_at: datetime.datetime
     # 2026-08 "Findings Validation" doc, section 4.3 Scan History -- derived
@@ -1067,6 +1112,8 @@ class SecurityScanSummaryOut(ORMModel):
     """Backs the "Findings Validation" doc's 4.1 Scan Summary section."""
     initial: Optional[SecurityScanResultOut] = None
     current: Optional[SecurityScanResultOut] = None
+    initial_results: List[SecurityScanResultOut] = []
+    current_results: List[SecurityScanResultOut] = []
     total_rescans: int = 0
     open_findings: int = 0
     suppressed_findings: int = 0
@@ -1358,12 +1405,12 @@ class DASTOut(ORMModel):
 
 class SASTScanStartOut(BaseModel):
     request: SASTOut
-    scan_result: SecurityScanResultOut
+    scan_results: List[SecurityScanResultOut]
 
 
 class DASTScanStartOut(BaseModel):
     request: DASTOut
-    scan_result: SecurityScanResultOut
+    scan_results: List[SecurityScanResultOut]
 
 
 # ---------------- Module 4c: Performance Testing ----------------
@@ -2094,6 +2141,7 @@ class QAWorkspaceOut(ORMModel):
     workspace_key: str
     name: str
     description: Optional[str] = None
+    document_portal_quota_bytes: Optional[int] = None
     is_active: bool
     is_default: bool
     parent_workspace_id: Optional[int] = None
@@ -2111,6 +2159,7 @@ class QAWorkspaceCreate(BaseModel):
     workspace_key: str
     name: str
     description: Optional[str] = None
+    document_portal_quota_bytes: int = Field(ge=1)
     is_active: bool = True
     is_default: bool = False
     parent_workspace_id: Optional[int] = None
@@ -2119,6 +2168,7 @@ class QAWorkspaceCreate(BaseModel):
 class QAWorkspaceUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    document_portal_quota_bytes: Optional[int] = Field(default=None, ge=1)
     is_active: Optional[bool] = None
     is_default: Optional[bool] = None
     parent_workspace_id: Optional[int] = None
@@ -3169,6 +3219,14 @@ class TestCaseCandidateOut(ORMModel):
     priority: Optional[str] = None
     module_name: Optional[str] = None
     version: str = "1.0"
+    created_at: datetime.datetime
+    created_by_id: Optional[int] = None
+    created_by_name: Optional[str] = None
+
+
+class TestCaseCandidateAuthor(BaseModel):
+    id: int
+    name: str
 
 
 class TestCaseCandidatePage(BaseModel):
@@ -3191,6 +3249,7 @@ class TestExecutionCandidateSelection(BaseModel):
     search: Optional[str] = None
     priority: Optional[str] = None
     test_type: Optional[str] = None
+    created_by_id: Optional[int] = None
     assigned_to_id: Optional[int] = None
 
 

@@ -711,7 +711,12 @@ interface TestCaseCandidate {
   priority?: string | null
   module_name?: string | null
   version: string
+  created_at: string
+  created_by_id?: number | null
+  created_by_name?: string | null
 }
+
+interface TestCaseCandidateAuthor { id: number; name: string }
 
 interface TestCaseCandidatePage {
   items: TestCaseCandidate[]
@@ -734,6 +739,8 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [priority, setPriority] = useState('')
   const [testType, setTestType] = useState('')
+  const [createdById, setCreatedById] = useState('')
+  const [authors, setAuthors] = useState<TestCaseCandidateAuthor[]>([])
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest')
   // Each entry is the cursor used to load that page. Keeping the small
   // history client-side gives Previous/Next navigation without OFFSET.
@@ -753,11 +760,19 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
   }, [search])
 
   useEffect(() => {
+    let active = true
+    api.get<TestCaseCandidateAuthor[]>(`/api/test-execution/cycles/${cycleId}/candidate-authors`)
+      .then(rows => { if (active) setAuthors(rows) })
+      .catch(err => { if (active) setError(err) })
+    return () => { active = false }
+  }, [cycleId])
+
+  useEffect(() => {
     setCursorStack([null])
     setSelectAllMatching(false)
     setSelected(new Set())
     setExcluded(new Set())
-  }, [debouncedSearch, priority, testType])
+  }, [debouncedSearch, priority, testType, createdById])
 
   // Sorting changes presentation only, so keep explicit selections while
   // restarting cursor pagination from the beginning of the new order.
@@ -772,13 +787,14 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
     if (debouncedSearch) qs.set('search', debouncedSearch)
     if (priority) qs.set('priority', priority)
     if (testType) qs.set('test_type', testType)
+    if (createdById) qs.set('created_by_id', createdById)
     qs.set('sort_order', sortOrder)
     setCandidateLoading(true)
     api.get<TestCaseCandidatePage>(`/api/test-execution/cycles/${cycleId}/candidate-test-cases?${qs.toString()}`)
       .then((result) => { if (requestId === requestRef.current) { setCandidatePage(result); setError(null) } })
       .catch((err) => { if (requestId === requestRef.current) setError(err) })
       .finally(() => { if (requestId === requestRef.current) setCandidateLoading(false) })
-  }, [cycleId, cursor, debouncedSearch, priority, testType, sortOrder])
+  }, [cycleId, cursor, debouncedSearch, priority, testType, createdById, sortOrder])
 
   const candidates = candidatePage.items
   const selectedCount = selectAllMatching ? Math.max(0, candidatePage.total - excluded.size) : selected.size
@@ -851,6 +867,7 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
         search: debouncedSearch || null,
         priority: priority || null,
         test_type: testType || null,
+        created_by_id: createdById ? Number(createdById) : null,
         assigned_to_id: assignedTo ? Number(assignedTo) : null,
       }, 180_000)
       while (result.job_id && result.status !== 'COMPLETED') {
@@ -891,15 +908,18 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
         <Field label="Priority">
           <select value={priority} onChange={(event) => setPriority(event.target.value)} disabled={busy}><option value="">All priorities</option>{TEST_CASE_PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>
         </Field>
+        <Field label="Created By">
+          <select value={createdById} onChange={(event) => setCreatedById(event.target.value)} disabled={busy}><option value="">All creators</option>{authors.map(author => <option key={author.id} value={author.id}>{author.name}</option>)}</select>
+        </Field>
         <Field label="Sort By">
           <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as 'newest' | 'oldest')} disabled={busy}><option value="newest">Recently added first</option><option value="oldest">Oldest added first</option></select>
         </Field>
       </div>
-      <div className="tm-add-cases-discovery-note"><span>Newest testcases are shown first by default.</span>{(search || priority || testType || sortOrder !== 'newest') && <button type="button" className="link-btn" disabled={busy} onClick={() => { setSearch(''); setPriority(''); setTestType(''); setSortOrder('newest') }}>Reset filters</button>}</div>
+      <div className="tm-add-cases-discovery-note"><span>Newest testcases are shown first by default. Date means when the testcase was created or imported into the portal.</span>{(search || priority || testType || createdById || sortOrder !== 'newest') && <button type="button" className="link-btn" disabled={busy} onClick={() => { setSearch(''); setPriority(''); setTestType(''); setCreatedById(''); setSortOrder('newest') }}>Reset filters</button>}</div>
       {candidateLoading ? (
         <p className="muted small">Loading approved testcases…</p>
       ) : candidates.length === 0 ? (
-        <p className="muted small">There are no approved testcases available to add. Approve pending testcases in the Test Repository first.</p>
+        <p className="muted small">{search || priority || testType || createdById ? 'No approved testcases match these filters. Change or reset the filters to see other available cases.' : 'There are no approved testcases available to add. Approve pending testcases in the Test Repository first.'}</p>
       ) : (
         <>
           <div className="tm-add-cases-selection-bar">
@@ -929,6 +949,8 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
               { key: 'test_type', header: 'Type', render: (testCase) => testCase.test_type || '—' },
               { key: 'priority', header: 'Priority', render: (testCase) => testCase.priority || '—' },
               { key: 'module_name', header: 'Module', render: (testCase) => testCase.module_name || '—' },
+              { key: 'created_by_name', header: 'Created By', render: (testCase) => testCase.created_by_name || 'Unknown creator', filterValue: (testCase) => testCase.created_by_name || '' },
+              { key: 'created_at', header: 'Upload / Created Date', render: (testCase) => formatDateTimeIST(testCase.created_at), filterValue: (testCase) => formatDateTimeIST(testCase.created_at) },
               { key: 'version', header: 'Version' },
             ]}
             server={{
@@ -2490,7 +2512,7 @@ export default function TestExecution() {
     <ul className="tm-cycle-nested">
       {cycles.map((cycle) => (
         <li className="tm-cycle-row" key={cycle.id}>
-          <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)} title={`Open ${cycle.name} (${cycle.cycle_key})`}>
+          <button className={cycleId === cycle.id ? 'active' : ''} onClick={() => setCycleId(cycle.id)} title={`Open ${cycle.name} (${cycle.cycle_key}) · ${cycle.status}`}>
             <span className="tm-cycle-row-copy"><i aria-hidden="true" /><span><strong>{cycle.name}</strong><small>{cycle.cycle_key}</small></span></span><Badge status={cycle.status} />
           </button>
           {canDeleteCycle && cycle.workspace_writable && projectIsActive && !TEST_CYCLE_LOCKED_STATUSES.includes(cycle.status) && <button className="tm-cycle-delete" title={`Delete ${cycle.name}`} aria-label={`Delete ${cycle.name}`} onClick={() => setCycleToDelete(cycle)}><IconTrash aria-hidden="true" /></button>}

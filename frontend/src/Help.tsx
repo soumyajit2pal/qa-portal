@@ -34,7 +34,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'roles', number: '02', title: 'Roles and access model',
     summary: 'What each role can do, department scope, assignment, and separation of duties.',
-    keywords: 'role access permission requester business analyst application owner sm department head qa engineer tester qa lead security analyst Executive  administrator',
+    keywords: 'role access permission requester business analyst application owner sm department head qa engineer tester qa lead security analyst executive administrator scale 6 view only parent workspace viewer',
   },
   {
     id: 'multi-role', number: '03', title: 'Multiple roles on one account',
@@ -44,7 +44,7 @@ const MANUAL_TOPICS: ManualTopic[] = [
   {
     id: 'role-sop', number: '04', title: 'Role-management SOP',
     summary: 'Create, review, change, deactivate, reactivate, and periodically certify access; administer the Application Master list.',
-    keywords: 'sop provision create user ldap role review department coordinator admin deactivate reactivate access certification managed by admin application master application name rename inactive department department not assigned',
+    keywords: 'sop provision create user ldap role review department coordinator admin deactivate reactivate access certification managed by admin application master application name rename inactive department department not assigned smtp email diagnostics notification',
   },
   {
     id: 'qa-request', number: '05', title: 'Raise and track a QA request',
@@ -53,8 +53,8 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'workflows', number: '06', title: 'Approval and testing workflows',
-    summary: 'Functional, Performance, SAST, DAST, Suppression, and QA Clearance lifecycles.',
-    keywords: 'workflow sm department head qa lead tester security analyst approval readiness scanning execution signoff clearance suppression false positive coe decision design identity confirmation return reject approval workflow log search',
+    summary: 'Functional, Performance, SAST, DAST, Suppression, and QA Clearance lifecycles, including certificate evidence and reapproval.',
+    keywords: 'workflow sm department head qa lead tester security analyst approval readiness scanning execution signoff clearance certificate conditional observations frozen summaries refresh reapproval assigned testers security closed suppression false positive coe decision design identity confirmation return reject approval workflow log search',
   },
   {
     id: 'evidence', number: '07', title: 'Readiness, evidence, and decisions',
@@ -63,13 +63,13 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'test-management', number: '08', title: 'Test case management',
-    summary: 'Test Projects, sharing, repository, testcase versions, cycles, folders, assignment, execution, defects, and export.',
-    keywords: 'project shared with you view access view only repository folder tag testcase test case version major minor superseded compare details bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete my executions qa group runner assign reassign reason change attempt defect rejected duplicate not a defect blocked checkout checkin export actual result image test cycle folder department access restricted unfiled folder scoped stats summary cards',
+    summary: 'Test Projects, workspace sharing, repository, testcase versions, cycles, folders, execution, defect workflows, and export.',
+    keywords: 'project shared with you workspace origin creation execution own workspace read only repository folder tag testcase test case version major minor superseded compare details bulk import select all filter skipped approve qa lead cycle child request link unlink lifecycle ready start resume complete my executions qa group runner assign reassign reason change attempt defect rejected duplicate not a defect blocked checkout checkin export actual result image test cycle folder department access restricted unfiled folder scoped stats summary cards',
   },
   {
     id: 'document-portal', number: '09', title: 'Document Portal',
-    summary: 'Controlled documents, folders, downloads, uploads, and document-only access.',
-    keywords: 'document portal document management viewer contributor manager upload folder rename move download zip selection storage deletion disabled access only document role',
+    summary: 'Workspace root folders, storage limits, controlled documents, downloads, uploads, and document-only access.',
+    keywords: 'document portal document management workspace root folder quota parent child storage limit viewer contributor manager upload folder rename move download zip selection storage deletion disabled access only document role',
   },
   {
     id: 'collaboration', number: '10', title: 'Comments and collaboration',
@@ -78,13 +78,13 @@ const MANUAL_TOPICS: ManualTopic[] = [
   },
   {
     id: 'find-report', number: '11', title: 'Find, monitor, and report',
-    summary: 'Global search, dashboard periods, tester tracking, occupancy, approval search, and exports.',
-    keywords: 'search id tqa tc dashboard portfolio analytics columns date range last 7 days 30 days 3 months 6 months custom raised date historical completed requests closed history active pending qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals report export workflow log cr number epic number exact match',
+    summary: 'Global search, dashboard periods, tester tracking, Test Reports, All Data Report, and exports.',
+    keywords: 'search id tqa tc dashboard portfolio analytics columns date range last 7 days 30 days 3 months 6 months custom raised date historical completed requests closed history active pending qa tester overview request ledger current completed occupancy capacity points grouped parent child pending approvals test reports catalogue traceability incomplete defects all data report workspace overview status breakdown record details export workflow log sla breach email cr number epic number exact match',
   },
   {
     id: 'audit', number: '12', title: 'Audit and control',
-    summary: 'Login history, access changes, workflow actions, evidence, and audit review.',
-    keywords: 'audit log login logout access change roles status approval evidence export trace who when what',
+    summary: 'Login history, user access report, role and workspace changes, workflow actions, and audit review.',
+    keywords: 'audit log login logout user access report roles workspace membership access change status approval evidence export trace who when what',
   },
   {
     id: 'troubleshooting', number: '13', title: 'Troubleshooting and FAQ',
@@ -104,14 +104,14 @@ const ROLE_ROWS = [
   ['QA Lead', 'Verify readiness, assign QA/Security work, review test cases, manage testing, and approve QA Clearance.', 'Cross-department QA delivery role.'],
   ['Security Analyst (QA)', 'Configure and perform SAST/DAST scans, validate findings, rescan, and review suppression requests.', 'Security QA role within an assigned workspace.'],
   ['Chief Manager / AGM – QA', 'Approve QA Clearance and provide executive QA oversight.', 'QA governance role. Local administration is assigned separately.'],
-  ['Scale 6+', 'Browse organisation-wide governed data with the privileged visibility granted by a System Administrator.', 'Confidential system role; workspace membership and workflow authority remain separately controlled.'],
+  ['Scale 6+', 'Browse governed data in every active workspace, including the combined All Data Report.', 'Confidential read-only system role; it cannot create, edit, execute or approve workflow records.'],
   ['View Only', 'Browse organisation-wide requests, testing records, dashboards, and reports without changing workflow data.', 'Cross-department read access; Document Portal requires a separate Document Portal role.'],
   ['Parent Workspace Viewer', 'View the parent and every active direct child without changing business or workspace data.', 'Assigned on one non-default top-level workspace.'],
   ['Parent Workspace Admin', 'View every active direct child and manage its direct members.', 'Workspace names, hierarchy, status, routing, and coordinator assignments remain under System Administrator control.'],
   ['Document Portal Viewer', 'Browse, search, and download files or folder/selection ZIP files.', 'May be combined with a portal business role; a dedicated account opens directly in Document Portal.'],
   ['Document Portal Contributor', 'Viewer capabilities plus create folders, upload, rename, and move documents.', 'May be combined with a portal business role; deletion remains restricted to Managers.'],
-  ['Document Portal Manager', 'Contributor capabilities plus delete documents and folders.', 'May be combined with a portal business role.'],
-  ['Administrator', 'Manage all accounts, departments, privileged roles, checklist configuration, and system-wide access.', 'System-wide; assign only when operationally required.'],
+  ['Document Portal Manager', 'Contributor capabilities and repository management; deletion is currently disabled.', 'May be combined with a portal business role.'],
+  ['Administrator', 'Manage accounts, departments, privileged roles, checklist configuration, and system-wide access.', 'Administrative access is system-wide; workflow actions still follow the user’s home department and record controls.'],
 ]
 
 const SEARCH_STOP_WORDS = new Set([
@@ -222,7 +222,7 @@ export default function Help() {
         <div className="help-hero-meta">
           <span>Audience</span><strong>All portal users</strong>
           <span>Manual status</span><strong>Current portal workflow</strong>
-          <span>Last reviewed</span><strong>31 August 2026</strong>
+          <span>Last reviewed</span><strong>15 September 2026</strong>
         </div>
       </div>
 
@@ -328,7 +328,7 @@ export default function Help() {
             <ManualSection {...topic('role-sop')}>
               <h3 className="help-subheading">Who manages which roles?</h3>
               <div className="help-card-grid three">
-                <article><IconUsers /><h3>System Administrator</h3><p>Creates accounts; changes departments; assigns Administrator, Department Head, and Executive  roles; manages protected accounts.</p></article>
+                <article><IconUsers /><h3>System Administrator</h3><p>Creates accounts; changes departments; assigns Administrator, Department Head, and executive roles; manages protected accounts and workspace storage limits.</p></article>
                 <article><IconApprove /><h3>Department Coordinator</h3><p>Reviews first-login access requests for an assigned department and manages working roles for its existing workspace members. An assignment on a parent workspace also applies in its active children.</p></article>
                 <article><IconShield /><h3>Scoped control</h3><p>Coordinators cannot change departments, workspace structure, protected roles, or ordinary workspace membership.</p></article>
               </div>
@@ -360,6 +360,9 @@ export default function Help() {
               ]} />
               <Callout tone="warning" title="Rename before renaming a department, not after">
                 Renaming an application only changes the application’s own name. If a department itself needs a new name or must be retired, use the Departments section’s own rename/active-inactive toggle instead.
+              </Callout>
+              <Callout title="Email diagnostics for Administrators">
+                Admin → Email diagnostics can send a test message to a chosen mailbox to check the configured SMTP relay, sender, authentication, and TLS. Workflow emails and SLA breach alerts depend on SMTP enablement and valid recipient addresses; use the user permission profile to correct a missing notification email.
               </Callout>
             </ManualSection>
           )}
@@ -404,8 +407,23 @@ export default function Help() {
                 <article><strong>Functional</strong><p>The Department Head assigns a QA Lead from the active workspace. The QA Lead verifies readiness and assigns one or more QA Testers.</p></article>
                 <article><strong>Performance</strong><p>The Department Head sends the request to the active workspace QA team; QA owns planning, execution, analysis, reporting, and clearance.</p></article>
                 <article><strong>SAST / DAST</strong><p>The QA Lead performs Security Readiness and assigns a Security Analyst from the active workspace for scan execution and findings.</p></article>
-                <article><strong>QA Clearance</strong><p>Only users with an eligible QA role in the active workspace can raise the request. It follows QA Engineer → QA Lead → Executive , with no SM stage.</p></article>
+                <article><strong>QA Clearance</strong><p>Only an eligible QA user in the active workspace can raise the certificate. It follows QA Engineer → QA Lead → QA executive, with no business SM stage.</p></article>
               </div>
+              <Callout title="Select every SAST / DAST target included in the scan">
+                Start Scan and Rescan list all repositories configured on a SAST request or all application URLs configured on a DAST request. Every target requires its own Fortify Application Name and Version and creates its own findings result. The rows are grouped as one workflow execution, while Findings and Scan History keep every target separate; older scans show that target coverage was not captured.
+              </Callout>
+              <h3 className="help-subheading">QA Clearance Certificate SOP</h3>
+              <SopSteps items={[
+                { title: 'Confirm linked security closure', text: 'If the parent QA Request also raised SAST or DAST, every linked security request must be Closed before Functional QA Clearance can be raised. A report-ready scan alone does not meet this gate.' },
+                { title: 'Review the captured lifecycle evidence', text: 'The certificate freezes QA Test Case Execution Summary, QA Defect Status Summary, and Defect Severity-wise Breakdown from linked lifecycle records. The summaries identify the CR/EPIC number and Change Description; assigned tester names are also captured.' },
+                { title: 'Complete Section E remarks', text: 'Enter Testing Scope Completed and Remarks, plus Open Risks (if any), Known Limitations, Business Acceptance Status, Security Testing Status, and Deployment Recommendation as applicable.' },
+                { title: 'Use Section F only for Conditional Clearance', text: 'Conditional Clearance Observations appear only when Certificate Type is Conditional Clearance. Enter your own observations to use only that content; leave the field blank to generate observations from linked open-defect evidence.' },
+                { title: 'Submit and obtain independent approvals', text: 'Submit for QA Lead approval, then QA executive approval. The requester cannot approve their own certificate; the QA Lead approver cannot also approve the executive stage.' },
+                { title: 'Refresh only with reapproval', text: 'Refresh summaries & restart approval captures current linked evidence, returns the certificate to Draft, and invalidates prior approvals and clearance. A rejected certificate must be reopened before this control is available.' },
+              ]} />
+              <Callout tone="warning" title="Certificate evidence is frozen for each approval revision">
+                A refresh or material certificate edit requires the full approval sequence again. Download Certificate appears when the certificate is Issued; earlier revisions offer Export PDF for review.
+              </Callout>
             </ManualSection>
           )}
 
@@ -484,12 +502,12 @@ export default function Help() {
               <h3 className="help-subheading">Execution SOP</h3>
               <SopSteps items={[
                 { title: 'Organize cycles into folders', text: 'Create a Test Cycle Folder to group related cycles, then create cycles under it (or leave a cycle Unfiled). A folder starts open to everyone with project access; use Manage Access to restrict it to specific departments and/or users—once at least one grant exists, only those departments/users (plus QA Lead Group, QA Engineer, the project owner, and the folder’s creator) can see that folder and its cycles. Folder deletion requires the same governance-tier role as other destructive QA Lead Group actions, and only an empty folder can be deleted.' },
-                { title: 'Create or edit a test cycle', text: 'Choose an active project and provide the mandatory start and end dates. You can define the cycle scope, place it in a folder, and run it as a standalone cycle. Linking a Functional QA Request is optional and can be done later.' },
+                { title: 'Create or edit a test cycle', text: 'Choose an active project and provide mandatory start and end dates. Set the tested environment and build before execution. You can place the cycle in a folder and run it standalone; linking a Functional QA Request is optional and can be done later.' },
                 { title: 'Add approved test cases', text: 'Open Add Test Cases to load approved candidates on demand. Search and move through cursor-based pages, select individual rows, or use Select all matching. Already-linked and unapproved cases are excluded by the database.' },
                 { title: 'Mark the cycle ready', text: 'A cycle can move from Draft to Ready once it has at least one approved testcase and valid dates. Testcases do not all need to be assigned at this stage.' },
                 { title: 'Assign runners', text: 'While the cycle is Ready, assign each testcase before its execution attempt. Existing Test Management permissions determine who can assign or reassign cases; the selected runner must be an eligible active QA Engineer in the workspace.' },
-                { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. An In Progress cycle can be blocked with a mandatory reason and resumed. Completion remains blocked until every testcase has an execution result; Completed is final.' },
-                { title: 'Execute an attempt', text: 'While the cycle is In Progress, the assigned runner opens the test case, reviews all repository details, and records status, actual result, comments, and evidence.' },
+                { title: 'Follow the cycle workflow', text: 'Move through Draft → Ready → In Progress. If a Functional Request is linked, it must already be Execution In Progress before Start Execution is allowed. An In Progress cycle can be blocked with a mandatory reason and resumed. Completion checks every result and defect: failed, blocked, or unexecuted cases prevent completion; unresolved severe defects and missing target releases also block it. QA Lead Group reviews eligible residual risk.' },
+                { title: 'Execute an attempt', text: 'While the cycle is In Progress, the assigned runner opens the test case, reviews all repository details, and records status, actual result, comments, and evidence. A previously failed case with a linked governed defect needs verification for the relevant execution, environment, and tested build before its result can change.' },
                 { title: 'Use rich Actual Result', text: 'Format text, add bullets, paste images, or upload supported images. Keep results specific enough for another person to reproduce.' },
                 { title: 'Link defects', text: 'For Fail or Blocked outcomes, add the defect reference and explain the observed behavior. Use a new execution attempt for retest history rather than overwriting evidence. Link existing defect also accepts a governed defect that already has a primary execution elsewhere -- it is added as an additional trace on this execution too, without moving its original link.' },
                 { title: 'Operate in bulk', text: 'Use bulk assignment, execution, or removal after checking the confirmation summary. Adding more than 500 testcases, Excel imports, and lifecycle/repository exports run as background jobs so the page does not wait on one long API request.' },
@@ -506,7 +524,10 @@ export default function Help() {
                 <li><IconCheckCircle />Successful reassignment records the old assignee, new assignee, reason, actor, and timestamp in history.</li>
               </ul>
               <h3 className="help-subheading">Defect lifecycle and terminal triage</h3>
-              <Workflow label="Standard defect path" steps={['New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Closed']} />
+              <Workflow label="Defect investigation" steps={['New', 'Triaged', 'In Progress', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'Closed']} />
+              <Callout title="Workspace defect workflow is versioned">
+                An Administrator can view version history in Workspace settings and restore earlier settings as a newly published version. A defect retains the workflow version captured when it was created; restoring settings affects new defects only. Triage requires a responsible department and an eligible working owner from that department. Production impact is recorded explicitly, and affected production requires production verification.
+              </Callout>
               <div className="help-table-wrap">
                 <table className="help-role-table">
                   <thead><tr><th>Outcome</th><th>Who can mark it</th><th>Required condition</th></tr></thead>
@@ -520,13 +541,13 @@ export default function Help() {
               <Callout tone="warning" title="Alternative outcomes and reopening">
                 Rejected and Not a Defect can be reopened by an authorized QA actor or the responsible requester side when new evidence requires another investigation. Reopening requires a reason and supporting evidence, records the change in history, and returns the defect through Reopened before work resumes. Duplicate remains terminal. Use Deferred when valid work is intentionally postponed; it can later return to In Progress.
               </Callout>
-              <h3 className="help-subheading">Project view sharing</h3>
+              <h3 className="help-subheading">Project sharing across workspaces</h3>
               <SopSteps items={[
-                { title: 'Open project access', text: 'An authorized project manager opens View Access for the project.' },
-                { title: 'Select the recipient', text: 'Grant access to a department or one particular active user. Duplicate grants and the project’s own department are excluded.' },
-                { title: 'Confirm the recipient view', text: 'The recipient sees the project in Quality workspace with Shared with you and View only badges.' },
-                { title: 'Understand the boundary', text: 'A view grant allows visibility into the project’s Repository, Execution, Reports, and Defects. It does not grant project management or write authority.' },
-                { title: 'Remove when no longer needed', text: 'Remove the grant from View Access. Project history remains intact while the recipient’s extra visibility ends.' },
+                { title: 'Open project sharing', text: 'An authorized project manager selects Share project from the project actions.' },
+                { title: 'Select the recipient', text: 'Choose a department, a particular active user, or another workspace. Duplicate grants and the project’s own department are excluded.' },
+                { title: 'Confirm the recipient view', text: 'The recipient sees the project with a Shared with you badge; project settings remain read-only to recipients.' },
+                { title: 'Understand the boundary', text: 'A workspace grant lets eligible users create test cases and execute work from their active workspace. They can write only the cases and executions originating there; assets from other workspaces remain read-only. Department and particular-user grants provide visibility without this workspace-origin execution right. Project administration stays with authorized owners and managers.' },
+                { title: 'Remove when no longer needed', text: 'Remove the grant from Project sharing. Project history remains intact while the recipient’s extra visibility ends.' },
               ]} />
               <Callout title="One test case can be executed many times">
                 Execution attempts preserve runner, result, timestamps, evidence, and linked defects independently. This provides a complete run and retest trail.
@@ -543,6 +564,8 @@ export default function Help() {
               </div>
               <SopSteps items={[
                 { title: 'Open the controlled repository', text: 'Use Document Portal from the navigation. Search first when you know the name; otherwise use the folder tree and breadcrumb trail to navigate.' },
+                { title: 'Use your workspace root', text: 'Each workspace has a root directory named for that workspace, created with it. Work within that root; child workspaces keep their files in their own root directories.' },
+                { title: 'Check the storage cap', text: 'An Administrator must set a positive maximum Document Portal storage limit in Workspace settings before uploads are accepted. A child limit cannot exceed its parent limit, and parent usage includes files in its children. The portal shows used and available capacity.' },
                 { title: 'Upload deliberately', text: 'Contributors and Managers can upload files or a folder hierarchy. Select how duplicates are handled: keep both, replace the existing file, or skip and report the duplicate.' },
                 { title: 'Organize without deleting', text: 'Create folders and use Rename or Move to correct organization. The repository deliberately has no delete action, preserving recoverability and audit evidence.' },
                 { title: 'Download safely', text: 'Download a single file, a folder ZIP, or a selected set. Large archive preparation can take time; keep the page open until the browser receives the download.' },
@@ -630,13 +653,21 @@ export default function Help() {
                 <li><IconCheckCircle />Combine text search with the Entity filter to narrow results to QA Request, Functional, SAST, DAST, Performance, Suppression, or Clearance.</li>
                 <li><IconCheckCircle />Results are searched and paginated on the server. Clear the search to restore the complete accessible log.</li>
               </ul>
+              <h3 className="help-subheading">Test Reports catalogue</h3>
+              <p>Use Requirements Traceability for Epic/CR/Feature/User Story coverage, Repository Health for ownership and readiness, Cycle Progress for assignment and results, Defect Quality for outcomes and resolvers, Version Impact for stale case versions, and Project Portfolio for cross-project trends. Incomplete Defect Traceability includes defects with no execution link even when they have no project, request, cycle, or testcase link. Each catalogue entry has its own Excel Export control; project and cycle reports require the appropriate selection.</p>
+              <h3 className="help-subheading">All Data Report</h3>
+              <p>Reports &amp; Export Centre offers the All Data Report in Excel, PDF, and CSV. Read Workspace Overview first for main and child request totals, projects, testcases, cycles, executions, defects, and clearances. Status Breakdown groups counts by workspace and record type, with defect severity shown separately. Record Details lists the underlying records. The Excel file includes a Guide tab; parent QA Requests are counted once and linked child requests appear separately.</p>
+              <p>The catalogue also provides a testcase register, every immutable execution attempt, and the frozen evidence figures recorded on QA Clearance certificates. Document Portal users can export a file inventory from their selected workspace; its date filter uses last modification time. Test Management Project Reports offers seven Excel workbooks; choose a project or cycle where required. These current-population workbooks do not use the centre's date range. Generated request PDFs, certificates, project workbooks, and uploaded files are listed under Generated Documents &amp; Source Exports. Open the source module to select the record or project before downloading.</p>
+              <Callout title="SLA breach notifications">
+                The current breach monitor uses calendar-day ageing from the record’s last update: a pending action at 16 days or more queues one email for the unchanged stage. With SMTP enabled, the alert goes to the responsible assigned person or approval group and eligible department heads in their departments. A new status or update starts a new ageing interval.
+              </Callout>
               <ul className="help-check-list">
                 <li><IconCheckCircle />Use the filter icon in a table column to narrow its visible results; QA Requests does not duplicate this with a separate page-level status selector.</li>
                 <li><IconCheckCircle />Use Reports & Export Centre for the QA Request Register, Functional Request Register, cycle execution summary, defect/retest register, performance and security registers, testcase approval backlog, application scorecard, QA Clearance register, and approval audit evidence.</li>
                 <li><IconCheckCircle />The Reporting period panel applies an IST From/To range to every export. Leave both dates empty to include all historical data available to your access scope.</li>
                 <li><IconCheckCircle />Use Repository and Test Execution exports for detailed test assets and run results.</li>
                 <li><IconCheckCircle />Inactive projects remain discoverable through the project status filter but cannot accept new repository or execution changes until reactivated.</li>
-                <li><IconCheckCircle />QA Certificate validation notes, defect review, and residual-risk sections support rich text, lists, and tables; exported PDFs preserve the formatted content.</li>
+                <li><IconCheckCircle />QA Certificate Section E remarks and Conditional Clearance Section F observations support rich text, lists, and tables; exported PDFs preserve the formatted content.</li>
               </ul>
             </ManualSection>
           )}
@@ -660,6 +691,9 @@ export default function Help() {
                 { title: 'Reconcile evidence', text: 'Match decision comments, attachments, results, and defects with the related status change.' },
                 { title: 'Export and retain', text: 'Export the applicable audit evidence under the organization’s retention and information-security policy.' },
               ]} />
+              <Callout title="Download the user access report">
+                An authorized Administrator can use Admin → Users → Download user access report to export user identities, departments, roles, account status, and workspace access for periodic access review.
+              </Callout>
             </ManualSection>
           )}
 
@@ -670,13 +704,15 @@ export default function Help() {
                 <div><strong>Action button is missing</strong><span>Wrong stage, role, department, assignment, or inactive account.</span><span>Check profile roles, Pending With, record assignment, and current status.</span></div>
                 <div><strong>400 popup</strong><span>Required data or workflow precondition is incomplete.</span><span>Follow the exact backend reason and corrective guidance shown in the red popup.</span></div>
                 <div><strong>403 popup</strong><span>Your account is authenticated but not authorized for this action.</span><span>Verify role, department, self-approval rule, and assignment; request an access review if incorrect.</span></div>
-                <div><strong>404 popup / page</strong><span>The record does not exist, was removed, or the ID/route is incorrect.</span><span>Search the full TQA ID, verify the module, and confirm the record still exists.</span></div>
+                <div><strong>Search result: no result found</strong><span>The request ID does not exist, the request was removed, or your workspace does not permit access.</span><span>Check the full TQA ID shown in the modal. Select Search another ID to return to global search, or ask an Administrator to review your workspace access.</span></div>
                 <div><strong>Import skipped or failed</strong><span>Duplicate, invalid, missing, unsupported, or unapproved data.</span><span>Open the issue summary and correct each row using its displayed reason; do not retry unchanged data.</span></div>
                 <div><strong>Upload path error</strong><span>The deployment-controlled upload path is not absolute, writable, or mounted for the backend container.</span><span>Ask the platform administrator to verify UPLOAD_STORAGE_ROOT and the Docker volume/bind mount; this path is not changed from the portal UI.</span></div>
-                <div><strong>Cannot execute</strong><span>Test case is unapproved, project inactive, or runner not assigned.</span><span>Approve the case, reactivate the project if authorized, and assign a runner from the active workspace.</span></div>
+                <div><strong>Cannot start or record execution</strong><span>Test case unapproved, project inactive, runner unassigned, environment/build missing, linked Functional Request not Execution In Progress, or linked defect verification incomplete.</span><span>Check the cycle and linked request status, set environment and build, assign an eligible runner, and review the exact defect verification message.</span></div>
+                <div><strong>Cannot complete a cycle</strong><span>Failed, blocked, or unexecuted cases; unresolved Critical/High defects; residual risk without review; or missing target release.</span><span>Open the cycle completion panel to see counts and affected defect IDs, then resolve, retest, review risk, or add the missing release.</span></div>
+                <div><strong>Cannot upload a document</strong><span>Workspace or parent storage cap is unset or exhausted, or the account lacks a Document Portal contributor role.</span><span>Ask an Administrator to set the cap in Workspace settings; review available capacity and your document role.</span></div>
               </div>
               <Callout title="Excel import storage">
-                Test-case import workbooks are read in memory and are not retained under the configured upload path. Documents, checklist evidence, execution images, and other retained attachments use the active Admin-configured upload root.
+                Test-case import workbooks are read in memory and are not retained under the configured upload path. Documents, checklist evidence, execution images, and other retained attachments use the deployment-configured upload root.
               </Callout>
               <h3 className="help-subheading">Escalation checklist</h3>
               <ul className="help-check-list">

@@ -3,6 +3,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models, schemas
+from ..document_portal_storage import DOCUMENT_ROOT, OWNER_FILE, rename_workspace_root, workspace_folder_name, workspace_root
+from ..storage_lock import exclusive_file_lock
 from ..database import get_db
 from ..deps import get_current_user, require_roles
 from ..constants import Role, REQUEST_TYPES
@@ -34,6 +36,20 @@ def _workspace(db: Session, workspace_id: int) -> models.QAWorkspace:
     if not row:
         raise HTTPException(404, "Workspace not found")
     return row
+
+
+def _check_family_quota(db: Session, *, parent: models.QAWorkspace | None,
+                        quota_bytes: int, workspace_id: int | None = None) -> None:
+    if parent is not None:
+        if parent.document_portal_quota_bytes is None:
+            raise HTTPException(409, 'Set the parent workspace storage limit before adding a child workspace')
+        if quota_bytes > parent.document_portal_quota_bytes:
+            raise HTTPException(400, 'A child workspace storage limit cannot exceed its parent workspace limit')
+    elif workspace_id is not None:
+        children = db.query(models.QAWorkspace).filter(
+            models.QAWorkspace.parent_workspace_id == workspace_id).all()
+        if any(child.document_portal_quota_bytes and child.document_portal_quota_bytes > quota_bytes for child in children):
+            raise HTTPException(400, 'The parent workspace limit cannot be lower than a child workspace limit')
 
 
 def _ensure_workspace_fallback(db: Session, user: models.User, excluded_workspace_id: int) -> int:
@@ -107,6 +123,10 @@ def create_workspace(payload: schemas.QAWorkspaceCreate, db: Session = Depends(g
     name = payload.name.strip()
     if not key or not name:
         raise HTTPException(400, "Workspace key and name are required")
+    try:
+        workspace_folder_name(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if db.query(models.QAWorkspace).filter(
         (models.QAWorkspace.workspace_key == key) | (models.QAWorkspace.name == name)
     ).first():
@@ -122,6 +142,7 @@ def create_workspace(payload: schemas.QAWorkspaceCreate, db: Session = Depends(g
             raise HTTPException(400, "A child workspace cannot contain another workspace")
     if not can_create_child_workspace(current_user, parent):
         raise HTTPException(403, "Only a System Administrator can create a workspace")
+    _check_family_quota(db, parent=parent, quota_bytes=payload.document_portal_quota_bytes)
     row = models.QAWorkspace(
         **payload.model_dump(exclude={"workspace_key", "name", "is_default", "parent_workspace_id"}),
         workspace_key=key, name=name, is_default=False,
@@ -130,8 +151,21 @@ def create_workspace(payload: schemas.QAWorkspaceCreate, db: Session = Depends(g
     )
     db.add(row)
     db.flush()
-    ensure_administrator_workspace_memberships(db, workspace=row)
-    db.commit()
+    created_root = None
+    root_was_present = (DOCUMENT_ROOT / name).exists()
+    try:
+        created_root = workspace_root(row, create=True)
+        ensure_administrator_workspace_memberships(db, workspace=row)
+        db.commit()
+    except FileExistsError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        if not root_was_present and created_root and created_root.is_dir() and set(item.name for item in created_root.iterdir()) == {OWNER_FILE}:
+            (created_root / OWNER_FILE).unlink()
+            created_root.rmdir()
+        raise
     return _workspace(db, row.id)
 
 
@@ -143,6 +177,8 @@ def update_workspace(workspace_id: int, payload: schemas.QAWorkspaceUpdate,
     if not can_configure_workspace(current_user, row):
         raise HTTPException(403, "You do not have administrative access to this workspace")
     data = payload.model_dump(exclude_unset=True)
+    if data.get('document_portal_quota_bytes') is None and 'document_portal_quota_bytes' in data:
+        raise HTTPException(400, 'Document Portal storage limit must be at least 1 byte')
     if not current_user.has_role(Role.ADMIN) and "parent_workspace_id" in data:
         if data["parent_workspace_id"] != row.parent_workspace_id:
             raise HTTPException(403, "Only a System Administrator can change workspace hierarchy")
@@ -167,6 +203,12 @@ def update_workspace(workspace_id: int, payload: schemas.QAWorkspaceUpdate,
                 raise HTTPException(400, "A child workspace cannot contain another workspace")
             if row.child_workspaces:
                 raise HTTPException(400, "A parent workspace cannot be moved below another workspace")
+    effective_parent_id = data.get('parent_workspace_id', row.parent_workspace_id)
+    effective_parent = db.get(models.QAWorkspace, effective_parent_id) if effective_parent_id else None
+    effective_quota = data.get('document_portal_quota_bytes', row.document_portal_quota_bytes)
+    if effective_quota is not None:
+        _check_family_quota(db, parent=effective_parent, quota_bytes=effective_quota,
+                            workspace_id=row.id if effective_parent is None else None)
     if data.get("is_active") is False and row.is_active:
         member_user_ids = {member.user_id for member in row.members if member.is_active}
         for user_id in member_user_ids:
@@ -175,9 +217,28 @@ def update_workspace(workspace_id: int, payload: schemas.QAWorkspaceUpdate,
                 fallback_id = _ensure_workspace_fallback(db, member_user, row.id)
                 if member_user.preferred_qa_workspace_id == row.id:
                     member_user.preferred_qa_workspace_id = fallback_id
-    for key, value in data.items():
-        setattr(row, key, value.strip() if isinstance(value, str) else value)
-    db.commit()
+    family_id = effective_parent.id if effective_parent else row.id
+    lock_path = DOCUMENT_ROOT / f'.workspace-{family_id}.quota.lock'
+    with exclusive_file_lock(lock_path) as acquired:
+        if not acquired:
+            raise HTTPException(409, 'Another storage operation is active in this workspace family')
+        renamed_root = None
+        if 'name' in data and data['name'].strip() != row.name:
+            try:
+                renamed_root = rename_workspace_root(row, data['name'].strip())
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            except FileExistsError as exc:
+                raise HTTPException(409, str(exc)) from exc
+        for key, value in data.items():
+            setattr(row, key, value.strip() if isinstance(value, str) else value)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            if renamed_root and renamed_root[0] != renamed_root[1]:
+                renamed_root[1].rename(renamed_root[0])
+            raise
     return _workspace(db, row.id)
 
 

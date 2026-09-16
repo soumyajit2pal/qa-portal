@@ -13,6 +13,7 @@ import ConfirmModal from "../../components/ConfirmModal";
 import InfoModal from "../../components/InfoModal";
 import { IconContract, IconExpand } from "../../components/Icons";
 import { useAuth } from "../../context/AuthContext";
+import AppVersion from "../../components/AppVersion";
 
 type Sort = "name" | "type" | "size" | "modified";
 type Item = {
@@ -31,6 +32,11 @@ type Browse = {
   breadcrumbs: { name: string; path: string }[];
   stats: { folders: number; files: number; used: number; free: number } | null;
   upload_capacity: number;
+  workspace_name: string;
+  storage_limit_bytes: number | null;
+  family_storage_limit_bytes: number | null;
+  family_storage_used_bytes: number;
+  parent_storage_limit_bytes: number | null;
   repository_path: string;
 };
 type UploadState = "ready" | "uploading" | "success" | "error";
@@ -240,6 +246,7 @@ function DocumentFullscreenCredit() {
       <span>Quality Assurance Department - IT</span>
       <span>·</span>
       <span>© 2026 All rights reserved.</span>
+      <AppVersion />
     </footer>
   );
 }
@@ -782,11 +789,11 @@ export default function DocumentPortal() {
   return (
     <div className="document-portal-page document-explorer-page">
       <PageHeader
-        eyebrow="Shared knowledge base"
+        eyebrow="Workspace documents"
         title="Document Portal"
-        subtitle="A controlled shared repository for QA evidence, reference documents, and delivery artefacts. All timestamps use India Standard Time (IST)."
+        subtitle="Files and folders in your active workspace. All timestamps use India Standard Time (IST)."
         actions={
-          canContribute ? (
+          canContribute && data?.storage_limit_bytes != null ? (
             <>
               <button className="btn" onClick={() => setDialog("folder")}>
                 New folder
@@ -801,6 +808,8 @@ export default function DocumentPortal() {
           ) : undefined
         }
       />
+      {data && data.storage_limit_bytes == null && <div className="alert alert-warning" role="status">An administrator must set the Document Portal storage limit for {data.workspace_name} before files can be uploaded.</div>}
+      {data && data.storage_limit_bytes != null && data.family_storage_limit_bytes == null && <div className="alert alert-warning" role="status">An administrator must set the parent workspace storage limit before files can be uploaded here.</div>}
       <Card
         className={`document-portal-card${isFullscreen ? " document-portal-fullscreen" : ""}`}
       >
@@ -956,8 +965,14 @@ export default function DocumentPortal() {
             <span>
               <strong>{bytes(data.stats.used)}</strong> used
             </span>
+            {data.parent_storage_limit_bytes != null && <span>
+              <strong>{bytes(data.family_storage_used_bytes)}</strong> used across parent and child workspaces of {bytes(data.parent_storage_limit_bytes)}
+            </span>}
+            {data.parent_storage_limit_bytes == null && data.family_storage_used_bytes !== data.stats.used && <span>
+              <strong>{bytes(data.family_storage_used_bytes)}</strong> used across this workspace and its children
+            </span>}
             <span>
-              <strong>{bytes(data.stats.free)}</strong> available
+              <strong>{bytes(data.stats.free)}</strong> available of {data.storage_limit_bytes == null ? 'limit not set' : bytes(data.storage_limit_bytes)}
             </span>
           </div>
         )}

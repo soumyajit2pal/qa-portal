@@ -11,6 +11,7 @@ from .. import models, schemas, pagination
 from ..constants import Role
 from ..database import get_db
 from ..deps import require_roles
+from ..user_access_report import user_access_workbook
 
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
@@ -152,6 +153,20 @@ def export_audit_logs(
         iter([stream.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=qualityhub-audit-log.csv"},
+    )
+
+
+@router.get("/user-access-report")
+def download_user_access_report(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_roles(Role.ADMIN)),
+):
+    """Current roles and workspace grants for System Administrator review."""
+    workbook = user_access_workbook(db, current_user)
+    return StreamingResponse(
+        workbook,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=qualityops-user-access-report.xlsx"},
     )
 
 

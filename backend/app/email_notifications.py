@@ -31,6 +31,7 @@ _delivery_lock = threading.Lock()
 _delivery_scheduler_lock = threading.Lock()
 _delivery_worker_running = False
 _delivery_rerun_requested = False
+_last_sla_check: float | None = None
 _MAX_ATTEMPTS = 5
 _EMAIL_TEMPLATE_MARKER = "qa-portal-email-template:v1"
 
@@ -1298,6 +1299,30 @@ def _after_commit(session: SASession) -> None:
         logger.info("SMTP outbox delivery trigger skipped reason=smtp_disabled")
 
 
+def _queue_sla_breaches_if_due() -> None:
+    """Queue SLA alerts at most once per hour for this application process.
+
+    Both the commit-triggered worker and the periodic poller call this helper.
+    Reserving the timestamp under the scheduler lock prevents concurrent
+    workers from producing duplicate breach notifications. A failed check
+    releases that reservation so the next delivery pass can retry it.
+    """
+    global _last_sla_check
+    now = time.monotonic()
+    with _delivery_scheduler_lock:
+        if _last_sla_check is not None and now - _last_sla_check < 3600:
+            return
+        _last_sla_check = now
+    try:
+        from .sla_notifications import queue_breaches
+        queue_breaches()
+    except Exception:
+        with _delivery_scheduler_lock:
+            if _last_sla_check == now:
+                _last_sla_check = None
+        raise
+
+
 def deliver_pending_async() -> None:
     """Wake one coalesced outbox worker without delaying the API request.
 
@@ -1320,10 +1345,7 @@ def deliver_pending_async() -> None:
         global _delivery_worker_running, _delivery_rerun_requested
         while True:
             try:
-                if time.monotonic() - last_sla_check >= 3600:
-                    from .sla_notifications import queue_breaches
-                    queue_breaches()
-                    last_sla_check = time.monotonic()
+                _queue_sla_breaches_if_due()
                 deliver_pending()
             except Exception:
                 logger.exception("SMTP outbox delivery worker failed")
@@ -1345,9 +1367,9 @@ def start_outbox_poller() -> None:
     _poller_started = True
 
     def _poll() -> None:
-        last_sla_check = 0.0
         while _enabled():
             try:
+                _queue_sla_breaches_if_due()
                 deliver_pending()
             except Exception:
                 logger.exception("Email outbox retry poll failed")
