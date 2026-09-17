@@ -1335,7 +1335,10 @@ def create_request(payload: schemas.QARequestCreate, db: Session = Depends(get_d
 @router.put("/{req_id}", response_model=schemas.QARequestOut)
 def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = Depends(get_db),
                   current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.QARequest).get(req_id)
+    # Serialize draft edits/cancellation/submission across workers and refresh
+    # any identity loaded earlier by dependencies before checking its status.
+    obj = (db.query(models.QARequest).filter_by(id=req_id)
+           .populate_existing().with_for_update().one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, obj, current_user)
@@ -1489,7 +1492,10 @@ def edit_request(req_id: int, payload: schemas.QARequestUpdate, db: Session = De
 
 @router.post("/{req_id}/cancel", response_model=schemas.QARequestOut)
 def cancel_request(req_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.QARequest).get(req_id)
+    # Serialize draft edits/cancellation/submission across workers and refresh
+    # any identity loaded earlier by dependencies before checking its status.
+    obj = (db.query(models.QARequest).filter_by(id=req_id)
+           .populate_existing().with_for_update().one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, obj, current_user)
@@ -1560,7 +1566,10 @@ def submit_request(req_id: int, db: Session = Depends(get_db),
     actually re-saved, which Submit alone never does. Blocked below instead
     of allowed through: a gateway can never raise while resolved to a
     REJECTED name, full stop."""
-    obj = db.query(models.QARequest).get(req_id)
+    # Serialize draft edits/cancellation/submission across workers and refresh
+    # any identity loaded earlier by dependencies before checking its status.
+    obj = (db.query(models.QARequest).filter_by(id=req_id)
+           .populate_existing().with_for_update().one_or_none())
     if not obj:
         raise HTTPException(404, "QA Request not found")
     _require_gateway_visibility(db, obj, current_user)

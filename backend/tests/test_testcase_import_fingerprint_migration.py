@@ -94,3 +94,28 @@ def test_duplicate_cleanup_preserves_rows_and_keeps_earliest_fingerprint():
         (3, 10, "different"),
         (4, 20, "same"),
     ]
+
+
+def test_conditional_index_allows_legacy_nulls_but_blocks_duplicate_imports():
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    import pytest
+    migration = _migration_module()
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    cases = sa.Table("qap_test_cases", metadata,
+                     sa.Column("id", sa.Integer, primary_key=True),
+                     sa.Column("project_id", sa.Integer),
+                     sa.Column("import_fingerprint", sa.String(64)))
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration._create_conditional_index()
+        connection.execute(cases.insert(), [
+            {"id": 1, "project_id": 10, "import_fingerprint": None},
+            {"id": 2, "project_id": 10, "import_fingerprint": None},
+            {"id": 3, "project_id": 10, "import_fingerprint": "same"},
+            {"id": 4, "project_id": 20, "import_fingerprint": "same"},
+        ])
+        with pytest.raises(sa.exc.IntegrityError):
+            connection.execute(cases.insert(), {"id": 5, "project_id": 10, "import_fingerprint": "same"})

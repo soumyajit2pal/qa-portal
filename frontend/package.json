@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test:request-navigation": "node --test tests/requestNavigation.test.mjs",
     "test:qa-document-upload": "node --test tests/qaDocumentUpload.test.mjs",
-    "preview": "vite preview --port 5173"
+    "preview": "vite preview --port 5173",
+    "test:login-encryption": "node --test tests/loginEncryption.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

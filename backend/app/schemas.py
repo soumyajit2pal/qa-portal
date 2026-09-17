@@ -2,6 +2,7 @@ import datetime
 import re
 from typing import Optional, List, Dict, Literal
 from pydantic import Field, BaseModel, ConfigDict, EmailStr, field_validator, model_validator
+from .login_encryption import EncryptedLogin
 
 RICH_TEXT_MAX_LENGTH = 10000
 
@@ -138,6 +139,7 @@ class UserSummaryOut(BaseModel):
 
 
 class UserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     username: str
     full_name: str
     email: Optional[str] = None
@@ -151,16 +153,8 @@ class UserCreate(BaseModel):
     department_unit_ids: Optional[List[int]] = None
     roles: List[str]                    # a user must be assigned at least one role
     login_type: str = "STANDARD"       # STANDARD / LDAP
-    password: Optional[str] = None      # required when login_type == STANDARD; ignored for LDAP
+    encrypted_password: Optional[EncryptedLogin] = None
     show_in_user_dropdowns: bool = True
-
-    @field_validator("password")
-    @classmethod
-    def validate_password(cls, value):
-        if value is not None and (len(value) < 12 or len(value.encode("utf-8")) > 72):
-            raise ValueError("Password must be at least 12 characters and no more than 72 UTF-8 bytes")
-        return value
-
 
 class UserUpdate(BaseModel):
     """Admin-only partial update -- role reassignment, activation, login-type change, etc.
@@ -169,7 +163,7 @@ class UserUpdate(BaseModel):
     departments (2026-08 CR) -- `department` (singular) is kept accepted for
     backward compatibility and is treated the same as a one-item
     `departments` list when `departments` itself isn't provided."""
-    full_name: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
     email: Optional[str] = None
     department: Optional[str] = None
     departments: Optional[List[str]] = None
@@ -189,14 +183,8 @@ class UserUpdate(BaseModel):
 
 
 class PasswordReset(BaseModel):
-    new_password: str
-
-    @field_validator("new_password")
-    @classmethod
-    def validate_new_password(cls, value):
-        if len(value) < 12 or len(value.encode("utf-8")) > 72:
-            raise ValueError("Password must be at least 12 characters and no more than 72 UTF-8 bytes")
-        return value
+    model_config = ConfigDict(extra="forbid")
+    encrypted_password: EncryptedLogin
 
 
 class LocalAdminUserUpdate(BaseModel):

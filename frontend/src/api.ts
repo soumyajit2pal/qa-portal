@@ -1,3 +1,4 @@
+import { encryptLogin, LoginKey } from './loginEncryption'
 import { isQaEvidenceUpload, qaDocumentSizeError } from './qaDocumentUpload'
 
 const BASE_URL: string = (import.meta.env.VITE_API_BASE_URL as string) || ''
@@ -291,7 +292,8 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
   // rendered after workspace B became active.
   const activeWorkspace = localStorage.getItem('active_workspace_id')
     || localStorage.getItem('qa_active_workspace_id') || ''
-  const key = method === 'GET' && path.split('?')[0] !== '/api/auth/me'
+  // Encryption challenges are single-use, including across concurrent actions.
+  const key = method === 'GET' && !['/api/auth/me', '/api/auth/login-key'].includes(path.split('?')[0])
     ? `${getToken() || ''}:${activeWorkspace}:${path}:${opts.isBlob ? 'blob' : 'json'}`
     : ''
   // Briefly reuse successful JSON reads across components and route changes.
@@ -385,10 +387,28 @@ export const api = {
   del: <T = any>(path: string): Promise<T> => request<T>(path, { method: 'DELETE' }),
 
   login: async (username: string, password: string): Promise<{ access_token: string; token_type: string; roles: string[]; full_name: string; username: string }> => {
-    const form = new URLSearchParams()
-    form.append('username', username)
-    form.append('password', password)
-    return request(`/api/auth/login`, { method: 'POST', body: form, formEncoded: true })
+    if (import.meta.env.PROD && window.location.protocol !== 'https:') {
+      throw new Error('HTTPS is required. Open the secure portal URL before signing in.')
+    }
+    const key = await request<LoginKey>('/api/auth/login-key', { method: 'GET' })
+    const envelope = await encryptLogin(key, username, password)
+    return request('/api/auth/login', { method: 'POST', body: envelope })
+  },
+
+  createUser: async <T = any>(body: { username: string; login_type: string; password?: string; [key: string]: unknown }): Promise<T> => {
+    const { password, ...payload } = body
+    if (body.login_type === 'LDAP') {
+      return request<T>('/api/auth/users', { method: 'POST', body: payload })
+    }
+    const key = await request<LoginKey>('/api/auth/login-key', { method: 'GET' })
+    const encrypted_password = await encryptLogin(key, `create-user:${body.username}`, password || '')
+    return request<T>('/api/auth/users', { method: 'POST', body: { ...payload, encrypted_password } })
+  },
+
+  resetUserPassword: async (userId: number, password: string): Promise<unknown> => {
+    const key = await request<LoginKey>('/api/auth/login-key', { method: 'GET' })
+    const encrypted_password = await encryptLogin(key, `reset-password:${userId}`, password)
+    return request(`/api/auth/users/${userId}/reset-password`, { method: 'POST', body: { encrypted_password } })
   },
 
   downloadReport: async (reportKey: string, format: string = 'xlsx', filters: string = '', dateFrom = '', dateTo = ''): Promise<void> => {

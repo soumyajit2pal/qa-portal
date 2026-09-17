@@ -207,9 +207,18 @@ Profile names may contain letters, numbers, underscores, and hyphens.
 ```bash
 cd backend
 cp .env.uat.example .env.uat
-APP_ENV=uat uvicorn app.main:app --port 8000
+APP_ENV=uat uvicorn app.main:app --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
 APP_ENV=uat alembic upgrade head
 ```
+
+UAT application traffic requires HTTPS. The Uvicorn command above is a private
+upstream for a trusted loopback TLS proxy, not a browser URL. For local Vite UAT,
+set `TLS_CERT_HOST_PATH` in the selected environment file to the directory containing
+`qualityops.crt` and `qualityops.key`, and run `npm run dev -- --mode uat` from
+frontend. Relative certificate directories resolve from the repository root,
+matching Compose. Vite builds do not require certificate files. Open `https://localhost:5173`
+using a certificate that includes localhost. Vite derives forwarded scheme from
+the actual TLS socket. See `UAT_HTTPS_Recovery.md` for direct and Compose cases.
 
 The active profile is included as `profile` in `/api/health` without exposing
 any configuration values or secrets.
@@ -717,3 +726,8 @@ cannot restore a token cleared by logout or replaced by a new login.
 
 Browser renewal regression checks: run `node tests/token-renewal.cjs` from
 `frontend`. Backend renewal checks are in `backend/tests/test_token_renewal.py`.
+
+
+### Login payload encryption
+
+Login now requires encrypted JSON. Deploy backend/frontend images together and provision the private RSA key before starting the release; see `Login_Encryption_Deployment.md`. Compose mounts `LOGIN_ENCRYPTION_KEY_HOST_DIR` (default `./secrets`) read-only in backend, separate from uploads. The old plaintext form API is rejected. HTTPS and a trusted proxy allowlist remain required.

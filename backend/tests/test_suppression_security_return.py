@@ -18,7 +18,7 @@ class _Query:
     def with_for_update(self):
         return self
 
-    def first(self):
+    def one_or_none(self):
         return self.get(None)
 
     def get(self, _record_id):

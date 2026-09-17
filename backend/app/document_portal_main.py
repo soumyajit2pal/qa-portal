@@ -35,8 +35,13 @@ app = FastAPI(
     title="QualityOps Document Portal API",
     description="Isolated authenticated file repository service for QualityOps.",
     version="1.0.0",
+    docs_url=None if settings.app_env in {"uat", "prod", "production"} else "/docs",
+    redoc_url=None if settings.app_env in {"uat", "prod", "production"} else "/redoc",
+    openapi_url=None if settings.app_env in {"uat", "prod", "production"} else "/openapi.json",
 )
 
+
+from .transport_security import enforce_https
 
 @app.middleware("http")
 async def document_portal_request_observability(request: Request, call_next):
@@ -168,3 +173,6 @@ def health():
 
 
 app.include_router(document_portal.router)
+
+# Register last so cleartext requests are rejected before auth/database work.
+app.middleware("http")(enforce_https)

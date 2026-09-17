@@ -404,8 +404,13 @@ def _require_can_remove_execution(execution: models.TestExecution, current_user:
         raise HTTPException(403, f"{key} {reason}.")
 
 
-def _execution_or_404(db: Session, execution_id: int) -> models.TestExecution:
-    obj = db.query(models.TestExecution).get(execution_id)
+def _execution_or_404(db: Session, execution_id: int, *, lock: bool = False) -> models.TestExecution:
+    query = db.query(models.TestExecution).filter_by(id=execution_id)
+    if lock:
+        # Refresh a previously loaded identity after waiting for another worker.
+        # The lock lasts through validation, attempt allocation and commit.
+        query = query.populate_existing().with_for_update()
+    obj = query.one_or_none()
     if not obj:
         raise HTTPException(404, "Execution not found")
     return obj
@@ -622,6 +627,7 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
 
 def _prepare_execution_update(db: Session, obj: models.TestExecution, status_value: str,
                               current_user: models.User, defect_key: str = "") -> models.TestCycle:
+    _execution_or_404(db, obj.id, lock=True)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
@@ -749,7 +755,8 @@ def _record_attempt(db: Session, obj: models.TestExecution, status_value: str,
     existing list/filter/report that reads those columns directly keeps
     working unchanged."""
     _migrate_legacy_result_if_needed(db, obj)
-    next_attempt_no = db.query(models.TestExecutionRun).filter_by(execution_id=obj.id).count() + 1
+    next_attempt_no = (db.query(func.max(models.TestExecutionRun.attempt_no))
+                       .filter_by(execution_id=obj.id).scalar() or 0) + 1
     executed_at = models.now()
     run = models.TestExecutionRun(
         execution_id=obj.id, attempt_no=next_attempt_no, status=status_value,
@@ -1321,7 +1328,7 @@ def update_cycle(cycle_id: int, payload: schemas.TestCycleUpdate, db: Session = 
             request_ids.add(link_id)
         for request_id in sorted(request_ids):
             linked_request = (db.query(models.FunctionalRequest).filter_by(id=request_id)
-                              .populate_existing().with_for_update().first())
+                              .populate_existing().with_for_update().one_or_none())
             if not linked_request:
                 raise HTTPException(404, "Linked Functional QA Request not found")
             require_request_execution_started(linked_request)
@@ -2256,7 +2263,7 @@ def assign_execution(execution_id: int, payload: schemas.TestExecutionAssign,
     unassignment too, not just a hand-off to a named person, so the
     reason requirement can't be bypassed by unassigning and having someone
     else assign fresh."""
-    obj = _execution_or_404(db, execution_id)
+    obj = _execution_or_404(db, execution_id, lock=True)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
@@ -2415,7 +2422,7 @@ def upgrade_execution_version(execution_id: int, payload: schemas.TestExecutionV
     versions-compare in test_repository.py to build the "change summary"
     the SRS describes -- this endpoint only performs the pin change itself
     once the caller has reviewed it)."""
-    obj = _execution_or_404(db, execution_id)
+    obj = _execution_or_404(db, execution_id, lock=True)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)
     require_can_execute_project(db, cycle.project_id, current_user)
@@ -2518,7 +2525,10 @@ def bulk_update_execution_results(
     if len((payload.defect_notes or "").strip()) > 5000:
         raise HTTPException(400, "Defect notes cannot exceed 5,000 characters")
 
-    found = db.query(models.TestExecution).filter(models.TestExecution.id.in_(execution_ids)).all()
+    # Lock in stable order before validating any selected slot. This prevents
+    # two workers allocating the same attempt number or checking stale results.
+    found = (db.query(models.TestExecution).filter(models.TestExecution.id.in_(execution_ids))
+             .order_by(models.TestExecution.id).populate_existing().with_for_update().all())
     found_by_id = {execution.id: execution for execution in found}
     missing = [str(execution_id) for execution_id in execution_ids if execution_id not in found_by_id]
     if missing:
@@ -2689,7 +2699,7 @@ def list_execution_runs(execution_id: int, db: Session = Depends(get_db),
 def add_run_defect(execution_id: int, run_id: int, payload: schemas.TestRunDefectCreate,
                    db: Session = Depends(get_db),
                    current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    obj = _execution_or_404(db, execution_id)
+    obj = _execution_or_404(db, execution_id, lock=True)
     require_project_visibility(db, obj.cycle.project_id, current_user)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)
@@ -2712,7 +2722,7 @@ def add_run_defect(execution_id: int, run_id: int, payload: schemas.TestRunDefec
 def remove_run_defect(execution_id: int, run_id: int, defect_id: int,
                       db: Session = Depends(get_db),
                       current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):
-    obj = _execution_or_404(db, execution_id)
+    obj = _execution_or_404(db, execution_id, lock=True)
     require_project_visibility(db, obj.cycle.project_id, current_user)
     cycle = _get_cycle_or_404(db, obj.cycle_id)
     _require_active_project(db, cycle.project_id)

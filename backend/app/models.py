@@ -4,7 +4,7 @@ from typing import List
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Column, Integer, BigInteger, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index,
+    Column, Integer, BigInteger, Float, String, Text, Boolean, DateTime, ForeignKey, Date, Identity, Index,
     UniqueConstraint, CheckConstraint, text, and_
 )
 from sqlalchemy.orm import relationship, foreign
@@ -18,6 +18,23 @@ from .constants import QAStatus, LoginType, GatewayStatus, FUNCTIONAL_BUCKET_TYP
 # inserts get a generated id instead of failing with ORA-01400.
 def pk_column():
     return Column(Integer, Identity(start=1, increment=1), primary_key=True)
+
+
+class UsedLoginChallenge(Base):
+    __tablename__ = 'qap_used_login_challenges'
+    __table_args__ = (Index('ix_qap_login_challenge_exp', 'expires_at'),)
+    jti = Column(String(64), primary_key=True)
+    expires_at = Column(BigInteger, nullable=False)
+
+
+class LoginFailure(Base):
+    __tablename__ = 'qap_login_failures'
+    __table_args__ = (Index('ix_qap_login_failure_lookup', 'username', 'host', 'attempted_at'),
+                      Index('ix_qap_login_failure_time', 'attempted_at'))
+    id = Column(String(32), primary_key=True)
+    username = Column(String(256), nullable=False)
+    host = Column(String(255), nullable=False)
+    attempted_at = Column(Float, nullable=False)
 
 
 def now():
@@ -2717,14 +2734,16 @@ class TestCase(WorkspaceOwnedContent, Base):
     version-scoped steps used by everything going forward."""
     __tablename__ = "qap_test_cases"
     __table_args__ = (
-        UniqueConstraint("project_id", "import_fingerprint", name="uq_qap_tc_project_import_fp"),
+        Index("uq_qap_tc_import_nonnull",
+              text("CASE WHEN import_fingerprint IS NOT NULL THEN project_id END"),
+              text("CASE WHEN import_fingerprint IS NOT NULL THEN import_fingerprint END"), unique=True),
     )
     id = pk_column()
     origin_workspace_id = Column(Integer, ForeignKey("qap_qa_workspaces.id"), nullable=True, index=True)
     test_case_key = Column(String(60), unique=True, nullable=False)
     project_id = Column(Integer, ForeignKey("qap_test_projects.id"), nullable=False)
     # SHA-256 of the normalized definition supplied by an Excel import.
-    # Manual cases/clones keep NULL. The project-scoped unique constraint is
+    # Manual cases/clones keep NULL. The project-scoped conditional unique index is
     # the final concurrency guard against two users importing the same case
     # at the same time; the importer also compares existing content so cases
     # created before this column was introduced are protected.

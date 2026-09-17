@@ -64,6 +64,8 @@ def decode_access_token(token: str) -> dict:
     payload = jwt.decode(
         token, SECRET_KEY, algorithms=[ALGORITHM],
         issuer=settings.jwt_issuer, audience=settings.jwt_audience,
+        options={"require_exp": True, "require_iat": True, "require_sub": True,
+                 "require_jti": True, "require_iss": True, "require_aud": True},
     )
     if "session_exp" in payload and (
         not isinstance(payload["session_exp"], (int, float))

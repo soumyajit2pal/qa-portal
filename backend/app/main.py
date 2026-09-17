@@ -129,6 +129,8 @@ if settings.cors_origins:
     )
 
 
+from .transport_security import enforce_https
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
@@ -210,9 +212,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     validation errors (bad query params, malformed body, etc.) which
     otherwise bypass http_exception_handler entirely."""
     request_id = _request_id_for(request)
+    errors = exc.errors()
+    if request.url.path.startswith('/api/auth/users'):
+        # Rejected legacy password fields must never be echoed back to clients.
+        errors = [{key: value for key, value in error.items() if key not in {'input', 'ctx'}}
+                  for error in errors]
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors(), "request_id": request_id, "status_code": 422},
+        content={"detail": errors, "request_id": request_id, "status_code": 422},
     )
 
 
@@ -394,6 +401,7 @@ def _log_file_operation(request, response) -> None:
 
 _DOCUMENT_PORTAL_ALLOWED_API_PATHS = {
     "/api/auth/login",
+    "/api/auth/login-key",
     "/api/auth/logout",
     "/api/auth/renew",
     "/api/auth/me",
@@ -780,3 +788,6 @@ def health():
         "database_pool": main_pool_metrics(),
         "circuits": resilience_snapshot(),
     }
+
+# Register last so cleartext requests are rejected before auth/database work.
+app.middleware("http")(enforce_https)

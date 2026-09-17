@@ -100,6 +100,7 @@ class Settings(BaseSettings):
     app_env: str = DEFAULT_PROFILE
     database_url: str | None = None
     secret_key: str = ""
+    login_encryption_private_key_file: str | None = None
     access_token_expire_minutes: int = 30
     session_max_minutes: int = 480
     jwt_issuer: str = "qualityops-api"

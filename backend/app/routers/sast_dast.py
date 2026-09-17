@@ -175,7 +175,8 @@ def _get_or_404(db: Session, model_cls, req_id: int, label: str, lock: bool = Fa
     query = db.query(model_cls).filter_by(id=req_id)
     if lock:
         query = query.populate_existing().with_for_update()
-    obj = query.first()
+    # Primary-key lookup: avoid Oracle-incompatible FETCH FIRST with FOR UPDATE.
+    obj = query.one_or_none()
     if not obj:
         raise HTTPException(404, f"{label} request not found")
     return obj

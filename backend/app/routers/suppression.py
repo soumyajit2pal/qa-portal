@@ -343,7 +343,7 @@ def get_suppression(sup_id: int, db: Session = Depends(get_db), current_user: mo
 @router.put("/{sup_id}", response_model=schemas.SuppressionOut)
 def update_suppression(sup_id: int, payload: schemas.SuppressionCreate, db: Session = Depends(get_db),
                         current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
@@ -408,7 +408,7 @@ def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Se
     must always be linked to exactly one SAST/DAST request (no "unlinked"
     state) -- "delink" means pointing it at a different one via this same
     endpoint, not clearing the link entirely."""
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
@@ -435,7 +435,7 @@ def relink_suppression(sup_id: int, payload: schemas.SuppressionRelinkIn, db: Se
 
 @router.post("/{sup_id}/submit", response_model=schemas.SuppressionOut)
 def submit_suppression(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
@@ -457,7 +457,7 @@ def submit_suppression(sup_id: int, db: Session = Depends(get_db), current_user:
 
 @router.post("/{sup_id}/resubmit", response_model=schemas.SuppressionOut)
 def resubmit_suppression(sup_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     if obj.created_by_id != current_user.id and not current_user.has_role(Role.ADMIN):
@@ -488,7 +488,7 @@ def sm_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = De
                 current_user: models.User = Depends(require_roles(Role.SM))):
     """SM assigns the request on to the Department Head (Approve), sends it
     back to the requester (Return), or rejects it outright."""
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
@@ -518,7 +518,7 @@ def sm_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = De
 @router.post("/{sup_id}/dept-head-decision", response_model=schemas.SuppressionOut)
 def dept_head_decision(sup_id: int, payload: schemas.WorkflowDecision, db: Session = Depends(get_db),
                         current_user: models.User = Depends(require_roles(Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM))):
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require_visible(db, obj, current_user)
@@ -554,7 +554,7 @@ def security_team_decision(sup_id: int, payload: schemas.WorkflowDecision, db: S
     fixing first -- e.g. missing justification or evidence -- choosing (via
     require_dept_head_reapproval) whether the fix needs a fresh Department
     Head approval or can come straight back to Security Team Verification."""
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     _require(obj, "SECURITY_TEAM_VERIFICATION", "Security team decision")
@@ -715,7 +715,7 @@ def list_suppression_documents(sup_id: int, db: Session = Depends(get_db), curre
 @router.post("/{sup_id}/documents", response_model=List[schemas.RequestDocumentOut])
 def upload_suppression_documents(sup_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db),
                                   current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     if not _can_upload_documents(db, obj, current_user):
@@ -741,7 +741,7 @@ def download_suppression_document(sup_id: int, doc_id: int, db: Session = Depend
 @router.delete("/{sup_id}/documents/{doc_id}")
 def delete_suppression_document(sup_id: int, doc_id: int, db: Session = Depends(get_db),
                                  current_user: models.User = Depends(get_current_user)):
-    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().first()
+    obj = db.query(models.SuppressionRequest).filter_by(id=sup_id).populate_existing().with_for_update().one_or_none()
     if not obj:
         raise HTTPException(404, "Suppression request not found")
     doc = doc_store.get_document_or_404(db, "SUPPRESSION", sup_id, doc_id)

@@ -61,7 +61,8 @@ def _get_or_404(db: Session, req_id: int, lock: bool = False):
     query = db.query(models.PerformanceRequest).filter_by(id=req_id)
     if lock:
         query = query.populate_existing().with_for_update()
-    obj = query.first()
+    # Primary-key lookup: avoid Oracle-incompatible FETCH FIRST with FOR UPDATE.
+    obj = query.one_or_none()
     if not obj:
         raise HTTPException(404, "Performance request not found")
     return obj

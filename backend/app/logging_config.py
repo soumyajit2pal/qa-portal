@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 
 from .config import load_environment
+from .process_logging import ProcessSafeRotatingFileHandler
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -91,7 +92,7 @@ def configure_logging() -> logging.Logger:
     )
     context_filter = _RequestContextFilter()
 
-    file_handler = logging.handlers.RotatingFileHandler(
+    file_handler = ProcessSafeRotatingFileHandler(
         LOG_FILE,
         maxBytes=max(1, _env_int("LOG_MAX_BYTES", 10 * 1024 * 1024)),
         backupCount=max(1, _env_int("LOG_BACKUP_COUNT", 5)),

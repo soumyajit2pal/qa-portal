@@ -664,6 +664,39 @@ def delete_item(
     return {"deleted": relative, "is_folder": is_folder}
 
 
+@router.post("/delete-selection")
+def delete_selection(payload: DownloadSelection,
+                     _: models.User = Depends(require_document_portal_manager), db: Session = Depends(get_db)):
+    root, workspace = _scope(db, _)
+    _, current = _path(payload.current_path, must_exist=True, root=root)
+    if not current.is_dir():
+        raise _http_error("The current location is not a folder.")
+    # Validate the entire selection before deleting any content.
+    selected: dict[str, Path] = {}
+    for value in payload.paths:
+        relative, item = _path(value, must_exist=True, root=root)
+        if item == root or item.name == OWNER_FILE:
+            raise _http_error("The workspace root cannot be deleted.")
+        if item.parent != current:
+            raise _http_error("Selected items must belong to the current folder.")
+        selected[relative] = item
+    deleted = []
+    failed = []
+    for relative, item in selected.items():
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            deleted.append(relative)
+            logger.warning("Document Portal item deleted user=%s workspace=%s path=%s",
+                           _log_user(_), workspace.id, relative)
+        except OSError:
+            logger.exception("Document Portal deletion failed user=%s path=%s", _log_user(_), relative)
+            failed.append(relative)
+    return {"deleted": deleted, "failed": failed}
+
+
 @router.get("/download")
 def download(path: str = Query(...), _: models.User = Depends(require_document_portal_viewer),
              db: Session = Depends(get_db)):

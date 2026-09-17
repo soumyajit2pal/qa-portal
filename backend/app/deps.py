@@ -134,7 +134,7 @@ def _resolve_current_user(request: Request, token: str, db: Session) -> models.U
     try:
         payload = decode_access_token(token)
         username = payload.get("sub")
-        if username is None:
+        if not isinstance(username, str) or not username.strip():
             raise credentials_exception
     except JWTError:
         raise credentials_exception

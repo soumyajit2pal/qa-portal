@@ -158,9 +158,7 @@ function CreateUserModal({ onClose, onCreated, departmentOptions, departmentRows
     setBusy(true)
     setError(null)
     try {
-      const payload: Partial<CreateUserForm> & { departments?: string[] } = { ...form, departments }
-      if (payload.login_type === 'LDAP') delete payload.password
-      const created = await api.post<UserOut>('/api/auth/users', payload)
+      const created = await api.createUser<UserOut>({ ...form, departments })
       onCreated(created)
     } catch (err) {
       setError(err)
@@ -219,7 +217,7 @@ function ResetPasswordModal({ userRow, onClose, onDone }: { userRow: UserOut; on
     setBusy(true)
     setError(null)
     try {
-      await api.post(`/api/auth/users/${userRow.id}/reset-password`, { new_password: newPassword })
+      await api.resetUserPassword(userRow.id, newPassword)
       onDone()
     } catch (err) {
       setError(err)
@@ -256,6 +254,14 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, depa
   const [departmentSearch, setDepartmentSearch] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
+  const [unlockMessage, setUnlockMessage] = useState('')
+  async function unlockLogin() {
+    setBusy(true); setError(null); setUnlockMessage('')
+    try {
+      const result = await api.post<{ message: string }>(`/api/auth/users/${userRow.id}/unlock-login`, {})
+      setUnlockMessage(result.message)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
   const isOwnAdminAccount = userRow.id === currentUserId && (userRow.roles || []).includes('ADMIN')
   async function save(e: React.FormEvent) {
     e.preventDefault()
@@ -329,6 +335,13 @@ function ManageUserAccessModal({ userRow, currentUserId, departmentOptions, depa
         <label><input type="checkbox" checked={adminManagedOnly} onChange={(event) => setAdminManagedOnly(event.target.checked)} disabled={busy} /><span><strong>Admin-managed account</strong><small>Hide from local department coordinator rosters.</small></span></label>
         <label title={isOwnAdminAccount ? 'Another Administrator must deactivate your account.' : undefined}><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} disabled={busy || isOwnAdminAccount} /><span><strong>Active account</strong><small>{isOwnAdminAccount ? 'Another Administrator must deactivate your account.' : 'User can sign in and access permitted modules.'}</small></span></label>
       </div>
+      <section className="access-picker-panel">
+        <h3>Sign-in recovery</h3>
+        <p>Five failed attempts from the same IP address within 15 minutes temporarily block sign-in. Clear this user's failed attempts across all IP addresses to let them retry now.</p>
+        <button type="button" className="btn" disabled={busy} onClick={unlockLogin}>Unlock sign-in now</button>
+        <p>This takes effect immediately. It does not reset the password, activate a disabled account, or unlock an account in the bank directory.</p>
+        {unlockMessage && <p role="status">{unlockMessage}</p>}
+      </section>
       <ErrorText error={error} />
       <div className="modal-actions access-manage-actions"><span>Changes apply after saving.</span><button type="button" className="btn" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save access'}</button></div>
     </form>

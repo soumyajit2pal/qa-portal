@@ -165,3 +165,8 @@ Revision `b9e4f6012a38` makes `qap_defects.qa_request_id` nullable and adds
 standalone defects retain explicit workspace/department ownership; request
 links remain optional and may be added later with scope checks. Apply before
 starting the updated API. Existing request links and workflow versions remain.
+
+
+## Deployment recovery: nullable import uniqueness (d63b9f2a8e41)
+
+Current head: `d63b9f2a8e41`. Oracle partially NULL composite unique keys reject repeated project IDs. The corrected 8c6f0a1b2d43 migration excludes NULL fingerprints using a conditional index; d63b9f2a8e41 replaces the old constraint on already-upgraded databases. Testcase history is retained. Rebuild the backend image, stop writers, back up Oracle, then run upgrade head; do not stamp around ORA-02299. See `Deployment_Recovery_2026-09-16.md` in the project root.

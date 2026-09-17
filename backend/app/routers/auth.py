@@ -1,11 +1,9 @@
 from typing import Optional
-from collections import defaultdict, deque
-from threading import Lock
-import time
+from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from jose import JWTError
-from fastapi.security import OAuth2PasswordRequestForm
+from ..login_encryption import encrypted_login_credentials, public_login_key, decrypt_admin_password
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -30,46 +28,27 @@ from ..constants import (
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-_LOGIN_WINDOW_SECONDS = 15 * 60
-_LOGIN_MAX_FAILURES = 5
-_login_failures = defaultdict(deque)
-_login_failure_lock = Lock()
+from ..login_rate_limit import (
+    enforce as _enforce_login_rate_limit,
+    record as _record_login_failure,
+    clear as _clear_login_failures,
+    unlock as _unlock_login_failures,
+)
 
 
-def _login_key(request: Request, username: str) -> tuple[str, str]:
-    return ((request.client.host if request.client else "unknown"), username)
-
-
-def _prune_login_failures(attempts, now: float) -> None:
-    while attempts and now - attempts[0] >= _LOGIN_WINDOW_SECONDS:
-        attempts.popleft()
-
-
-def _enforce_login_rate_limit(request: Request, username: str) -> None:
-    now = time.monotonic()
-    with _login_failure_lock:
-        attempts = _login_failures[_login_key(request, username)]
-        _prune_login_failures(attempts, now)
-        if len(attempts) >= _LOGIN_MAX_FAILURES:
-            retry_after = max(1, int(_LOGIN_WINDOW_SECONDS - (now - attempts[0])))
-            raise HTTPException(
-                status_code=429,
-                detail="Too many failed sign-in attempts. Try again later.",
-                headers={"Retry-After": str(retry_after)},
-            )
-
-
-def _record_login_failure(request: Request, username: str) -> None:
-    now = time.monotonic()
-    with _login_failure_lock:
-        attempts = _login_failures[_login_key(request, username)]
-        _prune_login_failures(attempts, now)
-        attempts.append(now)
-
-
-def _clear_login_failures(request: Request, username: str) -> None:
-    with _login_failure_lock:
-        _login_failures.pop(_login_key(request, username), None)
+@router.post("/users/{user_id}/unlock-login")
+def unlock_login(user_id: int, request: Request, db: Session = Depends(get_db),
+                 current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    user = db.get(models.User, user_id)
+    if not user:
+        raise HTTPException(404, 'User not found')
+    cleared = _unlock_login_failures(db, user.username)
+    db.commit()
+    write_audit(db, event_type='ACCESS_MANAGEMENT', action='LOGIN_UNLOCK', actor=current_user,
+                request=request, status_code=200, target_type='USER', target_id=user.id,
+                target_name=user.full_name, details={'cleared_attempts': cleared})
+    return {'message': 'Sign-in attempts cleared. The user can try signing in again. '
+                       'An active account and valid credentials are still required.'}
 
 
 @router.post("/admin/test-email", response_model=schemas.AdminTestEmailResult)
@@ -137,8 +116,14 @@ def _redact_confidential_roles(user: "models.User", viewer: "models.User") -> "s
     return out
 
 
+@router.get("/login-key")
+def login_key(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return public_login_key()
+
+
 @router.post("/login", response_model=schemas.Token)
-def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(request: Request, form_data = Depends(encrypted_login_credentials), db: Session = Depends(get_db)):
     username = _canonical_login_username(form_data.username)
     _enforce_login_rate_limit(request, username)
     user = db.query(models.User).filter(func.lower(models.User.username) == username).first()
@@ -602,8 +587,8 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
     login_type = payload.login_type or LoginType.STANDARD
     if login_type not in ALL_LOGIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid login_type '{login_type}'")
-    if login_type == LoginType.STANDARD and not payload.password:
-        raise HTTPException(status_code=400, detail="password is required for Standard accounts")
+    password = (decrypt_admin_password(payload.encrypted_password, f"create-user:{payload.username}")
+                if login_type == LoginType.STANDARD else None)
 
     user = models.User(
         username=payload.username, full_name=payload.full_name, email=payload.email,
@@ -611,7 +596,7 @@ def create_user(payload: schemas.UserCreate, request: Request, db: Session = Dep
         show_in_user_dropdowns=payload.show_in_user_dropdowns,
         role_assignments=[models.UserRole(role=r) for r in roles],
         department_assignments=[models.UserDepartment(department=d) for d in departments],
-        hashed_password=hash_password(payload.password) if login_type == LoginType.STANDARD else None,
+        hashed_password=hash_password(password) if login_type == LoginType.STANDARD else None,
     )
     db.add(user)
     db.flush()
@@ -743,9 +728,8 @@ def reset_password(user_id: int, payload: schemas.PasswordReset, request: Reques
     if user.login_type != LoginType.STANDARD:
         raise HTTPException(status_code=400,
                              detail="Only Standard accounts have a local password to reset")
-    if not payload.new_password:
-        raise HTTPException(status_code=400, detail="new_password is required")
-    user.hashed_password = hash_password(payload.new_password)
+    password = decrypt_admin_password(payload.encrypted_password, f"reset-password:{user_id}")
+    user.hashed_password = hash_password(password)
     db.commit()
     db.refresh(user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="PASSWORD_RESET", actor=current_user,

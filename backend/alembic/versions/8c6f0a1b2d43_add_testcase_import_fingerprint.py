@@ -20,6 +20,7 @@ depends_on = None
 _TABLE = "qap_test_cases"
 _COLUMN = "import_fingerprint"
 _CONSTRAINT = "uq_qap_tc_project_import_fp"
+_INDEX = "uq_qap_tc_import_nonnull"
 _CONSTRAINT_COLUMNS = {"project_id", _COLUMN}
 _CLEAR_DUPLICATE_FINGERPRINTS_SQL = sa.text(
     """
@@ -59,7 +60,7 @@ def _has_import_fingerprint_uniqueness(inspector: sa.Inspector) -> bool:
     unique_objects.extend(
         index for index in inspector.get_indexes(_TABLE) if index.get("unique")
     )
-    return any(
+    return any(_normalized(item.get("name")) == _INDEX for item in unique_objects) or any(
         {_normalized(column) for column in item.get("column_names") or []}
         == _CONSTRAINT_COLUMNS
         for item in unique_objects
@@ -76,12 +77,19 @@ def _has_named_constraint(inspector: sa.Inspector) -> bool:
 def _clear_duplicate_import_fingerprints(connection: sa.Connection) -> None:
     """Keep the earliest testcase canonical without deleting historical rows.
 
-    Oracle permits multiple NULL values under a composite unique constraint.
+    A conditional index excludes NULL fingerprints entirely, including on Oracle.
     The application still derives fingerprints for legacy NULL rows when it
     checks an import, so clearing this technical cache value does not let an
     existing duplicate be uploaded again.
     """
     connection.execute(_CLEAR_DUPLICATE_FINGERPRINTS_SQL)
+
+
+def _create_conditional_index():
+    op.create_index(_INDEX, _TABLE, [
+        sa.text("CASE WHEN import_fingerprint IS NOT NULL THEN project_id END"),
+        sa.text("CASE WHEN import_fingerprint IS NOT NULL THEN import_fingerprint END"),
+    ], unique=True)
 
 
 def upgrade() -> None:
@@ -91,7 +99,7 @@ def upgrade() -> None:
     if context.is_offline_mode():
         op.add_column(_TABLE, sa.Column(_COLUMN, sa.String(length=64), nullable=True))
         op.execute(_CLEAR_DUPLICATE_FINGERPRINTS_SQL)
-        op.create_unique_constraint(_CONSTRAINT, _TABLE, ["project_id", _COLUMN])
+        _create_conditional_index()
         return
 
     inspector = sa.inspect(op.get_bind())
@@ -102,12 +110,12 @@ def upgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     if not _has_import_fingerprint_uniqueness(inspector):
         _clear_duplicate_import_fingerprints(op.get_bind())
-        op.create_unique_constraint(_CONSTRAINT, _TABLE, ["project_id", _COLUMN])
+        _create_conditional_index()
 
 
 def downgrade() -> None:
     if context.is_offline_mode():
-        op.drop_constraint(_CONSTRAINT, _TABLE, type_="unique")
+        op.drop_index(_INDEX, table_name=_TABLE)
         op.drop_column(_TABLE, _COLUMN)
         return
 
@@ -116,5 +124,7 @@ def downgrade() -> None:
         op.drop_constraint(_CONSTRAINT, _TABLE, type_="unique")
 
     inspector = sa.inspect(op.get_bind())
+    if any(_normalized(i.get("name")) == _INDEX for i in inspector.get_indexes(_TABLE)):
+        op.drop_index(_INDEX, table_name=_TABLE)
     if _has_column(inspector):
         op.drop_column(_TABLE, _COLUMN)

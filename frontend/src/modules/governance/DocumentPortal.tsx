@@ -273,7 +273,7 @@ export default function DocumentPortal() {
     "folder" | "upload" | "rename" | "move" | null
   >(null);
   const [activeItem, setActiveItem] = useState<Item | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Item[] | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [folderName, setFolderName] = useState("");
   const [newName, setNewName] = useState("");
@@ -708,11 +708,15 @@ export default function DocumentPortal() {
     setDeleteBusy(true);
     setError(null);
     try {
-      await api.del(
-        `/api/document-portal/items?path=${encodeURIComponent(pendingDelete.path)}`,
+      const result = await api.post<{ deleted: string[]; failed: string[] }>(
+        "/api/document-portal/delete-selection",
+        { current_path: path, paths: pendingDelete.map((item) => item.path) },
       );
       setPendingDelete(null);
       await load(path);
+      if (result.failed.length) {
+        setError(new Error(`Deleted ${result.deleted.length} item(s). Could not delete: ${result.failed.join(", ")}. Refresh and try again.`));
+      }
     } catch (caught) {
       setError(caught);
     } finally {
@@ -928,6 +932,16 @@ export default function DocumentPortal() {
               Download selected ({selected.size})
             </button>
           )}
+          {!isSearching && canDelete && selected.size > 0 && (
+            <button
+              className="btn btn-danger"
+              type="button"
+              disabled={deleteBusy}
+              onClick={() => setPendingDelete(visible.filter((item) => selected.has(item.path)))}
+            >
+              Delete selected ({selected.size})
+            </button>
+          )}
         </form>
         {!isSearching && (!isFullscreen || !!path) && (
           <div className="document-breadcrumbs">
@@ -1117,7 +1131,7 @@ export default function DocumentPortal() {
                           <button
                             type="button"
                             className="btn btn-small btn-danger"
-                            onClick={() => setPendingDelete(item)}
+                            onClick={() => setPendingDelete([item])}
                           >
                             Delete
                           </button>
@@ -1498,11 +1512,9 @@ export default function DocumentPortal() {
       )}
       {pendingDelete && (
         <ConfirmModal
-          title={`Delete “${pendingDelete.name}”?`}
+          title={pendingDelete.length === 1 ? `Delete “${pendingDelete[0].name}”?` : `Delete ${pendingDelete.length} selected items?`}
           message={
-            pendingDelete.is_folder
-              ? "This folder and all documents and subfolders inside it will be permanently deleted."
-              : "This document will be permanently deleted."
+            `Selected items: ${pendingDelete.map((item) => item.name).join(", ")}. These files and folders, including all documents and subfolders inside selected folders, will be permanently deleted.`
           }
           confirmLabel="Delete"
           cancelLabel="Cancel"

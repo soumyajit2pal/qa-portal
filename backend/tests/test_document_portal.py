@@ -265,6 +265,34 @@ class DocumentPortalTests(unittest.TestCase):
         self.assertFalse(document.exists())
         self.assertFalse(folder.exists())
 
+    def test_bulk_delete_mixed_items_and_duplicates(self):
+        document_portal.create_folder(document_portal.FolderCreate(name="Release"), self.user, self.db)
+        (self.scope / "Release" / "nested.txt").write_text("nested")
+        (self.scope / "file.txt").write_text("file")
+        result = document_portal.delete_selection(
+            document_portal.DownloadSelection(paths=["file.txt", "Release", "file.txt"]), self.user, self.db)
+        self.assertEqual(result, {"deleted": ["file.txt", "Release"], "failed": []})
+        self.assertFalse((self.scope / "Release").exists())
+        self.assertFalse((self.scope / "file.txt").exists())
+
+    def test_bulk_delete_validates_all_items_before_mutation(self):
+        document_portal.create_folder(document_portal.FolderCreate(name="Release"), self.user, self.db)
+        (self.scope / "file.txt").write_text("keep")
+        (self.scope / "Release" / "nested.txt").write_text("keep")
+        for invalid in ["", "missing.txt", "Release/nested.txt", "../outside"]:
+            with self.subTest(invalid=invalid), self.assertRaises(HTTPException):
+                document_portal.delete_selection(
+                    document_portal.DownloadSelection(paths=["file.txt", invalid]), self.user, self.db)
+            self.assertTrue((self.scope / "file.txt").exists())
+
+    def test_bulk_delete_reports_partial_filesystem_failure(self):
+        document_portal.create_folder(document_portal.FolderCreate(name="Release"), self.user, self.db)
+        (self.scope / "file.txt").write_text("file")
+        with patch.object(document_portal.shutil, "rmtree", side_effect=PermissionError):
+            result = document_portal.delete_selection(
+                document_portal.DownloadSelection(paths=["Release", "file.txt"]), self.user, self.db)
+        self.assertEqual(result, {"deleted": ["file.txt"], "failed": ["Release"]})
+
     def test_document_repository_root_cannot_be_deleted(self):
         with self.assertRaises(HTTPException) as error:
             document_portal.delete_item(path="", _=self.user, db=self.db)

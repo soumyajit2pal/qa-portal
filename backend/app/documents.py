@@ -98,13 +98,17 @@ def save_documents(db: Session, module: str, request_id: int, folder_name: str,
     try:
         for f in files:
             original_name = os.path.basename(f.filename or "unnamed_file")
-            dest_path = os.path.join(request_dir, original_name)
-            if os.path.exists(dest_path):
-                stem, ext = os.path.splitext(original_name)
-                original_name = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
+            stem, ext = os.path.splitext(original_name)
+            # Reserve the name atomically. An exists() check followed by open()
+            # races when two workers upload the same original filename.
+            while True:
                 dest_path = os.path.join(request_dir, original_name)
-
-            with open(dest_path, "xb") as out:
+                try:
+                    output = open(dest_path, "xb")
+                    break
+                except FileExistsError:
+                    original_name = f"{stem}_{uuid.uuid4().hex}{ext}"
+            with output as out:
                 written_paths.append(dest_path)
                 shutil.copyfileobj(f.file, out)
 
