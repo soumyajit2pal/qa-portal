@@ -14,9 +14,12 @@ export default function DepartmentAdmin() {
   const { user } = useAuth()
   const [assignableRoles, setAssignableRoles] = useState<string[]>([])
   const [users, setUsers] = useState<UserOut[]>([])
+  const [loadError, setLoadError] = useState<unknown>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
   const [savingId, setSavingId] = useState<number | null>(null)
   const [emailTarget, setEmailTarget] = useState<UserOut | null>(null)
+  const [recoveryTarget, setRecoveryTarget] = useState<UserOut | null>(null)
   const [reviewRoles, setReviewRoles] = useState<Record<number, string[]>>({})
   const [reviewWorkspaceIds, setReviewWorkspaceIds] = useState<Record<number, string>>({})
   const [approvalWorkspaces, setApprovalWorkspaces] = useState<LocalAdminApprovalWorkspaceOut[]>([])
@@ -38,6 +41,8 @@ export default function DepartmentAdmin() {
   // routers/auth.py::list_local_admin_users' own docstring). This roster is
   // scoped to one department's own headcount, not an org-wide directory.
   const load = useCallback(async () => {
+    setLoading(true)
+    setLoadError(null)
     try {
       const [rows, workspaces, allowedRoles] = await Promise.all([
         api.get<UserOut[]>('/api/auth/local-admin/users'),
@@ -51,7 +56,7 @@ export default function DepartmentAdmin() {
         row.id,
         row.roles.filter((role) => allowedRoles.includes(role)),
       ])))
-    } catch (err) { setError(err) }
+    } catch (err) { setLoadError(err) } finally { setLoading(false) }
   }, [])
   useEffect(() => {
     if (!isSystemAdmin) void load()
@@ -61,6 +66,9 @@ export default function DepartmentAdmin() {
   const approvedUsers = users.filter((row) => !row.needs_role_review)
 
   if (isSystemAdmin) return <Navigate to="/admin" replace />
+
+  if (loading) return <Card title="Department Coordinator"><p role="status">Loading department access…</p></Card>
+  if (loadError) return <Card title="Department Coordinator"><ErrorText error={loadError} /><button className="btn" onClick={() => void load()}>Retry</button></Card>
 
   if (!isDepartmentCoordinator) {
     return (
@@ -139,6 +147,7 @@ export default function DepartmentAdmin() {
             <span className="coordinator-review-identity"><strong>{target.full_name}</strong><small>{target.username} · {(target.departments?.length ? target.departments : [target.department]).filter(Boolean).join(', ')}</small></span>
             <div className="coordinator-review-workspace"><small>Destination workspace</small><SearchableSelect ariaLabel={`Destination workspace for ${target.full_name}`} value={reviewWorkspaceIds[target.id] || ''} onChange={(workspaceId) => setReviewWorkspaceIds((current) => ({ ...current, [target.id]: workspaceId }))} options={approvalWorkspaceOptions(target)} placeholder="Select workspace…" disabled={savingId === target.id} /></div>
             <button type="button" className="btn btn-primary coordinator-review-action" disabled={savingId === target.id || !(reviewRoles[target.id] || []).length || !reviewWorkspaceIds[target.id]} onClick={() => void approvePendingUser(target)}>{savingId === target.id ? 'Approving…' : 'Approve access'}</button>
+            <button type="button" className="btn btn-sm" onClick={() => setRecoveryTarget(target)}>Sign-in recovery</button>
             <div className="coordinator-review-roles"><small>Approved role(s)</small><RoleChipSelect value={reviewRoles[target.id] || []} onChange={(roles) => setReviewRoles((current) => ({ ...current, [target.id]: roles }))} disabled={savingId === target.id} roles={assignableRolesFor(target)} /></div>
           </div>)}
           {!pendingUsers.length && <p className="muted small">No access requests are waiting for your review.</p>}
@@ -199,6 +208,7 @@ export default function DepartmentAdmin() {
                 <button className="btn btn-sm" disabled={savingId === u.id} onClick={() => setEmailTarget(u)}>Update</button>
               </div>
             ), filterValue: (u) => u.email || '' },
+            { key: 'recovery', header: 'Sign-in recovery', render: (u) => <button type="button" className="btn btn-sm" disabled={savingId === u.id} onClick={() => setRecoveryTarget(u)}>Sign-in recovery</button> },
             { key: 'is_active', header: 'Status', render: (u) => (
               <button
                 className={`btn btn-sm ${u.is_active ? '' : 'btn-danger'}`}
@@ -217,6 +227,7 @@ export default function DepartmentAdmin() {
           </p>
         )}
       </Card>
+      {recoveryTarget && <SignInRecovery key={recoveryTarget.id} userRow={recoveryTarget} onClose={() => setRecoveryTarget(null)} />}
       {emailTarget && (
         <EmailEditor
           userRow={emailTarget}
@@ -261,4 +272,25 @@ function EmailEditor({ userRow, busy, onClose, onSave }: {
       </form>
     </Modal>
   )
+}
+
+function SignInRecovery({ userRow, onClose }: { userRow: UserOut; onClose: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState<unknown>(null)
+  async function unlock() {
+    setBusy(true); setMessage(''); setError(null)
+    try {
+      const result = await api.post<{ message: string }>(`/api/auth/local-admin/users/${userRow.id}/unlock-login`, {})
+      setMessage(result.message)
+    } catch (err) { setError(err) } finally { setBusy(false) }
+  }
+  return <Modal title="Sign-in recovery" onClose={onClose} variant="dialog" compact closeDisabled={busy}>
+    <p><strong>{userRow.full_name}</strong> <span className="muted">({userRow.username})</span></p>
+    <p>Clear this user’s failed sign-in attempts so they can try again immediately.</p>
+    <p className="muted small">This does not reset their password, activate a disabled account, or unlock their bank directory account.</p>
+    <ErrorText error={error} />
+    {message && <p className="alert alert-success" role="status">{message}</p>}
+    <div className="modal-actions"><button type="button" className="btn" disabled={busy} onClick={onClose}>Close</button><button type="button" className="btn btn-primary" disabled={busy} onClick={() => void unlock()}>{busy ? 'Unlocking…' : 'Unlock sign-in now'}</button></div>
+  </Modal>
 }

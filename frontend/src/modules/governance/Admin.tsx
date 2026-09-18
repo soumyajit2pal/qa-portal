@@ -1,3 +1,4 @@
+import './RoleSelector.css'
 import WorkspaceDefectWorkflow from '../../components/WorkspaceDefectWorkflow'
 import React, { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
@@ -87,28 +88,50 @@ function rolesAfterToggle(values: string[], role: string): string[] {
 export function RoleChipSelect({ value, onChange, disabled, disabledRoles = [], roles = ALL_ROLES }: {
   value: string[]; onChange: (roles: string[]) => void; disabled?: boolean; disabledRoles?: string[]; roles?: string[]
 }) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState<string[]>([])
+  const [query, setQuery] = useState('')
+  const [selectedOnly, setSelectedOnly] = useState(false)
+  const label = (role: string) => ROLE_LABELS[role] || role
+  const groups: [string, string[]][] = [
+    ['Business & delivery', ['REQUESTER', 'DEVELOPER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER', 'SM', 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM']],
+    ['Quality & security', ['QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA']],
+    ['Other permissions', roles.filter(role => !['REQUESTER', 'DEVELOPER', 'BUSINESS_ANALYST', 'APPLICATION_OWNER', 'SM', 'DEPARTMENT_HEAD_CM', 'DEPARTMENT_HEAD_AGM', 'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA'].includes(role))],
+  ]
+  const visibleGroups = groups.map(([name, entries]) => [name, entries.filter(role => roles.includes(role) && (!selectedOnly || draft.includes(role)) && label(role).toLowerCase().includes(query.trim().toLowerCase()))] as [string, string[]]).filter(([, entries]) => entries.length)
   function toggle(role: string) {
     if (disabled || disabledRoles.includes(role)) return
-    onChange(rolesAfterToggle(value, role))
+    const next = rolesAfterToggle(draft, role)
+    if (disabledRoles.some(locked => draft.includes(locked) !== next.includes(locked))) return
+    setDraft(next)
   }
-  return (
-    <div className="chip-select">
-      {roles.map((r) => {
-        const active = value.includes(r)
-        const roleDisabled = !!disabled || disabledRoles.includes(r)
-        return (
-          <label key={r} className={`chip-toggle ${active ? 'active' : ''} ${roleDisabled ? 'disabled' : ''}`}>
-            <input type="checkbox" checked={active} disabled={roleDisabled} onChange={() => toggle(r)} />
-            <span className="chip-dot">{active && <IconCheckCircle width={9} height={9} strokeWidth={3} />}</span>
-            {ROLE_LABELS[r]}
-          </label>
-        )
-      })}
+  const added = draft.filter(role => !value.includes(role)).length
+  const removed = value.filter(role => !draft.includes(role)).length
+  return <div className="role-access-control">
+    <div className="role-access-summary">
+      <span className="role-access-count" aria-label={`${value.length} selected roles`}>{value.length}</span>
+      <div className="role-access-names">{value.length ? <>{value.slice(0, 2).map(role => <span key={role}>{label(role)}</span>)}{value.length > 2 && <small title={value.slice(2).map(label).join(', ')}>+{value.length - 2} more</small>}</> : <span className="role-access-empty">No roles selected</span>}</div>
+      <button type="button" className="role-access-edit" disabled={disabled} onClick={() => { setDraft([...value]); setQuery(''); setSelectedOnly(false); setOpen(true) }} aria-label="Manage selected roles">Manage</button>
     </div>
-  )
+    {open && <Modal title="Manage roles" variant="dialog" compact onClose={() => setOpen(false)} preventBackdropClose>
+      <div className="role-editor">
+        <p>Select the roles this user needs. Review your changes before applying.</p>
+        <div className="role-editor-tools"><input autoFocus aria-label="Search roles" placeholder="Find a role…" value={query} onChange={event => setQuery(event.target.value)} /><button type="button" aria-pressed={selectedOnly} onClick={() => setSelectedOnly(!selectedOnly)}>Selected <b>{draft.length}</b></button></div>
+        <div className="role-editor-options">
+          {visibleGroups.map(([name, entries]) => <fieldset key={name}><legend>{name}</legend>{entries.map(role => {
+            const next = rolesAfterToggle(draft, role)
+            const locked = !!disabled || disabledRoles.includes(role) || disabledRoles.some(code => draft.includes(code) !== next.includes(code))
+            return <label key={role} className={`role-editor-option${draft.includes(role) ? ' selected' : ''}${locked ? ' locked' : ''}`}><input type="checkbox" checked={draft.includes(role)} disabled={locked} onChange={() => toggle(role)} /><span>{label(role)}</span>{disabledRoles.includes(role) && <small>Protected</small>}</label>
+          })}</fieldset>)}
+          {!visibleGroups.length && <p className="role-editor-empty">{selectedOnly ? 'No selected roles match this view.' : 'No roles match your search.'}</p>}
+        </div>
+        <div className="role-editor-footer"><span>{added || removed ? `${added} added · ${removed} removed` : 'No changes'}<small>{draft.length} role{draft.length === 1 ? '' : 's'} selected</small></span><div><button type="button" className="btn btn-sm" onClick={() => setOpen(false)}>Cancel</button><button type="button" className="btn btn-primary btn-sm" disabled={disabled || (!added && !removed)} onClick={() => { onChange(draft); setOpen(false) }}>Apply roles</button></div></div>
+      </div>
+    </Modal>}
+  </div>
 }
 
-// 2026-08 "one user can be on multiple departments" CR -- mirrors
+
 // RoleChipSelect's own checkbox-chip pattern above, just for a plain string
 // list instead of a role-code-to-label lookup. The FIRST department a user
 // is assigned acts as their "primary"/default wherever exactly one

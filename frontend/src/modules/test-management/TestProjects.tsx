@@ -9,7 +9,7 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import { hasRole, isSelectableUser, QA_LEAD_GROUP_ROLES } from '../../constants'
 import {
   ApplicationMasterOut, TestProjectOut, TestProjectSummaryCountsOut, ApprovalActionOut, DepartmentOut,
-  UserOut, PageOut, TestProjectViewGrantOut, TestProjectWorkspaceOptionOut,
+  UserOut, UserOption, PageOut, TestProjectViewGrantOut, TestProjectWorkspaceOptionOut,
 } from '../../types'
 import JiraActivity from '../../components/JiraActivity'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
@@ -36,7 +36,7 @@ function canEditProjectDetails(user: UserOut | null | undefined, project: TestPr
 function NewProjectModal({ applications, departments, users, currentUserId, onClose, onCreated }: {
   applications: ApplicationMasterOut[]
   departments: DepartmentOut[]
-  users: UserOut[]
+  users: UserOption[]
   currentUserId?: number
   onClose: () => void
   onCreated: (p: TestProjectOut) => void
@@ -136,7 +136,7 @@ function EditProjectModal({ project, applications, departments, users, onClose, 
   project: TestProjectOut
   applications: ApplicationMasterOut[]
   departments: DepartmentOut[]
-  users: UserOut[]
+  users: UserOption[]
   onClose: () => void
   onUpdated: (p: TestProjectOut) => void
 }) {
@@ -234,7 +234,7 @@ function ManageViewAccessModal({ project, departments, onClose }: {
   onClose: () => void
 }) {
   const [grants, setGrants] = useState<TestProjectViewGrantOut[]>([])
-  const [allUsers, setAllUsers] = useState<UserOut[]>([])
+  const [allUsers, setAllUsers] = useState<UserOption[]>([])
   const [workspaces, setWorkspaces] = useState<TestProjectWorkspaceOptionOut[]>([])
   const [loaded, setLoaded] = useState(false)
   const [grantType, setGrantType] = useState<'department' | 'user' | 'workspace'>('department')
@@ -250,7 +250,7 @@ function ManageViewAccessModal({ project, departments, onClose }: {
       // Full active directory, deliberately NOT the QA-only eligible-users
       // list this page otherwise uses -- the whole point of a view grant is
       // reaching someone OUTSIDE the project's own department.
-      api.get<UserOut[]>('/api/auth/users'),
+      api.get<UserOption[]>('/api/auth/user-options'),
       api.get<TestProjectWorkspaceOptionOut[]>(`/api/test-projects/${project.id}/view-access-workspaces`),
     ]).then(([g, u, w]) => { setGrants(g); setAllUsers(u); setWorkspaces(w); setLoaded(true) }).catch((err) => { setError(err); setLoaded(true) })
   }, [project.id])
@@ -434,7 +434,7 @@ export default function TestProjects() {
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [applications, setApplications] = useState<ApplicationMasterOut[]>([])
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState<unknown>(null)
   const [showNew, setShowNew] = useState(false)
   const [summaries, setSummaries] = useState<Record<number, { cases: number; cycles: number }>>({})
@@ -472,8 +472,8 @@ export default function TestProjects() {
         api.get<DepartmentOut[]>('/api/departments'),
         // Test Management-scoped picker -- see constants.
         // the selected workspace on the backend; do not swap
-        // this back to the app-wide /api/auth/users list.
-        api.get<UserOut[]>('/api/test-projects/eligible-users'),
+        // this back to the app-wide /api/auth/user-options list.
+        api.get<UserOption[]>('/api/test-projects/eligible-users'),
         api.get<TestProjectSummaryCountsOut[]>('/api/test-projects/summary-counts?include_inactive=true'),
       ])
       const p = pPage.items

@@ -2354,6 +2354,30 @@ class QASignOff(Base):
     qa_workspace = relationship("QAWorkspace", foreign_keys=[qa_workspace_id])
 
     @property
+    def live_testing_scope(self):
+        source = self.source_functional_request
+        parent = source.qa_request if source else None
+        types = list(dict.fromkeys(t.strip() for t in (parent.request_types or '').split(',') if t.strip())) if parent else []
+        return {
+            'request_id': parent.request_id if parent and len(types) > 1 else self.testing_request_id,
+            'testing_type': ', '.join(types) if types else (self.testing_type or 'Functional'),
+        }
+
+    @property
+    def certificate_testing_request_id(self):
+        scope = (self.certificate_summary or {}).get('testing_scope') or self.live_testing_scope
+        return scope['request_id']
+
+    @property
+    def certificate_testing_type(self):
+        scope = (self.certificate_summary or {}).get('testing_scope') or self.live_testing_scope
+        return scope['testing_type']
+
+    @property
+    def approving_qa_team(self):
+        return self.qa_workspace.name if self.qa_workspace else None
+
+    @property
     def request_department(self):
         return self.source_functional_request.department if self.source_functional_request else None
 

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { api } from '../../api'
 import { formatDateTimeIST } from '../../time'
 import { Card, Table, Badge, ErrorText, PageHeader } from '../../components/Common'
-import { ApprovalActionOut, UserOut } from '../../types'
+import { ApprovalActionOut, UserOption } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 
@@ -15,19 +15,19 @@ const ENTITY_TYPES = [
   'SUPPRESSION', 'SIGNOFF',
 ]
 
-function userName(users: UserOut[], id?: number | null): string | null {
+function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
 }
 
 export default function Approvals() {
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [entityType, setEntityType] = useState('')
   const [search, setSearch] = useState('')
   const [error, setError] = useState<unknown>(null)
 
   useEffect(() => {
-    api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(setError)
+    api.get<UserOption[]>('/api/auth/user-options').then(setUsers).catch(setError)
   }, [])
 
   const {

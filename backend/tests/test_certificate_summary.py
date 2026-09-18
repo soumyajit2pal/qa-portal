@@ -127,3 +127,78 @@ def test_changed_tester_assignment_requires_reapproval(monkeypatch):
     with pytest.raises(HTTPException) as error:
         service.validate(Obj(certificate_summary=snapshot, certificate_type='Full Clearance'), object())
     assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize('types, expected_id, expected_types', [
+    ('Functional Testing', 'TQA-FUNC-03', 'Functional Testing'),
+    ('Functional Testing,SAST,DAST', 'TQA-REQ-03', 'Functional Testing, SAST, DAST'),
+    ('Functional Testing, Performance Testing', 'TQA-REQ-03', 'Functional Testing, Performance Testing'),
+    (' Functional Testing, Functional Testing, ', 'TQA-FUNC-03', 'Functional Testing'),
+])
+def test_certificate_testing_scope(types, expected_id, expected_types):
+    parent = models.QARequest(request_id='TQA-REQ-03', request_types=types)
+    source = models.FunctionalRequest(request_id='TQA-FUNC-03', qa_request=parent)
+    obj = models.QASignOff(testing_request_id=source.request_id, testing_type='Functional', source_functional_request=source)
+    assert obj.certificate_testing_request_id == expected_id
+    assert obj.certificate_testing_type == expected_types
+    assert obj.testing_request_id == 'TQA-FUNC-03'
+    obj.certificate_data_json = json.dumps({'current': {'testing_scope': obj.live_testing_scope}})
+    parent.request_types = 'Functional Testing,DAST,Performance Testing'
+    assert obj.certificate_testing_request_id == expected_id
+    assert obj.certificate_testing_type == expected_types
+
+
+def test_unlinked_legacy_certificate_testing_scope():
+    obj = models.QASignOff(testing_request_id='TQA-FUNC-03', testing_type='Functional')
+    assert obj.certificate_testing_request_id == 'TQA-FUNC-03'
+    assert obj.certificate_testing_type == 'Functional'
+
+
+def test_security_totals_sum_targets_not_overlapping_views_or_rescans():
+    def scan(id, batch, target, auditor, suppressed, other=999):
+        return Obj(id=id, execution_key=batch, targets=[{'id': target}], total_count=other,
+                   suppressed_total_count=suppressed,
+                   filters=[{'title': 'Quick View', 'total_count': other},
+                            {'title': 'Security Auditor View', 'total_count': auditor}])
+    scans = [scan(1, 'initial', 10, 12, 1), scan(2, 'initial', 20, 8, 2),
+             scan(3, 'rescan', 10, 0, 5)]
+    assert service.security_scan_counts(scans) == {'initial_findings': 20, 'current_findings': 8, 'suppression_count': 7}
+
+
+def test_security_legacy_scans_use_initial_total_and_latest_suppressions():
+    scans = [Obj(id=1, execution_key=None, targets=[], filters=[], total_count=9, suppressed_total_count=0),
+             Obj(id=2, execution_key=None, targets=[], filters=[], total_count=0, suppressed_total_count=4)]
+    assert service.security_scan_counts(scans) == {'initial_findings': 9, 'current_findings': 0, 'suppression_count': 4}
+    assert service.security_scan_counts([]) == {'initial_findings': None, 'current_findings': None, 'suppression_count': None}
+
+
+def test_security_export_includes_all_sast_dast_requests_and_zero_counts():
+    snapshot = {'security': [
+        {'type': 'SAST', 'request_id': 'TQA-SAST-01', 'status': 'CLOSED', 'initial_findings': 20, 'suppression_count': 7},
+        {'type': 'DAST', 'request_id': 'TQA-DAST-01', 'status': 'WAITING_FOR_FIX', 'initial_findings': 0, 'suppression_count': 0},
+        {'type': 'DAST', 'request_id': 'TQA-DAST-02', 'status': 'CLOSED', 'findings': 999},
+    ]}
+    rows = service.security_assessment_rows(snapshot)
+    assert len(rows) == 3
+    assert rows[0][3] == '20'
+    assert rows[0][5] == '7'
+    assert rows[1][2] == 'Waiting For Fix'
+    assert rows[1][5] == '0'
+    assert rows[2][3] == 'Not captured'
+    snapshot['security'][0].update(current_findings=2, suppression_request_ids=['TQA-SUP-01', 'TQA-SUP-02'])
+    table = service.security_assessment_table(snapshot)
+    assert '| Current findings | Suppression count | Suppression request ID(s) |' in table
+    assert '| 20 | 2 | 7 | TQA-SUP-01, TQA-SUP-02 |' in table
+    assert 'refresh and full reapproval' in table
+
+
+@pytest.mark.parametrize('defects, expected_total', [([defect(1, 'Closed')], 1), ([], 0)])
+def test_section_c_hides_zero_statuses_and_keeps_total(defects, expected_total):
+    snapshot = service.aggregate([], defects)
+    content = dict(service.markdown_tables(snapshot))['Section C – QA Defect Status Summary']
+    assert f'| Total | {expected_total} |' in content
+    for status in service.DEFECT_BUCKETS:
+        if snapshot['defects']['counts'].get(status, 0):
+            assert f'| {status} |' in content
+        else:
+            assert f'| {status} |' not in content

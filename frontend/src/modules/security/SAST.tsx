@@ -1,3 +1,4 @@
+import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useRequestNavigation, useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
@@ -13,7 +14,7 @@ import JiraActivity from '../../components/JiraActivity'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import RequestDelegation from '../../components/RequestDelegation'
 import { SEVERITIES, PRIORITIES, SAST_DAST_STATUS_LABELS, SAST_DAST_PENDING_WITH, SAST_DAST_ANALYST_REASSIGNABLE_STATUSES, SUPPRESSION_TERMINAL_STATUSES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceRole, isViewOnly, canManageReadinessEvidence } from '../../constants'
-import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOut, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
+import { SASTOut, SASTListOut, SASTComponentOut, ChecklistItemOut, UserOption, ApprovalActionOut, SecurityScanResultOut, SecurityScanSummaryOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
 import { SecurityFindingsNextAction, SecurityRemediationAssignment, SecurityFixDialog, SecurityScanDialog, SecurityScanResults, LinkSuppressionModal } from './SecurityScan'
@@ -306,7 +307,7 @@ function assignedGroupFor(
 }
 
 export function SASTDetail({ req, onClose, onChanged, users }: {
-  req: SASTOut; onClose: () => void; onChanged: (s: SASTOut) => void; users: UserOut[]
+  req: SASTOut; onClose: () => void; onChanged: (s: SASTOut) => void; users: UserOption[]
 }) {
   const { user } = useAuth()
   const [tab, setTab] = useState('overview')
@@ -472,8 +473,8 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   // ORACLE_MIGRATION_2026-07.md section 59.
   const isAssignedQALead = isAdmin || hasRole(user, 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA')
   const isAssignedAnalyst = isAdmin || (hasRole(user, 'SECURITY_ANALYST') && req.security_analyst_id === user?.id)
-  const qaLeads = users.filter((u) => u.is_active && hasWorkspaceRole(u, 'QA_LEAD'))
-  const securityAnalysts = users.filter((u) => u.is_active && hasWorkspaceRole(u, 'SECURITY_ANALYST'))
+  const qaLeads = useUserOptions('qa_lead')
+  const securityAnalysts = useUserOptions('security_analyst')
 
   // Edit access mirrors the backend's own _can_edit_details exactly (see
   // update_sast): the requester (or admin) may edit while it's Draft or
@@ -1165,7 +1166,7 @@ export function SASTDetail({ req, onClose, onChanged, users }: {
   )
 }
 
-function userName(users: UserOut[], id?: number | null): string | null {
+function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
 }
@@ -1178,7 +1179,7 @@ export default function SAST() {
   // is shown.
   const [selected, setSelected] = useState<SASTOut | null>(null)
   const [openingId, setOpeningId] = useState<number | null>(null)
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
   const [assignedOnly, setAssignedOnly] = useState(false)
@@ -1195,7 +1196,7 @@ export default function SAST() {
     // Full user list -- not just security analysts -- so both the Security
     // Lead assignment dropdown and the "Requester" field on the detail view
     // can resolve names from a single fetch.
-    api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
+    api.get<UserOption[]>('/api/auth/user-options').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
   }, [])
 
   const openRequest = useCallback(async (idOrRow: number | SASTListOut) => {

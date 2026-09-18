@@ -1,3 +1,4 @@
+import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from "react";
@@ -53,7 +54,7 @@ import {
 import {
   FunctionalOut,
   FunctionalListOut,
-  UserOut,
+  UserOption,
   ChecklistItemOut,
   ApprovalActionOut,
   SignOffOut,
@@ -710,7 +711,7 @@ function lifecycleStageIndex(status?: string): number {
   return 0;
 }
 
-function userName(users: UserOut[], id?: number | null): string | null {
+function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id);
   return u ? u.full_name : null;
 }
@@ -719,7 +720,7 @@ interface FunctionalDetailProps {
   req: FunctionalOut;
   onClose: () => void;
   onChanged: (req: FunctionalOut) => void;
-  users: UserOut[];
+  users: UserOption[];
 }
 
 export function FunctionalDetail({
@@ -852,12 +853,8 @@ export function FunctionalDetail({
     }
   }
 
-  const qaLeads = users.filter((u) =>
-    u.is_active && hasWorkspaceRole(u, "QA_LEAD")
-  );
-  const testers = users.filter((u) =>
-    u.is_active && hasWorkspaceRole(u, "QA_ENGINEER")
-  );
+  const qaLeads = useUserOptions('qa_lead')
+  const testers = useUserOptions('tester')
 
   const isAdmin = hasRole(user, "ADMIN");
   const viewOnly = isViewOnly(user);
@@ -1860,7 +1857,7 @@ export function FunctionalDetail({
 
 export default function Functional() {
   const viewerManagedDeepLinks = useViewerManagedDeepLinks();
-  const [users, setUsers] = useState<UserOut[]>([]);
+  const [users, setUsers] = useState<UserOption[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
   const [assignedOnly, setAssignedOnly] = useState(false);
   const [raisedHistory, setRaisedHistory] = useState({ from: "", to: "" });
@@ -1882,7 +1879,7 @@ export default function Functional() {
   });
 
   useEffect(() => {
-    api.get<UserOut[]>("/api/auth/users").then(setUsers).catch(setError);
+    api.get<UserOption[]>("/api/auth/user-options").then(setUsers).catch(setError);
   }, []);
 
   const openRequest = useCallback(async (idOrRow: number | FunctionalListOut) => {

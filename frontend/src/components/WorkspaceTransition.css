@@ -1,0 +1,18 @@
+.workspace-transition-backdrop{position:fixed;inset:0;z-index:100000;display:grid;place-items:center;padding:24px;background:rgba(16,38,56,.36);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
+.workspace-transition-panel{width:min(100%,410px);padding:32px 30px 26px;border:1px solid #d7e6ed;border-radius:20px;background:#fff;box-shadow:0 24px 80px #0e2d4329;text-align:center;color:#193950;overflow:hidden}
+.workspace-transition-scene{display:flex;align-items:center;justify-content:center;height:80px;margin-bottom:18px}
+.workspace-transition-tile{display:grid;place-items:center;width:54px;height:58px;border-radius:13px;border:1px solid #cbdde7;background:#f0f6f8;color:#688595;transform:rotate(-9deg)}
+.workspace-transition-tile.tile-destination{width:64px;height:68px;background:#e6f5f7;border-color:#8fc9d3;color:#086f82;transform:rotate(7deg);animation:workspace-arrive 1.8s ease-in-out infinite}
+.workspace-transition-bridge{display:flex;gap:7px;margin:0 17px}
+.workspace-transition-bridge i{width:5px;height:5px;border-radius:2px;background:#0d8296;animation:workspace-transfer 1.4s ease-in-out infinite}
+.workspace-transition-bridge i:nth-child(2){animation-delay:.18s}.workspace-transition-bridge i:nth-child(3){animation-delay:.36s}
+.workspace-transition-eyebrow{font-size:12px!important;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:#587787;margin:0 0 9px!important}
+.workspace-transition-panel h2{font-size:23px;line-height:1.3;letter-spacing:-.5px;margin:0;font-weight:650;overflow-wrap:anywhere;color:#193950}
+.workspace-transition-caption{font-size:13px!important;line-height:1.5;color:#6b818e;margin:12px 0 23px!important}
+.workspace-transition-track{height:3px;max-width:130px;margin:auto;border-radius:3px;background:#e5eff3;overflow:hidden}
+.workspace-transition-track span{display:block;width:45%;height:100%;border-radius:3px;background:#16869a;animation:workspace-travel 1.6s ease-in-out infinite}
+@keyframes workspace-transfer{0%,100%{opacity:.25;transform:translateX(-3px) scale(.8)}50%{opacity:1;transform:translateX(3px) scale(1.2)}}
+@keyframes workspace-arrive{0%,100%{transform:rotate(7deg) translateY(0)}50%{transform:rotate(3deg) translateY(-4px)}}
+@keyframes workspace-travel{0%{transform:translateX(-110%)}100%{transform:translateX(330%)}}
+@media(prefers-reduced-motion:reduce){.workspace-transition-scene *,.workspace-transition-track span{animation:none!important}.workspace-transition-track span{width:100%;opacity:.65}}
+@media(max-width:420px){.workspace-transition-panel{padding:26px 22px}.workspace-transition-panel h2{font-size:21px}}

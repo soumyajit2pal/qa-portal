@@ -3,6 +3,7 @@ import { useRequestNavigation } from './hooks/useRequestNavigation'
 import React, { useEffect, useState, useMemo, useRef } from 'react'
 
 import { api } from './api'
+import { runIndependentLoads } from './independentLoads'
 import { formatDateIST, formatDateTimeIST } from './time'
 import { useAuth } from './context/AuthContext'
 import { Card, MetricCard, BarChart, Table, Badge, ErrorText, Modal, TableColumn, EmptyState } from './components/Common'
@@ -489,7 +490,9 @@ function CommandCentre({ range }: { range: RaisedRange }) {
   const [threeW, setThreeW] = useState<ThreeWOut | null>(null)
   const [activity, setActivity] = useState<ApprovalActionOut[]>([])
   const [summary, setSummary] = useState<DashboardSummaryOut | null>(null)
-  const [error, setError] = useState<unknown>(null)
+  const [sectionErrors, setSectionErrors] = useState<Record<string, unknown>>({})
+  const [activityLoading, setActivityLoading] = useState(true)
+  const [retry, setRetry] = useState(0)
   const [govTab, setGovTab] = useState('Overview')
   // Reported directly: "Dashboard is too much of details and tracker." The
   // 3W governance card below is the densest thing on the default landing
@@ -536,36 +539,27 @@ function CommandCentre({ range }: { range: RaisedRange }) {
   useEffect(() => {
     let cancelled = false
     const query = rangeQuery(range)
-    setError(null)
-    async function loadCommandCentre() {
+    setSectionErrors({})
+    setProj(null); setThreeW(null); setSummary(null); setActivity([]); setActivityLoading(true)
+    const load = <T,>(key: string, path: string, publish: (value: T) => void) => async () => {
+      if (cancelled) return
       try {
-        // Keep the dashboard responsive without creating a four-connection
-        // burst for every visitor.  Two bounded batches are a deliberate
-        // production-load limit; each endpoint remains independently cached
-        // or optimized server-side.
-        const [p, w] = await Promise.all([
-          api.get<ProjectWiseOut>(`/api/dashboard/project-wise${query}`),
-          api.get<ThreeWOut>(`/api/dashboard/3w${query}`),
-        ])
-        const [a, s] = await Promise.all([
-          // The dashboard renders only five rows. Its dedicated endpoint
-          // resolves references in batches rather than downloading the audit
-          // feed's full history.
-          api.get<ApprovalActionOut[]>(`/api/dashboard/recent-activity${query}${query ? '&' : '?'}limit=5`),
-          // DSH-001..004 summary is cached server-side and replaces the
-          // earlier browser-side list aggregation.
-          api.get<DashboardSummaryOut>(`/api/dashboard/summary${query}`),
-        ])
-        if (!cancelled) {
-          setProj(p); setThreeW(w); setActivity(a); setSummary(s)
-        }
-      } catch (loadError) {
-        if (!cancelled) setError(loadError)
+        const result = await api.get<T>(path)
+        if (!cancelled) publish(result)
+      } catch (error) {
+        if (!cancelled) setSectionErrors(previous => ({ ...previous, [key]: error }))
+      } finally {
+        if (!cancelled && key === 'activity') setActivityLoading(false)
       }
     }
-    void loadCommandCentre()
+    void runIndependentLoads([
+      load('projects', `/api/dashboard/project-wise${query}`, setProj),
+      load('summary', `/api/dashboard/summary${query}`, setSummary),
+      load('governance', `/api/dashboard/3w${query}`, setThreeW),
+      load('activity', `/api/dashboard/recent-activity${query}${query ? '&' : '?'}limit=5`, setActivity),
+    ])
     return () => { cancelled = true }
-  }, [range])
+  }, [range, retry])
 
   const teams = useMemo(() => threeW ? Object.keys(threeW.team_wise_distribution) : [], [threeW])
   const priorities = useMemo(() => threeW
@@ -574,7 +568,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
   const visibleItems = useMemo<ThreeWItem[]>(() => {
     if (!threeW) return []
     const query = governanceSearch.trim().toLowerCase()
-    return threeW.items.filter((i) => (
+    return (threeW?.items || []).filter((i) => (
       (!teamFilter || i.responsible_team === teamFilter)
       && (!priorityFilter || i.priority === priorityFilter)
       && (!ageingFilter || i.ageing_bucket === ageingFilter)
@@ -591,20 +585,21 @@ function CommandCentre({ range }: { range: RaisedRange }) {
     [activity, range]
   )
 
-  if (error) return <ErrorText error={error} />
-  if (!proj || !threeW || !summary) return <DashboardLoadingSkeleton />
+  const sectionPlaceholder = (key: string, label: string) => <div role="status">
+    {sectionErrors[key] ? <><strong>{label} unavailable</strong><ErrorText error={sectionErrors[key]} /><button className="btn btn-sm" onClick={() => setRetry(value => value + 1)}>Retry dashboard</button></> : <p>Loading {label.toLowerCase()}…</p>}
+  </div>
 
-  const m = proj.metrics
-  const slaWithin = threeW.items.filter((i) => i.ageing_days <= 7).length
-  const slaNear = threeW.items.filter((i) => i.ageing_days > 7 && i.ageing_days <= 15).length
-  const slaBreached = threeW.items.filter((i) => i.ageing_days > 15).length
-  const highRiskPending = threeW.items.filter((i) => ['Critical', 'High'].includes(i.priority || '')).length
+  const m = proj?.metrics
+  const slaWithin = (threeW?.items || []).filter((i) => i.ageing_days <= 7).length
+  const slaNear = (threeW?.items || []).filter((i) => i.ageing_days > 7 && i.ageing_days <= 15).length
+  const slaBreached = (threeW?.items || []).filter((i) => i.ageing_days > 15).length
+  const highRiskPending = (threeW?.items || []).filter((i) => ['Critical', 'High'].includes(i.priority || '')).length
   // DSH-001..004 -- nearingRelease/criticalPending/activeRequestsCount below
   // all now come straight from the summary endpoint (see its own docstring
   // for exact query definitions) instead of being derived here from full
   // request-row collections.
-  const criticalPending = summary.critical_pending_count
-  const activeRequestsCount = summary.active_requests_count
+  const criticalPending = summary?.critical_pending_count
+  const activeRequestsCount = summary?.active_requests_count
 
   const attentionColumns: TableColumn<ThreeWItem>[] = [
     { key: 'project_id', header: 'Project' },
@@ -674,7 +669,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         </div>
       </div>
       <div className="grid dashboard-metric-grid dashboard-metric-grid-five">
-        <StatCard icon={IconGrid} iconClass="blue" tag="Distinct CR / EPIC" value={m.active_projects} label="Active CRs / EPICs"
+        {m ? <><StatCard icon={IconGrid} iconClass="blue" tag="Distinct CR / EPIC" value={m.active_projects} label="Active CRs / EPICs"
                   hint="Distinct CR/EPICs with at least one active Functional QA request."
                   footline="Source: active Functional QA requests"
                   loading={attentionLoading && attentionMetric === 'active-projects'}
@@ -689,8 +684,8 @@ function CommandCentre({ range }: { range: RaisedRange }) {
                   hint="Functional, SAST, DAST, or Suppression records waiting at a decision step."
                   footline="Grouped across all decision workflows in your visible scope"
                   loading={attentionLoading && attentionMetric === 'pending-decisions'}
-                  onOpen={() => openAttention('pending-decisions')} />
-        <StatCard icon={IconWorkflow} iconClass="purple" tag="Child requests" value={activeRequestsCount} label="Active child requests"
+                  onOpen={() => openAttention('pending-decisions')} /></> : sectionPlaceholder('projects', 'Portfolio metrics')}
+        {summary ? <><StatCard icon={IconWorkflow} iconClass="purple" tag="Child requests" value={activeRequestsCount} label="Active child requests"
                   hint="Still-open Functional, SAST, DAST, and Performance requests raised within the selected period."
                   footline={`${summary.child_requests_total} total child request${summary.child_requests_total === 1 ? '' : 's'} in the selected range`}
                   loading={attentionLoading && attentionMetric === 'active-requests'}
@@ -699,7 +694,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
                   hint="Governed defects reported within the selected period, with resolver and execution traceability."
                   footline={`${summary.defects_open} open · ${summary.defect_reopen_events} reopen event${summary.defect_reopen_events === 1 ? '' : 's'}`}
                   loading={attentionLoading && attentionMetric === 'defects'}
-                  onOpen={() => openAttention('defects')} />
+                  onOpen={() => openAttention('defects')} /></> : sectionPlaceholder('summary', 'Request summary')}
       </div>
 
       {attentionMetric && (
@@ -753,7 +748,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
         </Modal>
       )}
 
-      <Card
+      {threeW ? <Card
         style={{ marginTop: 18 }}
         title="3W project governance"
         subtitle="What is pending, where it is pending, and since when."
@@ -878,7 +873,7 @@ function CommandCentre({ range }: { range: RaisedRange }) {
             <Donut data={threeW.ageing_bucket_distribution} size={160} />
           </div>
         )}
-      </Card>
+      </Card> : sectionPlaceholder('governance', 'Project governance')}
 
       <div className="dashboard-section-head dashboard-lower-head"><div><span>Delivery flow</span><h3>Lifecycle and activity</h3></div></div>
       <div className="grid grid-2 dashboard-lower-grid">
@@ -886,10 +881,10 @@ function CommandCentre({ range }: { range: RaisedRange }) {
           title="QA Lifecycle Health"
           subtitle="Functional requests by current workflow stage"
         >
-          <LifecycleStepper statusCounts={summary.functional_status_counts} />
+          {summary ? <LifecycleStepper statusCounts={summary.functional_status_counts} /> : sectionPlaceholder('summary', 'Lifecycle health')}
         </Card>
         <Card title="Recent Activity" subtitle="Activity within the selected reporting period">
-          <RecentActivity items={filteredActivity} />
+          {activityLoading || sectionErrors.activity ? sectionPlaceholder('activity', 'Recent activity') : <RecentActivity items={filteredActivity} />}
         </Card>
       </div>
     </div>

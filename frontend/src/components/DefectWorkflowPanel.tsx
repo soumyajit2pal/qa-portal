@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useDefectSubmissionConfirmation } from '../defectSubmission'
-import { DefectOut, UserOut, DepartmentOut, RequestDocumentOut } from '../types'
+import { DefectOut, UserOption, DepartmentOut, RequestDocumentOut } from '../types'
 import { useAuth } from '../context/AuthContext'
 import { ENVIRONMENTS, isViewOnly, hasWorkflowRole } from '../constants'
 import { ErrorText, Field } from './Common'
@@ -10,7 +10,7 @@ import JiraRichTextField from './JiraRichTextField'
 import { MarkdownComment } from './JiraActivity'
 
 export default function DefectWorkflowPanel({ defect, users, departments, onChanged }: {
-  defect: DefectOut; users: UserOut[]; departments: DepartmentOut[]; onChanged: (d: DefectOut) => void
+  defect: DefectOut; users: UserOption[]; departments: DepartmentOut[]; onChanged: (d: DefectOut) => void
 }) {
   const { confirmDefectSubmission, confirmationModal } = useDefectSubmissionConfirmation()
   const { user } = useAuth()
@@ -52,14 +52,14 @@ export default function DefectWorkflowPanel({ defect, users, departments, onChan
     || state.occurrences?.some(occurrence => occurrence.environment === 'Production')
     || ['Ready for Release', 'Production Verification'].includes(defect.status)
   const field = (key: string, label: string, required = true, type = 'text') => <Field label={label + (required ? ' *' : '')}><input disabled={busy} type={type} required={required} value={data[key] || ''} onChange={e => setData({ ...data, [key]: e.target.value })} /></Field>
-  const [candidates, setCandidates] = useState<Record<string, UserOut[]>>({})
+  const [candidates, setCandidates] = useState<Record<string, UserOption[]>>({})
   const [loadingCandidates, setLoadingCandidates] = useState(false)
   const [candidateError, setCandidateError] = useState<unknown>(null)
   useEffect(() => {
     if (!choice) return
     let active = true
     setCandidates({}); setLoadingCandidates(true); setCandidateError(null)
-    api.get<Record<string, UserOut[]>>(`/api/defects/${defect.id}/workflow-candidates?department=${encodeURIComponent(data.assigned_team || '')}`)
+    api.get<Record<string, UserOption[]>>(`/api/defects/${defect.id}/workflow-candidates?department=${encodeURIComponent(data.assigned_team || '')}`)
       .then(result => {
         if (!active) return
         setCandidates(result)

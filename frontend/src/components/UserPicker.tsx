@@ -24,7 +24,7 @@ export interface UserPickerProps {
 
 export interface PickerUser {
   id: number
-  username: string
+  username?: string
   full_name: string
   department?: string | null
   departments?: string[]
@@ -42,7 +42,7 @@ export function userRoleLabels(user: PickerUser): string[] {
 function UserDetails({ user, showRoles }: { user: PickerUser; showRoles: boolean }) {
   const roles = userRoleLabels(user)
   const departments = userDepartments(user)
-  if (!showRoles) {
+  if (!showRoles || !user.roles) {
     return departments.length > 0
       ? <small>({departments.join(', ')})</small>
       : null
@@ -74,7 +74,7 @@ export default function UserPicker({
   const normalizedQuery = query.trim().toLowerCase()
   const filtered = normalizedQuery
     ? candidates.filter((user) => user.full_name.toLowerCase().includes(normalizedQuery)
-      || user.username.toLowerCase().includes(normalizedQuery)
+      || (user.username || '').toLowerCase().includes(normalizedQuery)
       || userDepartments(user).some((department) => department.toLowerCase().includes(normalizedQuery))
       || userRoleLabels(user).some((role) => role.toLowerCase().includes(normalizedQuery)))
     : candidates
@@ -135,7 +135,7 @@ export default function UserPicker({
   const panel = open && <div className="searchable-select-panel searchable-select-panel-fixed" style={{ top: panelPos.top, bottom: panelPos.bottom, left: panelPos.left, width: panelPos.width }}>
     <div className="searchable-select-search">
       <IconSearch width={13} height={13} />
-      <ClearableSearchInput ref={inputRef} placeholder={searchPlaceholder || 'Search by name, username, department, or role...'} value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery('')} clearLabel="Clear user search" />
+      <ClearableSearchInput ref={inputRef} placeholder={searchPlaceholder || 'Search users...'} value={query} onChange={(event) => setQuery(event.target.value)} onClear={() => setQuery('')} clearLabel="Clear user search" />
     </div>
     <div className="searchable-select-list">
       {showClearOption && (
@@ -175,7 +175,7 @@ export default function UserPicker({
     <button ref={(element) => { triggerRef.current = element }} type="button" className="searchable-select-trigger" disabled={disabled} aria-expanded={open} onClick={toggleOpen}>
       <span className={selectedUser ? 'user-assign-selected' : 'muted'}>
         <span>{selectedUser ? selectedUser.full_name : placeholder}</span>
-        {selectedUser && showRoles && <small>{userRoleLabels(selectedUser).join(' · ') || 'No role assigned'}</small>}
+        {selectedUser && showRoles && selectedUser.roles && <small>{userRoleLabels(selectedUser).join(' · ') || 'No role assigned'}</small>}
       </span>
       <span className="caret">&#9662;</span>
     </button>

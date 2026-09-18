@@ -1,3 +1,5 @@
+import './Defects.css'
+import { useUserOptions } from '../../hooks/useUserOptions'
 import DefectWorkflowDiagram from '../../components/DefectWorkflowDiagram'
 import LinkDefectRequest from '../../components/LinkDefectRequest'
 import DefectWorkflowPanel from '../../components/DefectWorkflowPanel'
@@ -14,7 +16,7 @@ import SearchableSelect from '../../components/SearchableSelect'
 import UserAssignSelect from '../../components/UserAssignSelect'
 import {
   ApplicationMasterOut, ApprovalActionOut, DefectDashboardOut, DefectLinkableExecutionOut, DefectListOut, DefectOut, DepartmentOut,
-  PageOut, QARequestListOut, QARequestOut, QAWorkspaceOut, RequestDocumentOut, UserOut,
+  PageOut, QARequestListOut, QARequestOut, QAWorkspaceOut, RequestDocumentOut, UserOption,
 } from '../../types'
 import { useAuth } from '../../context/AuthContext'
 import { ENVIRONMENTS, DEFECT_REASSIGNABLE_STATUSES, QA_REQUEST_CREATOR_ROLES, hasWorkflowRole as hasRole, hasDepartment, hasWorkspaceMembership, hasWorkspaceRole, canReassign, userDepartments, isSelectableUser, isViewOnly } from '../../constants'
@@ -412,8 +414,8 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
       <div className="grid grid-2">
         <Field label="Module / Feature *"><input required disabled={!!createdDefect} value={moduleFeature} onChange={(e) => setModuleFeature(e.target.value)} /></Field>
         <Field label="Environment *"><select required value={environment} onChange={(e) => setEnvironment(e.target.value)}><option value="" disabled>Select environment…</option>{ENVIRONMENTS.map((value) => <option key={value} value={value}>{value}</option>)}</select></Field>
-        <Field label="Severity *"><select value={severity} onChange={(e) => setSeverity(e.target.value)}>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select></Field>
-        <Field label="Priority *"><select value={priority} onChange={(e) => setPriority(e.target.value)}>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select></Field>
+        <Field label="Severity *"><select aria-label="Filter by severity" value={severity} onChange={(e) => setSeverity(e.target.value)}>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select></Field>
+        <Field label="Priority *"><select aria-label="Filter by priority" value={priority} onChange={(e) => setPriority(e.target.value)}>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select></Field>
       </div>
       {selected && <Field label="Other affected Test Cases (optional)">
         <div className="defect-case-picker">
@@ -475,7 +477,7 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
 }
 
 function TransitionModal({ defect, target, users, departments, requestDepartment, defects, hasEvidence, onEvidenceAttached, onClose, onChanged }: {
-  defect: DefectOut; target: string; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]
+  defect: DefectOut; target: string; users: UserOption[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]
   hasEvidence: boolean
   onEvidenceAttached: (documents: RequestDocumentOut[]) => void
   onClose: () => void; onChanged: (defect: DefectOut) => void
@@ -483,7 +485,7 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
   const { confirmDefectSubmission, confirmationModal } = useDefectSubmissionConfirmation()
 
   const autoDepartment = defect.project_department || requestDepartment || ''
-  const retestUsers = users.filter((user) => isSelectableUser(user) && hasRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA'))
+  const retestUsers = useUserOptions('retest', defect.qa_workspace_id)
   const suggestedRetestOwner = defect.retest_tester_id || defect.execution_assignee_id || defect.reporter_id
   const [values, setValues] = useState<Record<string, any>>(
     target === 'Triaged'
@@ -608,7 +610,7 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
 // Reassignment is an ownership action. It changes the responsible user
 // without changing the lifecycle state and requires an audit reason.
 function ReassignDefectModal({ defect, users, onClose, onChanged }: {
-  defect: DefectOut; users: UserOut[]
+  defect: DefectOut; users: UserOption[]
   onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
   const [assigneeId, setAssigneeId] = useState<number | ''>('')
@@ -621,14 +623,10 @@ function ReassignDefectModal({ defect, users, onClose, onChanged }: {
   const eligibleDepartments = Array.from(new Set(
     teammateDepartments.length ? teammateDepartments : (defect.assigned_team ? [defect.assigned_team] : []),
   ))
-  const eligibleUsers = users.filter((candidate) => isSelectableUser(candidate) && candidate.id !== defect.assignee_id
-    && (!defect.qa_workspace_id || hasWorkspaceMembership(candidate, defect.qa_workspace_id))
-    && (!candidate.roles.includes('ADMIN') || hasDepartment(candidate, defect.department))
-    && (hasRole(candidate, 'QA_ENGINEER', 'QA_LEAD', 'SECURITY_ANALYST', 'CHIEF_MANAGER_QA', 'AGM_QA')
-      || userDepartments(candidate).some((department) => eligibleDepartments.includes(department))))
+  const eligibleUsers = useUserOptions('defect_reassign', defect.qa_workspace_id, defect.id)
 
   function selectAssignee(value: string) {
-    const selectedUser = users.find((candidate) => String(candidate.id) === value)
+    const selectedUser = eligibleUsers.find((candidate) => String(candidate.id) === value)
     setAssigneeId(value ? Number(value) : '')
     if (!selectedUser) { setAssignedTeam(''); return }
     const selectedDepartments = userDepartments(selectedUser)
@@ -791,7 +789,7 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
 }
 
 function DefectDetail({ defect, users, departments, requestDepartment, defects, contexts, closeBeforeNavigate = false, onClose, onChanged }: {
-  defect: DefectOut; users: UserOut[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]; contexts: ExecutionContext[]; closeBeforeNavigate?: boolean; onClose: () => void; onChanged: (defect: DefectOut) => void
+  defect: DefectOut; users: UserOption[]; departments: DepartmentOut[]; requestDepartment?: string | null; defects: DefectListOut[]; contexts: ExecutionContext[]; closeBeforeNavigate?: boolean; onClose: () => void; onChanged: (defect: DefectOut) => void
 }) {
   const navigate = useRequestNavigation()
   const { user } = useAuth()
@@ -805,6 +803,9 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const [showLinkedExecutions, setShowLinkedExecutions] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [actionsOpen, setActionsOpen] = useState(false)
+  const [detailTab, setDetailTab] = useState('overview')
+  const detailTabs = [['overview', 'Overview'], ['resolution', 'Resolution'], ['trace', 'Linked work'], ['evidence', 'Evidence'], ['activity', 'Activity']]
+  useEffect(() => { setDetailTab('overview') }, [defect.id])
   const actionsRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     api.get<ApprovalActionOut[]>(`/api/approvals?entity_type=DEFECT&entity_id=${defect.id}`).then(setActivity).catch(() => setActivity([]))
@@ -935,8 +936,11 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   }
   return <>
     <Modal title={`${defect.defect_key} · ${defect.title}`} onClose={onClose} wide>
+      <div className="defect-review">
       <div className="defect-detail-hero">
         <div className="defect-detail-summary"><span className="defect-detail-kicker">DEFECT OVERVIEW · {defect.application_name} · {defect.module_feature}</span><div><Badge status={defect.status} /><span className={`defect-severity ${defect.severity.toLowerCase()}`}>{defect.severity} severity</span><span className="defect-priority-pill">{defect.priority}</span>{defect.workflow_state?.blocked && <span className="badge badge-yellow">Blocked</span>}</div></div>
+        <div className="defect-review-tools">
+        <button type="button" className="btn btn-sm" onClick={() => { setDetailTab('resolution'); document.getElementById(`defect-${defect.id}-tab-resolution`)?.focus() }}>View resolution</button>
         {showActions && <div className="defect-actions" ref={actionsRef}>
           <button type="button" className="btn btn-primary btn-sm defect-actions-trigger" aria-haspopup="menu" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}>
             Actions <span aria-hidden="true">⌄</span>
@@ -955,13 +959,31 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
           </div>}
         </div>}
       </div>
+      </div>
       <section className="defect-overview-grid" aria-label="Defect at a glance">
         <div className="defect-overview-fact"><span>Current stage</span><strong>{defect.status}</strong><small>{defect.workflow ? `Workflow version ${defect.workflow.version}` : 'Legacy defect workflow'}</small></div>
         <div className={`defect-overview-fact impact-${productionImpact.toLowerCase().replace(/\s+/g, '-')}`}><span>Production impact</span><strong>{productionImpact === 'Affected' ? 'Production affected' : productionImpact === 'Unaffected' ? 'Production unaffected' : productionImpact}</strong><small>{productionImpact === 'Affected' ? 'Production verification required' : productionImpact === 'Unaffected' ? 'Issue limited to test environments' : 'Review the observation and assessment'}</small></div>
         <div className="defect-overview-fact"><span>Responsible now</span><strong>{stageOwner || 'Not assigned yet'}</strong><small>{defect.assigned_team || 'Department not assigned'}</small></div>
         <div className={`defect-overview-fact ${traceRows.length ? 'trace-linked' : 'trace-missing'}`}><span>Execution trace</span><strong>{traceRows.length ? `${traceRows.length} linked testcase${traceRows.length === 1 ? '' : 's'}` : 'No execution linked'}</strong><small>{traceRows.length ? `Across ${traceCycleCount || 1} test cycle${traceCycleCount === 1 ? '' : 's'}` : 'Link a failed or blocked execution to complete traceability'}</small></div>
       </section>
-      {!defect.qa_request_id && !viewOnly && (manager || assignee || defect.reporter_id === user?.id) && !['Closed', 'Duplicate', 'Rejected', 'Not a Defect'].includes(defect.status) && <LinkDefectRequest defect={defect} onChanged={onChanged} />}
+      <ErrorText error={error} />
+      <div className="defect-review-tabs" role="tablist" aria-label="Defect sections">
+        {detailTabs.map(([key, label], index) => <button key={key} type="button" role="tab" id={`defect-${defect.id}-tab-${key}`} aria-controls={`defect-${defect.id}-panel-${key}`} aria-selected={detailTab === key} tabIndex={detailTab === key ? 0 : -1} onClick={() => setDetailTab(key)} onKeyDown={event => {
+          const next = event.key === 'ArrowRight' ? (index + 1) % detailTabs.length : event.key === 'ArrowLeft' ? (index + detailTabs.length - 1) % detailTabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? detailTabs.length - 1 : null
+          if (next !== null) { event.preventDefault(); setDetailTab(detailTabs[next][0]); document.getElementById(`defect-${defect.id}-tab-${detailTabs[next][0]}`)?.focus() }
+        }}>{label}{key === 'evidence' && <span>{documents.length}</span>}{key === 'trace' && <span>{traceRows.length}</span>}</button>)}
+      </div>
+      <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-overview`} aria-labelledby={`defect-${defect.id}-tab-overview`} hidden={detailTab !== 'overview'} tabIndex={0}>
+      <div className="defect-detail-grid">
+        <div className="defect-detail-main">
+          <section><span className="defect-section-label">Issue definition</span><h4>Description</h4><AuthenticatedMarkdown value={defect.description} basePath={`/api/defects/${defect.id}/attachments`} /></section>
+          <section><span className="defect-section-label">Reproduction evidence</span><h4>Steps to Reproduce</h4><AuthenticatedMarkdown value={defect.steps_to_reproduce} basePath={`/api/defects/${defect.id}/attachments`} /></section>
+          <div className="defect-result-compare"><section className="actual"><h4>Actual Result</h4><AuthenticatedMarkdown value={defect.actual_result} basePath={`/api/defects/${defect.id}/attachments`} /></section><section className="expected"><h4>Expected Result</h4><AuthenticatedMarkdown value={defect.expected_result} basePath={`/api/defects/${defect.id}/attachments`} /></section></div>
+        </div>
+        <aside className="defect-detail-aside"><section><span className="defect-section-label">Operating context</span><h4>Defect properties</h4><dl><dt>Application</dt><dd>{defect.application_name}</dd><dt>Module / Feature</dt><dd>{defect.module_feature}</dd><dt>Environment</dt><dd>{defect.environment}</dd><dt>Build</dt><dd>{defect.build_version || '—'}</dd><dt>Reporter</dt><dd>{defect.reporter_name}</dd><dt>Assignee</dt><dd>{defect.assignee_name || 'Unassigned'}</dd></dl></section></aside>
+      </div>
+      </div>
+      <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-resolution`} aria-labelledby={`defect-${defect.id}-tab-resolution`} hidden={detailTab !== 'resolution'} tabIndex={0}>
       {defect.workflow && <DefectWorkflowPanel key={`${defect.id}-${defect.workflow_revision}`} defect={defect} users={users} departments={departments} onChanged={onChanged} />}
       {!defect.workflow && <div className="defect-lifecycle">
         <div className="defect-lifecycle-track" aria-label="Defect lifecycle">
@@ -973,6 +995,22 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
         {legacyAssigned && <div className="defect-lifecycle-legacy"><strong>Assigned</strong><span>Owner assigned · ready to start work</span></div>}
         {lifecycleIndex < 0 && !terminalOutcomes.includes(defect.status) && <div className="defect-lifecycle-exception"><strong>{defect.status}</strong><span>Exception workflow state</span></div>}
       </div>}
+      {hasWorkflowRecord && <section className="defect-workflow-details">
+        <div className="defect-workflow-heading"><div><span className="defect-section-label">Decision record</span><h4>Workflow records</h4></div><span className="defect-readonly-pill">Read-only after submission</span></div>
+        <p className="defect-workflow-help">Each card shows the fields captured by that workflow action. Submitted decisions stay read-only to preserve the audit trail; later changes are recorded through the next available workflow action and Activity.</p>
+        <div className="defect-workflow-records">
+          {defect.assignment_remarks && <article className="defect-workflow-record"><header><div><strong>Triage and assignment</strong><span>Ownership decision</span></div><small>{defect.assigned_by_name || 'Assigned user'}{defect.assigned_at ? ` · ${formatDateIST(defect.assigned_at)}` : ''}</small></header><div className="defect-workflow-content"><strong>Assignment note</strong><AuthenticatedMarkdown value={defect.assignment_remarks} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
+          {hasResolutionRecord && <article className="defect-workflow-record"><header><div><strong>Resolution submitted</strong><span>Fix record and QA handoff</span></div><small>{defect.resolved_at ? formatDateIST(defect.resolved_at) : 'Resolution record'}</small></header><dl className="defect-workflow-facts"><dt>Resolution type</dt><dd>{defect.resolution_type || '—'}</dd><dt>Fixed build</dt><dd>{defect.fixed_build_version || '—'}</dd><dt>QA retest owner</dt><dd>{retestOwnerName || (defect.retest_tester_id ? `User #${defect.retest_tester_id}` : '—')}</dd></dl>{defect.resolution_summary && <div className="defect-workflow-content"><strong>Resolution summary</strong><AuthenticatedMarkdown value={defect.resolution_summary} basePath={`/api/defects/${defect.id}/attachments`} /></div>}{defect.root_cause && <div className="defect-workflow-content"><strong>Root cause</strong><AuthenticatedMarkdown value={defect.root_cause} basePath={`/api/defects/${defect.id}/attachments`} /></div>}{defect.fix_details && <div className="defect-workflow-content"><strong>Fix details</strong><AuthenticatedMarkdown value={defect.fix_details} basePath={`/api/defects/${defect.id}/attachments`} /></div>}</article>}
+          {hasRetestRecord && <article className="defect-workflow-record"><header><div><strong>QA retest and closure</strong><span>Independent validation record</span></div><small>{defect.closed_at ? `Closed ${formatDateIST(defect.closed_at)}` : defect.retest_at ? `Retest started ${formatDateIST(defect.retest_at)}` : 'Retest record'}</small></header><dl className="defect-workflow-facts"><dt>Retest result</dt><dd>{defect.retest_result || '—'}</dd><dt>Build validated</dt><dd>{defect.tested_build_version || '—'}</dd></dl>{defect.retest_actual_result && <div className="defect-workflow-content"><strong>Observed retest result</strong><AuthenticatedMarkdown value={defect.retest_actual_result} basePath={`/api/defects/${defect.id}/attachments`} /></div>}{defect.retest_remarks && <div className="defect-workflow-content"><strong>Retest evidence and notes</strong><AuthenticatedMarkdown value={defect.retest_remarks} basePath={`/api/defects/${defect.id}/attachments`} /></div>}{defect.closure_remarks && <div className="defect-workflow-content"><strong>Closure summary</strong><AuthenticatedMarkdown value={defect.closure_remarks} basePath={`/api/defects/${defect.id}/attachments`} /></div>}</article>}
+          {defect.reopen_reason && <article className="defect-workflow-record warning"><header><div><strong>Defect reopened</strong><span>Previous decision reversed</span></div><small>Reopened {defect.reopen_count} time{defect.reopen_count === 1 ? '' : 's'}</small></header><div className="defect-workflow-content"><strong>Reason for reopening</strong><AuthenticatedMarkdown value={defect.reopen_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
+          {defect.deferral_reason && <article className="defect-workflow-record"><header><div><strong>Work deferred</strong><span>Approved postponement</span></div><small>{defect.target_release ? `Target ${defect.target_release}` : 'Target release not recorded'}</small></header><dl className="defect-workflow-facts"><dt>Approved by</dt><dd>{defect.deferral_approved_by || '—'}</dd><dt>Expected resolution</dt><dd>{defect.expected_resolution_date || '—'}</dd></dl><div className="defect-workflow-content"><strong>Deferral reason</strong><AuthenticatedMarkdown value={defect.deferral_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
+          {defect.rejection_reason && <article className="defect-workflow-record warning"><header><div><strong>Defect rejected</strong><span>Disposition decision</span></div></header><div className="defect-workflow-content"><strong>Rejection reason</strong><AuthenticatedMarkdown value={defect.rejection_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
+          {defect.not_a_defect_reason && <article className="defect-workflow-record warning"><header><div><strong>Marked as Not a Defect</strong><span>Requirements decision</span></div></header><div className="defect-workflow-content"><strong>Discussion and confirmation</strong><AuthenticatedMarkdown value={defect.not_a_defect_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
+        </div>
+      </section>}
+      </div>
+      <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-trace`} aria-labelledby={`defect-${defect.id}-tab-trace`} hidden={detailTab !== 'trace'} tabIndex={0}>
+      {!defect.qa_request_id && !viewOnly && (manager || assignee || defect.reporter_id === user?.id) && !['Closed', 'Duplicate', 'Rejected', 'Not a Defect'].includes(defect.status) && <LinkDefectRequest defect={defect} onChanged={onChanged} />}
       <section className="defect-linked-work" aria-label="Linked work">
         <div className="defect-linked-work-head"><div><span className="defect-section-label">TRACEABILITY</span><h4>Linked work</h4></div><small>Open a linked record to follow the defect back to its source.</small></div>
         <div className="defect-trace-grid">
@@ -997,29 +1035,14 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
           <button type="button" className="btn" onClick={() => setShowLinkedExecutions(true)}>View all linked testcases</button>
         </div>
       )}
-      <div className="defect-detail-grid">
-        <div className="defect-detail-main">
-          <section><span className="defect-section-label">Issue definition</span><h4>Description</h4><AuthenticatedMarkdown value={defect.description} basePath={`/api/defects/${defect.id}/attachments`} /></section>
-          <section><span className="defect-section-label">Reproduction evidence</span><h4>Steps to Reproduce</h4><AuthenticatedMarkdown value={defect.steps_to_reproduce} basePath={`/api/defects/${defect.id}/attachments`} /></section>
-          <div className="defect-result-compare"><section className="actual"><h4>Actual Result</h4><AuthenticatedMarkdown value={defect.actual_result} basePath={`/api/defects/${defect.id}/attachments`} /></section><section className="expected"><h4>Expected Result</h4><AuthenticatedMarkdown value={defect.expected_result} basePath={`/api/defects/${defect.id}/attachments`} /></section></div>
-        </div>
-        <aside className="defect-detail-aside"><section><span className="defect-section-label">Operating context</span><h4>Defect properties</h4><dl><dt>Application</dt><dd>{defect.application_name}</dd><dt>Module / Feature</dt><dd>{defect.module_feature}</dd><dt>Environment</dt><dd>{defect.environment}</dd><dt>Build</dt><dd>{defect.build_version || '—'}</dd><dt>Reporter</dt><dd>{defect.reporter_name}</dd><dt>Assignee</dt><dd>{defect.assignee_name || 'Unassigned'}</dd></dl></section></aside>
       </div>
-      {hasWorkflowRecord && <section className="defect-workflow-details">
-        <div className="defect-workflow-heading"><div><span className="defect-section-label">Decision record</span><h4>Workflow records</h4></div><span className="defect-readonly-pill">Read-only after submission</span></div>
-        <p className="defect-workflow-help">Each card shows the fields captured by that workflow action. Submitted decisions stay read-only to preserve the audit trail; later changes are recorded through the next available workflow action and Activity.</p>
-        <div className="defect-workflow-records">
-          {defect.assignment_remarks && <article className="defect-workflow-record"><header><div><strong>Triage and assignment</strong><span>Ownership decision</span></div><small>{defect.assigned_by_name || 'Assigned user'}{defect.assigned_at ? ` · ${formatDateIST(defect.assigned_at)}` : ''}</small></header><div className="defect-workflow-content"><strong>Assignment note</strong><AuthenticatedMarkdown value={defect.assignment_remarks} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
-          {hasResolutionRecord && <article className="defect-workflow-record"><header><div><strong>Resolution submitted</strong><span>Fix record and QA handoff</span></div><small>{defect.resolved_at ? formatDateIST(defect.resolved_at) : 'Resolution record'}</small></header><dl className="defect-workflow-facts"><dt>Resolution type</dt><dd>{defect.resolution_type || '—'}</dd><dt>Fixed build</dt><dd>{defect.fixed_build_version || '—'}</dd><dt>QA retest owner</dt><dd>{retestOwnerName || (defect.retest_tester_id ? `User #${defect.retest_tester_id}` : '—')}</dd></dl>{defect.resolution_summary && <div className="defect-workflow-content"><strong>Resolution summary</strong><AuthenticatedMarkdown value={defect.resolution_summary} basePath={`/api/defects/${defect.id}/attachments`} /></div>}{defect.root_cause && <div className="defect-workflow-content"><strong>Root cause</strong><AuthenticatedMarkdown value={defect.root_cause} basePath={`/api/defects/${defect.id}/attachments`} /></div>}{defect.fix_details && <div className="defect-workflow-content"><strong>Fix details</strong><AuthenticatedMarkdown value={defect.fix_details} basePath={`/api/defects/${defect.id}/attachments`} /></div>}</article>}
-          {hasRetestRecord && <article className="defect-workflow-record"><header><div><strong>QA retest and closure</strong><span>Independent validation record</span></div><small>{defect.closed_at ? `Closed ${formatDateIST(defect.closed_at)}` : defect.retest_at ? `Retest started ${formatDateIST(defect.retest_at)}` : 'Retest record'}</small></header><dl className="defect-workflow-facts"><dt>Retest result</dt><dd>{defect.retest_result || '—'}</dd><dt>Build validated</dt><dd>{defect.tested_build_version || '—'}</dd></dl>{defect.retest_actual_result && <div className="defect-workflow-content"><strong>Observed retest result</strong><AuthenticatedMarkdown value={defect.retest_actual_result} basePath={`/api/defects/${defect.id}/attachments`} /></div>}{defect.retest_remarks && <div className="defect-workflow-content"><strong>Retest evidence and notes</strong><AuthenticatedMarkdown value={defect.retest_remarks} basePath={`/api/defects/${defect.id}/attachments`} /></div>}{defect.closure_remarks && <div className="defect-workflow-content"><strong>Closure summary</strong><AuthenticatedMarkdown value={defect.closure_remarks} basePath={`/api/defects/${defect.id}/attachments`} /></div>}</article>}
-          {defect.reopen_reason && <article className="defect-workflow-record warning"><header><div><strong>Defect reopened</strong><span>Previous decision reversed</span></div><small>Reopened {defect.reopen_count} time{defect.reopen_count === 1 ? '' : 's'}</small></header><div className="defect-workflow-content"><strong>Reason for reopening</strong><AuthenticatedMarkdown value={defect.reopen_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
-          {defect.deferral_reason && <article className="defect-workflow-record"><header><div><strong>Work deferred</strong><span>Approved postponement</span></div><small>{defect.target_release ? `Target ${defect.target_release}` : 'Target release not recorded'}</small></header><dl className="defect-workflow-facts"><dt>Approved by</dt><dd>{defect.deferral_approved_by || '—'}</dd><dt>Expected resolution</dt><dd>{defect.expected_resolution_date || '—'}</dd></dl><div className="defect-workflow-content"><strong>Deferral reason</strong><AuthenticatedMarkdown value={defect.deferral_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
-          {defect.rejection_reason && <article className="defect-workflow-record warning"><header><div><strong>Defect rejected</strong><span>Disposition decision</span></div></header><div className="defect-workflow-content"><strong>Rejection reason</strong><AuthenticatedMarkdown value={defect.rejection_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
-          {defect.not_a_defect_reason && <article className="defect-workflow-record warning"><header><div><strong>Marked as Not a Defect</strong><span>Requirements decision</span></div></header><div className="defect-workflow-content"><strong>Discussion and confirmation</strong><AuthenticatedMarkdown value={defect.not_a_defect_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
-        </div>
-      </section>}
-      <section className="defect-evidence"><div><h4>Evidence & Attachments <span>{documents.length}</span></h4>{canTouchDefect && <label className="btn btn-sm">{uploading ? 'Uploading…' : '+ Add evidence'}<input type="file" multiple hidden disabled={uploading} onChange={(e) => upload(e.target.files)} /></label>}</div>{documents.length ? <div className="defect-files">{documents.map((document) => <button key={document.id} onClick={() => download(document)}>{document.file_name}</button>)}</div> : <p className="muted small">No supporting evidence attached.</p>}<ErrorText error={error} /></section>
+      <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-evidence`} aria-labelledby={`defect-${defect.id}-tab-evidence`} hidden={detailTab !== 'evidence'} tabIndex={0}>
+      <section className="defect-evidence"><div><h4>Evidence & Attachments <span>{documents.length}</span></h4>{canTouchDefect && <label className="btn btn-sm">{uploading ? 'Uploading…' : '+ Add evidence'}<input type="file" multiple hidden disabled={uploading} onChange={(e) => upload(e.target.files)} /></label>}</div>{documents.length ? <div className="defect-files">{documents.map((document) => <button key={document.id} onClick={() => download(document)}>{document.file_name}</button>)}</div> : <p className="muted small">No supporting evidence attached.</p>}</section>
+      </div>
+      <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-activity`} aria-labelledby={`defect-${defect.id}-tab-activity`} hidden={detailTab !== 'activity'} tabIndex={0}>
       <JiraActivity workflowHistory={defect.workflow ? defect.workflow_state?.history || [] : undefined} entityType="DEFECT" entityId={defect.id} items={activity} onPosted={(item) => setActivity((current) => [...current, item])} />
+      </div>
+      </div>
     </Modal>
     {transition && <TransitionModal defect={defect} target={transition} users={users} departments={departments} requestDepartment={requestDepartment} defects={defects} hasEvidence={documents.length > 0} onEvidenceAttached={(attached) => setDocuments((current) => [...current, ...attached])} onClose={() => setTransition('')} onChanged={(saved) => { setTransition(''); onChanged(saved) }} />}
     {showReassign && <ReassignDefectModal defect={defect} users={users} onClose={() => setShowReassign(false)} onChanged={(saved) => { setShowReassign(false); onChanged(saved) }} />}
@@ -1040,7 +1063,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
 // Defect Management register first.
 export function EmbeddedDefectDetail({ defectKey, onClose }: { defectKey: string; onClose: () => void }) {
   const [defect, setDefect] = useState<DefectOut | null>(null)
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
   const [duplicateCandidates, setDuplicateCandidates] = useState<DefectListOut[]>([])
   const [contexts, setContexts] = useState<ExecutionContext[]>([])
@@ -1065,7 +1088,7 @@ export function EmbeddedDefectDetail({ defectKey, onClose }: { defectKey: string
         // transition, duplicate, and execution-link actions. A failure in a
         // supporting lookup must not prevent the user from viewing the defect.
         const [allUsers, activeDepartments, duplicates, executionContexts, request] = await Promise.all([
-          api.get<UserOut[]>('/api/auth/users').catch(() => [] as UserOut[]),
+          api.get<UserOption[]>('/api/auth/user-options').catch(() => [] as UserOption[]),
           api.get<DepartmentOut[]>('/api/departments').catch(() => [] as DepartmentOut[]),
           api.get<PageOut<DefectListOut>>('/api/defects?page_size=100').then((page) => page.items).catch(() => [] as DefectListOut[]),
           api.get<DefectLinkableExecutionOut[]>('/api/test-execution/executions/blocked-or-failed').catch(() => [] as DefectLinkableExecutionOut[]),
@@ -1117,7 +1140,7 @@ export default function Defects() {
   const [dashboard, setDashboard] = useState<DefectDashboardOut | null>(null)
   const [requests, setRequests] = useState<QARequestListOut[]>([])
   const [contexts, setContexts] = useState<ExecutionContext[]>([])
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [departments, setDepartments] = useState<DepartmentOut[]>([])
   const [duplicateCandidates, setDuplicateCandidates] = useState<DefectListOut[]>([])
   const [selected, setSelected] = useState<DefectOut | null>(null)
@@ -1183,7 +1206,7 @@ export default function Defects() {
         // all of them" rather than one page, so it asks for the max size
         // directly instead of going through hooks/usePaginatedList.
         api.get<PageOut<QARequestListOut>>('/api/qa-requests?page_size=100').then((p) => p.items).catch(() => [] as QARequestListOut[]),
-        api.get<UserOut[]>('/api/auth/users'),
+        api.get<UserOption[]>('/api/auth/user-options'),
         api.get<DepartmentOut[]>('/api/departments'),
         // Candidate pool for TransitionModal's "Original Defect ID" picker
         // (marking a defect Duplicate) -- SearchableSelect has no async/
@@ -1254,10 +1277,10 @@ export default function Defects() {
   // export_defects/the batch executions endpoint (routers/defects.py,
   // routers/test_execution.py).
 
-  return <div className="tm-page defect-page">
+  return <div className="tm-page defect-page defect-module">
     <header className="defect-command-header">
-      <div className="defect-command-copy"><span>TEST CASE MANAGEMENT · DESIGN · ORGANIZE · EXECUTE · TRACE</span><div><h2>Defect Management</h2><b>{dashboard?.total || 0}</b></div><p>Prioritize risk, maintain execution traceability, and move every defect through a governed resolution workflow.</p></div>
-      <div className="defect-command-actions"><button className="btn btn-sm" onClick={() => api.downloadFile('/api/defects/export-xlsx', 'defect-management-register.xlsx')}>Export</button>{canCreateDefect && <><button className="btn btn-sm" onClick={() => setCreateMode('standalone')}>+ New defect</button><button className="btn btn-primary btn-sm" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ Report from execution</button></>}</div>
+      <div className="defect-command-copy"><span>QUALITY OPERATIONS · DEFECTS</span><div><h2>Defect Management</h2><b>{dashboard?.total || 0}</b></div><p>Track issues, prioritize fixes, and verify resolution.</p></div>
+      <div className="defect-command-actions"><button className="btn btn-sm" onClick={() => { void api.downloadFile('/api/defects/export-xlsx', 'defect-management-register.xlsx').catch(setError) }}>Export</button>{canCreateDefect && <><button className="btn btn-sm" onClick={() => setCreateMode('standalone')}>+ New defect</button><button className="btn btn-primary btn-sm" disabled={!contexts.length} onClick={() => setCreateMode('execution')}>+ Report from execution</button></>}</div>
     </header>
     <ErrorText error={error} title="Defect Management could not be loaded" />
     <section className="defect-health-strip" aria-label="Defect overview">
@@ -1270,7 +1293,7 @@ export default function Defects() {
     <section className="defect-workspace-card">
       <nav className="defect-queue-tabs" aria-label="Defect queues">{([['all', 'All defects'], ['attention', 'Needs attention'], ['mine', 'My work'], ['unlinked', 'No execution link'], ['retest', 'Verification queue'], ['closed', 'Closed']] as const).map(([key, label]) => <button type="button" key={key} className={queue === key ? 'active' : ''} aria-current={queue === key ? 'page' : undefined} onClick={() => setQueue(key)}><span>{label}</span><b>{queueCounts[key]}</b></button>)}</nav>
       <div className="defect-register-head"><div><span>DEFECT REGISTER · {queue.replace('-', ' ').toUpperCase()}</span><h3>{total} {total === 1 ? 'record' : 'records'} in this view</h3><p>{queueDescriptions[queue]}</p></div>{dashboard && <div className="defect-register-signals"><span><i className="critical" />Critical {dashboard.by_severity?.Critical || 0}</span><span><i className="high" />High {dashboard.by_severity?.High || 0}</span></div>}</div>
-      <div className="defect-toolbar"><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search ID, title, application or module…" /></label><select value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><select value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
+      <div className="defect-toolbar"><label className="defect-search"><span>⌕</span><input value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search defects" placeholder="Search ID, title, application or module…" /></label><select aria-label="Filter by status" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><select aria-label="Filter by severity" value={severity} onChange={(e) => setSeverity(e.target.value)}><option value="">All severities</option>{SEVERITIES.map((value) => <option key={value}>{value}</option>)}</select><select aria-label="Filter by priority" value={priority} onChange={(e) => setPriority(e.target.value)}><option value="">All priorities</option>{PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>{hasFilters && <button className="btn btn-sm" onClick={clearFilters}>Clear filters</button>}</div>
       <Table<DefectListOut>
         tableId="defect-management" rowKey="id" rows={defects}
         onRowClick={(defect) => { openDefect(defect.id); setSearchParams({ open: defect.defect_key }) }}

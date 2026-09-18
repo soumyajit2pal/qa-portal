@@ -8,11 +8,11 @@ import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, ApprovalDecisi
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
 import { SEVERITIES, SUPPRESSION_STATUS_LABELS, SUPPRESSION_PENDING_WITH, SUPPRESSION_TERMINAL_STATUSES, SAST_DAST_PRE_SCANNING_STATUSES, SAST_DAST_COMPLETED_STATUSES, QA_REQUEST_CREATOR_ROLES, hasWorkflowRole as hasRole, hasDepartment, isViewOnly } from '../../constants'
-import { SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOut, ApprovalActionOut, PageOut } from '../../types'
+import { SASTListOut, DASTListOut, SASTOut, DASTOut, SuppressionOut, CombinedSecurityRequest, UserOption, ApprovalActionOut, PageOut } from '../../types'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import InfoModal from '../../components/InfoModal'
 
-function userName(users: UserOut[], id?: number | null): string | null {
+function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
 }
@@ -555,7 +555,7 @@ function EditSuppressionModal({ sup, onClose, onSaved }: {
   )
 }
 
-export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: SuppressionOut; onClose: () => void; onChanged: (s: SuppressionOut) => void; users: UserOut[] }) {
+export function SuppressionDetail({ sup, onClose, onChanged, users }: { sup: SuppressionOut; onClose: () => void; onChanged: (s: SuppressionOut) => void; users: UserOption[] }) {
   const { user } = useAuth()
   const [tab, setTab] = useState<'overview' | 'documents' | 'history'>('overview')
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
@@ -821,7 +821,7 @@ export default function Suppression() {
   const [rows, setRows] = useState<SuppressionOut[]>([])
   const [showNew, setShowNew] = useState(false)
   const [selected, setSelected] = useState<SuppressionOut | null>(null)
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -830,7 +830,7 @@ export default function Suppression() {
   }, [])
   useEffect(() => { load() }, [load])
   useEffect(() => {
-    api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names just stay empty */ })
+    api.get<UserOption[]>('/api/auth/user-options').then(setUsers).catch(() => { /* names just stay empty */ })
   }, [])
 
   // Same "?open=<suppression_id>" deep-link pattern as Functional/SAST/DAST/

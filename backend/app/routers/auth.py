@@ -42,9 +42,25 @@ def unlock_login(user_id: int, request: Request, db: Session = Depends(get_db),
     user = db.get(models.User, user_id)
     if not user:
         raise HTTPException(404, 'User not found')
+    return _unlock_user_login(db, user, current_user, request)
+
+
+@router.post("/local-admin/users/{user_id}/unlock-login")
+def unlock_local_admin_login(user_id: int, request: Request, db: Session = Depends(get_db),
+                             current_user: models.User = Depends(get_current_user)):
+    user = db.get(models.User, user_id)
+    if not user:
+        raise HTTPException(404, 'User not found')
+    _require_managed_department_target(
+        db, current_user, user, require_workspace_membership=not bool(user.needs_role_review),
+    )
+    return _unlock_user_login(db, user, current_user, request)
+
+
+def _unlock_user_login(db: Session, user: models.User, actor: models.User, request: Request):
     cleared = _unlock_login_failures(db, user.username)
     db.commit()
-    write_audit(db, event_type='ACCESS_MANAGEMENT', action='LOGIN_UNLOCK', actor=current_user,
+    write_audit(db, event_type='ACCESS_MANAGEMENT', action='LOGIN_UNLOCK', actor=actor,
                 request=request, status_code=200, target_type='USER', target_id=user.id,
                 target_name=user.full_name, details={'cleared_attempts': cleared})
     return {'message': 'Sign-in attempts cleared. The user can try signing in again. '
@@ -354,6 +370,7 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
     _set_user_departments(db, current_user, [primary_department])
     _set_user_department_units(db, current_user, [])
     current_user.needs_department_selection = False
+    coordinator_notifications = email_notifications.queue_department_access_review_notifications(db, current_user)
 
     db.commit()
     db.refresh(current_user)
@@ -368,26 +385,80 @@ def update_me(payload: schemas.DepartmentSelection, request: Request, db: Sessio
                     "changes": snapshot_changes(before, user_snapshot(current_user)),
                     "department": primary_department,
                     "approvers": ["Administrator", "Department Coordinator"],
+                    "coordinator_notifications_queued": coordinator_notifications,
                 })
     return current_user
 
 
+@router.get("/user-options", response_model=list[schemas.UserOption])
+def user_options(purpose: str = "lookup", workspace_id: Optional[int] = None,
+                 department: Optional[str] = None, roles: Optional[str] = None, department_scoped: bool = False,
+                 exclude_id: Optional[int] = None, defect_id: Optional[int] = None,
+                 db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    """Minimal workspace-scoped names and server-filtered assignment candidates."""
+    purposes = {"lookup", "select", "qa_lead", "tester", "security_analyst", "retest", "approver", "defect_reassign"}
+    if purpose not in purposes:
+        raise HTTPException(400, "Unknown user selection purpose")
+    scope_ids = active_qa_workspace_scope_ids(current_user)
+    if workspace_id is not None and workspace_id not in scope_ids:
+        raise HTTPException(403, "Workspace is outside the active scope")
+    selected_scope = (workspace_id,) if workspace_id is not None else scope_ids
+    q = db.query(models.User).filter(models.User.is_active == True)
+    if selected_scope:
+        member_ids = select(models.QAWorkspaceMember.user_id).where(
+            models.QAWorkspaceMember.workspace_id.in_(selected_scope),
+            models.QAWorkspaceMember.is_active == True)
+        requester_ids = select(models.QARequest.requester_id).where(
+            models.QARequest.qa_workspace_id.in_(selected_scope), models.QARequest.requester_id.isnot(None))
+        q = q.filter(or_(models.User.id == current_user.id, models.User.id.in_(member_ids),
+                         models.User.id.in_(requester_ids)))
+    else:
+        # No selected/authorized workspace must never mean the whole directory.
+        q = q.filter(models.User.id == current_user.id)
+    if purpose != "lookup":
+        q = q.filter(models.User.show_in_user_dropdowns == True)
+    rows = q.order_by(models.User.full_name, models.User.id).all()
+    role_sets = {"qa_lead": {Role.QA_LEAD}, "tester": {Role.QA_ENGINEER},
+                 "security_analyst": {Role.SECURITY_ANALYST},
+                 "retest": {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}}
+    if purpose in role_sets:
+        required = role_sets[purpose]
+        rows = [u for u in rows if (set(u.roles) & required or (purpose == "retest" and u.has_role(Role.ADMIN)))
+                and (purpose == "retest" or any(a.is_active and a.workspace_id in selected_scope for a in u.qa_workspace_access))]
+    if purpose == "approver":
+        allowed = {Role.QA_LEAD, Role.QA_ENGINEER, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
+                   Role.SM, Role.APPLICATION_OWNER, Role.DEPARTMENT_HEAD_CM, Role.DEPARTMENT_HEAD_AGM, Role.SECURITY_ANALYST}
+        required = set((roles or "").split(","))
+        if not required or not required <= allowed:
+            raise HTTPException(400, "Invalid approval group")
+        rows = [u for u in rows if set(u.roles) & required
+                and any(a.is_active and a.workspace_id in selected_scope for a in u.qa_workspace_access)
+                and (not u.has_role(Role.ADMIN) or (department and department in u.departments))]
+    if purpose == "defect_reassign":
+        if defect_id is None:
+            raise HTTPException(400, "Defect is required")
+        from .defects import _get_visible
+        defect = _get_visible(defect_id, db, current_user)
+        previous = db.get(models.User, defect.assignee_id) if defect.assignee_id else None
+        teams = set(previous.departments if previous else []) or {defect.assigned_team}
+        qa_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.SECURITY_ANALYST, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+        rows = [u for u in rows if u.id != defect.assignee_id
+                and (not defect.qa_workspace_id or any(a.is_active and a.workspace_id == defect.qa_workspace_id for a in u.qa_workspace_access))
+                and (not u.has_role(Role.ADMIN) or defect.department in u.departments)
+                and (set(u.roles) & qa_roles or u.has_role(Role.ADMIN) or set(u.departments) & teams)]
+    if department and (purpose != "approver" or department_scoped):
+        rows = [u for u in rows if department in u.departments]
+    if purpose == "approver" and department_scoped and not department:
+        rows = []
+    if exclude_id is not None:
+        rows = [u for u in rows if u.id != exclude_id]
+    return rows
+
+
 @router.get("/users", response_model=list[schemas.UserOut])
 def list_users(all_workspaces: bool = False, db: Session = Depends(get_db),
-               current_user: models.User = Depends(get_current_user)):
-    """Active users only -- used throughout the app for pickers (assign tester, etc.).
-    Reachable by any logged-in user, so CONFIDENTIAL_ROLES are redacted from
-    every row unless the caller is an Admin -- see _redact_confidential_roles.
-
-    SRS 7.2 pagination rollout -- deliberately left unpaginated. 9 separate
-    call sites across the app (QARequests/index.tsx, Performance.tsx,
-    Suppression.tsx, SAST.tsx, DAST.tsx, Defects.tsx, Approvals.tsx,
-    SignOff.tsx, Functional.tsx) all use this purely as a name-lookup/
-    assignee-picker source needing the complete active directory at once,
-    same as the app's other reference-data endpoints (`/api/departments`,
-    `/api/application-names`) that were never paginated either -- see
-    `list_all_users` below for the actual browsable Admin Users table this
-    is not."""
+               current_user: models.User = Depends(require_roles(Role.ADMIN))):
+    """Administrator directory; ordinary screens use /user-options."""
     q = db.query(models.User).filter(models.User.is_active == True)  # noqa: E712
     workspace_ids = active_qa_workspace_scope_ids(current_user)
     if all_workspaces and not current_user.has_role(Role.ADMIN):
@@ -403,8 +474,7 @@ def list_users(all_workspaces: bool = False, db: Session = Depends(get_db),
         )
         q = q.filter(or_(models.User.id == current_user.id,
                          models.User.id.in_(member_ids), models.User.id.in_(requester_ids)))
-    rows = q.order_by(models.User.full_name).all()
-    return [_redact_confidential_roles(u, current_user) for u in rows]
+    return q.order_by(models.User.full_name).all()
 
 
 @router.get("/users/all", response_model=pagination.Page[schemas.UserOut])

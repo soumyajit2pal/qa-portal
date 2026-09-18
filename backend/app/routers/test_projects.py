@@ -132,8 +132,8 @@ def _require_existing_cycle_links_match_application(db: Session, project_id: int
         )
 
 
-@router.get("/eligible-users", response_model=List[schemas.UserOut])
-def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_id: Optional[int] = None,
+@router.get("/eligible-users", response_model=List[schemas.UserOption])
+def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_id: Optional[int] = None, runner_only: bool = False,
                                         db: Session = Depends(get_db),
                                         current_user: models.User = Depends(get_current_user)):
     """Return active QA users for the selected workspace or Test Project.
@@ -170,6 +170,8 @@ def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_
     else:
         workspace_id = require_active_workspace(current_user)
     qa_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.ADMIN}
+    if runner_only:
+        qa_roles = {Role.QA_ENGINEER}
     candidates = (
         db.query(models.User)
         .filter(

@@ -14,7 +14,7 @@ import {
 import {
   TestProjectOut, TestFolderOut, TestCaseOut, TestCaseListOut, TestCaseSummaryOut, TestStepIn, TestCaseImportResult, ApprovalActionOut,
   TestCaseVersionSummary, TestCaseVersionCompareOut, TestProjectMyAccessOut, TestCaseVersionOut,
-  TestCaseReviewDecision, TestCaseBulkRecommendIn, UserOut, PageOut,
+  TestCaseReviewDecision, TestCaseBulkRecommendIn, UserOption, PageOut,
 } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity from '../../components/JiraActivity'
@@ -1641,7 +1641,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
   folders: TestFolderOut[]
   folderId: number | ''
   existing: TestCaseOut | null
-  users: UserOut[]
+  users: UserOption[]
   onClose: () => void
   onSaved: (tc: TestCaseOut) => void
   onDeleted: (id: number) => void
@@ -2651,7 +2651,7 @@ export default function TestRepository() {
   // already inside CAN_AUTHOR_ROLES, so canAuthor alone already covers
   // NEW-path Stage 1/Stage 2 selection eligibility too.
   const canSelectCases = canAuthor || canReview || canGiveFinalApproval
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [projects, setProjects] = useState<TestProjectOut[]>([])
   const [projectId, setProjectId] = useState<number | ''>('')
   const [folders, setFolders] = useState<TestFolderOut[]>([])
@@ -2733,9 +2733,9 @@ export default function TestRepository() {
   // Author-tier approver assignment (PATCH .../approvers) uses the shared
   // user picker and is scoped to the selected workspace via the
   // dedicated /api/test-projects/eligible-users endpoint, not the app-wide
-  // /api/auth/users list every other module uses.
+  // /api/auth/user-options list every other module uses.
   useEffect(() => {
-    api.get<UserOut[]>('/api/test-projects/eligible-users').then(setUsers).catch(() => setUsers([]))
+    api.get<UserOption[]>('/api/test-projects/eligible-users').then(setUsers).catch(() => setUsers([]))
   }, [])
 
   const loadFolders = useCallback(async (pid: number) => {
@@ -3407,7 +3407,8 @@ export default function TestRepository() {
                       <WorkflowStatusBadge record={c} status={c.status} label={TEST_CASE_STATUS_LABELS[c.status] || c.status} />
                       {pendingGroup
                         ? <RoleGroupLink
-                            users={users.filter(member => !member.roles.includes('ADMIN') || (!!selectedProject?.department && hasDepartment(member, selectedProject.department)))}
+                            users={users}
+                            department={selectedProject?.department}
                             role={pendingGroup.role}
                             label={pendingGroup.label}
                             renderTrigger={(count, open) => <button type="button" className="role-group-link" onClick={(event) => { event.stopPropagation(); open() }}>Pending with {pendingGroup.label}<span>{count}</span></button>}

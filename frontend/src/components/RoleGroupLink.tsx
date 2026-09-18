@@ -1,10 +1,11 @@
+import { useUserOptions } from '../hooks/useUserOptions'
 import { useMemo, useState, type ReactNode } from 'react'
 import { Modal } from './Common'
 import { hasDepartment, isSelectableUser, userDepartments } from '../constants'
-import type { UserOut } from '../types'
+import type { UserOption } from '../types'
 
 export default function RoleGroupLink({ users, role, label, department, renderTrigger }: {
-  users: UserOut[]
+  users: UserOption[]
   // A single role (the common case) or several -- e.g. Department Head
   // Approval is held jointly by DEPARTMENT_HEAD_CM and DEPARTMENT_HEAD_AGM
   // (identical authority, split only so approval logs show the exact
@@ -32,19 +33,7 @@ export default function RoleGroupLink({ users, role, label, department, renderTr
 }) {
   const [open, setOpen] = useState(false)
   const roles = useMemo(() => (Array.isArray(role) ? role : [role]), [role])
-  const members = useMemo(
-    () => users
-      .filter((user) => isSelectableUser(user)
-        // This modal describes actual group membership, so use exact stored
-        // roles. Authorization helpers intentionally treat Administrator as
-        // every role and some workflows grant executive overrides; neither
-        // should make those users appear as members of a group they were not
-        // assigned to.
-        && roles.some((candidateRole) => (user.roles || []).includes(candidateRole))
-        && (!department || hasDepartment(user, department)))
-      .sort((a, b) => a.full_name.localeCompare(b.full_name)),
-    [users, roles, department],
-  )
+  const members = useUserOptions('approver', undefined, undefined, roles.join(','), department)
 
   return <>
     {renderTrigger
@@ -60,7 +49,7 @@ export default function RoleGroupLink({ users, role, label, department, renderTr
       {members.length ? <div className="role-group-members">
         {members.map((member) => <div className="role-group-member" key={member.id}>
           <span className="role-group-avatar">{member.full_name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase()}</span>
-          <span><strong>{member.full_name}</strong><small>{member.email || member.username}</small></span>
+          <span><strong>{member.full_name}</strong></span>
           <em>{userDepartments(member).length ? userDepartments(member).join(', ') : 'Department not set'}</em>
         </div>)}
       </div> : <div className="role-group-empty">

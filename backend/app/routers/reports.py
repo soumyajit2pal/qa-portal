@@ -792,12 +792,12 @@ def qa_signoff_register(date_from: str | None = None, date_to: str | None = None
     return [{
         "Certificate ID": item.certificate_id,
         "Certificate Date": item.certificate_date,
-        "Testing Request ID": item.testing_request_id,
+        "Testing Request ID": item.certificate_testing_request_id,
         "Application": item.application_name,
         "Request Department": item.request_department,
         "CR Number/EPIC Number": item.change_request_ids,
         "Certificate Type": item.certificate_type,
-        "Testing Type": item.testing_type,
+        "Testing Type": item.certificate_testing_type,
         "Environment Tested": item.environment_tested,
         "Target Promotion Environment": item.target_promotion_environment,
         "Risk Tier": item.risk_tier,
@@ -828,7 +828,7 @@ def qa_clearance_evidence(date_from: str | None = None, date_to: str | None = No
         severity = snapshot.get("severity") or []
         result.append({
             "Certificate ID": item.certificate_id,
-            "Testing Request ID": item.testing_request_id,
+            "Testing Request ID": item.certificate_testing_request_id,
             "Application": item.application_name,
             "Department": item.request_department,
             "Certificate Type": item.certificate_type,

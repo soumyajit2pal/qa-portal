@@ -1,3 +1,4 @@
+import { useUserOptions } from '../../hooks/useUserOptions'
 import WorkflowStatusBadge from '../../components/WorkflowStatusBadge'
 import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback } from 'react'
@@ -19,11 +20,11 @@ import {
   PERFORMANCE_PENDING_WITH, QA_EXECUTION_GROUP_ROLE,
   PERFORMANCE_TESTER_REASSIGNABLE_STATUSES,
 } from '../../constants'
-import { PerformanceOut, PerformanceListOut, PerformanceChecklistItemOut, UserOut, ApprovalActionOut, RequestDocumentOut } from '../../types'
+import { PerformanceOut, PerformanceListOut, PerformanceChecklistItemOut, UserOption, ApprovalActionOut, RequestDocumentOut } from '../../types'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import RaisedHistoryFilter from '../../components/RaisedHistoryFilter'
 
-function userName(users: UserOut[], id?: number | null): string | null {
+function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
 }
@@ -288,7 +289,7 @@ function assignedGroupFor(
 }
 
 export function PerformanceDetail({ req, onClose, onChanged, users }: {
-  req: PerformanceOut; onClose: () => void; onChanged: (p: PerformanceOut) => void; users: UserOut[]
+  req: PerformanceOut; onClose: () => void; onChanged: (p: PerformanceOut) => void; users: UserOption[]
 }) {
   const { user } = useAuth()
   const [error, setError] = useState<unknown>(null)
@@ -361,8 +362,8 @@ export function PerformanceDetail({ req, onClose, onChanged, users }: {
   const assignedTesterIds = new Set((req.assigned_tester_ids || '').split(',').filter(Boolean).map(Number))
   const isAssignedTester = isAdmin || (hasRole(user, 'QA_ENGINEER') && !!user?.id && assignedTesterIds.has(user.id))
   const isExecutionOwner = isAssignedQALead || isAssignedTester
-  const qaLeads = users.filter((u) => u.is_active && hasWorkspaceRole(u, 'QA_LEAD'))
-  const testers = users.filter((u) => u.is_active && hasWorkspaceRole(u, 'QA_ENGINEER'))
+  const qaLeads = useUserOptions('qa_lead')
+  const testers = useUserOptions('tester')
 
   // Edit access -- see the matching (and more detailed) comment in
   // SAST.tsx's canEditDetails for the full reasoning; same rule here.
@@ -822,7 +823,7 @@ export default function Performance() {
   // before PerformanceDetail (which needs every field) is shown.
   const [selected, setSelected] = useState<PerformanceOut | null>(null)
   const [openingId, setOpeningId] = useState<number | null>(null)
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
   const [assignedOnly, setAssignedOnly] = useState(false)
@@ -839,7 +840,7 @@ export default function Performance() {
     // Full user list -- not just QA Engineer/Lead -- so both the Assign
     // Requester and readiness-starter fields can
     // resolve names from a single fetch.
-    api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
+    api.get<UserOption[]>('/api/auth/user-options').then(setUsers).catch(() => { /* names/dropdown just stay empty */ })
   }, [])
 
   const openRequest = useCallback(async (idOrRow: number | PerformanceListOut) => {

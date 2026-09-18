@@ -359,6 +359,71 @@ def queue_access_review_notifications(db: SASession, user: models.User) -> int:
     return queued_count
 
 
+def queue_department_access_review_notifications(db: SASession, user: models.User) -> int:
+    """Notify the selected department's active coordinators after onboarding.
+
+    Workspace placement is chosen by the reviewer, so notify coordinators
+    across that department's workspaces rather than the onboarding workspace.
+    The caller commits these outbox entries with the department selection.
+    """
+    if not _enabled() or user.needs_department_selection or not user.needs_role_review:
+        return 0
+    department = user.primary_department or user.department
+    assignments = (
+        db.query(models.DepartmentCoordinatorAssignment)
+        .join(models.DepartmentCoordinatorAssignment.department)
+        .join(models.DepartmentCoordinatorAssignment.workspace)
+        .join(models.DepartmentCoordinatorAssignment.user)
+        .options(joinedload(models.DepartmentCoordinatorAssignment.user))
+        .filter(
+            models.Department.name == department,
+            models.Department.is_active == True,
+            models.QAWorkspace.is_active == True,
+            models.DepartmentCoordinatorAssignment.is_active == True,
+            models.User.is_active == True,
+            models.User.id != user.id,
+        ).all()
+    )
+    recipients: set[str] = set()
+    for assignment in assignments:
+        email = (assignment.user.email or '').strip().lower()
+        if email:
+            recipients.add(email)
+    if not recipients:
+        logger.warning('SMTP department access-review skipped user=%s reason=no_active_coordinator_recipient', user.username)
+        return 0
+    action = models.ApprovalAction(
+        entity_type='USER_ACCESS', entity_id=user.id, step_name='Department access review',
+        actor_id=user.id, actor_role=user.roles_csv, decision='Access review requested',
+        comments=f'First-login portal and workspace access requested for {department}.',
+    )
+    db.add(action)
+    url = os.getenv('PORTAL_BASE_URL', '').rstrip('/') + '/department-admin'
+    name = user.full_name or user.username
+    instruction = f'{name} ({user.username}) needs approval to access the QA Portal. Please review the request and provide the necessary access in the respective workspace.'
+    count = 0
+    for email in sorted(recipients):
+        body = (
+            f'QA PORTAL ACCESS APPROVAL REQUIRED\n\n{instruction}\n\n'
+            f'Department: {department}\n'
+            'Review Pending role reviews in Department Admin.\n'
+            f'Review access: {url}\n'
+        )
+        html_body = _html_email(
+            'Portal and workspace access approval', 'First-login access request', instruction,
+            status='Access approval pending', panel_title='Access request',
+            panel_html=(f'<p>User: {escape(name)} ({escape(user.username)})</p>'
+                        f'<p>Department: {escape(department or "")}</p>'
+                        '<p>Review Pending role reviews in Department Admin.</p>'),
+            action_label='Review access request', action_url=url,
+        )
+        count += int(_queue_email_notification(
+            db, action, email, subject=f'Access approval required: {name} ({user.username})',
+            body=body, html_body=html_body, category='department_access_review',
+        ))
+    return count
+
+
 def queue_test_cycle_assignment_notification(
     db: SASession,
     *,

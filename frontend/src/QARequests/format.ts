@@ -1,6 +1,6 @@
-import { LinkedRequestRef, QARequestOut, UserOut } from '../types'
+import { LinkedRequestRef, QARequestOut, UserOption } from '../types'
 
-export function userName(users: UserOut[], id?: number | null): string | null {
+export function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
 }

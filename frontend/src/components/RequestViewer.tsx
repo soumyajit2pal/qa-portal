@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { api, HttpError } from '../api'
 import { RequestViewerContext } from '../hooks/useRequestNavigation'
 import { RequestLookupError, RequestTarget, requestRoutes, requestTarget, resolveRequestId } from '../requestNavigation'
-import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, SuppressionOut, SignOffOut, UserOut } from '../types'
+import { QARequestOut, FunctionalOut, SASTOut, DASTOut, PerformanceOut, SuppressionOut, SignOffOut, UserOption } from '../types'
 import { Modal } from './Common'
 import { IconSearch } from './Icons'
 import ModuleBoundary from './ModuleBoundary'
@@ -22,7 +22,7 @@ export default function RequestViewer({ children }: { children: React.ReactNode 
   const navigate = useNavigate()
   const [target, setTarget] = useState<RequestTarget | null>(null)
   const [record, setRecord] = useState<RequestRecord | null>(null)
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [error, setError] = useState<unknown>(null)
   const generation = useRef(0)
   const close = useCallback(() => {
@@ -42,7 +42,7 @@ export default function RequestViewer({ children }: { children: React.ReactNode 
         // Name lookup is supporting display data, not an access test for
         // the requested record. A restricted directory must not make an
         // otherwise accessible request appear missing.
-        api.get<UserOut[]>('/api/auth/users').catch(() => [] as UserOut[]),
+        api.get<UserOption[]>('/api/auth/user-options').catch(() => [] as UserOption[]),
       ])
       if (current !== generation.current) return
       const full = await api.get<RequestRecord>(`${requestRoutes[next.path].api}/${id}`)

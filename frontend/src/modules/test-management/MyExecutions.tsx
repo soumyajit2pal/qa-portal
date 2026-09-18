@@ -137,23 +137,27 @@ function QuickDefectLink({ execution, onChanged, onError }: {
   const [defectKey, setDefectKey] = useState('')
   const [defectUrl, setDefectUrl] = useState('')
   const [busy, setBusy] = useState(false)
+  const [defectSearch, setDefectSearch] = useState('')
+  const [defectPage, setDefectPage] = useState(1)
+  const [defectHasNext, setDefectHasNext] = useState(false)
+  const [defectLoadError, setDefectLoadError] = useState<unknown>(null)
+  const [defectRetry, setDefectRetry] = useState(0)
   useEffect(() => {
-    if (!open || linkMode !== 'internal' || internalDefects.length) return
-    const statuses = ['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred']
-    const qs = new URLSearchParams({ page_size: '100' })
-    statuses.forEach((status) => qs.append('status', status))
+    if (!open || linkMode !== 'internal') return
     let active = true
     setLoadingInternal(true)
-    async function loadCandidates() {
-      const first = await api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=1`)
-      const remaining = first.total_pages > 1
-        ? await Promise.all(Array.from({ length: first.total_pages - 1 }, (_, index) => api.get<PageOut<DefectListOut>>(`/api/defects?${qs.toString()}&page=${index + 2}`)))
-        : []
-      if (active) setInternalDefects([first, ...remaining].flatMap((page) => page.items))
-    }
-    loadCandidates().catch(onError).finally(() => { if (active) setLoadingInternal(false) })
-    return () => { active = false }
-  }, [internalDefects.length, linkMode, onError, open])
+    setDefectLoadError(null)
+    setInternalDefects([])
+    const timer = window.setTimeout(() => {
+      const qs = new URLSearchParams({ page_size: '25', page: String(defectPage), search: defectSearch })
+      ;['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred'].forEach(status => qs.append('status', status))
+      api.get<PageOut<DefectListOut>>(`/api/defects?${qs}`)
+        .then(result => { if (active) { setInternalDefects(result.items); setDefectHasNext(result.has_next) } })
+        .catch(error => { if (active) setDefectLoadError(error) })
+        .finally(() => { if (active) setLoadingInternal(false) })
+    }, 250)
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [linkMode, open, defectSearch, defectPage, defectRetry])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -193,7 +197,15 @@ function QuickDefectLink({ execution, onChanged, onError }: {
           <strong>Link to latest {latestRun.status.toLowerCase()} run</strong><small>Attempt #{latestRun.attempt_no} only</small>
           {!linkMode && <div className="tm-inline-defect-source"><button type="button" onClick={() => setLinkMode('internal')}><strong>Internal defect</strong><small>Existing governed defect</small></button><button type="button" onClick={() => setLinkMode('external')}><strong>External reference</strong><small>Managed in another system</small></button></div>}
           {linkMode === 'internal' && <form onSubmit={submitInternal}>
+            <input aria-label="Search internal defects" placeholder="Search all open defects by ID or title…" value={defectSearch} onChange={event => { setDefectSearch(event.target.value); setDefectPage(1); setInternalDefectId('') }} />
+            <ErrorText error={defectLoadError} />
+            {!!defectLoadError && <button type="button" onClick={() => setDefectRetry(value => value + 1)}>Retry</button>}
             <SearchableSelect value={internalDefectId} onChange={setInternalDefectId} placeholder={loadingInternal ? 'Loading defects…' : 'Select an open internal defect…'} disabled={loadingInternal} options={internalDefects.map((defect) => ({ value: String(defect.id), label: `${defect.defect_key} · ${defect.title} · ${defect.status}` }))} />
+            <div className="tm-inline-run-actions">
+              <button type="button" disabled={loadingInternal || defectPage === 1} onClick={() => { setDefectPage(page => page - 1); setInternalDefectId('') }}>Previous</button>
+              <span>Page {defectPage}</span>
+              <button type="button" disabled={loadingInternal || !!defectLoadError || !defectHasNext} onClick={() => { setDefectPage(page => page + 1); setInternalDefectId('') }}>Next</button>
+            </div>
             <div className="tm-inline-run-actions"><button type="button" className="btn btn-sm" onClick={() => setLinkMode(null)}>Back</button><button className="btn btn-sm btn-primary" disabled={busy || loadingInternal || !internalDefectId}>{busy ? 'Linking…' : 'Link internal'}</button></div>
           </form>}
           {linkMode === 'external' && <form onSubmit={submit}>

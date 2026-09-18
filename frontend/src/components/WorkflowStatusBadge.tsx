@@ -4,7 +4,7 @@ import { Badge, Modal, ErrorText } from './Common'
 import { api } from '../api'
 import { activeWorkspaceId, hasDepartment, hasWorkspaceMembership } from '../constants'
 import { useAuth } from '../context/AuthContext'
-import type { UserOut } from '../types'
+import type { UserOption } from '../types'
 
 type Context = {
   status?: string | null
@@ -19,7 +19,7 @@ export default function WorkflowStatusBadge({ status, label, record, workflow }:
 }) {
   const { user } = useAuth()
   const [open, setOpen] = useState(false)
-  const [members, setMembers] = useState<UserOut[]>([])
+  const [members, setMembers] = useState<UserOption[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const { roles, group, departmentScoped } = approvalStage(status, record.application_master_status, workflow)
@@ -27,15 +27,12 @@ export default function WorkflowStatusBadge({ status, label, record, workflow }:
   const load = async () => {
     setOpen(true); setLoading(true); setError(''); setMembers([])
     try {
-      const users = await api.get<UserOut[]>('/api/auth/users')
       const workspace = record.qa_workspace_id ?? activeWorkspaceId(user)
-      setMembers(users.filter(member => member.is_active
-        && roles.some(role => member.roles.includes(role))
-        && (!workspace || hasWorkspaceMembership(member, workspace))
-        && (!departmentScoped || (!!record.department && hasDepartment(member, record.department)))
-        && (!member.roles.includes('ADMIN') || (!!record.department && hasDepartment(member, record.department)))
-        && (!departmentScoped || member.id !== record.requester_id)
-      ).sort((a, b) => a.full_name.localeCompare(b.full_name)))
+      const query = new URLSearchParams({ purpose: 'approver', roles: roles.join(','), department_scoped: String(departmentScoped) })
+      if (workspace) query.set('workspace_id', String(workspace))
+      if (record.department) query.set('department', record.department)
+      if (departmentScoped && record.requester_id) query.set('exclude_id', String(record.requester_id))
+      setMembers(await api.get<UserOption[]>(`/api/auth/user-options?${query}`))
     } catch (err) { setError(err instanceof Error ? err.message : 'Unable to load approvers.') }
     finally { setLoading(false) }
   }
@@ -51,7 +48,7 @@ export default function WorkflowStatusBadge({ status, label, record, workflow }:
           : error ? <div className="approver-directory-message"><ErrorText error={error} /><button type="button" className="btn" onClick={() => void load()}>Retry</button></div>
           : members.length ? <ul className="approver-directory-list">{members.map(member => <li className="approver-directory-member" key={member.id}>
               <span className="approver-directory-avatar" aria-hidden="true">{member.full_name.trim().split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()}</span>
-              <div className="approver-directory-identity"><strong>{member.full_name}</strong><span>{member.email || member.username}</span></div>
+              <div className="approver-directory-identity"><strong>{member.full_name}</strong></div>
             </li>)}</ul>
           : <p className="approver-directory-message">No active approvers are configured for this stage and scope. Contact your administrator.</p>}
         <div className="approver-directory-footer"><button type="button" className="btn btn-primary" onClick={() => setOpen(false)}>Close</button></div>

@@ -237,50 +237,48 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
 
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), opts.timeoutMs ?? REQUEST_TIMEOUT_MS)
-  let res: Response
   try {
-    res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal })
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new HttpError(STATUS_MESSAGES[408], 408)
+    const res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal })
+
+    if (!res.ok) {
+      let detail: unknown = null
+      let reference = res.headers.get('x-request-id') || res.headers.get('x-audit-request-id') || undefined
+      try {
+        const responseBody = await res.text()
+        if (responseBody) {
+          try {
+            const errJson = JSON.parse(responseBody)
+            detail = errJson.detail ?? errJson.message ?? errJson.reason ?? errJson.error ?? errJson
+            reference = errJson.request_id || reference
+          } catch {
+            // Reverse proxies commonly return branded/full HTML error pages.
+            // Never expose that markup to users. Genuine short plain-text API
+            // explanations are retained for non-5xx responses only.
+            const contentType = res.headers.get('content-type') || ''
+            if (!looksLikeHtml(responseBody, contentType) && res.status < 500) {
+              detail = responseBody.trim().slice(0, 2_000)
+            }
+          }
+        }
+      } catch (e) { /* ignore */ }
+      const backendReason = formatBackendReason(detail)
+      const message = backendReason || statusMessage(res.status, res.statusText)
+      throw new HttpError(message, res.status, reference)
     }
+
+    // Await body consumption before releasing the deadline (including downloads).
+    if (isBlob) return await res.blob() as T
+    if (res.status === 204) return null as T
+    return await res.json() as T
+  } catch (error) {
+    if (controller.signal.aborted) throw new HttpError(STATUS_MESSAGES[408], 408)
+    if (error instanceof HttpError) throw error
     throw new HttpError(
-      'QualityOps could not connect to the application service. Check your network connection and try again.',
-      0,
+      'QualityOps could not connect to the application service. Check your network connection and try again.', 0,
     )
   } finally {
     window.clearTimeout(timeout)
   }
-
-  if (!res.ok) {
-    let detail: unknown = null
-    let reference = res.headers.get('x-request-id') || res.headers.get('x-audit-request-id') || undefined
-    try {
-      const responseBody = await res.text()
-      if (responseBody) {
-        try {
-          const errJson = JSON.parse(responseBody)
-          detail = errJson.detail ?? errJson.message ?? errJson.reason ?? errJson.error ?? errJson
-          reference = errJson.request_id || reference
-        } catch {
-          // Reverse proxies commonly return branded/full HTML error pages.
-          // Never expose that markup to users. Genuine short plain-text API
-          // explanations are retained for non-5xx responses only.
-          const contentType = res.headers.get('content-type') || ''
-          if (!looksLikeHtml(responseBody, contentType) && res.status < 500) {
-            detail = responseBody.trim().slice(0, 2_000)
-          }
-        }
-      }
-    } catch (e) { /* ignore */ }
-    const backendReason = formatBackendReason(detail)
-    const message = backendReason || statusMessage(res.status, res.statusText)
-    throw new HttpError(message, res.status, reference)
-  }
-
-  if (isBlob) return (res.blob() as unknown) as Promise<T>
-  if (res.status === 204) return null as unknown as T
-  return res.json() as Promise<T>
 }
 
 async function request<T = any>(path: string, opts: RequestOptions = {}): Promise<T> {

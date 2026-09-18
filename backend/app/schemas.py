@@ -91,6 +91,18 @@ class DepartmentCoordinatorOut(ORMModel):
     workspace_key: Optional[str] = None
 
 
+class UserOption(ORMModel):
+    """Display/selection fields only; never account or authorization metadata."""
+    id: int
+    full_name: str
+    department: Optional[str] = None
+    departments: List[str] = []
+    is_active: bool
+    show_in_user_dropdowns: bool = True
+
+    _normalize_full_name = field_validator("full_name", mode="before")(_plain_person_name)
+
+
 class UserOut(ORMModel):
     id: int
     username: str
@@ -2006,6 +2018,23 @@ class SignOffUpdate(BaseModel):
     )(_limited_rich_text)
 
 
+class SignOffListOut(ORMModel):
+    """Register fields only; evidence is fetched when a certificate is opened."""
+    id: int
+    certificate_id: str
+    certificate_type: str
+    certificate_testing_type: Optional[str] = None
+    application_name: str
+    qa_workspace_id: Optional[int] = None
+    request_department: Optional[str] = None
+    change_description: Optional[str] = None
+    status: str
+    requester_id: Optional[int] = None
+    reviewed_by_id: Optional[int] = None
+    approved_by_id: Optional[int] = None
+    created_at: datetime.datetime
+
+
 class SignOffOut(ORMModel):
     known_limitations: Optional[str] = None
     business_acceptance_status: Optional[str] = None
@@ -2018,6 +2047,8 @@ class SignOffOut(ORMModel):
     certificate_id: str
     certificate_date: Optional[datetime.date] = None
     certificate_type: str
+    certificate_testing_request_id: Optional[str] = None
+    certificate_testing_type: Optional[str] = None
     testing_type: str
     testing_request_id: Optional[str] = None
     change_request_ids: Optional[str] = None
@@ -2026,6 +2057,7 @@ class SignOffOut(ORMModel):
     department: Optional[str] = None
     qa_workspace_id: Optional[int] = None
     request_department: Optional[str] = None
+    approving_qa_team: Optional[str] = None
     # Delegated from the QA Request via source_functional_request -- see
     # models.QASignOff.change_description.
     change_description: Optional[str] = None

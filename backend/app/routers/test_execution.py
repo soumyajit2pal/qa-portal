@@ -439,7 +439,7 @@ def _runner_or_404(db: Session, user_id: int, *, workspace_id: int | None = None
     return target
 
 
-@router.get("/projects/{project_id}/cycle-owner-candidates", response_model=List[schemas.UserOut])
+@router.get("/projects/{project_id}/cycle-owner-candidates", response_model=List[schemas.UserOption])
 def cycle_owner_candidates(project_id: int, cycle_id: int | None = None,
                            db: Session = Depends(get_db),
                            current_user: models.User = Depends(require_roles(*_EXEC_ROLES))):

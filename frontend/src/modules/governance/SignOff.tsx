@@ -3,23 +3,24 @@ import { useViewerManagedDeepLinks } from '../../hooks/useRequestNavigation'
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api'
+import { resolveRequestId } from '../../requestNavigation'
 import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Card, Table, Badge, Modal, Field, ErrorText, PageHeader, RequestDocuments, ApprovalDecisionButtons } from '../../components/Common'
 import {
-  CERTIFICATE_TYPES, SIGNOFF_TESTING_TYPES, RISK_TIERS, DEPLOYMENT_ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole,
+  SAST_DAST_STATUS_LABELS, CERTIFICATE_TYPES, RISK_TIERS, DEPLOYMENT_ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole,
   isViewOnly,
   SIGNOFF_EDITABLE_STATUSES, SIGNOFF_STATUS_LABELS, SIGNOFF_PENDING_WITH,
   QA_LEAD_GROUP_ROLES, validTargetPromotionOptions, validEnvironmentPromotion,
 } from '../../constants'
-import { SignOffOut, UserOut, FunctionalOut, FunctionalListOut, QARequestOut, PageOut, ApprovalActionOut } from '../../types'
+import { SignOffOut, UserOption, FunctionalOut, FunctionalListOut, QARequestOut, PageOut, ApprovalActionOut } from '../../types'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraRichTextField from '../../components/JiraRichTextField'
 import ClearableSearchInput from '../../components/ClearableSearchInput'
 import './SignOff.css'
 
-function userName(users: UserOut[], id?: number | null): string | null {
+function userName(users: UserOption[], id?: number | null): string | null {
   const u = users.find((x) => x.id === id)
   return u ? u.full_name : null
 }
@@ -103,8 +104,9 @@ function richTextRequiredError(form: Pick<SignOffForm, 'exit_criteria_notes' | '
 // Selecting a match hands the full FunctionalOut record back to the caller,
 // which derives every auto-populated certificate field from it (see
 // NewSignOffModal::applyRequest below).
-function TestingRequestIdSearch({ requests, selected, onSelect, onClear }: {
+function TestingRequestIdSearch({ requests, selected, onSelect, onClear, displayRequestId }: {
   requests: FunctionalListOut[]
+  displayRequestId?: string | null
   // The already-fully-loaded selection (PAG-006 -- fetched fresh on select,
   // see NewSignOffModal's onSelect below), not one of the lightweight
   // `requests` rows -- both shapes carry request_id/application_name so the
@@ -127,7 +129,7 @@ function TestingRequestIdSearch({ requests, selected, onSelect, onClear }: {
     return (
       <div className="searchable-select">
         <div className="searchable-select-trigger" style={{ cursor: 'default' }}>
-          <span>{selected.request_id} — {selected.application_name || '—'}</span>
+          <span>{displayRequestId || selected.request_id} — {selected.application_name || '—'}</span>
           <button type="button" className="btn btn-sm" onClick={onClear}>Change</button>
         </div>
       </div>
@@ -236,9 +238,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
       technology_stack: r.technology_stack || '',
       release_version: r.release_version || '',
       build_number: r.build_number || '',
-      // SIGNOFF_TESTING_TYPES is ["Functional", "SAST", "DAST"] -- a
-      // certificate raised from a Functional Testing Request is always the
-      // "Functional" type.
+      // Retain the Functional source link; certificate scope is derived by the API.
       testing_type: 'Functional',
       environment_tested: r.environment || f.environment_tested,
       target_promotion_environment: r.target_promotion_environment || f.target_promotion_environment,
@@ -272,6 +272,8 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
     return () => { active = false }
   }, [selectedRequest?.qa_request_id])
 
+  const testingTypes = [...new Set((parentRequest?.request_types || '').split(',').map(t => t.trim()).filter(Boolean))]
+  const certificateRequestId = testingTypes.length > 1 ? parentRequest!.request_id : selectedRequest?.request_id
   const securityPending = parentRequest ? linkedSecurityNotClosed(parentRequest) : []
 
   // PAG-006 -- `eligibleRequests` only ever holds the lightweight
@@ -360,11 +362,11 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
           {presetRequest ? (
             <div className="searchable-select">
               <div className="searchable-select-trigger" style={{ cursor: 'default' }}>
-                <span>{presetRequest.request_id} — {presetRequest.application_name || '—'}</span>
+                <span>{certificateRequestId} — {presetRequest.application_name || '—'}</span>
               </div>
             </div>
           ) : (
-            <TestingRequestIdSearch requests={eligibleRequests} selected={selectedRequest} onSelect={selectEligibleRequest} onClear={clearSelection} />
+            <TestingRequestIdSearch displayRequestId={certificateRequestId} requests={eligibleRequests} selected={selectedRequest} onSelect={selectEligibleRequest} onClear={clearSelection} />
           )}
         </Field>
         {securityPending.length > 0 && <div className="alert alert-warning" role="status">
@@ -385,9 +387,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
             </select>
           </Field>
           <Field label="Testing Type *">
-            <select required value={form.testing_type} onChange={(e) => set('testing_type', e.target.value)}>
-              {SIGNOFF_TESTING_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
+            <input disabled value={testingTypes.join(', ') || form.testing_type} />
           </Field>
           <Field label="Risk Tier *">
             <select required value={form.risk_tier} onChange={(e) => set('risk_tier', e.target.value)}>
@@ -441,7 +441,7 @@ export function NewSignOffModal({ onClose, onCreated, presetRequest }: {
         ] as const).map(([key, label]) => <Field key={key} label={label}><JiraRichTextField value={form[key]} onChange={value => set(key, value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, [key]: images }))} ariaLabel={label} placeholder={`Enter ${label.toLowerCase()}…`} /></Field>)}
         <Field label="Remarks *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Remarks" placeholder="Add remarks…" /></Field>
         {form.certificate_type === 'Conditional Clearance' && <>
-        <div className="clearance-form-intro"><span>04 · Conditional clearance</span><h3>Section F · Conditional Clearance Observations</h3></div>
+        <div className="clearance-form-intro"><span>Conditional clearance</span><h3>Conditions & observations</h3></div>
         <p className="muted small">Optional. Leave blank to generate observations from linked open defects. If you enter observations, only your content is used in Section F; generated observations are not appended. Defect counts and clearance eligibility still use system data.</p>
         <Field label="Conditional Clearance Observations"><JiraRichTextField value={form.conditional_observations} onChange={value => set('conditional_observations', value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, conditional_observations: images }))} ariaLabel="Conditional Clearance Observations" placeholder="Enter your observations, including functionality, severity, business impact, mitigation, owner and target date; or leave blank to use system data…" /></Field>
         </>}
@@ -533,10 +533,11 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
       <form className="clearance-form" onSubmit={submit}>
         <div className="clearance-form-intro"><span>01 · Linked request</span><h3>Request identity</h3><p>These values come from the linked Functional request and stay locked.</p></div>
         <div className="form-row clearance-form-grid">
-          <Field label="Testing Request ID"><input disabled value={item.testing_request_id || ''} /></Field>
+          <Field label="Testing Request ID"><input disabled value={item.certificate_testing_request_id || item.testing_request_id || ''} /></Field>
           <Field label="Application Name"><input disabled value={item.application_name} /></Field>
           <Field label="Application Owner"><input disabled value={item.application_owner || ''} /></Field>
           <Field label="Request Department"><input disabled value={item.request_department || item.department || ''} /></Field>
+          <Field label="Approving QA Team"><input disabled value={item.approving_qa_team || 'Not configured'} /></Field>
         </div>
         <div className="clearance-form-intro"><span>02 · Clearance setup</span><h3>Certificate and promotion details</h3></div>
         <div className="form-row clearance-form-grid">
@@ -546,9 +547,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
             </select>
           </Field>
           <Field label="Testing Type *">
-            <select required value={form.testing_type} onChange={(e) => set('testing_type', e.target.value)}>
-              {SIGNOFF_TESTING_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
+            <input disabled value={item.certificate_testing_type || item.testing_type} />
           </Field>
           <Field label="Technology Stack"><input value={form.technology_stack} onChange={(e) => set('technology_stack', e.target.value)} /></Field>
           <Field label="Release Version"><input value={form.release_version} onChange={(e) => set('release_version', e.target.value)} /></Field>
@@ -596,7 +595,7 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
         ] as const).map(([key, label]) => <Field key={key} label={label}><JiraRichTextField value={form[key]} onChange={value => set(key, value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, [key]: images }))} ariaLabel={label} placeholder={`Enter ${label.toLowerCase()}…`} /></Field>)}
         <Field label="Remarks *"><JiraRichTextField value={form.residual_risk_notes} onChange={(value) => set('residual_risk_notes', value)} onImagesChange={setResidualRiskImages} ariaLabel="Remarks" placeholder="Add remarks…" /></Field>
         {form.certificate_type === 'Conditional Clearance' && <>
-        <div className="clearance-form-intro"><span>04 · Conditional clearance</span><h3>Section F · Conditional Clearance Observations</h3></div>
+        <div className="clearance-form-intro"><span>Conditional clearance</span><h3>Conditions & observations</h3></div>
         <p className="muted small">Optional. Leave blank to generate observations from linked open defects. If you enter observations, only your content is used in Section F; generated observations are not appended. Defect counts and clearance eligibility still use system data.</p>
         <Field label="Conditional Clearance Observations"><JiraRichTextField value={form.conditional_observations} onChange={value => set('conditional_observations', value)} onImagesChange={images => setAdditionalImages(current => ({ ...current, conditional_observations: images }))} ariaLabel="Conditional Clearance Observations" placeholder="Enter your observations, including functionality, severity, business impact, mitigation, owner and target date; or leave blank to use system data…" /></Field>
         </>}
@@ -612,15 +611,14 @@ function EditSignOffModal({ item, onClose, onSaved }: { item: SignOffOut; onClos
 
 function CertificateEvidence({ item }: { item: SignOffOut }) {
   const summary = item.certificate_summary
-  if (!summary) return <section className="clearance-evidence"><div className="clearance-section-heading"><div><span>02 · Evidence</span><h3>Frozen lifecycle evidence</h3></div></div><p className="clearance-empty-note">This earlier certificate has no frozen summary. Capturing current results requires a refresh and full reapproval.</p></section>
+  if (!summary) return <section className="clearance-evidence"><div className="clearance-section-heading"><div><span>Captured results</span><h3>Test evidence</h3></div></div><p className="clearance-empty-note">This earlier certificate has no frozen summary. Capturing current results requires a refresh and full reapproval.</p></section>
   const changeIdentity = <div className="clearance-evidence-identity"><span><small>CR / EPIC</small><strong>{summary.change_request_ids === undefined ? 'Not captured — refresh required' : summary.change_request_ids || 'Not recorded'}</strong></span><span><small>Change description</small><strong>{summary.change_description === undefined ? 'Not captured — refresh required' : summary.change_description || 'Not recorded'}</strong></span></div>
   const defectStatuses = ['Fix Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect']
   const activeDefectStatuses = defectStatuses.filter(status => (summary.defects.counts[status] || 0) > 0)
-  const otherDefectStatuses = defectStatuses.filter(status => !activeDefectStatuses.includes(status))
   const openSeverity = summary.severity.reduce((total, row) => total + row.open, 0)
   const passPercent = summary.execution.pass_pct == null ? 'No result' : `${summary.execution.pass_pct}%`
   return <section className="clearance-evidence" id="clearance-evidence">
-    <div className="clearance-section-heading"><div><span>02 · Evidence</span><h3>Frozen lifecycle evidence</h3><p>Revision {summary.revision} · captured {formatDateTimeIST(summary.captured_at)}</p></div><span className="clearance-frozen-badge">Snapshot locked</span></div>
+    <div className="clearance-section-heading"><div><span>Captured results</span><h3>Test evidence</h3><p>Revision {summary.revision} · captured {formatDateTimeIST(summary.captured_at)}</p></div><span className="clearance-frozen-badge">Snapshot locked</span></div>
     <div className="clearance-evidence-metrics">
       <article><small>Test cases</small><strong>{summary.execution.total}</strong><span>latest linked results</span></article>
       <article><small>Pass rate</small><strong>{passPercent}</strong><span>Pass + Retest Passed</span></article>
@@ -635,17 +633,22 @@ function CertificateEvidence({ item }: { item: SignOffOut }) {
       </details>
       <details><summary><span><b>QA Defect Status Summary</b><small>Current disposition, with deferred defects still open</small></span><strong>{summary.defects.total} defects</strong></summary>
         <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>{activeDefectStatuses.map(status => <tr key={status}><td>{status}{status === 'Deferred' ? ' (Open)' : ''}</td><td>{summary.defects.counts[status] || 0}</td></tr>)}{summary.defects.total === 0 && <tr><td colSpan={2}>No linked defects captured</td></tr>}<tr><th>Total</th><td>{summary.defects.total}</td></tr></tbody></table></div>
-        {otherDefectStatuses.length > 0 && <details className="clearance-zero-statuses"><summary>Show {otherDefectStatuses.length} status{otherDefectStatuses.length === 1 ? '' : 'es'} with zero defects</summary><ul>{otherDefectStatuses.map(status => <li key={status}>{status}</li>)}</ul></details>}
       </details>
       <details><summary><span><b>Defect Severity-wise Breakdown</b><small>Open and terminal defects by severity</small></span><strong>{openSeverity} open</strong></summary>
         <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Severity</th><th>Open</th><th>Closed / terminal</th><th>Total</th></tr></thead><tbody>{summary.severity.map(row => <tr key={row.severity}><td>{row.severity}</td><td>{row.open}</td><td>{row.closed}</td><td>{row.total}</td></tr>)}</tbody></table></div>
       </details>
     </div>
+    <section className="clearance-security-assessment" aria-label="Security Testing Assessment">
+      <h4>Section D · Security Testing Assessment</h4>
+      <p className="muted small">Status at capture. Initial findings total the Security Auditor View across all targets; suppressions total the latest captured scan for each target.</p>
+      {summary.security?.length ? <div className="clearance-table-scroll"><table className="workflow-table"><thead><tr><th>Type</th><th>Request ID</th><th>Current status</th><th>Initial total findings</th><th>Current findings</th><th>Suppression count</th><th>Suppression request ID(s)</th></tr></thead><tbody>{summary.security.map(row => <tr key={`${row.type}-${row.request_id}`}><td>{row.type}</td><td>{row.request_id}</td><td>{SAST_DAST_STATUS_LABELS[row.status] || row.status}</td><td>{row.initial_findings ?? 'Not captured'}</td><td>{row.current_findings ?? 'Not captured'}</td><td>{row.suppression_count ?? 'Not captured'}</td><td>{row.suppression_request_ids ? row.suppression_request_ids.join(', ') || 'None' : 'Not captured'}</td></tr>)}</tbody></table></div> : <p className="muted small">No linked security assessment captured.</p>}
+      {summary.security?.some(row => row.initial_findings == null || row.current_findings == null || row.suppression_count == null || row.suppression_request_ids == null) && <p className="muted small">Missing scan counts require evidence refresh and full reapproval.</p>}
+    </section>
     <details className="clearance-method-note"><summary>How these figures were calculated</summary><p>{summary.population_note}</p><p>The figures remain unchanged until explicitly refreshed. Refreshing invalidates previous approvals and requires the full approval sequence again.</p></details>
   </section>
 }
 
-export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; onClose: () => void; onChanged: (s: SignOffOut) => void; users: UserOut[] }) {
+export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignOffOut; onClose: () => void; onChanged: (s: SignOffOut) => void; users: UserOption[] }) {
   const { user } = useAuth()
   const [error, setError] = useState<unknown>(null)
   const [busyAction, setBusyAction] = useState<string | null>(null)
@@ -653,6 +656,9 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
   const [history, setHistory] = useState<ApprovalActionOut[]>([])
   const [editing, setEditing] = useState(false)
   const [confirmRefresh, setConfirmRefresh] = useState(false)
+  const [detailTab, setDetailTab] = useState('evidence')
+  const detailTabs = [['evidence', 'Test evidence'], ['details', 'Certificate details'], ['remarks', 'Remarks & risks'], ['documents', 'Documents'], ['activity', 'Approvals & activity']]
+  useEffect(() => { setDetailTab('evidence') }, [item.id])
 
   const load = useCallback(async () => {
     try { setHistory(await api.get<ApprovalActionOut[]>(`/api/signoffs/${item.id}/history`)) }
@@ -757,7 +763,8 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
     return Array.from(byStage.values())
   }, [history])
 
-  const stageIndex = status === 'ISSUED' ? 3 : status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? 2 : status === 'SM_APPROVAL_PENDING' ? 1 : 0
+  const stageIndex = status === 'ISSUED' ? 3 : ['DEPT_HEAD_QA_APPROVAL_PENDING', 'DEPT_HEAD_COE_REJECTED'].includes(status) ? 2 : ['SM_APPROVAL_PENDING', 'SM_REJECTED'].includes(status) ? 1 : 0
+  const isRejected = ['SM_REJECTED', 'DEPT_HEAD_COE_REJECTED'].includes(status)
   const stageNames = ['Draft', 'QA Lead', 'Executive', 'Issued']
   const nextStep = status === 'ISSUED' ? 'Certificate issued' : status === 'DRAFT' ? 'Submit for QA Lead review' : status === 'SM_APPROVAL_PENDING' ? 'QA Lead review' : status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? 'Executive review' : canResubmit ? 'Reopen and revise the certificate' : SIGNOFF_STATUS_LABELS[status] || status
   const nextStepHint = status === 'ISSUED' ? 'Download the approved certificate and review the locked evidence below.' : status === 'DRAFT' ? 'Review the captured evidence and remarks before submitting.' : status === 'SM_APPROVAL_PENDING' ? 'An eligible QA Lead must approve, return, or reject this certificate.' : status === 'DEPT_HEAD_QA_APPROVAL_PENDING' ? 'An independent eligible Executive must make the final decision.' : canResubmit ? 'Update the requested details, then restart approval.' : 'Review the decision history and available actions below.'
@@ -767,15 +774,15 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
     <Modal title={item.certificate_id} onClose={onClose} wide>
       <div className="clearance-detail">
       <ErrorText error={error} />
-      <section className="clearance-hero" aria-label="Certificate overview">
-        <div className="clearance-hero-main"><span className="clearance-eyebrow">QA clearance · {item.certificate_type}</span><h2>{item.application_name}</h2><p>{item.change_description || 'Change description not recorded'}</p><div className="clearance-hero-chips"><span>CR / EPIC <b>{item.change_request_ids || '—'}</b></span><span>Request <b>{item.testing_request_id || '—'}</b></span><span>Build <b>{item.build_number || '—'}</b></span></div></div>
-        <div className="clearance-hero-status"><small>Current status</small><WorkflowStatusBadge record={item} workflow="signoff" status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /><span>{SIGNOFF_PENDING_WITH[status] ? `Pending with ${SIGNOFF_PENDING_WITH[status]}` : item.certificate_date ? `Dated ${item.certificate_date}` : 'See approval history below'}</span></div>
+      <section className="clearance-hero clearance-overview" aria-label="Certificate overview">
+        <div className="clearance-hero-main"><span className="clearance-eyebrow">QA clearance · {item.certificate_type}</span><h2>{item.application_name}</h2><p>{item.change_description || 'Change description not recorded'}</p><div className="clearance-hero-chips"><span>CR / EPIC <b>{item.change_request_ids || '—'}</b></span><span>Request <b>{item.certificate_testing_request_id || item.testing_request_id || '—'}</b></span><span>Build <b>{item.build_number || '—'}</b></span><span>Testing <b>{item.certificate_testing_type || item.testing_type}</b></span><span>Promotion <b>{item.environment_tested || '—'} → {item.target_promotion_environment || '—'}</b></span></div></div>
+        <div className="clearance-hero-status"><small>Current status</small><WorkflowStatusBadge record={item} workflow="signoff" status={item.status} label={SIGNOFF_STATUS_LABELS[item.status] || item.status} /><span>{SIGNOFF_PENDING_WITH[status] && SIGNOFF_PENDING_WITH[status] !== '—' ? `Pending with ${SIGNOFF_PENDING_WITH[status]}` : item.certificate_date ? `Dated ${item.certificate_date}` : 'See Approvals & activity'}</span></div>
       </section>
-      <nav className="clearance-stage-track" aria-label="Approval progress">{stageNames.map((name, index) => <div key={name} className={`clearance-stage ${index < stageIndex ? 'is-done' : index === stageIndex ? 'is-current' : ''}`}><span>{index < stageIndex ? '✓' : index + 1}</span><b>{name}</b></div>)}</nav>
+      <nav className="clearance-stage-track" aria-label="Approval progress">{stageNames.map((name, index) => <div key={name} aria-current={index === stageIndex ? 'step' : undefined} className={`clearance-stage ${index < stageIndex ? 'is-done' : index === stageIndex ? (isRejected ? 'is-rejected' : 'is-current') : ''}`}><span>{index === stageIndex && isRejected ? '×' : index < stageIndex || status === 'ISSUED' ? '✓' : index + 1}</span><b>{name}</b></div>)}</nav>
       {assignedTesters === undefined ? <div className="clearance-tester-warning" role="status"><b>Assigned testers were not captured in this revision.</b><span>To include their names, refresh the evidence and complete approval again.</span></div> : <div className="clearance-tester-line"><span>Assigned tester(s)</span><b>{assignedTesters.map(tester => tester.name).join(', ') || 'Not assigned'}</b></div>}
 
       <section className="clearance-action-panel" aria-label="Next step and actions">
-        <div className="clearance-section-heading"><div><span>01 · Decision</span><h3>{nextStep}</h3><p>{nextStepHint}</p></div></div>
+        <div className="clearance-section-heading"><div><span>Next action</span><h3>{nextStep}</h3><p>{nextStepHint}</p></div></div>
         <div className="clearance-action-row">
           <button className={item.status === 'ISSUED' ? 'btn btn-sm btn-primary' : 'btn btn-sm'} disabled={!!busyAction} onClick={downloadCertificate}>{busyAction === 'download' ? 'Downloading…' : item.status === 'ISSUED' ? 'Download Certificate' : 'Export PDF'}</button>
           {canEditDetails && <button className="btn btn-sm" disabled={!!busyAction} onClick={() => setEditing(true)}>Edit Details</button>}
@@ -790,13 +797,24 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
       {canExecutiveCoeDecide && <div className="clearance-decision-buttons"><ApprovalDecisionButtons userName={user?.full_name} comments={comments} busy={!!busyAction} approveLabel="Approve & Issue Certificate" onApprove={(signed) => act('executive-coe-decision', { decision: 'Approved', comments: signed })} onReturn={(actionNote) => act('executive-coe-decision', { decision: 'Returned', comments: actionNote })} onReject={(actionNote) => act('executive-coe-decision', { decision: 'Rejected', comments: actionNote })} /></div>}
       {awaitingIndependentExecutive && <div className="alert alert-info signoff-independent-approval" role="status"><strong>Your QA Lead e-signature is already recorded.</strong><span>Final Executive approval must be completed by another eligible Chief Manager QA or AGM QA. No additional signature or decision is required from you at this stage.</span></div>}
 
+      <div className="clearance-tabs" role="tablist" aria-label="Certificate sections">
+        {detailTabs.map(([key, label], index) => <button key={key} type="button" role="tab" id={`clearance-tab-${key}`} aria-controls={`clearance-panel-${key}`} aria-selected={detailTab === key} tabIndex={detailTab === key ? 0 : -1} onClick={() => setDetailTab(key)} onKeyDown={event => {
+          const next = event.key === 'ArrowRight' ? (index + 1) % detailTabs.length : event.key === 'ArrowLeft' ? (index + detailTabs.length - 1) % detailTabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? detailTabs.length - 1 : null
+          if (next !== null) { event.preventDefault(); setDetailTab(detailTabs[next][0]); document.getElementById(`clearance-tab-${detailTabs[next][0]}`)?.focus() }
+        }}>{label}</button>)}
+      </div>
+      <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-evidence" aria-labelledby="clearance-tab-evidence" hidden={detailTab !== 'evidence'} tabIndex={0}>
       <CertificateEvidence item={item} />
-      <details className="clearance-detail-fields"><summary><span><b>Certificate details</b><small>Scope, ownership, environment, and validity</small></span><span>View details</span></summary><div className="clearance-fact-grid">
-        <ClearanceFact label="Application owner">{item.application_owner || '—'}</ClearanceFact><ClearanceFact label="Request department">{item.request_department || '—'}</ClearanceFact>
+      </div>
+      <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-details" aria-labelledby="clearance-tab-details" hidden={detailTab !== 'details'} tabIndex={0}>
+      <details open className="clearance-detail-fields"><summary><span><b>Certificate details</b><small>Scope, ownership, environment, and validity</small></span><span>View details</span></summary><div className="clearance-fact-grid">
+        <ClearanceFact label="Application owner">{item.application_owner || '—'}</ClearanceFact><ClearanceFact label="Request department">{item.request_department || '—'}</ClearanceFact><ClearanceFact label="Approving QA team">{item.approving_qa_team || 'Not configured'}</ClearanceFact>
         <ClearanceFact label="Requested by (QA team)">{userName(users, item.requester_id) || '—'}</ClearanceFact><ClearanceFact label="Approved by (QA Lead)">{userName(users, item.reviewed_by_id) || '—'}</ClearanceFact><ClearanceFact label="Approved by (Executive)">{userName(users, item.approved_by_id) || '—'}</ClearanceFact>
-        <ClearanceFact label="Testing type">{item.testing_type}</ClearanceFact><ClearanceFact label="Certificate date">{item.certificate_date || '—'}</ClearanceFact><ClearanceFact label="Vendor / SI partner">{item.vendor_si_partner || '—'}</ClearanceFact><ClearanceFact label="Technology stack">{item.technology_stack || '—'}</ClearanceFact><ClearanceFact label="Release / build">{item.release_version || '—'} / {item.build_number || '—'}</ClearanceFact><ClearanceFact label="Environment tested">{item.environment_tested || '—'}</ClearanceFact><ClearanceFact label="Target promotion">{item.target_promotion_environment || '—'}</ClearanceFact><ClearanceFact label="Risk tier">{item.risk_tier || '—'}</ClearanceFact><ClearanceFact label="Validity">{item.validity_from || '—'} to {item.validity_to || '—'}</ClearanceFact>
+        <ClearanceFact label="Testing type">{item.certificate_testing_type || item.testing_type}</ClearanceFact><ClearanceFact label="Certificate date">{item.certificate_date || '—'}</ClearanceFact><ClearanceFact label="Vendor / SI partner">{item.vendor_si_partner || '—'}</ClearanceFact><ClearanceFact label="Technology stack">{item.technology_stack || '—'}</ClearanceFact><ClearanceFact label="Release / build">{item.release_version || '—'} / {item.build_number || '—'}</ClearanceFact><ClearanceFact label="Environment tested">{item.environment_tested || '—'}</ClearanceFact><ClearanceFact label="Target promotion">{item.target_promotion_environment || '—'}</ClearanceFact><ClearanceFact label="Risk tier">{item.risk_tier || '—'}</ClearanceFact><ClearanceFact label="Validity">{item.validity_from || '—'} to {item.validity_to || '—'}</ClearanceFact>
       </div></details>
-      <section className="clearance-remarks" id="clearance-remarks"><div className="clearance-section-heading"><div><span>03 · Remarks</span><h3>Section E · QA Clearance Remarks</h3><p>Scope, risks, acceptance, security, and deployment decision</p></div></div><div className="clearance-remark-grid">
+      </div>
+      <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-remarks" aria-labelledby="clearance-tab-remarks" hidden={detailTab !== 'remarks'} tabIndex={0}>
+      <section className="clearance-remarks" id="clearance-remarks"><div className="clearance-section-heading"><div><span>Clearance assessment</span><h3>Remarks & risks</h3><p>Scope, risks, acceptance, security, and deployment decision</p></div></div><div className="clearance-remark-grid">
         {([
           ['exit_criteria_notes', 'Testing Scope Completed'], ['open_defect_summary', 'Open Risks (if any)'],
           ['known_limitations', 'Known Limitations'], ['business_acceptance_status', 'Business Acceptance Status'],
@@ -806,13 +824,15 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
       </div></section>
 
       {item.certificate_type === 'Conditional Clearance' && <section className="clearance-conditional" id="clearance-conditional">
-      <div className="clearance-section-heading clearance-conditional-heading"><div><span>04 · Conditional clearance</span><h3>Section F · Conditional Clearance Observations</h3><p>Only included for conditional certificates</p></div></div>
+      <div className="clearance-section-heading clearance-conditional-heading"><div><span>Conditional clearance</span><h3>Conditions & observations</h3><p>Only included for conditional certificates</p></div></div>
       {(item.certificate_summary ? item.certificate_summary.conditional_observations : item.conditional_observations)?.trim()
         ? <><p className="muted small">User-entered observations</p><AuthenticatedMarkdown value={(item.certificate_summary ? item.certificate_summary.conditional_observations : item.conditional_observations)!} basePath={`/api/signoffs/${item.id}/documents`} /></>
         : <><p className="muted small">Generated from the frozen linked-defect evidence.</p>{item.certificate_summary?.observations?.length ? <Table rows={item.certificate_summary.observations} rowKey="defect_key" columns={[{ key: 'defect_key', header: 'Defect' }, { key: 'functionality', header: 'Functionality' }, { key: 'observation', header: 'Observation' }, { key: 'severity', header: 'Severity' }, { key: 'owner', header: 'Owner' }, { key: 'target_date', header: 'Target date' }]} /> : <p>{item.certificate_summary ? 'No open linked defect observations in the captured evidence.' : 'Refresh summaries to generate observations; full reapproval is required.'}</p>}</>}
 
       </section>}
 
+      </div>
+      <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-activity" aria-labelledby="clearance-tab-activity" hidden={detailTab !== 'activity'} tabIndex={0}>
       {signatures.length > 0 && <>
         <div className="clearance-section-heading"><div><span>Approval record</span><h3>Electronic signatures</h3><p>Latest valid signature for each approval stage</p></div></div>
         <div className="signoff-signature-list">
@@ -825,10 +845,12 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
         </div>
       </>}
 
+      <JiraActivity entityType="SIGNOFF" entityId={item.id} items={history} onPosted={(entry) => setHistory((prev) => [...prev, entry])} />
+      </div>
+      <div className="clearance-tab-panel" role="tabpanel" id="clearance-panel-documents" aria-labelledby="clearance-tab-documents" hidden={detailTab !== 'documents'} tabIndex={0}>
       <div className="clearance-section-heading"><div><span>Supporting material</span><h3>Documents</h3><p>Evidence and attachments linked to this certificate</p></div></div>
       <RequestDocuments apiBase="/api/signoffs" reqId={item.id} canManage={canManageDocuments} />
-
-      <JiraActivity entityType="SIGNOFF" entityId={item.id} items={history} onPosted={(entry) => setHistory((prev) => [...prev, entry])} />
+      </div>
 
       {editing && (
         <EditSignOffModal
@@ -842,13 +864,24 @@ export function SignOffDetail({ item, onClose, onChanged, users }: { item: SignO
   )
 }
 
+type SignOffListRow = Pick<SignOffOut, 'id' | 'certificate_id' | 'certificate_type' | 'certificate_testing_type' | 'application_name' | 'change_description' | 'request_department' | 'requester_id' | 'reviewed_by_id' | 'approved_by_id' | 'status' | 'created_at' | 'qa_workspace_id'>
+type SignOffPage = PageOut<SignOffListRow> & { departments: string[]; status_counts: Record<string, number> }
+
 export default function SignOff() {
   const viewerManagedDeepLinks = useViewerManagedDeepLinks()
   const { user } = useAuth()
-  const [rows, setRows] = useState<SignOffOut[]>([])
+  const [result, setResult] = useState<SignOffPage | null>(null)
+  const rows = result?.items || []
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
+  const [search, setSearch] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [openingId, setOpeningId] = useState<number | null>(null)
+  const loadGeneration = useRef(0)
+  const openGeneration = useRef(0)
   const [showNew, setShowNew] = useState(false)
   const [selected, setSelected] = useState<SignOffOut | null>(null)
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [departmentFilter, setDepartmentFilter] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [searchParams, setSearchParams] = useSearchParams()
@@ -861,19 +894,37 @@ export default function SignOff() {
   const [downloadingId, setDownloadingId] = useState<number | null>(null)
 
   const load = useCallback(async () => {
-    try { setRows(await api.get<SignOffOut[]>('/api/signoffs')) } catch (err) { setError(err) }
+    const generation = ++loadGeneration.current
+    setLoading(true)
+    setError(null)
+    const qs = new URLSearchParams({ page: String(page), page_size: String(pageSize), search, department: departmentFilter })
+    try {
+      const response = await api.get<SignOffPage>(`/api/signoffs?${qs}`)
+      if (generation === loadGeneration.current) setResult(response)
+    } catch (err) { if (generation === loadGeneration.current) setError(err) }
+    finally { if (generation === loadGeneration.current) setLoading(false) }
+  }, [page, pageSize, search, departmentFilter])
+
+  const openCertificate = useCallback(async (id: number) => {
+    const generation = ++openGeneration.current
+    setOpeningId(id)
+    try {
+      const detail = await api.get<SignOffOut>(`/api/signoffs/${id}`)
+      if (generation === openGeneration.current) setSelected(detail)
+    } catch (err) { if (generation === openGeneration.current) setError(err) }
+    finally { if (generation === openGeneration.current) setOpeningId(null) }
   }, [])
 
-  async function downloadCertificate(row: SignOffOut) {
+  async function downloadCertificate(row: SignOffListRow) {
     setError(null)
     setDownloadingId(row.id)
     try {
       await api.downloadFile(`/api/signoffs/${row.id}/export`, `${row.certificate_id}.pdf`)
     } catch (err) { setError(err) } finally { setDownloadingId(null) }
   }
-  useEffect(() => { load() }, [load])
+  useEffect(() => { const timer = window.setTimeout(() => void load(), 250); return () => { window.clearTimeout(timer); loadGeneration.current++ } }, [load])
   useEffect(() => {
-    api.get<UserOut[]>('/api/auth/users').then(setUsers).catch(() => { /* names just stay empty */ })
+    api.get<UserOption[]>('/api/auth/user-options').then(setUsers).catch(() => { /* names just stay empty */ })
   }, [])
 
   // Same "?open=<certificate_id>" deep-link pattern as Functional/SAST/DAST/
@@ -884,21 +935,18 @@ export default function SignOff() {
     if (viewerManagedDeepLinks) return
     const recordId = Number(searchParams.get('openId'))
     const openId = searchParams.get('open')
-    if (Number.isInteger(recordId) && recordId > 0) {
-      api.get<SignOffOut>(`/api/signoffs/${recordId}`).then(setSelected).catch(setError)
-    } else if (openId) {
-      const match = rows.find((r) => r.certificate_id === openId)
-      if (!match) return
-      setSelected(match)
-    } else return
-    setSearchParams((p) => { p.delete('open'); p.delete('openId'); return p }, { replace: true })
-  }, [rows, searchParams, setSearchParams, viewerManagedDeepLinks])
+    if (!openId && !(Number.isInteger(recordId) && recordId > 0)) return
+    let active = true
+    resolveRequestId({ path: '/signoff', identifier: recordId > 0 ? String(recordId) : openId! }, url => api.get(url))
+      .then(id => { if (active) return openCertificate(id) }).catch(err => { if (active) setError(err) })
+    return () => { active = false }
+  }, [searchParams, viewerManagedDeepLinks, openCertificate])
 
-  const departments = useMemo(() => Array.from(new Set(rows.map((row) => row.request_department).filter((value): value is string => !!value))).sort((a, b) => a.localeCompare(b)), [rows])
-  const visibleRows = useMemo(() => departmentFilter ? rows.filter((row) => row.request_department === departmentFilter) : rows, [rows, departmentFilter])
-  const issuedCount = visibleRows.filter(row => row.status === 'ISSUED').length
-  const reviewCount = visibleRows.filter(row => ['SM_APPROVAL_PENDING', 'DEPT_HEAD_QA_APPROVAL_PENDING'].includes(row.status)).length
-  const actionCount = visibleRows.filter(row => ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER', 'DEPT_HEAD_COE_REJECTED'].includes(row.status)).length
+  const departments = result?.departments || []
+  const counts = result?.status_counts || {}
+  const issuedCount = counts.ISSUED || 0
+  const reviewCount = ['SM_APPROVAL_PENDING', 'DEPT_HEAD_QA_APPROVAL_PENDING'].reduce((sum, status) => sum + (counts[status] || 0), 0)
+  const actionCount = ['DRAFT', 'RETURNED_BY_SM', 'SM_REJECTED', 'RETURNED_BY_DEPT_HEAD_COE', 'RETURNED_BY_REQUESTER', 'DEPT_HEAD_COE_REJECTED'].reduce((sum, status) => sum + (counts[status] || 0), 0)
 
   // 2026-08 -- reported directly: "'Request Sign Off' button is not
   // enable[d] for QA lead ... in sign off ... section" -- widened from
@@ -912,22 +960,27 @@ export default function SignOff() {
     <div className="clearance-register">
       <ErrorText error={error} />
       <PageHeader
-        title="QA Clearance Certificates" count={rows.length}
+        title="QA Clearance Certificates" count={result?.total || 0}
         subtitle="Workspace QA clearance certificates: raised by QA, approved by the QA Lead, then issued after Executive approval."
         actions={canCreate && <button className="btn btn-primary" onClick={() => setShowNew(true)}>+ New Clearance Certificate</button>}
       />
       <Card>
         <div className="clearance-register-summary" aria-label="Certificate status overview">
-          <div><small>Total certificates</small><strong>{visibleRows.length}</strong><span>In selected department scope</span></div>
+          <div><small>Total certificates</small><strong>{result?.total || 0}</strong><span>In selected department scope</span></div>
           <div><small>Awaiting approval</small><strong>{reviewCount}</strong><span>QA Lead or Executive</span></div>
           <div><small>Needs revision / draft</small><strong>{actionCount}</strong><span>Requester action may be needed</span></div>
           <div><small>Issued</small><strong>{issuedCount}</strong><span>Ready to download</span></div>
         </div>
         <div className="signoff-register-toolbar">
-          <div><strong>Certificate Register</strong><span>{visibleRows.length} of {rows.length} certificates</span></div>
-          <label><span>Request Department</span><select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}><option value="">All departments</option>{departments.map((department) => <option key={department} value={department}>{department}</option>)}</select></label>
+          <div><strong>Certificate Register</strong><span>{rows.length} of {result?.total || 0} certificates</span></div>
+          <label><span>Request Department</span><select value={departmentFilter} onChange={(event) => { setDepartmentFilter(event.target.value); setPage(1) }}><option value="">All departments</option>{departments.map((department) => <option key={department} value={department}>{department}</option>)}</select></label>
         </div>
-        <Table rowKey="id" onRowClick={(r) => setSelected(r)} columns={[
+        <input aria-label="Search certificates" placeholder="Search certificate, application or request ID…" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} />
+        {openingId !== null && <p role="status">Loading certificate…</p>}
+        <Table rowKey="id" onRowClick={(r) => void openCertificate(r.id)}
+          server={{ page, pageSize, total: result?.total || 0, totalPages: result?.total_pages || 1,
+            hasNext: result?.has_next || false, hasPrevious: result?.has_previous || false, loading,
+            onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1) } }} columns={[
           // Reported directly: "where is download button?" -- it was added
           // as the LAST of 11 columns (see the removed 'download' column
           // this replaced), which on a wide register requires scrolling all
@@ -963,12 +1016,12 @@ export default function SignOff() {
           { key: 'reviewed_by_id', header: 'Reviewed By', render: (r) => userName(users, r.reviewed_by_id) || '—', filterValue: (r) => userName(users, r.reviewed_by_id) || '' },
           { key: 'approved_by_id', header: 'Approved By', render: (r) => userName(users, r.approved_by_id) || '—', filterValue: (r) => userName(users, r.approved_by_id) || '' },
           { key: 'certificate_type', header: 'Type' },
-          { key: 'testing_type', header: 'Testing Type' },
+          { key: 'certificate_testing_type', header: 'Testing Type' },
           { key: 'pending_with', header: 'Pending With', render: (r) => SIGNOFF_PENDING_WITH[r.status] || '—', filterValue: (r) => SIGNOFF_PENDING_WITH[r.status] || '' },
-        ]} rows={visibleRows} />
+        ]} rows={rows} />
       </Card>
       {showNew && <NewSignOffModal onClose={() => setShowNew(false)} onCreated={() => { setShowNew(false); load() }} />}
-      {selected && <SignOffDetail item={selected} onClose={() => setSelected(null)} onChanged={(u) => { setSelected(u); load() }} users={users} />}
+      {selected && <SignOffDetail item={selected} onClose={() => { setSelected(null); setSearchParams(p => { p.delete("open"); p.delete("openId"); return p }, { replace: true }) }} onChanged={(u) => { setSelected(u); load() }} users={users} />}
     </div>
   )
 }

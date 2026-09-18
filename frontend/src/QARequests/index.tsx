@@ -13,7 +13,7 @@ import {
 } from "../components/Common";
 import InfoModal from "../components/InfoModal";
 import { GATEWAY_PENDING_WITH } from "../constants";
-import { QARequestListOut, QARequestOut, UserOut, QAWorkspaceOut } from "../types";
+import { QARequestListOut, QARequestOut, UserOption, QAWorkspaceOut } from "../types";
 import { classificationSummary, userName } from "./format";
 import { NewRequestModal } from "./NewRequestModal";
 import { RequestDetail } from "./RequestDetail";
@@ -70,7 +70,7 @@ export default function QARequests() {
   const location = useLocation();
   const navigate = useRequestNavigation();
   const searchParams = new URLSearchParams(location.search);
-  const [users, setUsers] = useState<UserOut[]>([]);
+  const [users, setUsers] = useState<UserOption[]>([]);
   const [workspaces, setWorkspaces] = useState<QAWorkspaceOut[]>([]);
   const [assignedOnly, setAssignedOnly] = useState(false);
   const [raisedHistory, setRaisedHistory] = useState({ from: "", to: "" });
@@ -118,7 +118,7 @@ export default function QARequests() {
   });
 
   useEffect(() => {
-    api.get<UserOut[]>("/api/auth/users").then(setUsers).catch(setError);
+    api.get<UserOption[]>("/api/auth/user-options").then(setUsers).catch(setError);
     if (user?.roles.includes('ADMIN')) api.get<QAWorkspaceOut[]>('/api/workspaces').then(setWorkspaces).catch(setError);
   }, [user?.id]);
 

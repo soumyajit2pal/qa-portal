@@ -30,6 +30,14 @@ services:
       DOCUMENT_PORTAL_STORAGE_HOST_PATH: /data/qualityops/document-storage/repository
       LOGIN_ENCRYPTION_PRIVATE_KEY_FILE: /run/secrets/qualityops/login-private.pem
 
+    # Read the trust list from the selected service env_file at runtime.
+    # Nginx terminates TLS; Uvicorn must trust that proxy's source IP to
+    # recognize X-Forwarded-Proto. Never default to trusting every container.
+    command:
+      - sh
+      - -c
+      - exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers "$${WEB_CONCURRENCY:-4}" --proxy-headers --forwarded-allow-ips "$${FORWARDED_ALLOW_IPS:?Set FORWARDED_ALLOW_IPS to the nginx container IP in the selected environment file}"
+
     volumes:
       - ${LOGIN_ENCRYPTION_KEY_HOST_DIR:-./secrets}:/run/secrets/qualityops:ro,Z
       - ${UPLOAD_STORAGE_HOST_PATH:-./storage}/uploads:/data/qualityops/uploads:Z
@@ -81,7 +89,7 @@ services:
     command:
       - sh
       - -c
-      - mkdir -p "$$DOCUMENT_PORTAL_STORAGE_HOST_PATH" "$$TMPDIR" && exec uvicorn app.document_portal_main:app --host 0.0.0.0 --port 8000 --workers "$$WEB_CONCURRENCY"
+      - mkdir -p "$$DOCUMENT_PORTAL_STORAGE_HOST_PATH" "$$TMPDIR" && exec uvicorn app.document_portal_main:app --host 0.0.0.0 --port 8000 --workers "$$WEB_CONCURRENCY" --proxy-headers --forwarded-allow-ips "$${FORWARDED_ALLOW_IPS:?Set FORWARDED_ALLOW_IPS to the nginx container IP in the selected environment file}"
 
     volumes:
       - ${DOCUMENT_PORTAL_STORAGE_HOST_PATH:-./storage/document-portal}:/data/qualityops/document-storage:z

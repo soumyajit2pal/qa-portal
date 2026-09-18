@@ -3,10 +3,12 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models, schemas, certificate_summary
 from ..database import get_db
+from ..pagination import Page, PageParams, apply_search, apply_status_filter, apply_sort, paginate, to_page_response
 from ..deps import (get_workflow_user as get_current_user, require_workflow_roles as require_roles, require_not_requester,
                     dashboard_department_scope, active_qa_workspace_scope_ids,
                     require_entity_workspace_visibility)
@@ -144,8 +146,14 @@ def _validate_rich_text_before_progress(obj: models.QASignOff) -> None:
         )
 
 
-@router.get("", response_model=List[schemas.SignOffOut])
-def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+class SignOffPage(Page[schemas.SignOffListOut]):
+    departments: list[str]
+    status_counts: dict[str, int]
+
+
+@router.get("", response_model=SignOffPage)
+def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user),
+                  params: PageParams = Depends()):
     # The module is visible to every authenticated account, but business
     # users may only see certificates originating from their own department.
     # QA delivery/executive roles and Administrators are intentionally
@@ -161,7 +169,8 @@ def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Dep
     # alongside it so the new SignOffOut.change_description (two-hop via
     # models.QASignOff.change_description) doesn't reintroduce the same
     # N+1 this comment was written to fix.
-    q = db.query(models.QASignOff).options(
+    q = db.query(models.QASignOff).select_from(models.QASignOff).options(
+        joinedload(models.QASignOff.qa_workspace),
         joinedload(models.QASignOff.source_functional_request)
         .joinedload(models.FunctionalRequest.qa_request)
     )
@@ -176,7 +185,24 @@ def list_signoffs(db: Session = Depends(get_db), current_user: models.User = Dep
     workspace_ids = active_qa_workspace_scope_ids(current_user)
     if workspace_ids:
         q = q.filter(models.QASignOff.qa_workspace_id.in_(workspace_ids))
-    return q.order_by(models.QASignOff.created_at.desc()).all()
+    # Join once for display-field filtering; scope remains applied before counts.
+    if scope is None:
+        q = (q.outerjoin(models.FunctionalRequest, models.FunctionalRequest.request_id == models.QASignOff.testing_request_id)
+                 .outerjoin(models.QARequest, models.QARequest.id == models.FunctionalRequest.qa_request_id))
+    departments = [row[0] for row in q.with_entities(models.QARequest.department).distinct().all() if row[0]]
+    if params.department:
+        q = q.filter(models.QARequest.department == params.department)
+    q = apply_search(q, params, models.QASignOff.certificate_id, models.QASignOff.application_name,
+                     models.QASignOff.testing_request_id)
+    q = apply_status_filter(q, params, models.QASignOff.status)
+    status_counts = dict(q.with_entities(models.QASignOff.status, func.count(models.QASignOff.id))
+                        .group_by(models.QASignOff.status).all())
+    q = apply_sort(q, params, sortable={"certificate_id": models.QASignOff.certificate_id,
+                                      "application_name": models.QASignOff.application_name,
+                                      "status": models.QASignOff.status},
+                   default_column=models.QASignOff.created_at, id_column=models.QASignOff.id)
+    return {**to_page_response(paginate(q, params), params),
+            "departments": sorted(departments), "status_counts": status_counts}
 
 
 @router.get("/{signoff_id}", response_model=schemas.SignOffOut)
@@ -496,7 +522,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Status", qa_clearance_export_status(obj.status)),
             ("Workflow Status", obj.status),
             ("Certificate Type", obj.certificate_type),
-            ("Testing Type", obj.testing_type),
+            ("Testing Type", obj.certificate_testing_type),
             ("Certificate Date", obj.certificate_date),
             ("Clearance Signature Type", QA_CLEARANCE_SIGNED_TYPE if digitally_signed else "Not digitally signed"),
             ("Signature Method", DIGITAL_SIGNATURE_METHOD if digitally_signed else "—"),
@@ -505,8 +531,8 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
             ("Application Name", obj.application_name),
             ("Application Owner", obj.application_owner),
             ("Request Department", obj.request_department),
-            ("QA Approval Department", obj.department),
-            ("Testing Request ID", obj.testing_request_id),
+            ("Approving QA Team", obj.approving_qa_team or "Not configured"),
+            ("Testing Request ID", obj.certificate_testing_request_id),
             ("Assigned Tester(s)", certificate_summary.assigned_testers_label(obj.certificate_summary)),
             ("CR Number/EPIC Number", obj.change_request_ids),
             ("Vendor / SI Partner", obj.vendor_si_partner),
@@ -554,8 +580,7 @@ def export_signoff(signoff_id: int, db: Session = Depends(get_db), current_user:
     if snapshot:
         sections.append(('Evidence snapshot', [('Revision', snapshot['revision']), ('Captured at', snapshot['captured_at']), ('Population', snapshot['population_note'])]))
         sections.extend((title, [('Summary', RichTextValue(content))]) for title, content in certificate_summary.markdown_tables(snapshot))
-        security_rows = [(f"{row['type']} · {row['request_id']}", f"Workflow status: {row['status']}; recorded findings: {row['findings']}; risk: {row['risk_level']}") for row in snapshot.get('security', [])]
-        sections.append(('Section D – Security Testing Assessment', security_rows or [('Assessment', 'No linked security assessment recorded; this is not a Pass result.')]))
+        sections.append(('Section D – Security Testing Assessment', [('Summary', RichTextValue(certificate_summary.security_assessment_table(snapshot)))]))
     else:
         sections.append(('Sections B–D – Evidence snapshot', [('Availability', 'Legacy certificate: no frozen automatic summary. Refresh requires full reapproval.')]))
     sections.append(('Section E – QA Clearance Remarks', remarks))

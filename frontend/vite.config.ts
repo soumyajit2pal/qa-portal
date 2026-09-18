@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { TLSSocket } from 'node:tls'
+import { setClientProxyHeaders } from './proxyHeaders'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -37,11 +37,7 @@ export default defineConfig(({ mode, command }) => {
           target: env.VITE_BACKEND_URL || rootEnv.VITE_BACKEND_URL || 'http://127.0.0.1:8000',
           changeOrigin: true,
           configure(proxy) {
-            proxy.on('proxyReq', (outgoing, incoming) => {
-              // Derive the scheme from the real socket, never a browser header.
-              outgoing.setHeader('X-Forwarded-Proto',
-                (incoming.socket as TLSSocket).encrypted ? 'https' : 'http')
-            })
+            proxy.on('proxyReq', setClientProxyHeaders)
           },
         },
       },

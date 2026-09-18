@@ -12,7 +12,8 @@ import {
   IconHelp,
 } from './Icons'
 import ClearableSearchInput from './ClearableSearchInput'
-import SearchableSelect from './SearchableSelect'
+import WorkspaceSwitcher from './WorkspaceSwitcher'
+import { beginWorkspaceTransition, persistWorkspaceTransition, endWorkspaceTransition } from '../workspaceTransition'
 import AppVersion from './AppVersion'
 
 interface NavItem {
@@ -263,8 +264,13 @@ export default function Layout({ children }: { children?: ReactNode }) {
 
   async function selectWorkspace(workspaceId: number) {
     if (!workspaceId || workspaceSwitching) return
+    const currentWorkspaceId = Number(localStorage.getItem('active_workspace_id') || localStorage.getItem('qa_active_workspace_id')) || user?.preferred_workspace_id || user?.preferred_qa_workspace_id
+    if (workspaceId === currentWorkspaceId) return
+    const destination = workspaceOptions.find(row => row.workspace_id === workspaceId)
+    const destinationName = destination?.workspace_name || destination?.workspace_key || `Workspace ${workspaceId}`
     setWorkspaceSwitching(true)
     setWorkspaceSwitchError('')
+    beginWorkspaceTransition(destinationName)
     try {
       // Persist permission first. If it fails, keep the current tenant header
       // intact so the rest of the page does not start issuing forbidden calls.
@@ -272,8 +278,10 @@ export default function Layout({ children }: { children?: ReactNode }) {
       localStorage.setItem('active_workspace_id', String(workspaceId))
       // Every mounted page may own independent cached queries. A full reload
       // makes the workspace change atomic: no old-workspace card can remain.
+      persistWorkspaceTransition(destinationName)
       window.location.reload()
     } catch (error) {
+      endWorkspaceTransition()
       setWorkspaceSwitchError(error instanceof Error ? error.message : 'Workspace could not be changed')
       setWorkspaceSwitching(false)
     }
@@ -494,19 +502,11 @@ export default function Layout({ children }: { children?: ReactNode }) {
           </form>
           <div className="right-group">
             {workspaceOptions.length > 0 && (
-              <div className="qa-workspace-switcher" title="Active workspace">
-                <span>Workspace</span>
-                <SearchableSelect
-                  ariaLabel="Active workspace"
-                  value={String(Number(localStorage.getItem('active_workspace_id')) || user?.preferred_workspace_id || user?.preferred_qa_workspace_id || workspaceOptions[0]?.workspace_id || '')}
-                  onChange={(value) => void selectWorkspace(Number(value))}
-                  options={workspaceOptions.map((row) => ({
-                    value: String(row.workspace_id),
-                    label: row.parent_workspace_name
-                      ? `${row.parent_workspace_name} › ${row.workspace_name || row.workspace_key}`
-                      : (row.workspace_name || row.workspace_key || `Workspace ${row.workspace_id}`),
-                  }))}
-                  searchable={workspaceOptions.length > 8}
+              <div className="qa-workspace-switcher">
+                <WorkspaceSwitcher
+                  value={Number(localStorage.getItem('active_workspace_id')) || user?.preferred_workspace_id || user?.preferred_qa_workspace_id || workspaceOptions[0]?.workspace_id}
+                  onChange={(value) => void selectWorkspace(value)}
+                  options={workspaceOptions}
                   disabled={workspaceSwitching}
                 />
                 {workspaceSwitchError && <small className="workspace-switch-error" role="alert">{workspaceSwitchError}</small>}

@@ -80,6 +80,52 @@ def require_linked_security_closed(db, source):
             + ', '.join(pending))
 
 
+def security_scan_counts(results):
+    """Oldest-first snapshots: initial Auditor totals and latest suppressions per target."""
+    from .security_scan_state import current_scan_results
+    if not results:
+        return {'initial_findings': None, 'current_findings': None, 'suppression_count': None}
+    first_key = results[0].execution_key or f'legacy-{results[0].id}'
+    initial = [row for row in results if (row.execution_key or f'legacy-{row.id}') == first_key]
+    def auditor_total(row):
+        # Filter sets overlap. Use only the Auditor view, never their sum.
+        auditor = next((entry for entry in row.filters
+                        if 'security auditor view' in str(entry.get('title', '')).strip().casefold()), None)
+        return int(auditor.get('total_count') or 0) if auditor else int(row.total_count or 0)
+    current = current_scan_results(list(reversed(results)))
+    return {
+        'initial_findings': sum(auditor_total(row) for row in initial),
+        'current_findings': sum(auditor_total(row) for row in current),
+        'suppression_count': sum(int(row.suppressed_total_count or 0)
+                                 for row in current),
+    }
+
+
+def security_assessment_rows(snapshot):
+    from .constants import SAST_DAST_STATUS_LABELS
+    def count(row, key):
+        value = row.get(key)
+        return str(value) if value is not None else 'Not captured'
+    return [[row['type'], row['request_id'], SAST_DAST_STATUS_LABELS.get(row['status'], row['status']),
+             count(row, 'initial_findings'), count(row, 'current_findings'), count(row, 'suppression_count'),
+             ', '.join(row['suppression_request_ids']) or 'None' if row.get('suppression_request_ids') is not None else 'Not captured']
+            for row in snapshot.get('security', [])]
+
+
+def security_assessment_table(snapshot):
+    headers = ['Type', 'Request ID', 'Current status', 'Initial total findings', 'Current findings', 'Suppression count', 'Suppression request ID(s)']
+    def cells(row):
+        return '| ' + ' | '.join(str(value).replace('|', r'\|').replace('\n', ' ') for value in row) + ' |'
+    rows = security_assessment_rows(snapshot)
+    if not rows:
+        return 'No linked security assessment recorded; this is not a Pass result.'
+    table = '\n'.join([cells(headers), cells(['---'] * len(headers)), *[cells(row) for row in rows]])
+    note = 'Status and counts are frozen at evidence capture. Findings use the Security Auditor View across all targets; suppression request IDs list all linked requests.'
+    if any('Not captured' in row for row in rows):
+        note += ' Missing values require evidence refresh and full reapproval.'
+    return table + '\n\n' + note
+
+
 def capture(db, obj):
     source = db.query(models.FunctionalRequest).filter_by(request_id=obj.testing_request_id).first()
     if not source or not source.qa_request or source.qa_request.qa_workspace_id != obj.qa_workspace_id:
@@ -102,6 +148,7 @@ def capture(db, obj):
             models.Defect.execution_links.any(models.DefectExecutionLink.execution_id.in_(execution_ids)),
             models.Defect.cycle_id.in_(cycles))).order_by(models.Defect.id).all()
     result = aggregate(executions, defects)
+    result['testing_scope'] = obj.live_testing_scope
     result['assigned_testers'] = assigned_testers(db, source)
     result['certificate_fields'] = {key: str(getattr(obj, key, None) or '') for key in ('certificate_type', 'testing_type', 'testing_request_id', 'application_name', 'application_owner', 'department', 'release_version', 'build_number', 'environment_tested', 'target_promotion_environment', 'exit_criteria_notes', 'open_defect_summary', 'residual_risk_notes', 'known_limitations', 'business_acceptance_status', 'security_testing_status', 'deployment_recommendation', 'conditional_observations')}
     result['execution_results'] = sorted([{'id': item.id, 'status': item.status, 'pinned_version_id': item.pinned_version_id, 'run_version': item.run_version, 'executed_at': str(item.executed_at)} for item in executions], key=lambda item: item['id'])
@@ -115,8 +162,14 @@ def capture(db, obj):
     result['security'] = []
     for label, model in [('SAST', models.SASTRequest), ('DAST', models.DASTRequest)]:
         for item in db.query(model).filter_by(qa_request_id=source.qa_request_id).order_by(model.id).all():
+            scans = db.query(models.SecurityScanResult).filter_by(request_type=label, request_id=item.id).order_by(
+                models.SecurityScanResult.imported_at.asc(), models.SecurityScanResult.id.asc()).all()
+            suppression_column = models.SuppressionRequest.sast_request_id if label == 'SAST' else models.SuppressionRequest.dast_request_id
+            suppression_ids = [row[0] for row in db.query(models.SuppressionRequest.suppression_id).filter(
+                suppression_column == item.id).order_by(models.SuppressionRequest.id).all()]
             result['security'].append({'type': label, 'request_id': item.request_id,
-                'status': item.status, 'findings': len(item.findings), 'risk_level': item.risk_category or 'Not recorded'})
+                'status': item.status, 'findings': len(item.findings), 'risk_level': item.risk_category or 'Not recorded',
+                'suppression_request_ids': suppression_ids, **security_scan_counts(scans)})
     result.update(captured_at=models.now().isoformat(), application_name=source.qa_request.application_name,
                   change_request_ids=obj.change_request_ids or ' / '.join(filter(None, [source.qa_request.cr_number, source.qa_request.epic_number])),
                   change_description=source.qa_request.change_description or '',
@@ -146,6 +199,8 @@ def validate(obj, db=None):
     if db is not None:
         live = capture(db, obj)
         # Never silently replace reviewed evidence. Changes require an explicit refresh.
+        if snapshot.get('testing_scope') and live.get('testing_scope') != snapshot['testing_scope']:
+            raise HTTPException(409, 'Linked testing scope changed since capture. Refresh the certificate and obtain full reapproval.')
         for field in ('assigned_testers', 'execution', 'defects', 'severity', 'execution_ids', 'defect_ids', 'observations', 'security', 'execution_results', 'defect_results', 'change_request_ids', 'change_description', 'conditional_observations'):
             if live.get(field) != snapshot.get(field):
                 raise HTTPException(409, 'Linked evidence changed since capture. Refresh the certificate and obtain full reapproval.')
@@ -164,5 +219,5 @@ def markdown_tables(snapshot):
     identity = table(['CR/EPIC Number', 'Change Description'], [[snapshot.get('change_request_ids', 'Not captured — refresh and reapproval required') or 'Not recorded', snapshot.get('change_description', 'Not captured — refresh and reapproval required') or 'Not recorded']]) + '\n\n'
     return [
         ('Section B – QA Test Case Execution Summary', identity + table(['Total', *EXECUTION_STATUSES, 'Pass %'], [[e['total'], *[e['counts'].get(s, 0) for s in EXECUTION_STATUSES], e['pass_pct'] if e['pass_pct'] is not None else 'NA']])),
-        ('Section C – QA Defect Status Summary', identity + table(['Status', 'Count'], [(s, snapshot['defects']['counts'].get(s, 0)) for s in DEFECT_BUCKETS] + [('Total', snapshot['defects']['total'])])),
+        ('Section C – QA Defect Status Summary', identity + table(['Status', 'Count'], [(s, snapshot['defects']['counts'].get(s, 0)) for s in DEFECT_BUCKETS if snapshot['defects']['counts'].get(s, 0) > 0] + [('Total', snapshot['defects']['total'])])),
         ('Defect Severity-wise Breakdown', table(['Severity', 'Open', 'Closed', 'Total'], [[r['severity'], r['open'], r['closed'], r['total']] for r in snapshot['severity']]))]

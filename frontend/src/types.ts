@@ -20,6 +20,15 @@ export interface PageOut<T> {
   next_cursor?: number | null
 }
 
+export interface UserOption {
+  id: number
+  full_name: string
+  department?: string | null
+  departments: string[]
+  is_active: boolean
+  show_in_user_dropdowns: boolean
+}
+
 export interface UserOut {
   id: number
   username: string
@@ -935,6 +944,7 @@ export interface SuppressionOut {
 
 // ---------------- QA Clearance ----------------
 export interface CertificateSummary {
+  security?: { type: string; request_id: string; status: string; initial_findings?: number | null; current_findings?: number | null; suppression_count?: number | null; suppression_request_ids?: string[] }[]
   assigned_testers?: { id: number; name: string }[]
   conditional_observations?: string
   observations?: { defect_key: string; functionality: string; observation: string; severity: string; status: string; owner: string; target_date: string }[]
@@ -963,6 +973,8 @@ export interface SignOffOut {
   certificate_id: string
   certificate_date?: string | null
   certificate_type: string
+  certificate_testing_request_id?: string | null
+  certificate_testing_type?: string | null
   testing_type: string
   testing_request_id?: string | null
   change_request_ids?: string | null
@@ -970,6 +982,7 @@ export interface SignOffOut {
   application_owner?: string | null
   department?: string | null
   request_department?: string | null
+  approving_qa_team?: string | null
   change_description?: string | null
   vendor_si_partner?: string | null
   technology_stack?: string | null

@@ -7,7 +7,7 @@ import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
 import { ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, TEST_CASE_PRIORITIES, TEST_CASE_TYPES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
-import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOut, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
+import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
 import JiraRichTextField from '../../components/JiraRichTextField'
@@ -42,7 +42,7 @@ const EmbeddedDefectDetail = React.lazy(() => import('./Defects')
 function CycleModal({ project, requests, users, folders, defaultFolderId, editing, onClose, onSaved }: {
   project: TestProjectOut
   requests: LinkedRequestRef[]
-  users: UserOut[]
+  users: UserOption[]
   // Reported directly: "Create Test Cycle Folder ... Under this folder
   // create test cycle." '' means Unfiled -- same convention as
   // TestRepository.tsx's own folder picker.
@@ -52,13 +52,13 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
   onClose: () => void
   onSaved: (c: TestCycleOut) => void
 }) {
-  const [ownerCandidates, setOwnerCandidates] = useState<UserOut[]>([])
+  const [ownerCandidates, setOwnerCandidates] = useState<UserOption[]>([])
   const [ownersLoading, setOwnersLoading] = useState(true)
   const [ownersError, setOwnersError] = useState<unknown>(null)
   useEffect(() => {
     let active = true
     setOwnersLoading(true); setOwnerCandidates([]); setOwnersError(null)
-    api.get<UserOut[]>(`/api/test-execution/projects/${project.id}/cycle-owner-candidates${editing ? `?cycle_id=${editing.id}` : ''}`)
+    api.get<UserOption[]>(`/api/test-execution/projects/${project.id}/cycle-owner-candidates${editing ? `?cycle_id=${editing.id}` : ''}`)
       .then(items => { if (active) setOwnerCandidates(items) })
       .catch(error => { if (active) setOwnersError(error) })
       .finally(() => { if (active) setOwnersLoading(false) })
@@ -276,7 +276,7 @@ function CycleFolderAccessModal({ folder, departments, onClose, onChanged }: {
   onChanged: (grants: TestCycleFolderAccessOut[]) => void
 }) {
   const [grants, setGrants] = useState<TestCycleFolderAccessOut[]>(folder.access_grants)
-  const [allUsers, setAllUsers] = useState<UserOut[]>([])
+  const [allUsers, setAllUsers] = useState<UserOption[]>([])
   const [loaded, setLoaded] = useState(false)
   const [grantType, setGrantType] = useState<'department' | 'user'>('department')
   const [department, setDepartment] = useState('')
@@ -285,7 +285,7 @@ function CycleFolderAccessModal({ folder, departments, onClose, onChanged }: {
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
-    api.get<UserOut[]>('/api/auth/users').then((u) => { setAllUsers(u); setLoaded(true) }).catch((err) => { setError(err); setLoaded(true) })
+    api.get<UserOption[]>('/api/auth/user-options').then((u) => { setAllUsers(u); setLoaded(true) }).catch((err) => { setError(err); setLoaded(true) })
   }, [])
 
   function report(next: TestCycleFolderAccessOut[]) {
@@ -728,7 +728,7 @@ interface TestCaseCandidatePage {
 function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded }: {
   cycleId: number
   canAssign: boolean
-  runnerCandidates: UserOut[]
+  runnerCandidates: UserOption[]
   onClose: () => void
   onAdded: (createdCount: number) => void
 }) {
@@ -1479,7 +1479,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   canReassign: boolean
   canRemove: boolean
   removeBlockedReason?: string
-  runnerCandidates: UserOut[]
+  runnerCandidates: UserOption[]
   onAssigned: (execution: TestExecutionOut) => void
   onClose: () => void
   onSaved: (e: TestExecutionOut) => void
@@ -2162,7 +2162,7 @@ export default function TestExecution() {
   const [cycleActivity, setCycleActivity] = useState<ApprovalActionOut[]>([])
   const [showActivity, setShowActivity] = useState(false)
   const [cycleSidebarCollapsed, setCycleSidebarCollapsed] = useState(false)
-  const [users, setUsers] = useState<UserOut[]>([])
+  const [users, setUsers] = useState<UserOption[]>([])
   const [exportingCycle, setExportingCycle] = useState(false)
   const [functionalRequestOptions, setFunctionalRequestOptions] = useState<LinkedRequestRef[]>([])
   const [linkingExistingExecution, setLinkingExistingExecution] = useState<TestExecutionOut | null>(null)
@@ -2206,7 +2206,7 @@ export default function TestExecution() {
     if (!projectId) { setUsers([]); return }
     let active = true
     setUsers([])
-    api.get<UserOut[]>(`/api/test-projects/eligible-users?project_id=${projectId}${cycleId ? `&cycle_id=${cycleId}` : ''}`)
+    api.get<UserOption[]>(`/api/test-projects/eligible-users?runner_only=true&project_id=${projectId}${cycleId ? `&cycle_id=${cycleId}` : ''}`)
       .then((rows) => { if (active) setUsers(rows) })
       .catch((failure) => { if (active) setError(failure) })
     return () => { active = false }
@@ -2372,7 +2372,6 @@ export default function TestExecution() {
   const projectIsActive = !!selectedProject?.is_active
   const runnerCandidates = useMemo(() => users.filter((candidate) => (
     isSelectableUser(candidate)
-    && candidate.roles.includes('QA_ENGINEER')
   )), [users])
   const executionContextError = selectedCycle && (!selectedCycle.environment?.trim() || !selectedCycle.build?.trim())
     ? 'Set the environment and tested build in Edit Cycle before recording execution.' : undefined

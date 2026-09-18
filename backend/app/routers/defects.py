@@ -1128,7 +1128,7 @@ def download_attachment(defect_id: int, document_id: int, db: Session = Depends(
     return FileResponse(path, filename=document.file_name, media_type=document.content_type or "application/octet-stream")
 
 
-@router.get('/{defect_id}/workflow-candidates', response_model=dict[str, List[schemas.UserOut]])
+@router.get('/{defect_id}/workflow-candidates', response_model=dict[str, List[schemas.UserOption]])
 def workflow_candidates(defect_id: int, department: Optional[str] = None,
                         db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     from ..defect_assignment import assignment_error, OWNER_ROLES

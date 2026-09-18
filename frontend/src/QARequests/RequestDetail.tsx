@@ -29,7 +29,7 @@ import {
 import { useChecklistTemplate } from "./steps/useChecklistTemplate";
 import {
   QARequestOut,
-  UserOut,
+  UserOption,
   QARequestDocumentOut,
   DraftChecklistEvidenceOut,
   ApprovalActionOut,
@@ -48,7 +48,7 @@ interface RequestDetailProps {
   onClose: () => void;
   onChanged: (req: QARequestOut) => void;
   onUnavailable: () => void;
-  users: UserOut[];
+  users: UserOption[];
 }
 
 type EvidenceStepKey = "functional" | "sast" | "dast" | "performance";

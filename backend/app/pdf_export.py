@@ -41,7 +41,8 @@ _history_style = ParagraphStyle("DetailHistory", parent=_body_style, fontSize=7.
 _history_header_style = ParagraphStyle("DetailHistoryHeader", parent=_history_style, fontName="Helvetica-Bold", textColor=colors.white)
 
 _PAGE_MARGIN = 16 * mm
-_CONTENT_WIDTH = A4[0] - (2 * _PAGE_MARGIN)
+_FRAME_PADDING = 6  # ReportLab SimpleDocTemplate frame inset on each side.
+_CONTENT_WIDTH = A4[0] - (2 * _PAGE_MARGIN) - 2 * _FRAME_PADDING
 
 Field = Tuple[str, object]
 Section = Tuple[str, Sequence[Field]]
@@ -260,7 +261,7 @@ def _merged_table_flowable(table: dict, available_width: float) -> Table:
     repeat_rows = 1 if table["rows"] and table["rows"][0] and all(cell["h"] for cell in table["rows"][0]) else 0
     nested = Table(
         normalized, colWidths=[available_width / width] * width,
-        repeatRows=repeat_rows, splitByRow=1, splitInRow=1,
+        repeatRows=repeat_rows, splitByRow=1, splitInRow=1, hAlign="LEFT",
     )
     nested.setStyle(TableStyle([
         *span_commands,
@@ -308,10 +309,10 @@ def _rich_text_flowables(markdown: str, available_width: float = 320) -> list:
                 index += 1
             width = max(len(row) for row in rows)
             normalized = [row + [""] * (width - len(row)) for row in rows]
-            table_data = [[Paragraph(_markdown_inline(cell), _body_style) for cell in row] for row in normalized]
+            table_data = [[Paragraph(_markdown_inline(cell), _label_style if row_index == 0 else _body_style) for cell in row] for row_index, row in enumerate(normalized)]
             nested = Table(
                 table_data, colWidths=[available_width / width] * width,
-                repeatRows=1, splitByRow=1, splitInRow=1,
+                repeatRows=1, splitByRow=1, splitInRow=1, hAlign="LEFT",
             )
             nested.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8edf2")),
@@ -532,11 +533,11 @@ def _page_footer(canvas, doc) -> None:
     canvas.saveState()
     canvas.setStrokeColor(colors.HexColor("#d8e5e7"))
     canvas.setLineWidth(.4)
-    canvas.line(doc.leftMargin, 10.5 * mm, A4[0] - doc.rightMargin, 10.5 * mm)
+    canvas.line(doc.leftMargin + _FRAME_PADDING, 10.5 * mm, A4[0] - doc.rightMargin - _FRAME_PADDING, 10.5 * mm)
     canvas.setFillColor(colors.HexColor("#71868b"))
     canvas.setFont("Helvetica", 7.5)
-    canvas.drawString(doc.leftMargin, 7 * mm, "QualityOps - Controlled PDF export")
-    canvas.drawRightString(A4[0] - doc.rightMargin, 7 * mm, f"Page {doc.page}")
+    canvas.drawString(doc.leftMargin + _FRAME_PADDING, 7 * mm, "QualityOps - Controlled PDF export")
+    canvas.drawRightString(A4[0] - doc.rightMargin - _FRAME_PADDING, 7 * mm, f"Page {doc.page}")
     canvas.restoreState()
 
 
@@ -581,6 +582,7 @@ def build_request_detail_pdf(
         buf, pagesize=A4, topMargin=_PAGE_MARGIN, bottomMargin=18 * mm, leftMargin=_PAGE_MARGIN, rightMargin=_PAGE_MARGIN,
         title=title,
     )
+    content_width = doc.width - 2 * _FRAME_PADDING
     elements: List = [
         Paragraph(_safe_text(title), _styles["Title"]),
         Paragraph(_safe_text(subtitle), _styles["Normal"]),
@@ -594,21 +596,21 @@ def build_request_detail_pdf(
 
         def flush_rows() -> None:
             if pending_rows:
-                elements.append(_detail_table(pending_rows[:], doc.width))
+                elements.append(_detail_table(pending_rows[:], content_width))
                 pending_rows.clear()
 
         for label, value in fields:
             if isinstance(value, RichTextValue):
                 flush_rows()
-                elements.extend(_rich_field_block(label, value, doc.width))
+                elements.extend(_rich_field_block(label, value, content_width))
                 elements.append(Spacer(1, 7))
             elif isinstance(value, StructuredTableValue):
                 flush_rows()
-                elements.append(_structured_table(value, doc.width))
+                elements.append(_structured_table(value, content_width))
                 elements.append(Spacer(1, 7))
             elif isinstance(value, SignatureValue):
                 flush_rows()
-                elements.extend(_signature_block(label, value, doc.width))
+                elements.extend(_signature_block(label, value, content_width))
                 elements.append(Spacer(1, 7))
             else:
                 pending_rows.append([Paragraph(_safe_text(label), _label_style), _field_content(value)])
@@ -623,11 +625,11 @@ def build_request_detail_pdf(
         if history:
             head = ["Step", "Decision", "Actor", "Role", "Comments", "When"]
             rows = [[Paragraph(_fmt(c), _history_style) for c in row] for row in history]
-            history_widths = [doc.width * ratio for ratio in (.14, .12, .15, .14, .29, .16)]
+            history_widths = [content_width * ratio for ratio in (.12, .10, .14, .14, .34, .16)]
             t = Table(
                 [[Paragraph(column, _history_header_style) for column in head]] + rows,
                 repeatRows=1, colWidths=history_widths,
-                splitByRow=1, splitInRow=1,
+                splitByRow=1, splitInRow=1, hAlign="LEFT",
             )
             t.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2937")),
@@ -650,7 +652,7 @@ def build_request_detail_pdf(
         elements.extend([
             Spacer(1, 12),
             CondPageBreak(18 * mm),
-            _signature_notice_block(doc.width),
+            _signature_notice_block(content_width),
         ])
 
     doc.build(elements, onFirstPage=_page_footer, onLaterPages=_page_footer)

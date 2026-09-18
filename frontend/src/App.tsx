@@ -2,6 +2,7 @@ import React, { ReactNode, Suspense, lazy, useEffect, useState } from 'react'
 import { Routes, Route, Navigate, Link, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import Layout from './components/Layout'
+import WorkspaceTransition from './components/WorkspaceTransition'
 import RequestViewer from './components/RequestViewer'
 import DepartmentPrompt from './components/DepartmentPrompt'
 import EmailCompletionPrompt from './components/EmailCompletionPrompt'
@@ -75,11 +76,15 @@ function isAccessApprovalPending(user: UserOut | null): boolean {
 }
 
 function isWorkspaceAccessMissing(user: UserOut | null): boolean {
-  return !!user
-    && !user.needs_department_selection
-    && !user.needs_role_review
-    && user.roles.length > 0
-    && uniqueWorkspaceAccess(user).length === 0
+  if (!user || user.needs_department_selection) return false
+  // DEFAULT is the fixed onboarding workspace, not an operational assignment.
+  // Check all memberships, not the currently selected or preferred workspace.
+  return !uniqueWorkspaceAccess(user).some(access => {
+    const key = access.workspace_key?.trim().toUpperCase()
+    if (key) return key !== 'DEFAULT'
+    const name = access.workspace_name?.trim().toLowerCase()
+    return !!name && name !== 'default workspace'
+  })
 }
 
 function isLdapEmailCompletionRequired(user: UserOut | null): boolean {
@@ -165,12 +170,12 @@ function WorkspaceAccessRequired() {
         </div>
         <span className="access-pending-status" aria-hidden="true">!</span>
         <p className="access-pending-kicker">Workspace access required</p>
-        <h1>No workspace is assigned</h1>
+        <h1>You don’t have an assigned workspace</h1>
         <p className="access-pending-message">
-          QualityOps cannot show requests, projects, testing, defects, or reports until your account has an active workspace.
+          Please ask your department coordinator to assign you to the appropriate workspace before accessing the portal.
         </p>
         <div className="access-pending-note">
-          Ask an Administrator to assign a workspace. If access was just updated, check again.
+          If your department coordinator has updated your access, select “Check workspace access” below.
         </div>
         <div className="access-pending-actions">
           <button className="btn btn-primary" onClick={checkWorkspaceAccess} disabled={checking}>
@@ -214,6 +219,7 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
   if (user.needs_department_selection) {
     return <main className="access-pending-page" aria-label="Complete account setup"><DepartmentPrompt /></main>
   }
+  if (isWorkspaceAccessMissing(user)) return <WorkspaceAccessRequired />
   if (isAccessApprovalPending(user)) return <AccessApprovalPending />
   if (isLdapEmailCompletionRequired(user)) {
     return <main className="access-pending-page" aria-label="Complete notification email"><EmailCompletionPrompt /></main>
@@ -253,8 +259,6 @@ function ProtectedLayout() {
   // so do not mount Layout at all. Besides hiding the sidebar/topbar, this
   // prevents their navigation-specific API calls from running while the
   // backend pending-access guard intentionally permits only /me and logout.
-  if (isAccessApprovalPending(user)) return <AccessApprovalPending />
-  if (isWorkspaceAccessMissing(user)) return <WorkspaceAccessRequired />
   return (
     <AuthenticatedChrome user={user}>
       <DocumentOnlyAccessGuard user={user}>
@@ -297,8 +301,6 @@ function DocumentPortalOnly({ children }: { children: ReactNode }) {
 function HelpRoute() {
   const { user, loading } = useAuth()
   if (loading) return <ModuleFallback />
-  if (isAccessApprovalPending(user)) return <AccessApprovalPending />
-  if (isWorkspaceAccessMissing(user)) return <PublicHelp />
   if (user) return (
     <AuthenticatedChrome user={user}>
       {isDocumentPortalOnly(user) ? <DocumentPortalOnlyAccessDenied /> : <Help />}
@@ -369,6 +371,7 @@ export default function App() {
 
   return (
     <>
+      <WorkspaceTransition />
       <GlobalButtonTooltips />
       <ApiActivityIndicator />
       <GlobalToastCenter />

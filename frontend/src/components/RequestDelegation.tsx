@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import { hasWorkflowRole as hasRole, isViewOnly } from '../constants'
-import { QARequestDelegationOut, UserOut } from '../types'
+import { QARequestDelegationOut, UserOut, UserOption } from '../types'
 import { ErrorText, Field, Modal } from './Common'
 import UserAssignSelect from './UserAssignSelect'
 import { isSelectableUser } from '../constants'
@@ -21,7 +21,7 @@ export interface DelegatableRequest {
 interface RequestDelegationProps<T extends DelegatableRequest> {
   targetType: DelegationTarget
   request: T
-  users: UserOut[]
+  users: UserOption[]
   onChanged: (updated: T) => void | Promise<void>
   onReturned?: () => void | Promise<void>
   disabled?: boolean
