@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     login_encryption_private_key_file: str | None = None
     access_token_expire_minutes: int = 30
     session_max_minutes: int = 480
+    session_idle_minutes: int = 30
+    session_cookie_secure: bool | None = None
     jwt_issuer: str = "qualityops-api"
     jwt_audience: str = "qualityops-web"
     upload_storage_root: str | None = None
@@ -126,13 +128,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_security_configuration(self):
-        if self.access_token_expire_minutes <= 0 or self.session_max_minutes <= 0:
+        if self.access_token_expire_minutes <= 0 or self.session_max_minutes <= 0 or self.session_idle_minutes <= 0:
             raise ValueError("Token and session durations must be positive")
+        if self.session_idle_minutes > self.session_max_minutes:
+            raise ValueError("SESSION_IDLE_MINUTES cannot exceed SESSION_MAX_MINUTES")
         if len(self.secret_key) < 32:
             raise ValueError("SECRET_KEY must be a deployment secret of at least 32 characters")
         if self.app_env in {"uat", "prod", "production"}:
             if not self.database_url:
                 raise ValueError("DATABASE_URL is required outside development")
+            if self.session_cookie_secure is False:
+                raise ValueError("SESSION_COOKIE_SECURE cannot be disabled in UAT or production")
+            if "*" in self.cors_origins:
+                raise ValueError("Credentialed CORS must use explicit origins in UAT or production")
         if self.app_env in {"prod", "production"} and self.ldap_mock_enabled:
             raise ValueError("LDAP mock authentication cannot be enabled in production")
         if self.ldap_mock_enabled:
@@ -152,6 +160,12 @@ class Settings(BaseSettings):
         if self.domain_name.strip():
             hosts.append(self.domain_name.strip())
         return list(dict.fromkeys(hosts))
+
+    @property
+    def secure_session_cookie(self) -> bool:
+        if self.session_cookie_secure is not None:
+            return self.session_cookie_secure
+        return self.app_env in {"uat", "prod", "production"}
 
 
 settings = Settings()

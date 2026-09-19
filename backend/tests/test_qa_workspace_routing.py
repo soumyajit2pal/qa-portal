@@ -19,7 +19,6 @@ from app.routers.qa_workspaces import (
     add_department_coordinator, create_workspace, update_workspace, list_workspace_member_candidates, replace_members,
 )
 from app.routers import auth as auth_router
-from app.auth import create_access_token
 from app.deps import _resolve_current_user
 from app.routers.test_projects import list_eligible_test_management_users
 from app.routers.test_repository import _require_stage_group_user
@@ -426,7 +425,7 @@ def test_authenticated_legacy_user_without_membership_is_repaired_to_default_wor
 
     resolved = _resolve_current_user(
         _request("/api/dashboard/summary"),
-        create_access_token({"sub": user.username, "roles": user.roles}),
+        user.id,
         db,
     )
 
@@ -444,15 +443,13 @@ def test_approved_user_without_workspace_fails_closed_when_default_is_missing():
         role_assignments=[models.UserRole(role="BUSINESS_ANALYST")],
     )
     db.add(user); db.commit()
-    token = create_access_token({"sub": user.username, "roles": user.roles})
-
     with pytest.raises(HTTPException, match="No active workspace access") as raised:
-        _resolve_current_user(_request("/api/dashboard/summary"), token, db)
+        _resolve_current_user(_request("/api/dashboard/summary"), user.id, db)
     assert raised.value.status_code == 403
 
     # Self-service identity remains available so the browser can show the
     # dedicated access screen and still let the person log out.
-    resolved = _resolve_current_user(_request("/api/auth/me"), token, db)
+    resolved = _resolve_current_user(_request("/api/auth/me"), user.id, db)
     assert getattr(resolved, "active_qa_workspace_id", None) is None
 
 
@@ -473,15 +470,13 @@ def test_auth_me_recovers_stale_workspace_after_first_login_approval():
     db.add(models.QAWorkspaceMember(
         workspace_id=assigned.id, user_id=user.id, role="WORKSPACE_MEMBER", is_active=True,
     )); db.commit()
-    token = create_access_token({"sub": user.username, "roles": user.roles})
-
     try:
-        resolved = _resolve_current_user(_request("/api/auth/me", stale.id), token, db)
+        resolved = _resolve_current_user(_request("/api/auth/me", stale.id), user.id, db)
         assert resolved.active_workspace_id == assigned.id
         assert schemas.UserOut.model_validate(resolved).active_workspace_id == assigned.id
 
         with pytest.raises(HTTPException, match="selected workspace") as raised:
-            _resolve_current_user(_request("/api/dashboard/summary", stale.id), token, db)
+            _resolve_current_user(_request("/api/dashboard/summary", stale.id), user.id, db)
         assert raised.value.status_code == 403
     finally:
         set_current_workspace_id(None)
@@ -579,6 +574,7 @@ def test_test_management_candidates_come_from_active_workspace_not_department():
     )
     in_workspace = models.User(
         username="inside", full_name="Inside", department="Retail", hashed_password="x", is_active=True,
+        show_in_user_dropdowns=False,
         role_assignments=[models.UserRole(role="QA_ENGINEER")],
     )
     outside = models.User(
@@ -597,6 +593,17 @@ def test_test_management_candidates_come_from_active_workspace_not_department():
     candidates = list_eligible_test_management_users(db=db, current_user=actor)
 
     assert {user.username for user in candidates} == {"actor", "inside"}
+    qa_group = list_eligible_test_management_users(roles="QA_ENGINEER", db=db, current_user=actor)
+    assert {user.username for user in qa_group} == {"inside"}
+    lead_group = list_eligible_test_management_users(
+        roles="QA_LEAD,CHIEF_MANAGER_QA,AGM_QA", db=db, current_user=actor,
+    )
+    assert {user.username for user in lead_group} == {"actor"}
+    # The group directory still returns only minimal display fields.
+    assert "roles" not in schemas.UserOption.model_validate(qa_group[0]).model_dump()
+    with pytest.raises(HTTPException) as invalid:
+        list_eligible_test_management_users(roles="ADMIN", db=db, current_user=actor)
+    assert invalid.value.status_code == 400
 
 
 def test_legacy_role_rows_serialize_as_one_workspace_membership():

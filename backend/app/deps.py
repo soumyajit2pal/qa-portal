@@ -1,18 +1,14 @@
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import OAuth2PasswordBearer
 from starlette.concurrency import run_in_threadpool
-from jose import JWTError
 from sqlalchemy import and_, false, func, or_, true
 from sqlalchemy.orm import Session, selectinload
 
 from .database import SessionLocal, get_db
 from . import models
-from .auth import decode_access_token
+from .session_security import resolve_session
 from .constants import Role
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 _SAFE_READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 _VIEW_ONLY_SELF_SERVICE_PATHS = {"/api/auth/logout", "/api/auth/renew", "/api/auth/me/email"}
@@ -124,20 +120,12 @@ def _enforce_parent_workspace_viewer_request(request: Request, access_mode: str 
     )
 
 
-def _resolve_current_user(request: Request, token: str, db: Session) -> models.User:
+def _resolve_current_user(request: Request, user_id: int, db: Session) -> models.User:
     """Resolve an authenticated user while the supplied session is open."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
     )
-    try:
-        payload = decode_access_token(token)
-        username = payload.get("sub")
-        if not isinstance(username, str) or not username.strip():
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
 
     # role_assignments eagerly loaded (selectinload, a second targeted query
     # rather than a join) so `user.roles`/`user.roles_csv` are cheap to
@@ -153,7 +141,7 @@ def _resolve_current_user(request: Request, token: str, db: Session) -> models.U
             selectinload(models.User.department_coordinator_assignments).selectinload(models.DepartmentCoordinatorAssignment.department),
             selectinload(models.User.department_coordinator_assignments).selectinload(models.DepartmentCoordinatorAssignment.department_unit),
         )
-        .filter(models.User.username == username)
+        .filter(models.User.id == user_id)
         .first()
     )
     if user is None or not user.is_active:
@@ -262,11 +250,12 @@ def _resolve_current_user(request: Request, token: str, db: Session) -> models.U
 
 
 async def get_current_user(
-    request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+    request: Request, db: Session = Depends(get_db)
 ) -> models.User:
     """Core-API user dependency; its request session is closed after the response."""
     from .workspace_service import workspace_context
-    user = await run_in_threadpool(_resolve_current_user, request, token, db)
+    auth_session = await run_in_threadpool(resolve_session, request, db)
+    user = await run_in_threadpool(_resolve_current_user, request, auth_session.user_id, db)
     from .workflow_authority import workflow_context
     with workspace_context(user.active_qa_workspace_id, user.active_workspace_scope_ids), workflow_context(
         user, enabled=bool(getattr(request.state, "workflow_operation", False)),
@@ -275,7 +264,7 @@ async def get_current_user(
 
 
 def _resolve_document_portal_user(
-    request: Request, token: str = Depends(oauth2_scheme),
+    request: Request,
 ) -> models.User:
     """Authenticate a Document Portal request without pinning an Oracle session.
 
@@ -287,16 +276,17 @@ def _resolve_document_portal_user(
     session before the filesystem operation begins.
     """
     with SessionLocal() as db:
-        user = _resolve_current_user(request, token, db)
+        auth_session = resolve_session(request, db)
+        user = _resolve_current_user(request, auth_session.user_id, db)
         db.expunge(user)
         return user
 
 
 async def get_document_portal_current_user(
-    request: Request, token: str = Depends(oauth2_scheme),
+    request: Request,
 ):
     from .workspace_service import workspace_context
-    user = await run_in_threadpool(_resolve_document_portal_user, request, token)
+    user = await run_in_threadpool(_resolve_document_portal_user, request)
     from .workflow_authority import workflow_context
     with workspace_context(user.active_qa_workspace_id, user.active_workspace_scope_ids), workflow_context(
         user, enabled=bool(getattr(request.state, "workflow_operation", False)),
@@ -305,13 +295,14 @@ async def get_document_portal_current_user(
 
 
 async def get_workflow_user(
-    request: Request, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db),
+    request: Request, db: Session = Depends(get_db),
 ):
     """Explicit operational authority; administrator privileges do not qualify."""
     request.state.workflow_operation = True
     from .workspace_service import workspace_context
     from .workflow_authority import workflow_context
-    user = await run_in_threadpool(_resolve_current_user, request, token, db)
+    auth_session = await run_in_threadpool(resolve_session, request, db)
+    user = await run_in_threadpool(_resolve_current_user, request, auth_session.user_id, db)
     with workspace_context(user.active_qa_workspace_id, user.active_workspace_scope_ids), workflow_context(user):
         yield user
 

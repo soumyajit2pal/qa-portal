@@ -1375,6 +1375,8 @@ export interface TestStepIn {
 export type TestStepOut = TestStepIn & { id: number }
 
 export interface TestCaseOut {
+  current_draft_qa_lead_decided_by_id?: number | null
+  current_draft_qa_lead_decided_by_name?: string | null
   origin_workspace_id?: number | null
   origin_workspace_name?: string | null
   workspace_writable?: boolean

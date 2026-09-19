@@ -134,6 +134,7 @@ def _require_existing_cycle_links_match_application(db: Session, project_id: int
 
 @router.get("/eligible-users", response_model=List[schemas.UserOption])
 def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_id: Optional[int] = None, runner_only: bool = False,
+                                        roles: Optional[str] = None,
                                         db: Session = Depends(get_db),
                                         current_user: models.User = Depends(get_current_user)):
     """Return active QA users for the selected workspace or Test Project.
@@ -172,6 +173,12 @@ def list_eligible_test_management_users(project_id: Optional[int] = None, cycle_
     qa_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA, Role.ADMIN}
     if runner_only:
         qa_roles = {Role.QA_ENGINEER}
+    if roles is not None:
+        requested_roles = set(roles.split(","))
+        group_roles = {Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA}
+        if not requested_roles or not requested_roles <= group_roles:
+            raise HTTPException(400, "Invalid repository approval group")
+        qa_roles &= requested_roles
     candidates = (
         db.query(models.User)
         .filter(

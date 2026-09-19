@@ -23,6 +23,7 @@ class ExplicitRoleAssignmentTests(unittest.TestCase):
             models.User.__table__, models.UserRole.__table__,
             models.UserDepartment.__table__, models.Department.__table__,
             models.DepartmentUnit.__table__, models.UserDepartmentUnit.__table__,
+            models.AuthSession.__table__,
         ])
         self.db = sessionmaker(bind=self.engine)()
         self.db.add(models.Department(name=TEST_DEPARTMENT, is_active=True))

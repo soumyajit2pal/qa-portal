@@ -2,7 +2,6 @@ from typing import Optional
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from jose import JWTError
 from ..login_encryption import encrypted_login_credentials, public_login_key, decrypt_admin_password
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -11,14 +10,15 @@ from sqlalchemy.exc import IntegrityError
 from .. import models, schemas, pagination, email_notifications
 from ..database import get_db
 from ..audit_service import snapshot_changes, user_snapshot, write_audit
-from ..auth import (
-    verify_password, create_access_token, ldap_authenticate, ldap_authenticate_with_profile, LDAPAuthError,
+from ..auth import verify_password, ldap_authenticate, ldap_authenticate_with_profile, LDAPAuthError
+from ..session_security import (
+    create_session, clear_session_cookies, resolve_session, revoke_presented_session,
+    reject_cross_site_request, revoke_session, revoke_user_sessions, set_session_cookies,
 )
 from ..deps import (
-    get_current_user, require_roles, oauth2_scheme, active_qa_workspace_scope,
+    get_current_user, require_roles, active_qa_workspace_scope,
     active_qa_workspace_scope_ids,
 )
-from ..auth import renew_access_token
 from ..constants import (
     Role, ALL_ROLES, LoginType, ALL_LOGIN_TYPES,
     DEPARTMENT_ADMIN_ASSIGNABLE_ROLES, QA_ADMIN_ASSIGNABLE_ROLES, CONFIDENTIAL_ROLES,
@@ -139,7 +139,8 @@ def login_key(response: Response):
 
 
 @router.post("/login", response_model=schemas.Token)
-def login(request: Request, form_data = Depends(encrypted_login_credentials), db: Session = Depends(get_db)):
+def login(request: Request, response: Response, form_data = Depends(encrypted_login_credentials), db: Session = Depends(get_db)):
+    reject_cross_site_request(request)
     username = _canonical_login_username(form_data.username)
     _enforce_login_rate_limit(request, username)
     user = db.query(models.User).filter(func.lower(models.User.username) == username).first()
@@ -156,8 +157,15 @@ def login(request: Request, form_data = Depends(encrypted_login_credentials), db
         # an unaudited self-service selection.
         try:
             profile = ldap_authenticate_with_profile(username, form_data.password)
-        except LDAPAuthError:
-            profile = None
+        except LDAPAuthError as exc:
+            # Match the outage response used for known LDAP accounts. Treating
+            # a directory outage as an ordinary bad password only for unknown
+            # usernames creates an account-enumeration oracle.
+            write_audit(db, event_type="AUTHENTICATION", action="LOGIN_ERROR", outcome="FAILED",
+                        actor_username=username, request=request, status_code=503,
+                        details={"reason": "LDAP authentication unavailable"})
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="LDAP authentication unavailable. Please try again later.") from exc
         if not profile:
             _record_login_failure(request, username)
             write_audit(db, event_type="AUTHENTICATION", action="LOGIN_FAILED", outcome="FAILED",
@@ -203,9 +211,13 @@ def login(request: Request, form_data = Depends(encrypted_login_credentials), db
             user = db.query(models.User).filter(func.lower(models.User.username) == username).first()
 
     if not user.is_active:
+        # Do not disclose that a submitted username belongs to a disabled
+        # account. Count it as a failed attempt and return the same response
+        # as invalid credentials; the internal audit retains the real reason.
+        _record_login_failure(request, username)
         write_audit(db, event_type="AUTHENTICATION", action="LOGIN_BLOCKED", outcome="FAILED",
-                    actor=user, request=request, status_code=403, details={"reason": "User is disabled"})
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is disabled")
+                    actor=user, request=request, status_code=401, details={"reason": "User is disabled"})
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     if not just_provisioned:
         # Credentials were already verified above for a just-provisioned account;
@@ -234,7 +246,9 @@ def login(request: Request, form_data = Depends(encrypted_login_credentials), db
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
 
     _clear_login_failures(request, username)
-    token = create_access_token({"sub": user.username, "roles": user.roles}, )
+    revoke_presented_session(db, request)
+    session_secret, csrf_secret = create_session(db, user.id, request)
+    set_session_cookies(response, session_secret, csrf_secret)
     if just_provisioned:
         # An external/document-only identity is already placed in Other and
         # can safely use only Document Portal. Alert every active Admin when
@@ -255,28 +269,46 @@ def login(request: Request, form_data = Depends(encrypted_login_credentials), db
     write_audit(db, event_type="AUTHENTICATION", action="LOGIN_SUCCESS", actor=user,
                 request=request, status_code=200,
                 details={"login_type": user.login_type, "just_provisioned": just_provisioned})
-    return schemas.Token(access_token=token, roles=user.roles, full_name=user.full_name, username=user.username)
+    return schemas.Token(roles=user.roles, full_name=user.full_name, username=user.username)
 
 
 @router.post("/logout")
-def logout(request: Request, db: Session = Depends(get_db),
-           current_user: models.User = Depends(get_current_user)):
-    write_audit(db, event_type="AUTHENTICATION", action="LOGOUT", actor=current_user,
-                request=request, status_code=200)
+def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    """Revoke an active session and always clear an expired/stale cookie.
+
+    A valid session still requires CSRF, preventing forced cross-site logout.
+    Missing or expired sessions make logout idempotent so the browser can
+    recover instead of being trapped with an uncleared HttpOnly cookie.
+    """
+    try:
+        auth_session = resolve_session(request, db)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            raise
+        clear_session_cookies(response)
+        return {"status": "ok"}
+    current_user = db.get(models.User, auth_session.user_id)
+    revoke_session(db, auth_session.token_hash)
+    clear_session_cookies(response)
+    if current_user is not None:
+        write_audit(db, event_type="AUTHENTICATION", action="LOGOUT", actor=current_user,
+                    request=request, status_code=200)
     return {"status": "ok"}
 
 
 @router.post("/renew", response_model=schemas.Token)
-def renew(response: Response, token: str = Depends(oauth2_scheme),
+def renew(response: Response, request: Request, db: Session = Depends(get_db),
           current_user: models.User = Depends(get_current_user)):
-    # get_current_user rechecks the database account and resolves current roles.
-    try:
-        renewed = renew_access_token(token, current_user.username, current_user.roles)
-    except JWTError:
-        raise HTTPException(401, "Your session has ended. Please sign in again.")
+    # Cookie sessions renew their idle deadline in resolve_session; no bearer
+    # token is returned to JavaScript.
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
-    return schemas.Token(access_token=renewed, roles=current_user.roles,
+    # Keep direct callers of the old helper signature source-compatible during
+    # the cookie-session migration; routed requests always use the dependency
+    # above and never accept a bearer token.
+    if isinstance(request, str) and not isinstance(current_user, models.User):
+        current_user = db
+    return schemas.Token(roles=current_user.roles,
                          full_name=current_user.full_name, username=current_user.username)
 
 
@@ -693,6 +725,7 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
 
     data = payload.model_dump(exclude_unset=True)
     new_roles = data.pop("roles", None)
+    security_changed = new_roles is not None or any(key in data for key in ("is_active", "login_type"))
     if new_roles is not None:
         _validate_roles(new_roles)
         new_roles = _dedupe_roles(new_roles)
@@ -779,6 +812,8 @@ def update_user(user_id: int, payload: schemas.UserUpdate, request: Request, db:
         from ..workspace_service import ensure_default_workspace_membership
         ensure_default_workspace_membership(db, user)
     db.commit()
+    if security_changed:
+        revoke_user_sessions(db, user.id)
     db.refresh(user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="USER_ACCESS_UPDATED", actor=current_user,
                 request=request, status_code=200, target_type="USER", target_id=user.id,
@@ -801,6 +836,7 @@ def reset_password(user_id: int, payload: schemas.PasswordReset, request: Reques
     password = decrypt_admin_password(payload.encrypted_password, f"reset-password:{user_id}")
     user.hashed_password = hash_password(password)
     db.commit()
+    revoke_user_sessions(db, user.id)
     db.refresh(user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="PASSWORD_RESET", actor=current_user,
                 request=request, status_code=200, target_type="USER", target_id=user.id,
@@ -1212,6 +1248,8 @@ def update_local_admin_user(user_id: int, payload: schemas.LocalAdminUserUpdate,
         user.is_active = payload.is_active
 
     db.commit()
+    if payload.roles is not None or payload.is_active is not None:
+        revoke_user_sessions(db, user.id)
     db.refresh(user)
     write_audit(db, event_type="ACCESS_MANAGEMENT", action="DEPARTMENT_USER_ACCESS_UPDATED",
                 actor=current_user, request=request, status_code=200, target_type="USER",

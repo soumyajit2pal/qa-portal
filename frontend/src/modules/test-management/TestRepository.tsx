@@ -23,6 +23,7 @@ import LinkedDefects from '../../components/LinkedDefects'
 import RoleGroupLink from '../../components/RoleGroupLink'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconArchive, IconFolder, IconGrid, IconInbox, IconTrash } from '../../components/Icons'
+import { testCaseRejectionNote } from '../../testCaseRejectionNote'
 
 // Test Repository module -- folder tree + test case authoring/import, under
 // a selected Test Project. QA Engineer + QA Lead both author (create/edit/
@@ -85,7 +86,7 @@ function workflowStatusNote(existing: TestCaseOut | null): string {
     case 'Returned by QA Lead':
       return 'Returned for correction -- edit and resubmit for review.'
     case 'Rejected':
-      return 'Rejected by QA Lead -- edit to start a new draft revision.'
+      return testCaseRejectionNote(existing)
     case 'Approved':
       return 'Approved -- selectable for Test Cycles.'
     case 'Archived':
@@ -1676,6 +1677,11 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
   // no other visual cue once it doesn't close), so it's shown briefly next
   // to the button and cleared on a timer, same idea as a toast.
   const [justSaved, setJustSaved] = useState(false)
+  // Submission is deliberately gated on an explicit successful Save in
+  // this editor session. A testcase loaded from the server is persisted,
+  // but the user must still confirm the currently displayed draft before
+  // sending it into the governed review workflow.
+  const [savedInThisSession, setSavedInThisSession] = useState(false)
   useEffect(() => {
     if (!justSaved) return
     const timer = window.setTimeout(() => setJustSaved(false), 2500)
@@ -1708,6 +1714,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
   const lockedByMe = !!existing?.checked_out_by_id && existing.checked_out_by_id === user?.id
   // Both "In Review" (Stage 1) and "Review Completed" (Stage 2) are pending
   // a decision -- mirrors backend constants.TEST_CASE_PENDING_DECISION_STATUSES.
+  const rejectedStatus = existing?.status === 'Rejected'
   const pendingDecisionStatus = !!existing && TEST_CASE_PENDING_DECISION_STATUSES.includes(existing.status)
   const isCurrentDraftAuthor = !!existing && !!user?.id && (
     existing.current_draft_author_id === user.id
@@ -1746,7 +1753,12 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
         : (existing.status === 'QA Lead Approval Pending' && (existing.current_draft_submitted_by_id === user?.id || existing.current_draft_reviewed_by_id === user?.id))
           ? 'You already acted on this testcase version at an earlier stage, so you cannot also record its Stage 2 decision. Another eligible QA Lead Group member must record it.'
           : null
-  const pendingLockContext = !pendingDecisionStatus || !existing ? null
+  const pendingLockContext = !existing ? null
+    : rejectedStatus ? {
+      title: 'Rejected — final and read-only',
+      message: 'This testcase cannot be edited or resubmitted. Use Clone to create a new Draft test case; the rejected testcase remains unchanged for history.',
+    }
+    : !pendingDecisionStatus ? null
     : gov002BlockedMessage ? {
       title: 'Maker-checker lock',
       message: gov002BlockedMessage,
@@ -1769,14 +1781,14 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
             }
               : existing.status === 'In Review' || existing.status === 'Recommendation Pending' ? {
                 title: 'Editing locked — awaiting a QA recommendation',
-                message: 'The testcase content cannot change while Stage 1 review is pending. Editing reopens only if the QA reviewer returns it for correction.',
+                message: 'The testcase content cannot change while Stage 1 review is pending. If returned, the author can correct and resubmit it. If rejected, use Clone to create a new Draft test case.',
               }
                 : {
                   title: 'Editing locked — awaiting QA Lead final decision',
-                  message: 'The testcase content cannot change while Stage 2 approval is pending. Editing reopens only if the QA Lead returns it for correction.',
+                  message: 'The testcase content cannot change while Stage 2 approval is pending. If returned, the author can correct and resubmit it. If rejected, use Clone to create a new Draft test case.',
                 }
   const isTerminalStatus = !!existing && TEST_CASE_TERMINAL_STATUSES.includes(existing.status)
-  const readOnly = !canAuthor || returnedCorrectionLocked || lockedByOther || (!!existing && !lockedByMe) || pendingDecisionStatus
+  const readOnly = rejectedStatus || !canAuthor || returnedCorrectionLocked || lockedByOther || (!!existing && !lockedByMe) || pendingDecisionStatus
 
   // Checkout only reserves the testcase. It must not create a version. Keep
   // the editor compared with the last server value so Finish editing can
@@ -1902,6 +1914,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
         : await api.post<TestCaseOut>(`/api/test-repository/projects/${projectId}/test-cases`, body)
       onSaved(saved)
       setJustSaved(true)
+      setSavedInThisSession(true)
     } catch (err) { setError(err) } finally { setBusy(false) }
   }
 
@@ -1972,7 +1985,9 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
                   to approve. This now reflects the actual status/submission
                   state instead of only the approval-history flag. */}
               <small>{workflowStatusNote(existing)}</small>
-              {isTerminalStatus && <small className="muted">Terminal state -- use Clone or edit to start a fresh Draft revision.</small>}
+              {isTerminalStatus && <small className="muted">{rejectedStatus
+                ? 'Terminal state -- use Clone to create a new Draft test case.'
+                : 'Terminal state -- use Clone or edit to start a fresh Draft revision.'}</small>}
             </div>
           </Field>
           {existing && (
@@ -1981,7 +1996,9 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
                 <span className="badge badge-gray">{`v${existing.version || '1.0'}`}</span>
                 <small>
                   {existing.current_draft_version_id
-                    ? 'A Draft revision is in progress on top of the Approved baseline'
+                    ? existing.current_approved_version_id
+                      ? 'A revision exists on top of the Approved baseline'
+                      : 'No Approved baseline exists for this test case'
                     : 'Bumps when a QA Lead approves the next revision'}
                 </small>
                 {versions.length > 0 && (
@@ -1997,6 +2014,8 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
                   <span className={`badge ${canActOnPendingStage ? 'badge-blue' : 'badge-yellow'}`}>
                     {canActOnPendingStage ? 'Decision mode — editing locked' : 'Locked during review'}
                   </span>
+                ) : rejectedStatus ? (
+                  <span className="badge badge-gray">Final — Clone to create a new Draft</span>
                 ) : returnedCorrectionLocked ? (
                   <span className="badge badge-yellow">
                     Assigned to {existing.current_draft_author_name || 'the testcase author'} for correction
@@ -2008,12 +2027,12 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
                 ) : (
                   <span className="badge badge-gray">Available</span>
                 )}
-                {canAuthor && !pendingDecisionStatus && lockedByMe && (
+                {canAuthor && !pendingDecisionStatus && !rejectedStatus && lockedByMe && (
                   <button type="button" className="btn btn-sm" onClick={toggleCheckout} disabled={checkoutBusy}>
                     {checkoutBusy ? 'Please wait…' : 'Finish editing'}
                   </button>
                 )}
-                {canAuthor && !pendingDecisionStatus && !lockedByMe && !existing.checked_out_by_id && !returnedCorrectionLocked && (
+                {canAuthor && !pendingDecisionStatus && !rejectedStatus && !lockedByMe && !existing.checked_out_by_id && !returnedCorrectionLocked && (
                   <button type="button" className="btn btn-sm" onClick={toggleCheckout} disabled={checkoutBusy}>
                     {checkoutBusy ? 'Please wait…' : 'Start editing'}
                   </button>
@@ -2021,7 +2040,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
                 {canAuthor && pendingDecisionStatus && (
                   <button type="button" className="btn btn-sm" disabled title="Editing is locked while an approval decision is pending">Start editing</button>
                 )}
-                {!pendingDecisionStatus && !returnedCorrectionLocked && canManageRepoGovernance && lockedByOther && (
+                {!pendingDecisionStatus && !rejectedStatus && !returnedCorrectionLocked && canManageRepoGovernance && lockedByOther && (
                   <button type="button" className="btn btn-sm btn-danger" onClick={() => setShowOverride(true)}>Override checkout</button>
                 )}
               </div>
@@ -2033,7 +2052,7 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
             <strong>{pendingLockContext.title}.</strong> {pendingLockContext.message}
           </div>
         )}
-        {lockedByOther && !pendingDecisionStatus && !returnedCorrectionLocked && (
+        {lockedByOther && !pendingDecisionStatus && !rejectedStatus && !returnedCorrectionLocked && (
           <div className="info-banner">
             <strong>{existing?.checked_out_by_name}</strong> has this test case checked out, so it's locked
             for editing until they check it back in. {canManageRepoGovernance ? 'You can override the checkout above.' : 'Ask them, or a member of the QA Lead Group, to release it.'}
@@ -2045,10 +2064,10 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
             Only the author can edit and resubmit this version. You remain eligible to recommend it after the author resubmits.
           </div>
         )}
-        {existing && canAuthor && !existing.checked_out_by_id && !pendingDecisionStatus && !returnedCorrectionLocked && (
+        {existing && canAuthor && !existing.checked_out_by_id && !pendingDecisionStatus && !rejectedStatus && !returnedCorrectionLocked && (
           <div className="tm-edit-access-notice"><strong>Read-only until reserved</strong><span>Select <b>Start editing</b> above to check out this case and enable the form.</span></div>
         )}
-        {existing && lockedByMe && !pendingDecisionStatus && (
+        {existing && lockedByMe && !pendingDecisionStatus && !rejectedStatus && (
           <div className="tm-edit-access-notice">
             <strong>Editing is reserved to you</strong>
             <span>A new version is created only when you select <b>Save</b>. If you finish editing first, any unsaved changes will be reverted.</span>
@@ -2081,9 +2100,23 @@ function TestCaseModal({ projectId, currentProject, allProjects, folders, folder
             {existing && lockedByMe && hasUnsavedChanges && <span className="muted small">Unsaved changes</span>}
             <button type="button" className="btn" onClick={onClose}>Cancel</button>
             {existing && ['Draft', 'Returned', 'Returned by QA', 'Returned by QA Lead'].includes(existing.status) && (
-              <button type="button" className="btn btn-success" onClick={() => setShowSubmit(true)} disabled={busy}>
+              <button
+                type="button"
+                className="btn btn-success"
+                onClick={() => setShowSubmit(true)}
+                disabled={busy || !savedInThisSession || hasUnsavedChanges}
+                title={!savedInThisSession
+                  ? 'Save this testcase before submitting it for review'
+                  : hasUnsavedChanges
+                    ? 'Save your latest changes before submitting for review'
+                    : undefined}
+              >
                 Submit for review
               </button>
+            )}
+            {existing && ['Draft', 'Returned', 'Returned by QA', 'Returned by QA Lead'].includes(existing.status)
+              && (!savedInThisSession || hasUnsavedChanges) && (
+              <span className="muted small">Save the testcase before submitting it for review.</span>
             )}
             {/* 2026-08 -- "Final-Approved Test Case Deletion and Archive Requirement": Delete must stay hidden
                 for any governed test case, not just an Approved/Archived one (current_approved_version_id is
@@ -3395,7 +3428,7 @@ export default function TestRepository() {
                   const pendingGroup = c.status === 'Recommendation Pending'
                     ? { role: 'QA_ENGINEER', label: 'QA Group' }
                     : c.status === 'QA Lead Approval Pending'
-                      ? { role: 'QA_LEAD', label: 'QA Lead Group' }
+                      ? { role: QA_LEAD_GROUP_ROLES, label: 'QA Lead Group' }
                       : null
                   // Final states have no next actor. The fallback map uses
                   // an em dash for those states; treating that as a person
@@ -3408,7 +3441,7 @@ export default function TestRepository() {
                       {pendingGroup
                         ? <RoleGroupLink
                             users={users}
-                            department={selectedProject?.department}
+                            repositoryGroup
                             role={pendingGroup.role}
                             label={pendingGroup.label}
                             renderTrigger={(count, open) => <button type="button" className="role-group-link" onClick={(event) => { event.stopPropagation(); open() }}>Pending with {pendingGroup.label}<span>{count}</span></button>}
@@ -3462,6 +3495,7 @@ export default function TestRepository() {
                   header: 'Editing access',
                   render: (c) => {
                     if (!c.workspace_writable) return <span className="badge badge-gray">{c.origin_workspace_name || "Other workspace"} · Read-only</span>
+                    if (c.status === 'Rejected') return <span className="tm-checkout-state"><strong>Final — read-only</strong><small>Clone to create a new Draft test case</small></span>
                     const lockedByMe = c.checked_out_by_id === user?.id
                     const lockedByOther = !!c.checked_out_by_id && !lockedByMe
                     const reviewLocked = TEST_CASE_PENDING_DECISION_STATUSES.includes(c.status)

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -107,6 +108,27 @@ def _cycle_payload(**changes):
     }
     values.update(changes)
     return schemas.TestCycleCreate(**values)
+
+
+@pytest.mark.parametrize("field", ["environment", "build"])
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_cycle_creation_requires_nonblank_execution_context(field, value):
+    with pytest.raises(ValidationError):
+        _cycle_payload(**{field: value})
+
+
+@pytest.mark.parametrize("field", ["environment", "build"])
+def test_cycle_creation_requires_execution_context_fields(field):
+    data = _cycle_payload().model_dump()
+    del data[field]
+    with pytest.raises(ValidationError):
+        schemas.TestCycleCreate(**data)
+
+
+def test_cycle_creation_trims_environment_and_build():
+    payload = _cycle_payload(environment=" UAT ", build=" 2026.09.1 ")
+    assert payload.environment == "UAT"
+    assert payload.build == "2026.09.1"
 
 
 def test_create_cycle_without_request_persists_as_standalone():

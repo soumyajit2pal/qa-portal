@@ -54,8 +54,7 @@ class ORMModel(BaseModel):
 
 # ---------------- Auth / Users ----------------
 class Token(ORMModel):
-    access_token: str
-    token_type: str = "bearer"
+    """Non-secret login result; authentication is carried only by HttpOnly cookie."""
     roles: List[str]
     full_name: str
     username: str
@@ -2925,6 +2924,8 @@ class TestCaseOut(ORMModel):
     # "Add Recommended By once recommended" -- see models.TestCase.
     # current_draft_reviewed_by_name's own docstring.
     current_draft_reviewed_by_name: Optional[str] = None
+    current_draft_qa_lead_decided_by_id: Optional[int] = None
+    current_draft_qa_lead_decided_by_name: Optional[str] = None
     assigned_reviewer_id: Optional[int] = None
     assigned_reviewer_name: Optional[str] = None
     assigned_qa_lead_id: Optional[int] = None
@@ -3142,9 +3143,14 @@ class TestCycleCreate(BaseModel):
     linked_request_id: Optional[int] = None
     # CYC-001 / LNK-003.
     cycle_type: Optional[str] = None
-    environment: Optional[str] = None
-    build: Optional[str] = None
+    environment: str = Field(min_length=1)
+    build: str = Field(min_length=1)
     owner_id: Optional[int] = None
+
+    @field_validator("environment", "build", mode="before")
+    @classmethod
+    def normalize_execution_context(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def validate_optional_request_link(self):

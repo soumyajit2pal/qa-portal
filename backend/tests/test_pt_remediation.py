@@ -44,21 +44,21 @@ def test_required_claims(claim):
     with pytest.raises(JWTError):
         decode_access_token(jwt.encode(claims, SECRET_KEY, algorithm=ALGORITHM))
 
-def test_signed_role_claim_does_not_override_database_roles():
+def test_session_identity_uses_live_database_roles():
     engine = create_engine('sqlite://'); models.Base.metadata.create_all(engine)
     with Session(engine) as db:
         workspace = models.QAWorkspace(workspace_key='DEFAULT', name='Default', is_active=True, is_default=True)
         user = models.User(username='requester', full_name='Requester', hashed_password='x', is_active=True,
                            role_assignments=[models.UserRole(role='REQUESTER')])
         db.add_all([workspace, user]); db.commit()
-        resolved = _resolve_current_user(request(), create_access_token({'sub': 'requester', 'roles': ['ADMIN']}), db)
+        resolved = _resolve_current_user(request(), user.id, db)
         assert resolved.username == 'requester' and resolved.roles == ['REQUESTER']
         with pytest.raises(HTTPException) as exc:
             require_roles('ADMIN')(request('/api/auth/users'), resolved)
         assert exc.value.status_code == 403
         user.is_active = False; db.commit()
         with pytest.raises(HTTPException) as exc:
-            _resolve_current_user(request(), create_access_token({'sub': 'requester'}), db)
+            _resolve_current_user(request(), user.id, db)
         assert exc.value.status_code == 401
     engine.dispose()
 
@@ -82,6 +82,8 @@ def test_nginx_csp_and_tls():
         assert "script-src 'self'; script-src-attr 'none'" in config
         assert "style-src-elem 'self'" in config
         assert 'TLSv1.2 TLSv1.3' in config
+        assert "location ~ ^/api/test-execution/executions/[0-9]+/rich-result$" in config
+        assert 'proxy_request_buffering off' in config
 
 
 def test_https_forwarding_is_accepted_only_from_configured_proxy_peer():

@@ -16,6 +16,7 @@ def test_http_workspace_propagation_and_isolation(monkeypatch, dependency):
     def resolve(request,token,db):
         i=int(request.headers['x-workspace-id'])
         return NS(active_qa_workspace_id=i,active_workspace_scope_ids=(i,i+10))
+    monkeypatch.setattr(deps, 'resolve_session', lambda request, db: NS(user_id=1))
     monkeypatch.setattr(deps,'_resolve_current_user',resolve)
     app=FastAPI();app.dependency_overrides[deps.get_db]=lambda:None
     @app.get('/probe')
@@ -26,7 +27,7 @@ def test_http_workspace_propagation_and_isolation(monkeypatch, dependency):
         async def receive():return {'type':'http.request','body':b'','more_body':False}
         async def send(msg):
             if msg['type']=='http.response.body':messages.append(msg.get('body',b''))
-        await app({'type':'http','http_version':'1.1','method':'GET','scheme':'http','path':'/probe','raw_path':b'/probe','query_string':b'','headers':[(b'authorization',b'Bearer test'),(b'x-workspace-id',str(i).encode())],'server':('test',80),'client':('test',1),'root_path':''},receive,send)
+        await app({'type':'http','http_version':'1.1','method':'GET','scheme':'http','path':'/probe','raw_path':b'/probe','query_string':b'','headers':[(b'x-workspace-id',str(i).encode())],'server':('test',80),'client':('test',1),'root_path':''},receive,send)
         assert json.loads(b''.join(messages))==[i,[i,i+10]]
         assert current_workspace_id()==99
     async def run():

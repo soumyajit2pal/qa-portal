@@ -37,6 +37,23 @@ class LoginFailure(Base):
     attempted_at = Column(Float, nullable=False)
 
 
+class AuthSession(Base):
+    """Server-controlled browser session; only a hash of the secret is stored."""
+    __tablename__ = 'qap_auth_sessions'
+    __table_args__ = (
+        Index('ix_qap_auth_session_user', 'user_id'),
+        Index('ix_qap_auth_session_exp', 'expires_at'),
+    )
+    token_hash = Column(String(64), primary_key=True)
+    user_id = Column(Integer, ForeignKey('qap_users.id', ondelete='CASCADE'), nullable=False)
+    csrf_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    user_agent_hash = Column(String(64), nullable=True)
+
+
 def now():
     return datetime.datetime.now(datetime.UTC).astimezone(ZoneInfo("Asia/Kolkata"))
 
@@ -764,7 +781,11 @@ class ApplicationMaster(Base):
     requested_by = relationship("User", foreign_keys=[requested_by_id])
     app_owner_decided_by = relationship("User", foreign_keys=[app_owner_decided_by_id])
     decided_by = relationship("User", foreign_keys=[decided_by_id])
-    qa_request = relationship("QARequest", foreign_keys=[qa_request_id])
+    # Defer this traceability link until both rows have been saved. The
+    # reciprocal QARequest.application_master link otherwise creates an ORM
+    # flush cycle when the name and its introducing request are both dirty.
+    # use_alter above only handles DDL ordering, not ORM save ordering.
+    qa_request = relationship("QARequest", foreign_keys=[qa_request_id], post_update=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2966,6 +2987,14 @@ class TestCase(WorkspaceOwnedContent, Base):
     @property
     def current_draft_reviewed_by_name(self):
         return self.current_draft_version.reviewed_by_name if self.current_draft_version else None
+
+    @property
+    def current_draft_qa_lead_decided_by_id(self):
+        return self.current_draft_version.qa_lead_decided_by_id if self.current_draft_version else None
+
+    @property
+    def current_draft_qa_lead_decided_by_name(self):
+        return self.current_draft_version.qa_lead_decided_by_name if self.current_draft_version else None
 
     @property
     def assigned_reviewer_id(self):

@@ -6,7 +6,7 @@ import { formatDateTimeIST } from '../../time'
 import { useAuth } from '../../context/AuthContext'
 import { Table, Modal, Field, ErrorText, PageHeader, Badge } from '../../components/Common'
 import SearchableSelect from '../../components/SearchableSelect'
-import { ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, TEST_CASE_PRIORITIES, TEST_CASE_TYPES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
+import { ENVIRONMENTS, hasWorkflowRole as hasRole, hasWorkspaceRole, hasRetestEligibleHistory, isSelectableUser, TEST_CASE_PRIORITIES, TEST_EXECUTION_STATUSES, TEST_CYCLE_LOCKED_STATUSES, executionStatusGate, selectionActionLabel } from '../../constants'
 import { TestProjectOut, TestCaseOut, TestCycleOut, TestExecutionOut, TestExecutionSummaryOut, TestExecutionRunOut, TestRunDefectOut, ApprovalActionOut, RequestDocumentOut, UserOption, PageOut, LinkedRequestRef, TestProjectMyAccessOut, DefectListOut, TestCycleFolderOut, TestCycleFolderAccessOut, TestCycleFolderListOut, DepartmentOut } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import JiraActivity, { AuthenticatedMarkdown } from '../../components/JiraActivity'
@@ -15,6 +15,7 @@ import UserAssignSelect from '../../components/UserAssignSelect'
 import LinkedDefects from '../../components/LinkedDefects'
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { IconFolder, IconGrid, IconInbox, IconLock, IconPlus, IconTrash, IconWorkflow } from '../../components/Icons'
+import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvidence'
 
 // Test Execution module -- Test Cycles under a selected Test Project, each
 // holding one result row (Pass/Fail/Blocked/NA/Retest Passed) per test case
@@ -96,6 +97,7 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!name.trim()) { setError(new Error('Cycle name cannot be blank')); return }
+    if (!environment.trim() || !build.trim()) { setError(new Error('Environment and Build are required')); return }
     if (!startDate || !endDate) { setError(new Error('Start date and end date are required')); return }
     if (startDate > endDate) { setError(new Error('Start date cannot be after end date')); return }
     if (isOwnerReassignment && !ownerReassignReason.trim()) { setError(new Error('A reassignment reason is required to change the cycle owner')); return }
@@ -108,7 +110,7 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
           ? { linked_request_type: 'Functional', linked_request_id: Number(linkedRequest.split(':')[1]) }
           : editing ? { linked_request_type: null, linked_request_id: null } : {}),
         cycle_type: cycleType || null,
-        environment: environment || null, build: build || null,
+        environment: environment.trim(), build: build.trim(),
         owner_id: ownerId || null,
         folder_id: folderId || null,
         ...(isOwnerReassignment ? { reason: ownerReassignReason.trim() } : {}),
@@ -152,8 +154,8 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
           <Field label="Cycle Type">
             <input value={cycleType} onChange={(e) => setCycleType(e.target.value)} placeholder="Smoke, Functional, Regression, Retest…" />
           </Field>
-          <Field label="Environment">
-            <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+          <Field label="Environment *">
+            <select required value={environment} onChange={(e) => setEnvironment(e.target.value)}>
               <option value="">-- Select environment --</option>
               {/* Keep a pre-existing legacy value selectable while editing,
                   but all new choices come from the shared system list. */}
@@ -165,8 +167,8 @@ function CycleModal({ project, requests, users, folders, defaultFolderId, editin
               ))}
             </select>
           </Field>
-          <Field label="Build (required before execution)">
-            <input value={build} onChange={(e) => setBuild(e.target.value)} placeholder="e.g. 2026.08.1" />
+          <Field label="Build *">
+            <input required value={build} onChange={(e) => setBuild(e.target.value)} placeholder="e.g. 2026.08.1" />
           </Field>
           <Field label="Owner">
             {canChangeOwner ? (
@@ -738,13 +740,21 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [priority, setPriority] = useState('')
-  const [testType, setTestType] = useState('')
   const [createdById, setCreatedById] = useState('')
   const [authors, setAuthors] = useState<TestCaseCandidateAuthor[]>([])
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest')
   // Each entry is the cursor used to load that page. Keeping the small
   // history client-side gives Previous/Next navigation without OFFSET.
-  const [cursorStack, setCursorStack] = useState<Array<number | null>>([null])
+  const filterKey = JSON.stringify([cycleId, debouncedSearch, priority, createdById, sortOrder])
+  const [pagination, setPagination] = useState<{ key: string; cursors: Array<number | null> }>({ key: filterKey, cursors: [null] })
+  // A cursor only belongs to the exact query that produced it.
+  const cursorStack = pagination.key === filterKey ? pagination.cursors : [null]
+  const setCursorStack = (update: React.SetStateAction<Array<number | null>>) => {
+    setPagination(current => {
+      const cursors = current.key === filterKey ? current.cursors : [null]
+      return { key: filterKey, cursors: typeof update === 'function' ? update(cursors) : update }
+    })
+  }
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [selectAllMatching, setSelectAllMatching] = useState(false)
   const [excluded, setExcluded] = useState<Set<number>>(new Set())
@@ -772,7 +782,7 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
     setSelectAllMatching(false)
     setSelected(new Set())
     setExcluded(new Set())
-  }, [debouncedSearch, priority, testType, createdById])
+  }, [debouncedSearch, priority, createdById])
 
   // Sorting changes presentation only, so keep explicit selections while
   // restarting cursor pagination from the beginning of the new order.
@@ -786,7 +796,6 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
     if (cursor != null) qs.set('cursor', String(cursor))
     if (debouncedSearch) qs.set('search', debouncedSearch)
     if (priority) qs.set('priority', priority)
-    if (testType) qs.set('test_type', testType)
     if (createdById) qs.set('created_by_id', createdById)
     qs.set('sort_order', sortOrder)
     setCandidateLoading(true)
@@ -794,7 +803,8 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
       .then((result) => { if (requestId === requestRef.current) { setCandidatePage(result); setError(null) } })
       .catch((err) => { if (requestId === requestRef.current) setError(err) })
       .finally(() => { if (requestId === requestRef.current) setCandidateLoading(false) })
-  }, [cycleId, cursor, debouncedSearch, priority, testType, createdById, sortOrder])
+    return () => { if (requestId === requestRef.current) ++requestRef.current }
+  }, [cycleId, cursor, debouncedSearch, priority, createdById, sortOrder])
 
   const candidates = candidatePage.items
   const selectedCount = selectAllMatching ? Math.max(0, candidatePage.total - excluded.size) : selected.size
@@ -866,7 +876,6 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
         excluded_ids: selectAllMatching ? Array.from(excluded) : [],
         search: debouncedSearch || null,
         priority: priority || null,
-        test_type: testType || null,
         created_by_id: createdById ? Number(createdById) : null,
         assigned_to_id: assignedTo ? Number(assignedTo) : null,
       }, 180_000)
@@ -902,9 +911,6 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
         <Field label="Find approved testcases">
           <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Test Case ID, scenario, module or type…" disabled={busy} />
         </Field>
-        <Field label="Test Type">
-          <select value={testType} onChange={(event) => setTestType(event.target.value)} disabled={busy}><option value="">All types</option>{TEST_CASE_TYPES.map((type) => <option key={type}>{type}</option>)}</select>
-        </Field>
         <Field label="Priority">
           <select value={priority} onChange={(event) => setPriority(event.target.value)} disabled={busy}><option value="">All priorities</option>{TEST_CASE_PRIORITIES.map((value) => <option key={value}>{value}</option>)}</select>
         </Field>
@@ -915,11 +921,11 @@ function AddCasesModal({ cycleId, canAssign, runnerCandidates, onClose, onAdded 
           <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as 'newest' | 'oldest')} disabled={busy}><option value="newest">Recently added first</option><option value="oldest">Oldest added first</option></select>
         </Field>
       </div>
-      <div className="tm-add-cases-discovery-note"><span>Newest testcases are shown first by default. Date means when the testcase was created or imported into the portal.</span>{(search || priority || testType || createdById || sortOrder !== 'newest') && <button type="button" className="link-btn" disabled={busy} onClick={() => { setSearch(''); setPriority(''); setTestType(''); setCreatedById(''); setSortOrder('newest') }}>Reset filters</button>}</div>
+      <div className="tm-add-cases-discovery-note"><span>Newest testcases are shown first by default. Date means when the testcase was created or imported into the portal.</span>{(search || priority || createdById || sortOrder !== 'newest') && <button type="button" className="link-btn" disabled={busy} onClick={() => { setSearch(''); setPriority(''); setCreatedById(''); setSortOrder('newest') }}>Reset filters</button>}</div>
       {candidateLoading ? (
         <p className="muted small">Loading approved testcases…</p>
       ) : candidates.length === 0 ? (
-        <p className="muted small">{search || priority || testType || createdById ? 'No approved testcases match these filters. Change or reset the filters to see other available cases.' : 'There are no approved testcases available to add. Approve pending testcases in the Test Repository first.'}</p>
+        <p className="muted small">{search || priority || createdById ? 'No approved testcases match these filters. Change or reset the filters to see other available cases.' : 'There are no approved testcases available to add. Approve pending testcases in the Test Repository first.'}</p>
       ) : (
         <>
           <div className="tm-add-cases-selection-bar">
@@ -1496,6 +1502,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   const [defectStatus, setDefectStatus] = useState('Open')
   const [defectNotes, setDefectNotes] = useState('')
   const [resultImages, setResultImages] = useState<File[]>([])
+  const [resultAttachments, setResultAttachments] = useState<File[]>([])
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState(false)
@@ -1521,6 +1528,8 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!status) { setError(new Error('Select a result for this attempt')); return }
+    const evidenceError = defectEvidenceError([...resultImages, ...resultAttachments])
+    if (evidenceError) { setError(new Error(evidenceError)); return }
     setBusy(true); setError(null)
     try {
       const saved = await api.uploadFormFiles<TestExecutionOut>(
@@ -1531,7 +1540,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
           defect_title: ['Fail', 'Blocked'].includes(status) ? defectTitle : '', defect_status: ['Fail', 'Blocked'].includes(status) ? defectStatus : '',
           defect_notes: ['Fail', 'Blocked'].includes(status) ? defectNotes : '',
         },
-        resultImages,
+        [...resultImages, ...resultAttachments],
       )
       onSaved(saved)
     } catch (err) { setError(err) } finally { setBusy(false) }
@@ -1706,6 +1715,28 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
           </Field>
           <Field label="Actual Result">
             <JiraRichTextField value={actualResult} onChange={setActualResult} onImagesChange={setResultImages} />
+          </Field>
+          <Field label="Execution Evidence">
+            <div className="defect-evidence">
+              <label className="btn btn-sm">+ Add attachments
+                <input
+                  type="file" multiple hidden
+                  accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')}
+                  onChange={(event) => {
+                    const files = Array.from(event.target.files || [])
+                    if (files.length) setResultAttachments(current => [...current, ...files])
+                    event.target.value = ''
+                  }}
+                />
+              </label>
+              {resultAttachments.length > 0 && <div className="defect-files">{resultAttachments.map((file, index) => (
+                <button type="button" key={`${file.name}-${file.size}-${index}`} disabled={busy}
+                  onClick={() => setResultAttachments(current => current.filter((_, fileIndex) => fileIndex !== index))}>
+                  {file.name} ✕
+                </button>
+              ))}</div>}
+              <small className="muted">Documents, images, MP4, MOV, WebM, or AVI; maximum 25 MB per file.</small>
+            </div>
           </Field>
           <Field label="Test Run Artifacts">
             <input value={artifacts} onChange={(e) => setArtifacts(e.target.value)} placeholder="Link, filename, or reference" />
@@ -2206,11 +2237,14 @@ export default function TestExecution() {
     if (!projectId) { setUsers([]); return }
     let active = true
     setUsers([])
+    // Project changes can render before the replacement cycle list arrives.
+    // Never combine the new project with a cycle from the previous project.
+    if (cycleId && !cycles.some(cycle => cycle.id === cycleId && cycle.project_id === projectId)) return
     api.get<UserOption[]>(`/api/test-projects/eligible-users?runner_only=true&project_id=${projectId}${cycleId ? `&cycle_id=${cycleId}` : ''}`)
       .then((rows) => { if (active) setUsers(rows) })
       .catch((failure) => { if (active) setError(failure) })
     return () => { active = false }
-  }, [projectId, cycleId])
+  }, [projectId, cycleId, cycles])
 
   // Request-link options are loaded only when a control that needs them is
   // reachable. Runner candidates are handled separately above because their
@@ -2237,16 +2271,17 @@ export default function TestExecution() {
   // summaryFolderParam calculation -- numeric folder id, the literal
   // 'unfiled', or omitted for every cycle this user can see across the
   // whole project.
-  const loadCycles = useCallback(async (pid: number, folderParam?: string) => {
+  const loadCycles = useCallback(async (pid: number, folderParam?: string, isCurrent: () => boolean = () => true) => {
     try {
       const qs = new URLSearchParams({ page_size: '100' })
       if (folderParam) qs.set('folder_id', folderParam)
       const cPage = await api.get<PageOut<TestCycleOut>>(`/api/test-execution/projects/${pid}/cycles?${qs.toString()}`)
+      if (!isCurrent()) return
       const c = cPage.items
       setCycles(c)
       const requestedCycle = Number(searchParams.get('cycle'))
       setCycleId(c.some((cycle) => cycle.id === requestedCycle) ? requestedCycle : (c.length ? c[0].id : ''))
-    } catch (err) { setError(err) }
+    } catch (err) { if (isCurrent()) setError(err) }
   }, [searchParams])
   const loadCycleFolders = useCallback(async (pid: number) => {
     try {
@@ -2266,7 +2301,12 @@ export default function TestExecution() {
     if (projectId) loadCycleFolders(projectId)
     else { setCycleFolders([]); setCycleFolderTotals({ unfiled_count: 0, total: 0 }) }
   }, [projectId, loadCycleFolders])
-  useEffect(() => { if (projectId) loadCycles(projectId, cycleFolderParam) }, [projectId, cycleFolderParam, loadCycles])
+  useEffect(() => {
+    let active = true
+    if (projectId) loadCycles(projectId, cycleFolderParam, () => active)
+    else { setCycles([]); setCycleId('') }
+    return () => { active = false }
+  }, [projectId, cycleFolderParam, loadCycles])
 
   // SRS 7.2 pagination rollout -- the main execution list is now
   // server-paginated/server-filtered (status/assignment become query params
@@ -2535,7 +2575,12 @@ export default function TestExecution() {
           <div style={{ display: 'flex', gap: 8 }}>
             <SearchableSelect
               value={projectId === '' ? '' : String(projectId)}
-              onChange={(v) => { setProjectId(v ? Number(v) : ''); setSelectedCycleFolder('') }}
+              onChange={(v) => {
+                setProjectId(v ? Number(v) : '')
+                setCycleId('')
+                setCycles([])
+                setSelectedCycleFolder('')
+              }}
               placeholder={projects.length === 0 ? 'No Test Projects yet' : 'Select a project...'}
               style={{ minWidth: 220 }}
               options={projects.map((p) => ({

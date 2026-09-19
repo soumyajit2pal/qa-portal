@@ -1,10 +1,11 @@
 import datetime
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.routers.test_execution import _cycle_candidate_query
+from app.routers.test_execution import _cycle_candidate_query, list_cycle_candidate_test_cases
 
 
 def test_creator_filter_applies_to_approved_unlinked_cycle_candidates():
@@ -48,3 +49,38 @@ def test_creator_filter_applies_to_approved_unlinked_cycle_candidates():
         candidate = schemas.TestCaseCandidateOut.model_validate(one)
         assert candidate.created_by_name == "Author One"
         assert candidate.created_at == datetime.datetime(2026, 9, 16, 10, 0)
+
+        # A pending revision changes the testcase mirror, while execution
+        # candidates must still search and display the approved baseline.
+        approved = one.current_approved_version
+        approved.test_scenario = "Approved payments scenario"
+        approved.module_name = "Payments"
+        approved.test_type = "Functional Positive"
+        approved.priority = "High"
+        approved.version_major = 1
+        approved.version_minor = 0
+        one.test_scenario = "Unapproved replacement"
+        one.test_type = "Functional Negative"
+        one.module_name = "Draft module"
+        one.priority = "Low"
+        db.commit()
+        matches = _cycle_candidate_query(
+            db, cycle, search="payments", priority="High",
+            test_type="Functional Positive", created_by_id=authors[0].id,
+        ).all()
+        assert [case.id for case in matches] == [one.id]
+        assert not _cycle_candidate_query(db, cycle, search="Unapproved replacement").all()
+        assert not _cycle_candidate_query(db, cycle, priority="Low", created_by_id=authors[0].id).all()
+        with patch("app.routers.test_execution._get_cycle_or_404", return_value=cycle), \
+                patch("app.routers.test_execution.require_can_execute_project"):
+            page = list_cycle_candidate_test_cases(
+                cycle.id, cursor=None, page_size=25, search="payments", priority="High",
+                test_type="Functional Positive", created_by_id=authors[0].id,
+                sort_order="newest", db=db, current_user=authors[0],
+            )
+        assert page["total"] == 1
+        row = schemas.TestCaseCandidateOut.model_validate(page["items"][0])
+        assert row.test_scenario == "Approved payments scenario"
+        assert row.test_type == "Functional Positive"
+        assert row.priority == "High"
+        assert row.version == "1.0"

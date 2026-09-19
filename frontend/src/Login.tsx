@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useLocation, useNavigate, Link } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
 import { IconApprove, IconCertificate, IconEyeOff, IconLock, IconShield, IconUsers, IconWorkflow } from './components/Icons'
 import { ErrorText } from './components/Common'
@@ -13,6 +13,9 @@ export default function Login() {
   const [busy, setBusy] = useState(false)
   const { login } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  const requested = typeof location.state?.from === 'string' && location.state.from.startsWith('/')
+    && !location.state.from.startsWith('//') ? location.state.from : '/'
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -20,7 +23,7 @@ export default function Login() {
     setError(null)
     try {
       await login(username.trim().toLowerCase(), password)
-      navigate('/')
+      navigate(requested, { replace: true })
     } catch (err: any) {
       setError(err.message || 'Login failed')
     } finally {

@@ -27,7 +27,7 @@ logger = logging.getLogger("qa_portal.main")
 
 from .database import SessionLocal, AuditSessionLocal, main_pool_metrics
 from . import cache, models, email_notifications  # noqa: F401  (models ensures models are registered before create_all)
-from .auth import decode_access_token
+from .session_security import resolve_session
 from .constants import is_document_portal_only
 from .audit_service import write_audit
 from .documents import migrate_legacy_document_layout
@@ -125,7 +125,10 @@ if settings.cors_origins:
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+        allow_headers=[
+            "Content-Type", "X-Request-ID", "X-CSRF-Token",
+            "X-Workspace-ID", "X-QA-Workspace-ID",
+        ],
     )
 
 
@@ -324,16 +327,6 @@ def _write_request_audit(request, request_id, status_code, duration_ms, error_na
             actor_id = snapshot["id"]
             actor_name = snapshot["full_name"]
             actor_roles = snapshot["roles_csv"]
-        else:
-            auth_header = request.headers.get("authorization", "")
-            if auth_header.lower().startswith("bearer "):
-                try:
-                    claims = decode_access_token(auth_header.split(" ", 1)[1])
-                    actor_username = claims.get("sub")
-                    if actor_username:
-                        actor = db.query(models.User).filter(models.User.username == actor_username).first()
-                except Exception:
-                    pass
         method = request.method.upper()
         mutation = method in {"POST", "PUT", "PATCH", "DELETE"}
         access_management = mutation and (
@@ -427,6 +420,50 @@ def _ldap_email_completion_required(user: models.User) -> bool:
     )
 
 
+_GUARD_IDENTITY_UNSET = object()
+
+
+def _session_guard_identity(request: Request) -> dict | None:
+    """Load the cookie-authenticated identity once for the API guard stack.
+
+    The old guards decoded a browser-supplied bearer token. Cookie sessions
+    contain no Authorization header, which silently disabled all three
+    onboarding/document-only boundaries. Cache a plain snapshot on the
+    request so the guards share one short database checkout without retaining
+    an ORM object or connection across the downstream request.
+    """
+    cached = getattr(request.state, "session_guard_identity", _GUARD_IDENTITY_UNSET)
+    if cached is not _GUARD_IDENTITY_UNSET:
+        return cached
+    identity = None
+    with SessionLocal() as db:
+        try:
+            auth_session = resolve_session(request, db, enforce_csrf=False, touch=False)
+        except StarletteHTTPException:
+            auth_session = None
+        user = db.get(models.User, auth_session.user_id) if auth_session else None
+        if user is not None:
+            roles = list(user.roles)
+            identity = {
+                "id": user.id,
+                "username": user.username,
+                "full_name": user.full_name,
+                "roles": roles,
+                "roles_csv": ",".join(roles),
+                "is_active": bool(user.is_active),
+                "needs_role_review": bool(user.needs_role_review),
+                "needs_department_selection": bool(user.needs_department_selection),
+                "login_type": user.login_type,
+                "email": user.email,
+            }
+    request.state.session_guard_identity = identity
+    if identity:
+        request.state.current_user_snapshot = {
+            key: identity[key] for key in ("id", "username", "full_name", "roles_csv")
+        }
+    return identity
+
+
 @app.middleware("http")
 async def pending_access_approval_api_guard(request, call_next):
     """Do not expose portal data while a newly provisioned LDAP account waits.
@@ -439,42 +476,14 @@ async def pending_access_approval_api_guard(request, call_next):
     if not path.startswith("/api") or path in _DOCUMENT_PORTAL_ALLOWED_API_PATHS:
         return await call_next(request)
 
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("bearer "):
+    identity = _session_guard_identity(request)
+    if not identity:
         return await call_next(request)
-    try:
-        claims = decode_access_token(auth_header.split(" ", 1)[1])
-        username = claims.get("sub")
-    except Exception:
-        return await call_next(request)
-    if not username:
-        return await call_next(request)
-
-    # Do not forward the request from inside this context manager.  Doing so
-    # used to retain one Oracle connection for the *entire* downstream API
-    # request. Together with the email guard below, one dashboard request
-    # consumed three pool connections (two guards plus its route session).
-    # Under concurrent dashboard loads that exhausted the pool even though
-    # every route's own get_db dependency correctly closes its session.
-    with SessionLocal() as db:
-        user = db.query(models.User).filter(models.User.username == username).first()
-        # Authentication may succeed so first-time users can complete the
-        # department prompt and see their approval status, but portal data is
-        # unavailable until role review finishes. A provisional/existing role
-        # must never bypass the durable needs_role_review flag.
-        allow_request = bool(
-            not user
-            or not user.is_active
-            or not user.needs_role_review
-            or (user.needs_department_selection and path == "/api/departments")
-        )
-        if not allow_request:
-            request.state.current_user_snapshot = {
-                "id": user.id,
-                "username": user.username,
-                "full_name": user.full_name,
-                "roles_csv": user.roles_csv,
-            }
+    allow_request = bool(
+        not identity["is_active"]
+        or not identity["needs_role_review"]
+        or (identity["needs_department_selection"] and path == "/api/departments")
+    )
     if allow_request:
         return await call_next(request)
     return JSONResponse(
@@ -498,30 +507,17 @@ async def ldap_email_completion_api_guard(request, call_next):
     if not path.startswith("/api") or path in _DOCUMENT_PORTAL_ALLOWED_API_PATHS:
         return await call_next(request)
 
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("bearer "):
+    identity = _session_guard_identity(request)
+    if not identity:
         return await call_next(request)
-    try:
-        claims = decode_access_token(auth_header.split(" ", 1)[1])
-        username = claims.get("sub")
-    except Exception:
-        return await call_next(request)
-    if not username:
-        return await call_next(request)
-
-    # Same lifetime rule as the pending-access guard above: this read is only
-    # a gate decision, so its database connection must be returned before the
-    # actual endpoint begins its own work.
-    with SessionLocal() as db:
-        user = db.query(models.User).filter(models.User.username == username).first()
-        allow_request = not user or not user.is_active or not _ldap_email_completion_required(user)
-        if not allow_request:
-            request.state.current_user_snapshot = {
-                "id": user.id,
-                "username": user.username,
-                "full_name": user.full_name,
-                "roles_csv": user.roles_csv,
-            }
+    allow_request = bool(
+        not identity["is_active"]
+        or identity["login_type"] != "LDAP"
+        or identity["needs_department_selection"]
+        or identity["needs_role_review"]
+        or not identity["roles"]
+        or str(identity["email"] or "").strip()
+    )
     if allow_request:
         return await call_next(request)
     return JSONResponse(
@@ -551,29 +547,10 @@ async def document_portal_only_api_guard(request, call_next):
     ):
         return await call_next(request)
 
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("bearer "):
+    identity = _session_guard_identity(request)
+    if not identity or not is_document_portal_only(identity["roles"]):
         return await call_next(request)
-    try:
-        claims = decode_access_token(auth_header.split(" ", 1)[1])
-        username = claims.get("sub")
-    except Exception:
-        return await call_next(request)
-    if not username or not is_document_portal_only(claims.get("roles")):
-        return await call_next(request)
-
-    # This guard applies to a narrow account type, but it follows the same
-    # strict connection-lifetime rule as the two general guards above.
-    with SessionLocal() as db:
-        user = db.query(models.User).filter(models.User.username == username).first()
-        allow_request = not user or not user.is_active or not is_document_portal_only(user.roles)
-        if not allow_request:
-            request.state.current_user_snapshot = {
-                "id": user.id,
-                "username": user.username,
-                "full_name": user.full_name,
-                "roles_csv": user.roles_csv,
-            }
+    allow_request = not identity["is_active"] or not is_document_portal_only(identity["roles"])
     if allow_request:
         return await call_next(request)
     return JSONResponse(
@@ -785,6 +762,9 @@ def health():
         "profile": settings.app_env,
         "database": "ok" if db_ok else "unreachable",
         "cache": cache_status,
+        # Deployment capability marker: support teams can verify that every
+        # backend worker is running the build that accepts video evidence.
+        "capabilities": {"video_evidence": ["mp4", "mov", "webm", "avi"]},
         "database_pool": main_pool_metrics(),
         "circuits": resilience_snapshot(),
     }

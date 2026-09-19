@@ -25,6 +25,7 @@ from .. import documents as doc_store
 from .. import reassignment
 from . import jobs
 from ..xlsx_export import add_summary_sheet, add_table_sheet, new_workbook, workbook_response
+from ..upload_limits import validate_document_uploads
 
 # PAG-005-adjacent -- list_executions below keeps the full TestExecutionOut
 # shape (unlike Functional/SAST/DAST/Test Cases, no separate lightweight
@@ -106,14 +107,14 @@ def _cycle_candidate_query(db: Session, cycle: models.TestCycle,
         like = f"%{search.strip()}%"
         query = query.filter(or_(
             models.TestCase.test_case_key.ilike(like),
-            models.TestCase.test_scenario.ilike(like),
-            models.TestCase.module_name.ilike(like),
-            models.TestCase.test_type.ilike(like),
+            models.TestCaseVersion.test_scenario.ilike(like),
+            models.TestCaseVersion.module_name.ilike(like),
+            models.TestCaseVersion.test_type.ilike(like),
         ))
     if priority and priority.strip():
-        query = query.filter(models.TestCase.priority == priority.strip())
+        query = query.filter(models.TestCaseVersion.priority == priority.strip())
     if test_type and test_type.strip():
-        query = query.filter(models.TestCase.test_type == test_type.strip())
+        query = query.filter(models.TestCaseVersion.test_type == test_type.strip())
     if created_by_id is not None:
         query = query.filter(models.TestCase.created_by_id == created_by_id)
     return query
@@ -473,12 +474,15 @@ def _require_qa_assignment_manager(current_user: models.User) -> None:
         raise HTTPException(403, "Only QA members of the active workspace can assign testcase runners")
 
 
-def _validate_result_images(files: List[UploadFile]) -> None:
-    if len(files) > _RESULT_IMAGE_LIMIT:
+def _validate_result_evidence(files: List[UploadFile]) -> None:
+    """Validate inline screenshots and general execution attachments together."""
+    if not files:
+        return
+    validate_document_uploads(files)
+    images = [upload for upload in files if (upload.content_type or "").lower() in _RESULT_IMAGE_TYPES]
+    if len(images) > _RESULT_IMAGE_LIMIT:
         raise HTTPException(400, f"Actual Result can contain at most {_RESULT_IMAGE_LIMIT} new images per save")
-    for image in files:
-        if (image.content_type or "").lower() not in _RESULT_IMAGE_TYPES:
-            raise HTTPException(400, f"'{image.filename or 'pasted image'}' is not supported. Use PNG, JPEG, GIF, or WebP")
+    for image in images:
         image.file.seek(0, os.SEEK_END)
         size = image.file.tell()
         image.file.seek(0)
@@ -1745,11 +1749,21 @@ def list_cycle_candidate_test_cases(
             models.TestCase.id < cursor if sort_order == "newest" else models.TestCase.id > cursor
         )
     id_order = models.TestCase.id.desc() if sort_order == "newest" else models.TestCase.id.asc()
-    rows = page_query.options(joinedload(models.TestCase.created_by)).order_by(id_order).limit(page_size + 1).all()
+    rows = page_query.options(joinedload(models.TestCase.created_by),
+                              joinedload(models.TestCase.current_approved_version)).order_by(id_order).limit(page_size + 1).all()
     has_more = len(rows) > page_size
     items = rows[:page_size]
     return {
-        "items": items,
+        "items": [{
+            "id": case.id, "test_case_key": case.test_case_key,
+            "test_scenario": case.current_approved_version.test_scenario,
+            "test_type": case.current_approved_version.test_type,
+            "priority": case.current_approved_version.priority,
+            "module_name": case.current_approved_version.module_name,
+            "version": case.current_approved_version.version,
+            "created_at": case.created_at, "created_by_id": case.created_by_id,
+            "created_by_name": case.created_by_name,
+        } for case in items],
         "total": total,
         "next_cursor": items[-1].id if has_more and items else None,
         "has_more": has_more,
@@ -2657,7 +2671,7 @@ def update_rich_execution_result(
     result_text = actual_result.strip()
     if len(result_text) > 10000:
         raise HTTPException(400, "Actual Result cannot exceed 10,000 characters")
-    _validate_result_images(files)
+    _validate_result_evidence(files)
     if defect_key and status_value not in {"Fail", "Blocked"}:
         raise HTTPException(400, "A defect can only be linked when the latest attempt result is Fail or Blocked")
     if not defect_key and any(value.strip() for value in (defect_url, defect_title, defect_notes)):

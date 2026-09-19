@@ -253,8 +253,9 @@ function AuthenticatedChrome({ user, children }: { user: UserOut; children: Reac
 // before), which a route nested under an auth-gated parent could never do.
 function ProtectedLayout() {
   const { user, loading } = useAuth()
+  const location = useLocation()
   if (loading) return <ModuleFallback />
-  if (!user) return <Navigate to="/login" replace />
+  if (!user) return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}${location.hash}` }} />
   // A provisioned account awaiting role approval has no portal access yet,
   // so do not mount Layout at all. Besides hiding the sidebar/topbar, this
   // prevents their navigation-specific API calls from running while the
@@ -270,8 +271,11 @@ function ProtectedLayout() {
 
 function LoginRoute() {
   const { user, loading } = useAuth()
+  const location = useLocation()
+  const requested = typeof location.state?.from === 'string' && location.state.from.startsWith('/')
+    && !location.state.from.startsWith('//') ? location.state.from : '/'
   if (loading) return <ModuleFallback />
-  return user ? <Navigate to="/" replace /> : <Login />
+  return user ? <Navigate to={requested} replace /> : <Login />
 }
 
 function QaGroupOnly({ children }: { children: ReactNode }) {

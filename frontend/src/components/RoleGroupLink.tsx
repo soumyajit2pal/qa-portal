@@ -1,10 +1,10 @@
 import { useUserOptions } from '../hooks/useUserOptions'
 import { useMemo, useState, type ReactNode } from 'react'
 import { Modal } from './Common'
-import { hasDepartment, isSelectableUser, userDepartments } from '../constants'
+import { userDepartments } from '../constants'
 import type { UserOption } from '../types'
 
-export default function RoleGroupLink({ users, role, label, department, renderTrigger }: {
+export default function RoleGroupLink({ users, role, label, department, repositoryGroup = false, renderTrigger }: {
   users: UserOption[]
   // A single role (the common case) or several -- e.g. Department Head
   // Approval is held jointly by DEPARTMENT_HEAD_CM and DEPARTMENT_HEAD_AGM
@@ -22,6 +22,9 @@ export default function RoleGroupLink({ users, role, label, department, renderTr
   // Executive -- none of those are department-restricted) are unaffected;
   // when provided, members are further filtered to a matching department.
   department?: string | null
+  // Repository groups use their workspace QA directory, rather than the
+  // department-scoped assignment picker used by other approval workflows.
+  repositoryGroup?: boolean
   // Reported directly ("I AM ASKING HERE" -- the QA Request gateway's own
   // Application Name field, whose existing yellow "Application Owner
   // Approval Pending" status pill needed to open this same modal without
@@ -33,7 +36,7 @@ export default function RoleGroupLink({ users, role, label, department, renderTr
 }) {
   const [open, setOpen] = useState(false)
   const roles = useMemo(() => (Array.isArray(role) ? role : [role]), [role])
-  const members = useUserOptions('approver', undefined, undefined, roles.join(','), department)
+  const members = useUserOptions('approver', undefined, undefined, roles.join(','), department, repositoryGroup)
 
   return <>
     {renderTrigger

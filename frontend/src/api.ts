@@ -3,73 +3,24 @@ import { isQaEvidenceUpload, qaDocumentSizeError } from './qaDocumentUpload'
 
 const BASE_URL: string = (import.meta.env.VITE_API_BASE_URL as string) || ''
 
-function getToken(): string | null {
-  return sessionStorage.getItem('qa_portal_token')
+// Remove credentials written by releases that used browser storage. The
+// current session cookie is HttpOnly and is never read or copied by JS.
+try {
+  localStorage.removeItem('qa_portal_token')
+  sessionStorage.removeItem('qa_portal_token')
+} catch { /* Storage can be unavailable in restricted browser contexts. */ }
+
+function readCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null
+  const match = document.cookie.split(';').map((entry) => entry.trim()).find((entry) => entry.startsWith(`${name}=`))
+  if (!match) return null
+  try { return decodeURIComponent(match.slice(name.length + 1)) }
+  catch { return null }
 }
 
-let lastUserActivity = 0
-let renewal: Promise<void> | null = null
-
-function tokenTimes(token: string): { exp: number; iat: number } | null {
-  try {
-    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
-    const claims = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, '=')))
-    return typeof claims.exp === 'number' && typeof claims.iat === 'number' ? claims : null
-  } catch { return null }
-}
-
-async function renewIfNeeded(): Promise<void> {
-  const token = getToken()
-  if (!token || Date.now() - lastUserActivity > 60_000) return
-  const times = tokenTimes(token)
-  if (!times) return
-  const margin = Math.min(120, Math.max(5, (times.exp - times.iat) / 3))
-  if (times.exp * 1000 - Date.now() > margin * 1000) return
-  if (renewal) return renewal
-  renewal = (async () => {
-    const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 15_000)
-    try {
-      const response = await fetch(`${BASE_URL}/api/auth/renew`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal, cache: 'no-store',
-      })
-      if (response.status === 401) {
-        if (getToken() === token) {
-          setToken(null)
-          window.dispatchEvent(new Event('qa-session-expired'))
-        }
-        return
-      }
-      if (!response.ok) return
-      const result = await response.json()
-      // A response arriving after logout or a new login must never restore
-      // the old session. Concurrent requests share this single renewal.
-      if (getToken() === token && typeof result.access_token === 'string') setToken(result.access_token)
-    } catch { /* A transient outage does not discard a still-valid token. */ }
-    finally { window.clearTimeout(timeout) }
-  })().finally(() => { renewal = null })
-  return renewal
-}
-
-export function startTokenRenewal(): () => void {
-  lastUserActivity = Date.now()
-  const activity = (event: Event) => {
-    if (!event.isTrusted) return
-    lastUserActivity = Date.now()
-    void renewIfNeeded()
-  }
-  const events = ['pointerdown', 'keydown', 'scroll', 'pointermove']
-  events.forEach((name) => window.addEventListener(name, activity, { passive: true }))
-  const timer = window.setInterval(() => {
-    if (document.visibilityState === 'visible') void renewIfNeeded()
-  }, 15_000)
-  void renewIfNeeded()
-  return () => {
-    events.forEach((name) => window.removeEventListener(name, activity))
-    window.clearInterval(timer)
-    lastUserActivity = 0
-  }
+function csrfToken(): string | null {
+  // Production uses the __Host- prefix; development uses the non-secure name.
+  return readCookie('__Host-QAP-CSRF') || readCookie('QAP-CSRF')
 }
 
 interface RequestOptions {
@@ -219,11 +170,12 @@ function formatBackendReason(detail: unknown): string {
 }
 
 async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T> {
-  if (!path.startsWith('/api/auth/')) await renewIfNeeded()
   const { method = 'GET', body, formEncoded = false, isBlob = false } = opts
   const headers: Record<string, string> = {}
-  const token = getToken()
-  if (token) headers['Authorization'] = `Bearer ${token}`
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) {
+    const csrf = csrfToken()
+    if (csrf) headers['X-CSRF-Token'] = csrf
+  }
   const activeWorkspace = localStorage.getItem('active_workspace_id') || localStorage.getItem('qa_active_workspace_id')
   if (activeWorkspace) headers['X-Workspace-ID'] = activeWorkspace
 
@@ -238,9 +190,12 @@ async function executeRequest<T>(path: string, opts: RequestOptions): Promise<T>
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), opts.timeoutMs ?? REQUEST_TIMEOUT_MS)
   try {
-    const res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal })
+    const res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload, signal: controller.signal, credentials: 'include' })
 
     if (!res.ok) {
+      if (res.status === 401 && !path.startsWith('/api/auth/login')) {
+        window.dispatchEvent(new Event('qa-session-expired'))
+      }
       let detail: unknown = null
       let reference = res.headers.get('x-request-id') || res.headers.get('x-audit-request-id') || undefined
       try {
@@ -292,7 +247,7 @@ async function request<T = any>(path: string, opts: RequestOptions = {}): Promis
     || localStorage.getItem('qa_active_workspace_id') || ''
   // Encryption challenges are single-use, including across concurrent actions.
   const key = method === 'GET' && !['/api/auth/me', '/api/auth/login-key'].includes(path.split('?')[0])
-    ? `${getToken() || ''}:${activeWorkspace}:${path}:${opts.isBlob ? 'blob' : 'json'}`
+    ? `${activeWorkspace}:${path}:${opts.isBlob ? 'blob' : 'json'}`
     : ''
   // Briefly reuse successful JSON reads across components and route changes.
   // Mutations clear this cache below, so saved data is never hidden behind a
@@ -384,7 +339,7 @@ export const api = {
   patch: <T = any>(path: string, body?: unknown): Promise<T> => request<T>(path, { method: 'PATCH', body }),
   del: <T = any>(path: string): Promise<T> => request<T>(path, { method: 'DELETE' }),
 
-  login: async (username: string, password: string): Promise<{ access_token: string; token_type: string; roles: string[]; full_name: string; username: string }> => {
+  login: async (username: string, password: string): Promise<{ roles: string[]; full_name: string; username: string }> => {
     if (import.meta.env.PROD && window.location.protocol !== 'https:') {
       throw new Error('HTTPS is required. Open the secure portal URL before signing in.')
     }
@@ -446,9 +401,8 @@ export const api = {
   },
 
   // Authenticated Blob fetch used when a protected file must be displayed
-  // inline (for example, images pasted into a Jira-style comment). Native
-  // <img src> requests cannot attach the portal's Bearer token, so callers
-  // fetch through this helper and render a short-lived object URL instead.
+  // inline (for example, images pasted into a Jira-style comment). Fetching
+  // here provides normal API error handling and a revocable object URL.
   getBlob: (path: string): Promise<Blob> => request<Blob>(path, { isBlob: true }),
 
   // Uploads a single named file plus optional extra form fields -- unlike
@@ -491,8 +445,9 @@ export const api = {
     })
     const xhr = new XMLHttpRequest()
     xhr.open('POST', `${BASE_URL}${path}`)
-    const token = getToken()
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    const csrf = csrfToken()
+    if (csrf) xhr.setRequestHeader('X-CSRF-Token', csrf)
+    xhr.withCredentials = true
     xhr.timeout = timeoutMs
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(event.loaded, event.total)
@@ -509,6 +464,9 @@ export const api = {
         mutationListeners.forEach((listener) => listener({ path, method: 'POST' }))
         resolve(payload as T)
         return
+      }
+      if (xhr.status === 401 && !path.startsWith('/api/auth/login')) {
+        window.dispatchEvent(new Event('qa-session-expired'))
       }
       reject(new HttpError(formatBackendReason(payload?.detail ?? payload) || statusMessage(xhr.status, xhr.statusText), xhr.status))
     }
@@ -553,18 +511,14 @@ export async function waitForJob<T = Record<string, unknown>>(jobId: string): Pr
   }
 }
 
-export function setToken(token: string | null | undefined): void {
+export function setToken(_token: string | null | undefined): void {
+  // Compatibility cleanup for tokens issued by releases before cookie
+  // sessions. Authentication is now carried only by the HttpOnly cookie.
   cacheGeneration += 1
   completedGets.clear()
   inFlightGets.clear()
-  // Bearer credentials must not survive the browser session. Keeping the
-  // token in sessionStorage limits persistence while preserving reloads in
-  // the active tab; CSP and escaped rich text provide the XSS boundary.
-  localStorage.removeItem('qa_portal_token')
-  if (token) sessionStorage.setItem('qa_portal_token', token)
-  else sessionStorage.removeItem('qa_portal_token')
-}
-
-export function hasToken(): boolean {
-  return !!getToken()
+  try {
+    localStorage.removeItem('qa_portal_token')
+    sessionStorage.removeItem('qa_portal_token')
+  } catch { /* Credential cleanup must not break cookie-based sign-in/out. */ }
 }

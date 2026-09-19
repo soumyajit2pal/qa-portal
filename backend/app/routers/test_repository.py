@@ -996,6 +996,12 @@ def _enforce_checkout_lock(case: models.TestCase, current_user: models.User) -> 
         )
 
 
+def _require_non_rejected_for_edit(case: models.TestCase) -> None:
+    draft = case.current_draft_version
+    if case.status == "Rejected" or (draft and draft.status == "Rejected"):
+        raise HTTPException(409, "Rejected test cases are final and cannot be edited. Clone this test case to create a new Draft.")
+
+
 def _require_checkout_holder_for_edit(case: models.TestCase, current_user: models.User) -> None:
     """Make Start editing a server-enforced prerequisite for saving."""
     if case.checked_out_by_id != current_user.id:
@@ -1024,6 +1030,7 @@ def checkout_test_case(case_id: int, db: Session = Depends(get_db),
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_author_repository(db, obj.project_id, current_user)
     _lock_case_version_state(db, obj)
+    _require_non_rejected_for_edit(obj)
     if obj.is_deleted:
         raise HTTPException(400, "This test case is in the Recycle Bin -- restore it before editing")
     draft = obj.current_draft_version
@@ -1062,6 +1069,7 @@ def checkout_override(case_id: int, payload: schemas.TestCaseCheckoutOverride, d
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_manage_repository_governance(current_user, db, obj.project_id)
     _lock_case_version_state(db, obj)
+    _require_non_rejected_for_edit(obj)
     draft = obj.current_draft_version
     _require_returned_correction_owner(draft, current_user, "take over its checkout")
     if draft and draft.status in ("In Review", "Review Completed", "Recommendation Pending", "QA Lead Approval Pending"):
@@ -1112,18 +1120,14 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
     spun off first. folder_id/tags stay identity-level (TestCase's own
     columns, see its docstring) and are applied regardless of version state.
 
-    2026-08 Approval Workflow refactor -- the new draft is spun off from
-    whichever of these is the actual "last known good" content to build on:
-    the current draft if it's Rejected (terminal -- frozen in history, not
-    edited in place, same mechanic as spinning off an Approved baseline),
-    else the current approved baseline, else nothing (a case that somehow
-    has neither -- shouldn't happen post-creation, but never crash an edit
-    over it). In Review/Review Completed stay blocked from any edit --
-    there's a decision pending, whichever stage it's at."""
+    New draft revisions use the current approved baseline. Rejected cases
+    remain final and must be cloned to create a new testcase. Pending review
+    or approval decisions block editing until a decision is recorded."""
     obj = get_or_404(db, models.TestCase, case_id, "Test Case")
     _require_active_project(_get_project_or_404(db, obj.project_id))
     require_can_author_repository(db, obj.project_id, current_user)
     _lock_case_version_state(db, obj)
+    _require_non_rejected_for_edit(obj)
     _require_checkout_holder_for_edit(obj, current_user)
     if obj.is_deleted:
         raise HTTPException(400, "This test case is in the Recycle Bin -- restore it before editing")
@@ -1148,11 +1152,9 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
     # through Restore. Blocked explicitly here instead.
     if not draft and obj.current_approved_version and obj.current_approved_version.status == "Archived":
         raise HTTPException(400, "This test case is archived -- restore it before editing")
-    rejected_base = draft if (draft and draft.status == "Rejected") else None
-    if not draft or rejected_base:
-        # VER-003 (extended for Rejected, see docstring above): spin off a
-        # new draft from the best available content base.
-        base = obj.current_approved_version or rejected_base
+    if not draft:
+        # VER-003: create a revision without modifying the approved baseline.
+        base = obj.current_approved_version
         base_content = {f: getattr(base, f) if base else None for f in _CONTENT_FIELDS}
         major, minor = _next_provisional_version_numbers(obj)
         draft = models.TestCaseVersion(
@@ -1166,12 +1168,6 @@ def update_test_case(case_id: int, payload: schemas.TestCaseUpdate, db: Session 
             draft.steps = [models.TestCaseVersionStep(step_no=s.step_no, step_text=s.step_text,
                                                        expected_result=s.expected_result) for s in base.steps]
         obj.current_draft_version_id = draft.id
-        if rejected_base:
-            db.add(_case_workflow_action(
-                obj.id, current_user, "Revised after rejection",
-                f"Started a new draft (v{draft.version}) off the rejected v{rejected_base.version} for correction.",
-                previous_state="Rejected", new_state="Draft",
-            ))
 
     data = payload.model_dump(exclude_unset=True, exclude={"steps", "tags", "folder_id"})
     for field, value in data.items():

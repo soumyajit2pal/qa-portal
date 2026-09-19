@@ -1,0 +1,53 @@
+import datetime
+
+import pytest
+from fastapi import HTTPException
+from unittest.mock import Mock, patch
+
+from app import models, schemas
+from app.routers import test_repository
+
+
+@pytest.mark.parametrize("lead_decision", [False, True])
+def test_rejected_testcase_response_preserves_decision_stage(lead_decision):
+    reviewer = models.User(id=2, full_name="qa2")
+    lead = models.User(id=3, full_name="lead1")
+    version = models.TestCaseVersion(
+        id=10, status="Rejected", version_major=1, version_minor=0,
+        reviewed_by_id=reviewer.id, reviewed_by=reviewer,
+        qa_lead_decided_by_id=lead.id if lead_decision else None,
+        qa_lead_decided_by=lead if lead_decision else None,
+    )
+    case = models.TestCase(
+        id=390, test_case_key="TQA-TC-390", project_id=1, status="Rejected", is_deleted=False,
+        current_draft_version_id=version.id, current_draft_version=version,
+        created_at=datetime.datetime(2026, 9, 19), updated_at=datetime.datetime(2026, 9, 19),
+    )
+    response = schemas.TestCaseOut.model_validate(case)
+    assert response.current_draft_reviewed_by_id == 2
+    assert response.current_draft_reviewed_by_name == "qa2"
+    assert response.current_draft_qa_lead_decided_by_id == (3 if lead_decision else None)
+    assert response.current_draft_qa_lead_decided_by_name == ("lead1" if lead_decision else None)
+
+
+@pytest.mark.parametrize("endpoint", ["checkout_test_case", "checkout_override", "update_test_case"])
+def test_rejected_case_cannot_be_reopened_even_by_administrator(endpoint):
+    case = models.TestCase(id=390, project_id=1, status="Rejected")
+    actor = models.User(id=1, role_assignments=[models.UserRole(role="ADMIN")])
+    db = Mock()
+    with patch.object(test_repository, "get_or_404", return_value=case), \
+            patch.object(test_repository, "_get_project_or_404"), \
+            patch.object(test_repository, "_require_active_project"), \
+            patch.object(test_repository, "require_can_author_repository"), \
+            patch.object(test_repository, "require_can_manage_repository_governance"), \
+            patch.object(test_repository, "_lock_case_version_state"):
+        args = {"case_id": case.id, "db": db, "current_user": actor}
+        if endpoint == "update_test_case":
+            args["payload"] = schemas.TestCaseUpdate(test_scenario="Correction")
+        elif endpoint == "checkout_override":
+            args["payload"] = schemas.TestCaseCheckoutOverride(reason="Recovery")
+        with pytest.raises(HTTPException) as error:
+            getattr(test_repository, endpoint)(**args)
+        assert error.value.status_code == 409
+        assert "Clone" in error.value.detail
+        db.commit.assert_not_called()

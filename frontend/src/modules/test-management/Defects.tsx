@@ -1,4 +1,5 @@
 import './Defects.css'
+import { defectEvidenceError, DEFECT_EVIDENCE_EXTENSIONS } from '../../defectEvidence'
 import { useUserOptions } from '../../hooks/useUserOptions'
 import DefectWorkflowDiagram from '../../components/DefectWorkflowDiagram'
 import LinkDefectRequest from '../../components/LinkDefectRequest'
@@ -187,6 +188,8 @@ function useStagedEvidence(opts: { uploadPath: (defectId: number) => string; ver
   ) {
     const files = [...fieldImages.flat(), ...evidenceFiles]
     if (!files.length) { onDone(defect); return }
+    const validationError = defectEvidenceError(files)
+    if (validationError) { onFailed(new Error(validationError)); return }
     try {
       await api.uploadFormFiles(opts.uploadPath(defect.id), {}, files)
       onDone(defect)
@@ -337,6 +340,8 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
+    const evidenceError = defectEvidenceError([...descriptionImages, ...stepsImages, ...actualImages, ...expectedImages, ...evidenceFiles])
+    if (evidenceError) { setError(new Error(evidenceError)); return }
     if (createdDefect) { setBusy(true); setError(null); await attachStagedEvidence(createdDefect); return }
     if (!standalone && !selected) { setError(new Error('Select a failed/blocked execution')); return }
     if (!requestId && !selected?.project.application_name && !applicationName.trim()) { setError(new Error('Select an application or choose Other and enter its name')); return }
@@ -461,10 +466,10 @@ function CreateDefectModal({ contexts, requests, initialExecutionId, standalone 
       </div>
       <div className="defect-form-section defect-evidence">
         <div><h4>Evidence & Attachments <span>{descriptionImages.length + stepsImages.length + actualImages.length + expectedImages.length + evidenceFiles.length}</span></h4>
-          <label className="btn btn-sm">+ Add evidence<input type="file" multiple hidden disabled={!!createdDefect} onChange={(e) => addEvidenceFiles(e.target.files)} /></label>
+          <label className="btn btn-sm">+ Add evidence<input type="file" multiple hidden accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} disabled={busy} onChange={(e) => addEvidenceFiles(e.target.files)} /></label>
         </div>
-        {evidenceFiles.length > 0 && <div className="defect-files">{evidenceFiles.map((file, index) => <button type="button" key={`${file.name}-${index}`} disabled={!!createdDefect} onClick={() => removeEvidenceFile(index)}>{file.name} ✕</button>)}</div>}
-        <p className="muted small">Screenshots pasted into Steps/Actual/Expected above are attached automatically -- use this to add anything else (logs, recordings, additional screenshots).</p>
+        {evidenceFiles.length > 0 && <div className="defect-files">{evidenceFiles.map((file, index) => <button type="button" key={`${file.name}-${index}`} disabled={busy} onClick={() => removeEvidenceFile(index)}>{file.name} ✕</button>)}</div>}
+        <p className="muted small">Screenshots pasted above are attached automatically. Documents, images, MP4, MOV, WebM, and AVI are supported up to 25 MB per file.</p>
       </div>
       <ErrorText error={error} title={createdDefect ? `${createdDefect.defect_key} was created` : 'Defect could not be created'} />
       <div className="modal-actions">
@@ -545,6 +550,8 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
+    const evidenceError = defectEvidenceError([...Object.values(imageValues).flat(), ...evidenceFiles])
+    if (evidenceError) { setError(new Error(evidenceError)); return }
     if (savedDefect) { setBusy(true); setError(null); await attachStagedEvidence(savedDefect); return }
     const validationError = validateRichFields()
     if (validationError) { setError(new Error(validationError)); return }
@@ -588,15 +595,15 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
       {target === 'Duplicate' && <Field label="Original Defect ID *"><SearchableSelect value={values.duplicate_defect_id ? String(values.duplicate_defect_id) : ''} onChange={(value) => set('duplicate_defect_id', value ? Number(value) : null)} placeholder="Select canonical defect…" options={defects.filter((item) => item.id !== defect.id && item.status !== 'Duplicate').map((item) => ({ value: String(item.id), label: `${item.defect_key} · ${item.title}` }))} /></Field>}
       {target === 'Not a Defect' && <Field label="Discussion & Requirements Confirmation *"><JiraRichTextField value={values.not_a_defect_reason || ''} onChange={(v) => set('not_a_defect_reason', v)} onImagesChange={setImages('not_a_defect_reason')} disabled={!!savedDefect} ariaLabel="Discussion and Requirements Confirmation" placeholder="Record the discussion with the Developer/Dev Lead and confirmation against requirements…" /></Field>}
       {!['Triaged', 'Assigned', 'Resolved', 'Closed', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect'].includes(target) && <Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" /></Field>}
+      </fieldset>
       {['Rejected', 'Reopened'].includes(target) && <div className="defect-form-section defect-evidence">
         <div>
           <h4>Supporting Evidence <span>{Object.values(imageValues).flat().length + evidenceFiles.length}</span></h4>
-          <label className="btn btn-sm">+ Attach evidence<input type="file" multiple hidden disabled={busy || !!savedDefect} onChange={(event) => { addEvidenceFiles(event.target.files); event.target.value = '' }} /></label>
+          <label className="btn btn-sm">+ Attach evidence<input type="file" multiple hidden accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} disabled={busy} onChange={(event) => { addEvidenceFiles(event.target.files); event.target.value = '' }} /></label>
         </div>
-        {evidenceFiles.length > 0 && <div className="defect-files">{evidenceFiles.map((file, index) => <button type="button" key={`${file.name}-${file.size}-${index}`} disabled={busy || !!savedDefect} onClick={() => removeEvidenceFile(index)}>{file.name} ✕</button>)}</div>}
+        {evidenceFiles.length > 0 && <div className="defect-files">{evidenceFiles.map((file, index) => <button type="button" key={`${file.name}-${file.size}-${index}`} disabled={busy} onClick={() => removeEvidenceFile(index)}>{file.name} ✕</button>)}</div>}
         <p className="muted small">{hasEvidence || evidenceUploaded ? 'Existing evidence is already attached. You may add new files for this decision.' : 'Attach at least one file, or paste/upload an image in the reason field above.'}</p>
       </div>}
-      </fieldset>
       <ErrorText error={error} title={savedDefect ? `${savedDefect.defect_key} was updated` : 'Defect workflow action failed'} />
       <div className="modal-actions">
         {savedDefect
@@ -736,6 +743,8 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
+    const evidenceError = defectEvidenceError([...descriptionImages, ...stepsImages, ...actualImages, ...expectedImages, ...evidenceFiles])
+    if (evidenceError) { setError(new Error(evidenceError)); return }
     if (savedDefect) { setBusy(true); setError(null); await attachStagedEvidence(savedDefect); return }
     if (!title.trim() || !description.trim() || !moduleFeature.trim()) { setError(new Error('Defect Title, Description, and Module/Feature are required')); return }
     if (!steps.trim() || !actual.trim() || !expected.trim()) { setError(new Error('Steps to Reproduce, Actual Result, and Expected Result are required')); return }
@@ -773,9 +782,9 @@ function EditDefectModal({ defect, manager, onClose, onChanged }: {
       </div>
       <div className="defect-form-section defect-evidence">
         <div><h4>Evidence & Attachments <span>{descriptionImages.length + stepsImages.length + actualImages.length + expectedImages.length + evidenceFiles.length}</span></h4>
-          <label className="btn btn-sm">+ Add evidence<input type="file" multiple hidden disabled={!!savedDefect} onChange={(e) => addEvidenceFiles(e.target.files)} /></label>
+          <label className="btn btn-sm">+ Add evidence<input type="file" multiple hidden accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} disabled={busy} onChange={(e) => addEvidenceFiles(e.target.files)} /></label>
         </div>
-        {evidenceFiles.length > 0 && <div className="defect-files">{evidenceFiles.map((file, index) => <button type="button" key={`${file.name}-${index}`} disabled={!!savedDefect} onClick={() => removeEvidenceFile(index)}>{file.name} ✕</button>)}</div>}
+        {evidenceFiles.length > 0 && <div className="defect-files">{evidenceFiles.map((file, index) => <button type="button" key={`${file.name}-${index}`} disabled={busy} onClick={() => removeEvidenceFile(index)}>{file.name} ✕</button>)}</div>}
         <p className="muted small">Screenshots pasted into Steps/Actual/Expected above are attached automatically -- use this to add anything else.</p>
       </div>
       <ErrorText error={error} title={savedDefect ? `${savedDefect.defect_key} was updated` : 'Defect could not be updated'} />
@@ -828,6 +837,8 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   }, [actionsOpen])
   async function upload(files: FileList | null) {
     if (!files?.length) return
+    const validationError = defectEvidenceError(Array.from(files))
+    if (validationError) { setError(new Error(validationError)); return }
     setUploading(true); setError(null)
     try {
       const created = await api.uploadFormFiles<RequestDocumentOut[]>(`/api/defects/${defect.id}/attachments`, {}, Array.from(files))
@@ -1037,7 +1048,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
       )}
       </div>
       <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-evidence`} aria-labelledby={`defect-${defect.id}-tab-evidence`} hidden={detailTab !== 'evidence'} tabIndex={0}>
-      <section className="defect-evidence"><div><h4>Evidence & Attachments <span>{documents.length}</span></h4>{canTouchDefect && <label className="btn btn-sm">{uploading ? 'Uploading…' : '+ Add evidence'}<input type="file" multiple hidden disabled={uploading} onChange={(e) => upload(e.target.files)} /></label>}</div>{documents.length ? <div className="defect-files">{documents.map((document) => <button key={document.id} onClick={() => download(document)}>{document.file_name}</button>)}</div> : <p className="muted small">No supporting evidence attached.</p>}</section>
+      <section className="defect-evidence"><div><h4>Evidence & Attachments <span>{documents.length}</span></h4>{canTouchDefect && <label className="btn btn-sm">{uploading ? 'Uploading…' : '+ Add evidence'}<input type="file" multiple hidden accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} disabled={uploading} onChange={(e) => upload(e.target.files)} /></label>}</div>{documents.length ? <div className="defect-files">{documents.map((document) => <button key={document.id} onClick={() => download(document)}>{document.file_name}</button>)}</div> : <p className="muted small">No supporting evidence attached.</p>}</section>
       </div>
       <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-activity`} aria-labelledby={`defect-${defect.id}-tab-activity`} hidden={detailTab !== 'activity'} tabIndex={0}>
       <JiraActivity workflowHistory={defect.workflow ? defect.workflow_state?.history || [] : undefined} entityType="DEFECT" entityId={defect.id} items={activity} onPosted={(item) => setActivity((current) => [...current, item])} />

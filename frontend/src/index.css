@@ -2764,7 +2764,7 @@ tbody tr:hover { background: #f8f9fc; }
 .tm-add-cases-runner strong { color: #3d4355; font-size: 11px; }
 .tm-add-cases-runner span { color: #8b92a3; font-size: 9px; }
 .tm-add-cases-runner .searchable-select { width: 260px; }
-.tm-add-cases-discovery { display: grid; grid-template-columns: minmax(260px, 1.6fr) repeat(4, minmax(130px, .7fr)); gap: 9px; align-items: end; }
+.tm-add-cases-discovery { display: grid; grid-template-columns: minmax(260px, 1.6fr) repeat(3, minmax(130px, .7fr)); gap: 9px; align-items: end; }
 .tm-add-cases-discovery .field { margin: 0; }
 .tm-add-cases-discovery input,.tm-add-cases-discovery select { width: 100%; min-width: 0; }
 .tm-add-cases-discovery-note { min-height: 27px; padding: 5px 2px 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #7c8d97; font-size: 9.5px; }

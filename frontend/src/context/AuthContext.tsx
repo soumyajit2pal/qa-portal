@@ -1,11 +1,9 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react'
-import { api, setToken, hasToken, startTokenRenewal } from '../api'
+import { api, setToken } from '../api'
 import { UserOut } from '../types'
 import { uniqueWorkspaceAccess } from '../constants'
 
 interface LoginResult {
-  access_token: string
-  token_type: string
   roles: string[]
   full_name: string
   username: string
@@ -15,7 +13,7 @@ interface AuthContextValue {
   user: UserOut | null
   loading: boolean
   login: (username: string, password: string) => Promise<LoginResult>
-  logout: () => void
+  logout: () => Promise<void>
   // Re-fetches /api/auth/me and updates `user` in place -- used after the
   // first-LDAP-login department-selection popup (components/
   // DepartmentPrompt.tsx) saves a department, so `user.needs_department_
@@ -61,10 +59,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { sessionStorage.removeItem('qa_approved_session') }, [])
 
   const loadMe = useCallback(async () => {
-    if (!hasToken()) {
-      setLoading(false)
-      return
-    }
+    try {
+      if (localStorage.getItem('qa_logout_pending') === '1') {
+        try {
+          await api.post('/api/auth/logout')
+          localStorage.removeItem('qa_logout_pending')
+        } catch { /* Stay locally signed out and retry after service recovery. */ }
+        setUser(null)
+        setLoading(false)
+        return
+      }
+    } catch { /* Storage can be unavailable; continue with server validation. */ }
     try {
       const me = await api.get<UserOut>('/api/auth/me')
       syncWorkspaceSelection(me)
@@ -80,21 +85,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { loadMe() }, [loadMe])
 
   useEffect(() => {
-    if (!user) return
-    return startTokenRenewal()
-  }, [user?.id])
-
-  useEffect(() => {
     const expired = () => { setUser(null); setJustLoggedIn(false) }
+    const storageChanged = (event: StorageEvent) => {
+      if (event.key === 'qa_session_logout' && event.newValue) expired()
+    }
     window.addEventListener('qa-session-expired', expired)
-    return () => window.removeEventListener('qa-session-expired', expired)
-  }, [])
+    window.addEventListener('storage', storageChanged)
+    return () => {
+      window.removeEventListener('qa-session-expired', expired)
+      window.removeEventListener('storage', storageChanged)
+    }
+  }, [loadMe])
 
   const login = async (username: string, password: string): Promise<LoginResult> => {
     // The sign-in field already displays lowercase input; normalize here as
     // well so every caller of AuthContext follows the same login identity.
     const res = await api.login(username.trim().toLowerCase(), password)
-    setToken(res.access_token)
+    try { localStorage.removeItem('qa_logout_pending') } catch { /* optional recovery marker */ }
+    setToken(null)
     // A shared browser may still hold the previous account's workspace.
     // Resolve /me without sending that stale tenant selection.
     localStorage.removeItem('active_workspace_id')
@@ -106,17 +114,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return res
   }
 
-  const logout = () => {
-    // request() reads the bearer token synchronously before returning its
-    // Promise, so the audit call is authenticated even though local UI state
-    // is cleared immediately. A slow/unavailable server cannot trap the user
-    // in a signed-in UI.
-    void api.post('/api/auth/logout').catch(() => undefined)
+  const logout = async () => {
+    // Clear the UI immediately, but retain a non-secret retry marker until
+    // the server confirms revocation of the HttpOnly session.
     setToken(null)
-    localStorage.removeItem('active_workspace_id')
-    localStorage.removeItem('qa_active_workspace_id')
+    try {
+      localStorage.setItem('qa_logout_pending', '1')
+      // Notify other same-origin tabs without placing credentials in storage.
+      localStorage.setItem('qa_session_logout', String(Date.now()))
+      localStorage.removeItem('active_workspace_id')
+      localStorage.removeItem('qa_active_workspace_id')
+    } catch { /* Storage can be unavailable; server revocation still proceeds. */ }
     setUser(null)
     setJustLoggedIn(false)
+    try {
+      await api.post('/api/auth/logout')
+      localStorage.removeItem('qa_logout_pending')
+    } catch { /* Remain signed out locally; loadMe retries revocation later. */ }
   }
 
   const refreshUser = async () => {
