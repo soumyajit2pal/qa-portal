@@ -25,10 +25,11 @@ import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { internalNavigationPath } from '../../requestNavigation'
 import { createLatestRequestGate } from '../../latestRequest'
 
-const STATUSES = ['Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect', 'Closed']
+const STATUSES = ['Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised', 'Closed']
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
 const PRIORITIES = ['P1 – Immediate', 'P2 – High', 'P3 – Medium', 'P4 – Low']
-const RESOLUTION_TYPES = ['Fixed', 'Configuration Changed', 'Data Corrected', 'Code Change', 'Environment Issue Resolved', 'Cannot Reproduce', 'Working as Designed', 'Other']
+const RESOLUTION_TYPES = ['Fixed', 'Configuration Changed', 'Data Corrected', 'Code Change', 'Environment Issue Resolved', 'Cannot Reproduce', 'Working as Designed', 'Requirement Misunderstanding', 'Test Data Issue', 'Configuration Issue', 'Documentation Updated', 'Enhancement / Change Request', 'Other']
+const NAD_QA_OUTCOMES = ['Working as Designed', 'Requirement Misunderstanding', 'Environment Issue Resolved', 'Test Data Issue', 'Configuration Issue', 'Documentation Updated']
 // 2026-08 -- reported directly, with a full defect lifecycle diagram: New
 // now passes through an explicit "Triaged" checkpoint before any
 // disposition (mirrors routers/defects.py's own TRANSITIONS -- see that
@@ -36,17 +37,22 @@ const RESOLUTION_TYPES = ['Fixed', 'Configuration Changed', 'Data Corrected', 'C
 // ownership, so Assigned is retained only as a legacy backend state.
 const TRANSITIONS: Record<string, string[]> = {
   New: ['Triaged'],
-  Triaged: ['In Progress', 'Rejected', 'Duplicate', 'Not a Defect', 'Deferred'],
-  Assigned: ['In Progress', 'Rejected', 'Duplicate', 'Not a Defect', 'Deferred'],
-  'In Progress': ['Resolved', 'Rejected', 'Duplicate', 'Not a Defect', 'Deferred'],
+  Triaged: ['In Progress', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Deferred'],
+  Assigned: ['In Progress', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Deferred'],
+  'In Progress': ['Resolved', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Deferred'],
   Resolved: ['Retest'], Retest: ['Closed', 'Reopened'], Reopened: ['In Progress'],
-  Deferred: ['In Progress'], Closed: ['Reopened'], Rejected: ['Reopened'], Duplicate: [], 'Not a Defect': ['Reopened'],
+  Deferred: ['In Progress'], Closed: ['Reopened'], Rejected: ['Reopened'], Duplicate: [],
+  'Not a Defect Review': ['Not a Defect', 'Change Request Raised', 'Reopened'], 'Not a Defect': ['Reopened'],
+  'Change Request Raised': ['Reopened'],
 }
 
 function defectTransitionLabel(status: string) {
   if (status === 'Triaged') return 'Triage & assign'
   if (status === 'Resolved') return 'Resolve & assign retest'
   if (status === 'In Progress') return 'Start work'
+  if (status === 'Not a Defect Review') return 'Propose Not a Defect'
+  if (status === 'Not a Defect') return 'Confirm Not a Defect'
+  if (status === 'Change Request Raised') return 'Close as Enhancement / CR'
   return status
 }
 
@@ -54,6 +60,10 @@ function defectTransitionDescription(current: string, target: string) {
   if (target === 'Triaged') return 'Review, prioritize, and select the working owner'
   if (target === 'Resolved') return 'Record the resolution and select the QA retest owner'
   if (target === 'In Progress') return `Begin active work from ${current}`
+  if (target === 'Not a Defect Review') return 'Send the developer rationale to a named QA reviewer'
+  if (target === 'Not a Defect') return 'QA agrees with the proposal and closes the defect as Not a Defect'
+  if (target === 'Change Request Raised') return 'QA identifies an enhancement and records the raised Change Request reference'
+  if (target === 'Reopened' && current === 'Not a Defect Review') return 'QA disagrees and returns the defect to development'
   return `Move from ${current} to ${target}`
 }
 
@@ -73,6 +83,18 @@ function defectTransitionGuidance(target: string) {
   if (target === 'Reopened') return {
     title: 'Reverse the previous decision',
     text: 'Explain why the defect must return to active work and attach evidence supporting the failed retest or the reconsidered decision.',
+  }
+  if (target === 'Not a Defect Review') return {
+    title: 'Independent QA triage required',
+    text: 'Record the developer rationale and assign a QA reviewer. This proposal remains open until QA agrees or returns it to development.',
+  }
+  if (target === 'Not a Defect') return {
+    title: 'Confirm the triage decision',
+    text: 'QA must classify the finding and record why it can close as Not a Defect. Documentation gaps require the updated requirement or user-guide reference.',
+  }
+  if (target === 'Change Request Raised') return {
+    title: 'Convert the finding to an enhancement',
+    text: 'Record the CR or enhancement reference and QA rationale. The defect closes as a terminal Change Request Raised outcome.',
   }
   return null
 }
@@ -497,9 +519,9 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
   const [values, setValues] = useState<Record<string, any>>(
     target === 'Triaged'
       ? { assigned_team: autoDepartment || defect.assigned_team || '' }
-      : target === 'Resolved'
+      : ['Resolved', 'Not a Defect Review'].includes(target)
         ? { retest_tester_id: retestUsers.some((user) => user.id === suggestedRetestOwner) ? suggestedRetestOwner : null }
-        : {},
+        : target === 'Not a Defect' ? { resolution_type: 'Working as Designed' } : {},
   )
 
   const [imageValues, setImageValues] = useState<Record<string, File[]>>({})
@@ -527,10 +549,12 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
     const need = (key: string, label: string) => (!values[key] || !String(values[key]).trim()) ? `${label} is required` : null
     if (target === 'Resolved') return need('resolution_summary', 'Resolution Summary') || need('root_cause', 'Root Cause') || need('fix_details', 'Fix Details')
     if (target === 'Closed') return need('actual_result', 'Retest Actual Result') || need('retest_remarks', 'Retest Remarks') || need('closure_remarks', 'Closure Remarks')
-    if (target === 'Reopened') return need('reopen_reason', 'Reopening Reason')
+    if (target === 'Reopened') return need('reopen_reason', 'Reopening Reason') || (defect.status === 'Not a Defect Review' ? need('reference', 'Additional evidence or triage reference') : null)
     if (target === 'Deferred') return need('deferral_reason', 'Deferral Reason')
     if (target === 'Rejected') return need('rejection_reason', 'Rejection Reason')
-    if (target === 'Not a Defect') return need('not_a_defect_reason', 'Reason')
+    if (target === 'Not a Defect Review') return need('not_a_defect_reason', 'Developer rationale') || need('reference', 'Developer evidence or requirements reference')
+    if (target === 'Not a Defect') return need('resolution_type', 'QA classification') || need('closure_remarks', 'QA triage decision') || (values.resolution_type === 'Documentation Updated' ? need('reference', 'Updated requirement or user-guide reference') : null)
+    if (target === 'Change Request Raised') return need('related_cr_number', 'Change Request / enhancement reference') || need('closure_remarks', 'QA enhancement decision')
     return null
   }
 
@@ -558,7 +582,8 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
     const validationError = validateRichFields()
     if (validationError) { setError(new Error(validationError)); return }
     const stagedFiles = [...Object.values(imageValues).flat(), ...evidenceFiles]
-    if (['Rejected', 'Reopened'].includes(target) && !hasEvidence && !evidenceUploaded && !stagedFiles.length) {
+    const reviewDisagreement = target === 'Reopened' && defect.status === 'Not a Defect Review'
+    if (['Rejected', 'Reopened'].includes(target) && !reviewDisagreement && !hasEvidence && !evidenceUploaded && !stagedFiles.length) {
       setError(new Error(`Supporting evidence is required before ${target === 'Rejected' ? 'rejecting' : 'reopening'} a defect`))
       return
     }
@@ -590,15 +615,17 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
       <fieldset disabled={!!savedDefect} className="defect-transition-fieldset">
       {target === 'Triaged' && <>{defect.assignee_name && <p className="defect-assignment-current">Currently assigned to <strong>{defect.assignee_name}</strong>{defect.assigned_team ? ` (${defect.assigned_team})` : ''}.</p>}<Field label="Responsible Department *"><SearchableSelect value={values.assigned_team || ''} onChange={(value) => { set('assigned_team', value); set('assignee_id', null) }} placeholder="Select department…" options={departments.map((department) => ({ value: department.name, label: department.name }))} /></Field><Field label="Working Owner *"><UserAssignSelect value={values.assignee_id ? String(values.assignee_id) : ''} onChange={(value) => set('assignee_id', value ? Number(value) : null)} users={departmentUsers} placeholder={values.assigned_team ? 'Select responsible user…' : 'Select a department first…'} disabled={!values.assigned_team} showRoles /></Field>{autoDepartment && <p className="defect-assignment-default">Defaulted from {defect.project_department ? 'the linked Failed / Blocked Test Execution\'s project' : 'the linked QA Request'}: <strong>{autoDepartment}</strong></p>}<Field label="Triage Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Triage Remarks" placeholder="Optional routing note for the working owner…" /></Field></>}
       {target === 'Resolved' && <><Field label="Resolution Type *"><select required value={values.resolution_type || ''} onChange={(e) => set('resolution_type', e.target.value)}><option value="">Select…</option>{RESOLUTION_TYPES.map((value) => <option key={value}>{value}</option>)}</select></Field><Field label="Resolution Summary *"><JiraRichTextField value={values.resolution_summary || ''} onChange={(v) => set('resolution_summary', v)} onImagesChange={setImages('resolution_summary')} disabled={!!savedDefect} ariaLabel="Resolution Summary" placeholder="Summarize the fix…" /></Field><Field label="Root Cause *"><JiraRichTextField value={values.root_cause || ''} onChange={(v) => set('root_cause', v)} onImagesChange={setImages('root_cause')} disabled={!!savedDefect} ariaLabel="Root Cause" placeholder="Describe the root cause…" /></Field><Field label="Fix Details *"><JiraRichTextField value={values.fix_details || ''} onChange={(v) => set('fix_details', v)} onImagesChange={setImages('fix_details')} disabled={!!savedDefect} ariaLabel="Fix Details" placeholder="Describe the fix that was applied…" /></Field><Field label="Fixed Build / Release *"><input required value={values.fixed_build_version || ''} onChange={(e) => set('fixed_build_version', e.target.value)} /></Field><Field label="QA Retest Owner *"><UserAssignSelect value={values.retest_tester_id ? String(values.retest_tester_id) : ''} onChange={(value) => set('retest_tester_id', value ? Number(value) : null)} users={retestUsers} placeholder="Select the QA user responsible for retest…" /></Field></>}
+      {target === 'Not a Defect Review' && <><Field label="QA reviewer *"><UserAssignSelect value={values.retest_tester_id ? String(values.retest_tester_id) : ''} onChange={(value) => set('retest_tester_id', value ? Number(value) : null)} users={retestUsers} placeholder="Select the QA user responsible for triage…" /></Field><Field label="Developer rationale *"><JiraRichTextField value={values.not_a_defect_reason || ''} onChange={(v) => set('not_a_defect_reason', v)} onImagesChange={setImages('not_a_defect_reason')} disabled={!!savedDefect} ariaLabel="Developer rationale" placeholder="Explain why this is expected behavior and summarize the supporting evidence…" /></Field><Field label="Evidence / requirements reference *"><input required value={values.reference || ''} onChange={(e) => set('reference', e.target.value)} placeholder="Requirement, log, screenshot, test evidence, or discussion reference" /></Field></>}
       {target === 'Closed' && <><Field label="Build validated by QA *"><input required value={values.tested_build_version || ''} onChange={(e) => set('tested_build_version', e.target.value)} placeholder="Build or release containing the fix" /></Field><Field label="Observed retest result *"><JiraRichTextField value={values.actual_result || ''} onChange={(v) => set('actual_result', v)} onImagesChange={setImages('actual_result')} disabled={!!savedDefect} ariaLabel="Observed retest result" placeholder="Describe what QA observed while validating the fix…" /></Field><Field label="Retest evidence and notes *"><JiraRichTextField value={values.retest_remarks || ''} onChange={(v) => set('retest_remarks', v)} onImagesChange={setImages('retest_remarks')} disabled={!!savedDefect} ariaLabel="Retest evidence and notes" placeholder="Record the validation steps, evidence references, or important conditions…" /></Field><Field label="Closure summary *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="Closure summary" placeholder="State why this defect can now be closed…" /></Field></>}
-      {target === 'Reopened' && <Field label="Reason for reopening *"><JiraRichTextField value={values.reopen_reason || ''} onChange={(v) => set('reopen_reason', v)} onImagesChange={setImages('reopen_reason')} disabled={!!savedDefect} ariaLabel="Reason for reopening" placeholder="Explain what failed during retest, or what new evidence changes the earlier decision." /></Field>}
+      {target === 'Reopened' && <><Field label="Reason for reopening *"><JiraRichTextField value={values.reopen_reason || ''} onChange={(v) => set('reopen_reason', v)} onImagesChange={setImages('reopen_reason')} disabled={!!savedDefect} ariaLabel="Reason for reopening" placeholder="Explain what failed during retest, or what new evidence changes the earlier decision." /></Field>{defect.status === 'Not a Defect Review' && <Field label="Additional evidence / triage reference *"><input required value={values.reference || ''} onChange={(e) => set('reference', e.target.value)} placeholder="Evidence, acceptance criterion, or triage meeting record" /></Field>}</>}
       {target === 'Deferred' && <><Field label="Deferral Reason *"><JiraRichTextField value={values.deferral_reason || ''} onChange={(v) => set('deferral_reason', v)} onImagesChange={setImages('deferral_reason')} disabled={!!savedDefect} ariaLabel="Deferral Reason" /></Field><div className="grid grid-2"><Field label="Approved By *"><input required value={values.deferral_approved_by || ''} onChange={(e) => set('deferral_approved_by', e.target.value)} /></Field><Field label="Target Release *"><input required value={values.target_release || ''} onChange={(e) => set('target_release', e.target.value)} /></Field></div><Field label="Expected Resolution Date *"><input required type="date" value={values.expected_resolution_date || ''} onChange={(e) => set('expected_resolution_date', e.target.value)} /></Field></>}
       {target === 'Rejected' && <Field label="Rejection Reason *"><JiraRichTextField value={values.rejection_reason || ''} onChange={(v) => set('rejection_reason', v)} onImagesChange={setImages('rejection_reason')} disabled={!!savedDefect} ariaLabel="Rejection Reason" placeholder="Give a valid rejection reason and paste or upload supporting evidence." /></Field>}
       {target === 'Duplicate' && <Field label="Original Defect ID *"><SearchableSelect value={values.duplicate_defect_id ? String(values.duplicate_defect_id) : ''} onChange={(value) => set('duplicate_defect_id', value ? Number(value) : null)} placeholder="Select canonical defect…" options={defects.filter((item) => item.id !== defect.id && item.status !== 'Duplicate').map((item) => ({ value: String(item.id), label: `${item.defect_key} · ${item.title}` }))} /></Field>}
-      {target === 'Not a Defect' && <Field label="Discussion & Requirements Confirmation *"><JiraRichTextField value={values.not_a_defect_reason || ''} onChange={(v) => set('not_a_defect_reason', v)} onImagesChange={setImages('not_a_defect_reason')} disabled={!!savedDefect} ariaLabel="Discussion and Requirements Confirmation" placeholder="Record the discussion with the Developer/Dev Lead and confirmation against requirements…" /></Field>}
-      {!['Triaged', 'Assigned', 'Resolved', 'Closed', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect'].includes(target) && <Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" /></Field>}
+      {target === 'Not a Defect' && <><Field label="QA classification *"><select required value={values.resolution_type || ''} onChange={(e) => set('resolution_type', e.target.value)}><option value="">Select…</option>{NAD_QA_OUTCOMES.map((value) => <option key={value}>{value}</option>)}</select></Field>{values.resolution_type === 'Documentation Updated' && <Field label="Updated requirement / user-guide reference *"><input required value={values.reference || ''} onChange={(e) => set('reference', e.target.value)} placeholder="Document ID, URL, version, or approved reference" /></Field>}<Field label="QA triage decision *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="QA triage decision" placeholder="Summarize the evidence reviewed, classification, discussion, and closure decision…" /></Field></>}
+      {target === 'Change Request Raised' && <><Field label="Change Request / enhancement reference *"><input required value={values.related_cr_number || ''} onChange={(e) => set('related_cr_number', e.target.value)} placeholder="CR, EPIC, story, or enhancement ID" /></Field><Field label="QA enhancement decision *"><JiraRichTextField value={values.closure_remarks || ''} onChange={(v) => set('closure_remarks', v)} onImagesChange={setImages('closure_remarks')} disabled={!!savedDefect} ariaLabel="QA enhancement decision" placeholder="Explain the requirement gap, triage participants, and why the defect is being converted to an enhancement…" /></Field></>}
+      {!['Triaged', 'Assigned', 'Resolved', 'Closed', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised'].includes(target) && <Field label="Remarks"><JiraRichTextField value={values.remarks || ''} onChange={(v) => set('remarks', v)} onImagesChange={setImages('remarks')} disabled={!!savedDefect} ariaLabel="Remarks" /></Field>}
       </fieldset>
-      {['Rejected', 'Reopened'].includes(target) && <div className="defect-form-section defect-evidence">
+      {['Rejected', 'Reopened'].includes(target) && !(target === 'Reopened' && defect.status === 'Not a Defect Review') && <div className="defect-form-section defect-evidence">
         <div>
           <h4>Supporting Evidence <span>{Object.values(imageValues).flat().length + evidenceFiles.length}</span></h4>
           <label className="btn btn-sm">+ Attach evidence<input type="file" multiple hidden accept={DEFECT_EVIDENCE_EXTENSIONS.join(',')} disabled={busy} onChange={(event) => { addEvidenceFiles(event.target.files); event.target.value = '' }} /></label>
@@ -610,7 +637,7 @@ function TransitionModal({ defect, target, users, departments, requestDepartment
       <div className="modal-actions">
         {savedDefect
           ? <><button className="btn btn-primary" disabled={busy}>{busy ? 'Attaching…' : 'Retry attaching evidence'}</button><button type="button" className="btn" disabled={busy} onClick={() => onChanged(savedDefect)}>Continue without evidence</button></>
-          : <><button className={`btn ${['Rejected', 'Duplicate', 'Not a Defect'].includes(target) ? 'btn-danger' : 'btn-primary'}`} disabled={busy || (target === 'Triaged' && (!values.assignee_id || !values.assigned_team)) || (target === 'Resolved' && !values.retest_tester_id)}>{busy ? 'Updating…' : defectTransitionLabel(target)}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></>}
+          : <><button className={`btn ${['Rejected', 'Duplicate'].includes(target) ? 'btn-danger' : 'btn-primary'}`} disabled={busy || (target === 'Triaged' && (!values.assignee_id || !values.assigned_team)) || (['Resolved', 'Not a Defect Review'].includes(target) && !values.retest_tester_id)}>{busy ? 'Updating…' : defectTransitionLabel(target)}</button><button type="button" className="btn" onClick={onClose}>Cancel</button></>}
       </div>
     </form>
   </Modal>
@@ -864,6 +891,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     || defect.execution_assignee_id === user?.id
     || defect.reporter_id === user?.id
   )
+  const qaReviewer = !viewOnly && defect.retest_tester_id === user?.id
   // 2026-08 Reassignment Requirement -- "Assigned" (above) is only reachable
   // from New/Reopened/Deferred, so this is the only way to change the
   // assignee once work is already under way. Eligible to the current
@@ -888,7 +916,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   ])
   const hasUnlinkedExecution = contexts.some((row) => !linkedExecutionIds.has(row.execution.id))
   const canLinkExecution = !viewOnly && hasUnlinkedExecution
-    && !['Closed', 'Rejected', 'Duplicate', 'Not a Defect'].includes(defect.status)
+    && !['Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'].includes(defect.status)
     && hasRole(user, 'QA_ENGINEER', 'QA_LEAD', 'CHIEF_MANAGER_QA', 'AGM_QA', 'SECURITY_ANALYST', ...QA_REQUEST_CREATOR_ROLES, 'APPLICATION_OWNER')
   const allowedTransitions = (viewOnly || defect.workflow) ? [] : (TRANSITIONS[defect.status] || []).filter((target) => {
     // Same actor set already trusted to reject/duplicate a defect -- see
@@ -898,9 +926,9 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     if (target === 'Assigned') return canAssign
     if (['Rejected', 'Duplicate'].includes(target)) return !qaDispositionBlocked
       && (manager || defect.reporter_id === user?.id || assigneeOrDepartmentHead)
-    if (target === 'Not a Defect') return defect.assignee_is_requester
-      ? !qaDispositionBlocked && assigneeOrDepartmentHead
-      : manager || defect.reporter_id === user?.id
+    if (target === 'Not a Defect Review') return manager || assignee
+    if (target === 'Not a Defect') return defect.status === 'Not a Defect Review' && (manager || qaReviewer)
+    if (target === 'Change Request Raised') return defect.status === 'Not a Defect Review' && (manager || qaReviewer)
     if (target === 'Deferred') return manager || applicationOwner
     if (['In Progress', 'Resolved'].includes(target)) return manager || assignee
     if (['Retest', 'Closed'].includes(target)) return manager || tester
@@ -908,15 +936,20 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
     // paths. Closed is a retest outcome; Rejected and Not a Defect are
     // investigation decisions and can be reconsidered by the same scoped
     // actors who were allowed to make them.
-    if (target === 'Reopened') return defect.status === 'Closed'
+    if (target === 'Reopened') return defect.status === 'Not a Defect Review'
+      ? manager || qaReviewer
+      : defect.status === 'Closed'
       ? manager || defect.reporter_id === user?.id
-      : ['Rejected', 'Not a Defect'].includes(defect.status)
+      : ['Rejected', 'Not a Defect', 'Change Request Raised'].includes(defect.status)
         ? manager || defect.reporter_id === user?.id || assigneeOrDepartmentHead
         : manager || tester
     return false
   })
-  const lifecycle = defect.workflow_stages?.length ? defect.workflow_stages : ['New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Closed']
-  const terminalOutcomes = ['Rejected', 'Duplicate', 'Not a Defect']
+  const lifecycle = defect.workflow_stages?.length ? defect.workflow_stages
+    : ['Not a Defect Review', 'Not a Defect', 'Change Request Raised'].includes(defect.status)
+      ? ['New', 'Triaged', 'In Progress', 'Not a Defect Review', defect.status === 'Change Request Raised' ? 'Change Request Raised' : 'Not a Defect']
+      : ['New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Closed']
+  const terminalOutcomes = ['Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised']
   // Assigned was removed as a lifecycle stage. Existing rows may retain that
   // value until the data migration runs, so present them at the hand-off
   // between triage and active work without restoring a seventh stage.
@@ -933,7 +966,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const productionImpact = defect.workflow_state?.production_impact || (defect.environment === 'Production' ? 'Reported in Production' : 'Not assessed')
   const stageOwnerId = defect.status === 'Business Acceptance' ? defect.workflow_state?.business_owner_id
     : ['Ready for Release', 'Production Verification'].includes(defect.status) ? defect.workflow_state?.release_owner_id
-    : ['Ready for QA', 'QA Testing', 'Retest'].includes(defect.status) ? defect.retest_tester_id : defect.assignee_id
+    : ['Ready for QA', 'QA Testing', 'Retest', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised'].includes(defect.status) ? defect.retest_tester_id : defect.assignee_id
   const stageOwner = users.find((candidate) => candidate.id === stageOwnerId)?.full_name
     || (stageOwnerId === defect.assignee_id ? defect.assignee_name : null)
   function runAction(action: () => void) {
@@ -1018,12 +1051,12 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
           {defect.reopen_reason && <article className="defect-workflow-record warning"><header><div><strong>Defect reopened</strong><span>Previous decision reversed</span></div><small>Reopened {defect.reopen_count} time{defect.reopen_count === 1 ? '' : 's'}</small></header><div className="defect-workflow-content"><strong>Reason for reopening</strong><AuthenticatedMarkdown value={defect.reopen_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
           {defect.deferral_reason && <article className="defect-workflow-record"><header><div><strong>Work deferred</strong><span>Approved postponement</span></div><small>{defect.target_release ? `Target ${defect.target_release}` : 'Target release not recorded'}</small></header><dl className="defect-workflow-facts"><dt>Approved by</dt><dd>{defect.deferral_approved_by || '—'}</dd><dt>Expected resolution</dt><dd>{defect.expected_resolution_date || '—'}</dd></dl><div className="defect-workflow-content"><strong>Deferral reason</strong><AuthenticatedMarkdown value={defect.deferral_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
           {defect.rejection_reason && <article className="defect-workflow-record warning"><header><div><strong>Defect rejected</strong><span>Disposition decision</span></div></header><div className="defect-workflow-content"><strong>Rejection reason</strong><AuthenticatedMarkdown value={defect.rejection_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
-          {defect.not_a_defect_reason && <article className="defect-workflow-record warning"><header><div><strong>Marked as Not a Defect</strong><span>Requirements decision</span></div></header><div className="defect-workflow-content"><strong>Discussion and confirmation</strong><AuthenticatedMarkdown value={defect.not_a_defect_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
+          {defect.not_a_defect_reason && <article className="defect-workflow-record warning"><header><div><strong>{defect.status === 'Not a Defect' ? 'Confirmed as Not a Defect' : defect.status === 'Change Request Raised' ? 'Converted to Enhancement / Change Request' : 'Not a Defect proposed'}</strong><span>{['Not a Defect', 'Change Request Raised'].includes(defect.status) ? `QA-confirmed outcome${defect.resolution_type ? ` · ${defect.resolution_type}` : ''}` : 'Awaiting or reconsidered QA triage'}</span></div></header>{defect.related_cr_number && <dl className="defect-workflow-facts"><dt>Change Request</dt><dd>{defect.related_cr_number}</dd></dl>}<div className="defect-workflow-content"><strong>Developer rationale and requirements reference</strong><AuthenticatedMarkdown value={defect.not_a_defect_reason} basePath={`/api/defects/${defect.id}/attachments`} /></div></article>}
         </div>
       </section>}
       </div>
       <div className="defect-review-panel" role="tabpanel" id={`defect-${defect.id}-panel-trace`} aria-labelledby={`defect-${defect.id}-tab-trace`} hidden={detailTab !== 'trace'} tabIndex={0}>
-      {!defect.qa_request_id && !viewOnly && (manager || assignee || defect.reporter_id === user?.id) && !['Closed', 'Duplicate', 'Rejected', 'Not a Defect'].includes(defect.status) && <LinkDefectRequest defect={defect} onChanged={onChanged} />}
+      {!defect.qa_request_id && !viewOnly && (manager || assignee || defect.reporter_id === user?.id) && !['Closed', 'Duplicate', 'Rejected', 'Not a Defect', 'Change Request Raised'].includes(defect.status) && <LinkDefectRequest defect={defect} onChanged={onChanged} />}
       <section className="defect-linked-work" aria-label="Linked work">
         <div className="defect-linked-work-head"><div><span className="defect-section-label">TRACEABILITY</span><h4>Linked work</h4></div><small>Open a linked record to follow the defect back to its source.</small></div>
         <div className="defect-trace-grid">

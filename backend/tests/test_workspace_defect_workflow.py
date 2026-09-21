@@ -13,7 +13,8 @@ def defect(status='QA Testing', impact='Unaffected', **config):
         workflow_state_json=json.dumps({'production_impact': impact, 'iteration': 1,
                                        'deployed_build': '2.0', 'history': []}),
         retest_tester_id=2, assignee_id=3, reporter_id=4, qa_request=SimpleNamespace(qa_workspace_id=10),
-        assignee_is_requester=False, reopen_count=0, closed_at=None)
+        assignee_is_requester=False, reopen_count=0, closed_at=None, retest_result=None,
+        not_a_defect_reason=None, resolution_type=None, closure_remarks=None, related_cr_number=None)
 
 
 class Query:
@@ -182,6 +183,103 @@ def test_qa_cannot_accept_business_risk():
     with pytest.raises(HTTPException) as exc:
         action(defect('Triaged'), 'Accept Risk', remarks='Accept risk', reference='Approval 1')
     assert exc.value.status_code == 403
+
+
+def test_developer_not_a_defect_proposal_routes_to_independent_qa_review():
+    obj = defect('In Progress')
+    action(obj, 'Not a Defect Review', user_id=3, retest_tester_id=2,
+           remarks='Behavior matches requirement REQ-17', reference='REQ-17 and screenshot-4')
+
+    assert obj.status == 'Not a Defect Review'
+    assert obj.retest_tester_id == 2
+    assert obj.not_a_defect_reason == 'Behavior matches requirement REQ-17'
+    assert obj.closed_at is None
+    assert transitions(obj) == ['Not a Defect', 'Change Request Raised', 'Reopened']
+
+
+def test_not_a_defect_proposal_requires_traceable_evidence_reference():
+    with pytest.raises(HTTPException, match='evidence or requirements reference'):
+        action(defect('In Progress'), 'Not a Defect Review', user_id=3,
+               retest_tester_id=2, remarks='Expected behavior')
+
+
+def test_qa_can_confirm_not_a_defect_after_review():
+    obj = defect('In Progress')
+    action(obj, 'Not a Defect Review', user_id=3, retest_tester_id=2,
+           remarks='Behavior matches requirement REQ-17', reference='REQ-17 and screenshot-4')
+    action(obj, 'Not a Defect', user_id=2,
+           remarks='QA reviewed the requirement and agrees this is expected behavior')
+
+    assert obj.status == 'Not a Defect'
+    assert obj.resolution_type == 'Working as Designed'
+    assert obj.closed_at is not None
+
+
+@pytest.mark.parametrize('classification', [
+    'Requirement Misunderstanding', 'Environment Issue Resolved', 'Test Data Issue',
+    'Configuration Issue',
+])
+def test_qa_records_not_a_defect_classification(classification):
+    obj = defect('In Progress')
+    action(obj, 'Not a Defect Review', user_id=3, retest_tester_id=2,
+           remarks='Developer proposal', reference='REQ-17')
+    action(obj, 'Not a Defect', user_id=2, resolution_type=classification,
+           remarks='QA completed evidence review')
+    assert obj.status == 'Not a Defect'
+    assert obj.resolution_type == classification
+
+
+def test_documentation_gap_requires_updated_document_reference():
+    obj = defect('In Progress')
+    action(obj, 'Not a Defect Review', user_id=3, retest_tester_id=2,
+           remarks='Developer proposal', reference='REQ-17')
+    with pytest.raises(HTTPException, match='user-guide reference'):
+        action(obj, 'Not a Defect', user_id=2, resolution_type='Documentation Updated',
+               remarks='User guide needed clarification')
+    action(obj, 'Not a Defect', user_id=2, resolution_type='Documentation Updated',
+           remarks='User guide corrected', reference='USER-GUIDE v4.2 section 8')
+    assert obj.resolution_type == 'Documentation Updated'
+
+
+def test_qa_can_convert_requirement_gap_to_change_request():
+    obj = defect('In Progress')
+    action(obj, 'Not a Defect Review', user_id=3, retest_tester_id=2,
+           remarks='Developer proposal', reference='REQ-17')
+    action(obj, 'Change Request Raised', user_id=2, related_cr_number='CR-2041',
+           remarks='Product Owner agreed this is a new capability')
+    assert obj.status == 'Change Request Raised'
+    assert obj.related_cr_number == 'CR-2041'
+    assert obj.resolution_type == 'Enhancement / Change Request'
+    assert obj.closed_at is not None
+
+
+def test_qa_can_disagree_with_not_a_defect_using_additional_evidence_reference():
+    obj = defect('In Progress')
+    action(obj, 'Not a Defect Review', user_id=3, retest_tester_id=2,
+           remarks='Behavior matches requirement REQ-17', reference='REQ-17 and screenshot-4')
+    action(obj, 'Reopened', user_id=2,
+           remarks='QA disagrees; acceptance criteria require the reported behavior',
+           reference='AC-9 and triage minutes TM-22')
+
+    assert obj.status == 'Reopened'
+    assert obj.reopen_count == 1
+    assert obj.retest_result is None
+    assert state(obj)['verification_invalidated'] is True
+
+
+def test_qa_disagreement_requires_additional_evidence_or_triage_reference():
+    obj = defect('In Progress')
+    action(obj, 'Not a Defect Review', user_id=3, retest_tester_id=2,
+           remarks='Developer proposal', reference='REQ-17')
+    with pytest.raises(HTTPException, match='Additional evidence or triage reference'):
+        action(obj, 'Reopened', user_id=2, remarks='QA disagrees')
+
+
+def test_not_a_defect_proposer_cannot_self_assign_as_qa_reviewer():
+    obj = defect('In Progress')
+    with pytest.raises(HTTPException, match='independent QA reviewer'):
+        action(obj, 'Not a Defect Review', user_id=3, retest_tester_id=3,
+               remarks='Expected behavior', reference='REQ-17')
 
 
 def test_owner_from_another_workspace_rejected(monkeypatch):

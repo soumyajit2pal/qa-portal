@@ -150,7 +150,7 @@ function QuickDefectLink({ execution, onChanged, onError }: {
     setInternalDefects([])
     const timer = window.setTimeout(() => {
       const qs = new URLSearchParams({ page_size: '25', page: String(defectPage), search: defectSearch })
-      ;['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred'].forEach(status => qs.append('status', status))
+      ;['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Not a Defect Review'].forEach(status => qs.append('status', status))
       api.get<PageOut<DefectListOut>>(`/api/defects?${qs}`)
         .then(result => { if (active) { setInternalDefects(result.items); setDefectHasNext(result.has_next) } })
         .catch(error => { if (active) setDefectLoadError(error) })

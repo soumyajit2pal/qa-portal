@@ -5,9 +5,9 @@ from fastapi import HTTPException
 from sqlalchemy import or_
 from . import models
 
-TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect'}
+TERMINAL = {'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised'}
 EXECUTION_STATUSES = ['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed', 'Not Executed']
-DEFECT_BUCKETS = ['Fix Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect']
+DEFECT_BUCKETS = ['Fix Pending', 'Not a Defect Review Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised']
 
 
 def defect_bucket(defect):
@@ -19,6 +19,8 @@ def defect_bucket(defect):
         return 'Deferred'
     if defect.status == 'Reopened':
         return 'Reopened / Retest Failed'
+    if defect.status == 'Not a Defect Review':
+        return 'Not a Defect Review Pending'
     if defect.status == 'Business Acceptance':
         return 'Business Acceptance Pending'
     if defect.status == 'Ready for Release':

@@ -532,18 +532,14 @@ def _require_assigned_runner(obj: models.TestExecution, current_user: models.Use
         )
 
 
-# Governed statuses (defects.py) that count as "resolved enough to retest
-# against" -- Deferred (accepted, tracked, testing may proceed) or Closed
-# (fixed and verified). Every other status (New/Triaged/Assigned/In Progress/
-# Resolved/Retest/Reopened/Rejected/Duplicate/Not a Defect) counts as "active"
-# and keeps the full lock below engaged. Rejected/Duplicate/Not a Defect are
-# deliberately NOT included
-# even though they're also terminal -- reported directly as "Deferred or
-# Closed" only; flag to the QA process owner if another terminal decision
-# should also clear the lock.
-_DEFECT_RETEST_CLEAR_STATUSES = ("Deferred", "Closed")
+# Governed statuses (defects.py) that no longer represent unresolved
+# development work. "Not a Defect Review" remains active and blocks further
+# execution; final "Not a Defect" is included only because the revised flow
+# requires an independent QA reviewer to confirm that outcome first.
+_DEFECT_RETEST_CLEAR_STATUSES = ("Deferred", "Closed", "Not a Defect", "Change Request Raised")
 _DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES = (
     "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened",
+    "Not a Defect Review",
     "Ready for QA", "QA Testing", "Business Acceptance", "Ready for Release", "Production Verification",
 )
 
@@ -552,7 +548,8 @@ def _execution_lock_state(db: Session, execution_id: int):
     """Returns (active_defects, has_prior_failed_or_blocked) for the status gate.
     active_defects -- every governed Defect (defects.py) linked to this slot
     through its primary execution or an additional execution trace, whose
-    own status is not yet Deferred/Closed; a
+    own status is not yet Deferred/QA-confirmed Not a Defect, or a properly
+    verified Closed status; a
     non-empty list here is what drives the full lock. The second value is True
     if any attempt ever recorded on this slot (TestExecutionRun.status) was
     'Fail' or 'Blocked'. It enables Retest Passed and drives the permanent
@@ -566,8 +563,16 @@ def _execution_lock_state(db: Session, execution_id: int):
     from ..defect_workflow import verified_for
     execution = db.get(models.TestExecution, execution_id) if any(getattr(d, 'workflow_json', None) for d in defects) else None
     cycle = execution.cycle if execution else None
-    active_defects = [d for d in defects if (getattr(d, "workflow_json", None) or d.status not in _DEFECT_RETEST_CLEAR_STATUSES)
-                      and not (cycle and verified_for(d, cycle.environment, cycle.build))]
+    active_defects = [
+        d for d in defects
+        if d.status not in {"Deferred", "Not a Defect", "Change Request Raised"}
+        and (
+            not getattr(d, "workflow_json", None)
+            and d.status not in _DEFECT_RETEST_CLEAR_STATUSES
+            or getattr(d, "workflow_json", None)
+            and not (cycle and verified_for(d, cycle.environment, cycle.build))
+        )
+    ]
     has_prior_failed_or_blocked = db.query(models.TestExecutionRun.id).filter(
         models.TestExecutionRun.execution_id == execution_id,
         models.TestExecutionRun.status.in_(("Fail", "Blocked")),

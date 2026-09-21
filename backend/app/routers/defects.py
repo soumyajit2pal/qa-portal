@@ -21,13 +21,19 @@ from .. import reassignment
 
 router = APIRouter(prefix="/api/defects", tags=["defect-management"])
 
-STATUSES = ("Ready for QA", "QA Testing", "Business Acceptance", "Ready for Release", "Production Verification", "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect", "Closed")
+STATUSES = ("Ready for QA", "QA Testing", "Business Acceptance", "Ready for Release", "Production Verification", "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest", "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect Review", "Not a Defect", "Change Request Raised", "Closed")
 SEVERITIES = ("Critical", "High", "Medium", "Low")
 PRIORITIES = ("P1 – Immediate", "P2 – High", "P3 – Medium", "P4 – Low")
 RESOLUTION_TYPES = (
     "Fixed", "Configuration Changed", "Data Corrected", "Code Change",
-    "Environment Issue Resolved", "Cannot Reproduce", "Working as Designed", "Other",
+    "Environment Issue Resolved", "Cannot Reproduce", "Working as Designed",
+    "Requirement Misunderstanding", "Test Data Issue", "Configuration Issue",
+    "Documentation Updated", "Enhancement / Change Request", "Other",
 )
+NAD_QA_OUTCOMES = {
+    "Working as Designed", "Requirement Misunderstanding", "Environment Issue Resolved",
+    "Test Data Issue", "Configuration Issue", "Documentation Updated",
+}
 TRANSITIONS = {
     # Modern states use defect_workflow.transitions; never enter through the legacy API.
     "Ready for QA": set(), "QA Testing": set(), "Business Acceptance": set(),
@@ -43,9 +49,9 @@ TRANSITIONS = {
     # Defect" status covers that ground. Assignment is now captured as part
     # of Triage, while Reopened and Deferred work resume at In Progress.)
     "New": {"Triaged"},
-    "Triaged": {"In Progress", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
-    "Assigned": {"In Progress", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
-    "In Progress": {"Resolved", "Rejected", "Duplicate", "Not a Defect", "Deferred"},
+    "Triaged": {"In Progress", "Rejected", "Duplicate", "Not a Defect Review", "Deferred"},
+    "Assigned": {"In Progress", "Rejected", "Duplicate", "Not a Defect Review", "Deferred"},
+    "In Progress": {"Resolved", "Rejected", "Duplicate", "Not a Defect Review", "Deferred"},
     "Resolved": {"Retest"},
     "Retest": {"Closed", "Reopened"},
     "Reopened": {"In Progress"},
@@ -53,7 +59,9 @@ TRANSITIONS = {
     "Closed": {"Reopened"},
     "Rejected": {"Reopened"},
     "Duplicate": set(),
+    "Not a Defect Review": {"Not a Defect", "Change Request Raised", "Reopened"},
     "Not a Defect": {"Reopened"},
+    "Change Request Raised": {"Reopened"},
 }
 CREATE_ROLES = (
     Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
@@ -77,7 +85,7 @@ CREATE_ROLES = (
 # (GET /{id}, GET /by-key/{key} -- e.g. from a direct link) was already
 # open to any authenticated user regardless, unchanged here.
 _DOC_MODULE = "DEFECT"
-_REQUESTER_DISPOSITION_STATUSES = {"Rejected", "Duplicate", "Not a Defect"}
+_REQUESTER_DISPOSITION_STATUSES = {"Rejected", "Duplicate"}
 _QA_DEFECT_ROLES = {
     Role.QA_ENGINEER, Role.QA_LEAD, Role.CHIEF_MANAGER_QA, Role.AGM_QA,
 }
@@ -440,7 +448,7 @@ def _link_additional_execution(db: Session, obj: models.Defect, execution: model
     _link_run_defect(db, obj, execution, user)
 
 
-_TERMINAL_STATUSES = ("Closed", "Rejected", "Duplicate", "Not a Defect")
+_TERMINAL_STATUSES = ("Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised")
 _ATTENTION_SEVERITIES = ("Critical", "High")
 _RETEST_STATUSES = ("Resolved", "Retest", "Ready for QA", "QA Testing", "Business Acceptance", "Production Verification")
 
@@ -518,7 +526,7 @@ def list_defects(severity: Optional[str] = None,
     elif queue == "retest":
         q = q.filter(models.Defect.status.in_(_RETEST_STATUSES))
     elif queue == "closed":
-        q = q.filter(models.Defect.status == "Closed")
+        q = q.filter(models.Defect.status.in_(_TERMINAL_STATUSES))
     q = pagination.apply_search(
         q, params, models.Defect.defect_key, models.Defect.title, models.Defect.application_name,
         models.Defect.module_feature,
@@ -602,7 +610,7 @@ def defect_dashboard(db: Session = Depends(get_db), current_user: models.User = 
 
     return {
         "total": total, "open": sum(v for k, v in by_status.items() if k not in _TERMINAL_STATUSES),
-        "closed": by_status["Closed"], "reopened": by_status["Reopened"], "deferred": by_status["Deferred"],
+        "closed": sum(by_status.get(s, 0) for s in _TERMINAL_STATUSES), "reopened": by_status["Reopened"], "deferred": by_status["Deferred"],
         "attention_count": attention_count, "mine_count": mine_count,
         "unlinked_count": unlinked_count, "retest_count": retest_count,
         "by_status": dict(by_status), "by_severity": dict(by_severity), "by_priority": dict(by_priority),
@@ -623,8 +631,8 @@ def export_defects(db: Session = Depends(get_db), current_user: models.User = De
         [("Generated at", models.now()), ("Generated by", current_user.full_name)],
         [
             ("Total defects", len(defects)),
-            ("Open defects", sum(v for k, v in status_counts.items() if k not in {"Closed", "Rejected", "Duplicate", "Not a Defect"})),
-            ("Closed defects", status_counts["Closed"]),
+            ("Open defects", sum(v for k, v in status_counts.items() if k not in set(_TERMINAL_STATUSES))),
+            ("Closed / terminal defects", sum(status_counts[s] for s in _TERMINAL_STATUSES)),
             ("Reopened defects", status_counts["Reopened"]),
             ("Deferred defects", status_counts["Deferred"]),
         ],
@@ -787,7 +795,7 @@ def link_defect_execution(defect_id: int, payload: schemas.DefectLinkExecution,
                           db: Session = Depends(get_db),
                           current_user: models.User = Depends(get_current_user)):
     obj = _get_mutable(defect_id, db, current_user)
-    if obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect"}:
+    if obj.status in {"Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised"}:
         raise HTTPException(400, f"A {obj.status} defect cannot be linked to a new execution")
     execution, cycle, test_case = _execution_context(db, payload.execution_id, obj.qa_request)
     if obj.qa_workspace_id and (cycle.origin_workspace_id or cycle.project.qa_workspace_id) != obj.qa_workspace_id:
@@ -853,11 +861,11 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
     manager = _is_manager(db, obj, current_user)
     assignee = _is_assignee(obj, current_user)
     tester = _is_tester(obj, current_user)
-    requester_owns_assignment = obj.assignee_is_requester
+    qa_reviewer = obj.retest_tester_id == current_user.id
     if _qa_disposition_blocked_for_requester_assignment(obj, current_user, requested):
         raise HTTPException(
             403,
-            "Rejected, Duplicate, and Not a Defect are controlled by the requester side while the defect is assigned to a Requester.",
+            "Rejected and Duplicate are controlled by the requester side while the defect is assigned to a Requester.",
         )
     # Triage now includes selecting the working owner. Assignment is an
     # attribute of the defect rather than a separate lifecycle state, so
@@ -875,18 +883,15 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
             "Only the Defect Reporter, current assignee, the Department Head of the assignee, "
             "a QA Lead, or an Administrator can perform this action",
         )
-    if requested == "Not a Defect" and not (
-        (requester_owns_assignment and (
-            assignee
-            or _is_assignee_department_head(db, obj, current_user)
-            or Role.ADMIN in set(current_user.roles or [])
-        ))
-        or (not requester_owns_assignment and (manager or obj.reporter_id == current_user.id))
-    ):
+    if requested == "Not a Defect Review" and not (manager or assignee):
         raise HTTPException(
             403,
-            "Only the responsible requester side, or the Defect Reporter/QA Lead before requester assignment, can mark this as Not a Defect",
+            "Only the assigned developer/resolver or an authorized QA lead can propose Not a Defect",
         )
+    if requested == "Not a Defect" and not (obj.status == "Not a Defect Review" and (qa_reviewer or manager)):
+        raise HTTPException(403, "Only the assigned QA reviewer or an authorized QA lead can confirm Not a Defect")
+    if requested == "Change Request Raised" and not (obj.status == "Not a Defect Review" and (qa_reviewer or manager)):
+        raise HTTPException(403, "Only the assigned QA reviewer or an authorized QA lead can classify the issue as an enhancement")
     if requested == "Deferred" and not _can_defer(db, obj, current_user):
         raise HTTPException(403, "Only a QA Lead group member, Application Owner, or Administrator can defer a defect")
     if requested in {"In Progress", "Resolved"} and not (assignee or manager):
@@ -906,7 +911,9 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
             raise HTTPException(403, "Only the reporter, QA Lead group, or Administrator can reopen a Closed defect")
         if obj.status == "Retest" and not (tester or manager):
             raise HTTPException(403, "Only the assigned tester or an authorized lead can reopen this defect")
-        if obj.status in {"Rejected", "Not a Defect"} and not (
+        if obj.status == "Not a Defect Review" and not (qa_reviewer or manager):
+            raise HTTPException(403, "Only the assigned QA reviewer or an authorized QA lead can disagree and reopen this defect")
+        if obj.status in {"Rejected", "Not a Defect", "Change Request Raised"} and not (
             manager or obj.reporter_id == current_user.id or assignee
             or _is_assignee_department_head(db, obj, current_user)
         ):
@@ -994,19 +1001,23 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         obj.retest_result = "Passed"; obj.closed_at = models.now(); details = obj.closure_remarks
     elif requested == "Reopened":
         obj.reopen_reason = _required(payload.reopen_reason, "Reopening Reason")
-        if not doc_store.list_documents(db, _DOC_MODULE, obj.id):
+        if previous == "Not a Defect Review":
+            _required(payload.reference, "Additional evidence or triage reference")
+        elif not doc_store.list_documents(db, _DOC_MODULE, obj.id):
             raise HTTPException(400, "Supporting evidence must be attached before reopening a defect")
         # Reopening from Retest/Closed means a validation failure. Reopening
         # Reopening a Rejected or Not a Defect outcome reverses an
         # investigation decision, not a retest, so do not manufacture a
         # misleading failed-retest result for either decision.
-        if previous not in {"Rejected", "Not a Defect"}:
+        if previous not in {"Rejected", "Not a Defect", "Not a Defect Review", "Change Request Raised"}:
             obj.retest_result = "Failed"
             obj.retest_at = models.now()
         obj.reopen_count += 1
+        obj.closed_at = None
+        obj.resolution_type = None
         details = (
             f"{previous} decision reopened: {obj.reopen_reason}"
-            if previous in {"Rejected", "Not a Defect"}
+            if previous in {"Rejected", "Not a Defect", "Not a Defect Review", "Change Request Raised"}
             else obj.reopen_reason
         )
     elif requested == "Deferred":
@@ -1028,12 +1039,49 @@ def transition_defect(defect_id: int, payload: schemas.DefectTransition, db: Ses
         if original.status == "Duplicate":
             raise HTTPException(400, "Select the canonical defect instead of another Duplicate")
         obj.duplicate_of_id = original.id; details = f"Duplicate of {original.defect_key}."
-    elif requested == "Not a Defect":
+    elif requested == "Not a Defect Review":
         obj.not_a_defect_reason = _required(
             payload.not_a_defect_reason,
-            "Requirements confirmation and discussion outcome",
+            "Developer rationale and requirements reference",
         )
-        details = obj.not_a_defect_reason
+        evidence_reference = _required(payload.reference, "Developer evidence or requirements reference")
+        retest_tester_id = _required(payload.retest_tester_id, "QA reviewer")
+        reviewer_user = db.get(models.User, retest_tester_id)
+        if not reviewer_user or not reviewer_user.is_active:
+            raise HTTPException(404, "Selected QA reviewer was not found or is inactive")
+        from ..defect_assignment import assignment_error
+        reviewer_error = assignment_error(db, obj, reviewer_user, "retest_tester_id")
+        if reviewer_error:
+            raise HTTPException(400, f"QA reviewer: {reviewer_error}")
+        if reviewer_user.id in {current_user.id, obj.assignee_id}:
+            raise HTTPException(400, "Select an independent QA reviewer other than the developer/resolver proposing this outcome")
+        previous_retest_tester_id = obj.retest_tester_id
+        obj.retest_tester_id = reviewer_user.id
+        reassignment.record_assignment_change(
+            db, "DEFECT", obj.id, "DEFECT_RETEST_TESTER", current_user,
+            [previous_retest_tester_id], [reviewer_user.id], "Assigned for Not a Defect triage",
+        )
+        details = f"Proposed Not a Defect for QA review by {reviewer_user.full_name}: {obj.not_a_defect_reason}; evidence/reference: {evidence_reference}"
+    elif requested == "Not a Defect":
+        obj.closure_remarks = _required(payload.closure_remarks or payload.remarks, "QA triage decision")
+        outcome = payload.resolution_type or "Working as Designed"
+        if outcome not in NAD_QA_OUTCOMES:
+            raise HTTPException(400, "Select a valid QA Not a Defect classification")
+        if outcome == "Documentation Updated":
+            reference = _required(payload.reference, "Updated requirement or user-guide reference")
+        else:
+            reference = (payload.reference or "").strip()
+        obj.resolution_type = outcome
+        obj.closed_at = models.now()
+        details = f"QA confirmed Not a Defect ({outcome}): {obj.closure_remarks}"
+        if reference:
+            details += f"; reference: {reference}"
+    elif requested == "Change Request Raised":
+        obj.closure_remarks = _required(payload.closure_remarks or payload.remarks, "QA enhancement decision")
+        obj.related_cr_number = _required(payload.related_cr_number, "Change Request / enhancement reference")
+        obj.resolution_type = "Enhancement / Change Request"
+        obj.closed_at = models.now()
+        details = f"QA classified this as an enhancement; CR {obj.related_cr_number}: {obj.closure_remarks}"
     else:
         details = remarks or f"Changed to {requested}."
 

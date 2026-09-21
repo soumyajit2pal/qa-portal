@@ -239,7 +239,7 @@ def defect_quality(
         models.ApprovalAction.decision.in_(("Resolved", "Ready for QA")),
     ).group_by(models.ApprovalAction.entity_id).subquery()
 
-    terminal_statuses = {"Closed", "Rejected", "Duplicate", "Not a Defect"}
+    terminal_statuses = {"Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised"}
     resolved_statuses = {"Resolved", "Retest", "Reopened", "Closed"}
     total_governed = governed_query.with_entities(func.count(models.Defect.id)).scalar() or 0
     open_defects = governed_query.filter(models.Defect.status.notin_(terminal_statuses)).with_entities(func.count(models.Defect.id)).scalar() or 0

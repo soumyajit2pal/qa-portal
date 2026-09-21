@@ -149,6 +149,21 @@ test('test repository and execution activity pass both server writability and wo
   assert.match(execution, /ownerWorkspaceId=\{selectedCycle\?\.origin_workspace_id \|\| selectedProject\?\.qa_workspace_id\}/)
 })
 
+test('not-a-defect is proposed to an independent QA reviewer before becoming terminal', async () => {
+  const legacy = await readFile(new URL('../src/modules/test-management/Defects.tsx', import.meta.url), 'utf8')
+  const modern = await readFile(new URL('../src/components/DefectWorkflowPanel.tsx', import.meta.url), 'utf8')
+
+  assert.match(legacy, /'In Progress': \['Resolved', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Deferred'\]/)
+  assert.match(legacy, /'Not a Defect Review': \['Not a Defect', 'Change Request Raised', 'Reopened'\]/)
+  assert.match(legacy, /Documentation Updated/)
+  assert.match(legacy, /Change Request \/ enhancement reference/)
+  assert.match(legacy, /QA reviewer \*/)
+  assert.match(modern, /target === 'Not a Defect Review'.*manager \|\| resolver/)
+  assert.match(modern, /target === 'Not a Defect'.*manager \|\| qa/)
+  assert.match(modern, /target === 'Change Request Raised'.*manager \|\| qa/)
+  assert.match(modern, /target === 'Reopened'.*Not a Defect Review.*manager \|\| qa/)
+})
+
 test('privileged configuration routes are wrapped in the AdminOnly guard', async () => {
   const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8')
   for (const path of ['/admin', '/checklist-config', '/request-type-config']) {

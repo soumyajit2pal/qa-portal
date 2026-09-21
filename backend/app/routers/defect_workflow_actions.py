@@ -73,7 +73,7 @@ def apply_action(db, obj, payload, user):
 
     if payload.action == 'occurrence':
         allowed(manager or assignee or qa or business or release or obj.reporter_id == user.id)
-        if previous in ('Closed', 'Duplicate', 'Not a Defect', 'Rejected'):
+        if previous in ('Closed', 'Duplicate', 'Not a Defect', 'Change Request Raised', 'Rejected'):
             raise HTTPException(400, 'Reopen the defect before recording another occurrence')
         if payload.environment not in ENVIRONMENTS:
             raise HTTPException(400, 'Select a valid environment')
@@ -137,16 +137,56 @@ def apply_action(db, obj, payload, user):
             s['qa_build'] = obj.fixed_build_version
             event.update(iteration=s['iteration'], kind='deployment', environment=p['qa_environment'],
                          build=obj.fixed_build_version, reference=required(payload.reference, 'Deployment/change reference'))
+        elif target == 'Not a Defect Review':
+            # A resolver may propose this outcome, but cannot finalize their
+            # own decision.  Route it to a named QA reviewer so agreement or
+            # disagreement is explicit, attributable, and independently
+            # audited instead of treating the developer's proposal as a
+            # terminal status.
+            allowed(manager or assignee)
+            reviewer = owner(payload.retest_tester_id, 'QA tester')
+            if reviewer.id in {user.id, obj.assignee_id}:
+                raise HTTPException(400, 'Select an independent QA reviewer other than the developer/resolver proposing this outcome')
+            obj.retest_tester_id = reviewer.id
+            obj.not_a_defect_reason = required(payload.remarks, 'Developer rationale')
+            evidence_reference = required(payload.reference, 'Developer evidence or requirements reference')
+            obj.closed_at = None
+            obj.closure_remarks = None
+            obj.resolution_type = None
+            event.update(kind='not_a_defect_proposed', reviewer_id=reviewer.id,
+                         reviewer_name=getattr(reviewer, 'full_name', None), remarks=obj.not_a_defect_reason,
+                         reference=evidence_reference)
+        elif target == 'Not a Defect':
+            allowed(previous == 'Not a Defect Review' and (manager or qa))
+            obj.closure_remarks = required(payload.remarks, 'QA triage decision')
+            outcome = payload.resolution_type or 'Working as Designed'
+            if outcome not in d.NAD_QA_OUTCOMES:
+                raise HTTPException(400, 'Select a valid QA Not a Defect classification')
+            if outcome == 'Documentation Updated':
+                required(payload.reference, 'Updated requirement or user-guide reference')
+            obj.resolution_type = outcome
+            obj.closed_at = models.now()
+            event.update(kind='not_a_defect_confirmed', resolution=outcome,
+                         remarks=obj.closure_remarks, reference=payload.reference)
+        elif target == 'Change Request Raised':
+            allowed(previous == 'Not a Defect Review' and (manager or qa))
+            obj.closure_remarks = required(payload.remarks, 'QA enhancement decision')
+            obj.related_cr_number = required(payload.related_cr_number, 'Change Request / enhancement reference')
+            obj.resolution_type = 'Enhancement / Change Request'
+            obj.closed_at = models.now()
+            event.update(kind='change_request_raised', resolution=obj.resolution_type,
+                         reference=obj.related_cr_number, remarks=obj.closure_remarks)
         elif target == 'QA Testing':
             allowed(manager or qa)
         elif target == 'Reopened':
             allowed(manager or (previous == 'Closed' and obj.reporter_id == user.id)
                     or (previous in ('QA Testing', 'Ready for QA') and qa)
+                    or (previous == 'Not a Defect Review' and qa)
                     or (previous == 'Business Acceptance' and business)
                     or (previous in ('Ready for Release', 'Production Verification') and release)
-                    or (previous in ('Rejected', 'Not a Defect') and (assignee or obj.reporter_id == user.id)))
+                    or (previous in ('Rejected', 'Not a Defect', 'Change Request Raised') and (assignee or obj.reporter_id == user.id)))
             obj.reopen_reason = required(payload.remarks, 'Reopening reason')
-            required(payload.reference, 'Supporting evidence reference')
+            required(payload.reference, 'Additional evidence or triage reference' if previous == 'Not a Defect Review' else 'Supporting evidence reference')
             if environment_for(obj, previous):
                 verification('Failed')
             s['verification_invalidated'] = True
@@ -161,14 +201,11 @@ def apply_action(db, obj, payload, user):
             obj.closed_at = models.now()
             event.update(to='Closed', resolution='Accepted Risk', reference=payload.reference)
             target = 'Closed'
-        elif target in ('Deferred', 'Rejected', 'Not a Defect', 'Duplicate'):
+        elif target in ('Deferred', 'Rejected', 'Duplicate'):
             if d._qa_disposition_blocked_for_requester_assignment(obj, user, target):
                 raise HTTPException(403, 'This disposition is controlled by the requester side')
             allowed(d._can_defer(db, obj, user) if target == 'Deferred' else
                     (manager or assignee or obj.reporter_id == user.id or d._is_assignee_department_head(db, obj, user)))
-            if target == 'Not a Defect':
-                allowed((obj.assignee_is_requester and (assignee or d._is_assignee_department_head(db, obj, user) or user.has_role(Role.ADMIN)))
-                        or (not obj.assignee_is_requester and (manager or obj.reporter_id == user.id)))
             reason = required(payload.remarks, 'Decision reason')
             if target == 'Deferred':
                 obj.deferral_reason = reason
@@ -182,8 +219,6 @@ def apply_action(db, obj, payload, user):
                 if original.id == obj.id or original.status == 'Duplicate':
                     raise HTTPException(400, 'Select a different canonical defect')
                 obj.duplicate_of_id = original.id
-            elif target == 'Not a Defect':
-                obj.not_a_defect_reason = reason
             else:
                 obj.rejection_reason = reason
         else:
@@ -211,7 +246,7 @@ def apply_action(db, obj, payload, user):
         obj.status = target
     elif payload.action == 'assess':
         allowed(d._can_assign(db, obj, user))
-        if previous in ('Closed', 'Duplicate', 'Rejected', 'Not a Defect'):
+        if previous in ('Closed', 'Duplicate', 'Rejected', 'Not a Defect', 'Change Request Raised'):
             raise HTTPException(400, 'Reopen this defect before changing its assessment')
         if payload.production_impact not in ('Affected', 'Unaffected', 'Unknown'):
             raise HTTPException(400, 'Select production impact')

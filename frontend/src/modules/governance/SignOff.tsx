@@ -611,7 +611,7 @@ function CertificateEvidence({ item }: { item: SignOffOut }) {
   const summary = item.certificate_summary
   if (!summary) return <section className="clearance-evidence"><div className="clearance-section-heading"><div><span>Captured results</span><h3>Test evidence</h3></div></div><p className="clearance-empty-note">This earlier certificate has no frozen summary. Capturing current results requires a refresh and full reapproval.</p></section>
   const changeIdentity = <div className="clearance-evidence-identity"><span><small>CR / EPIC</small><strong>{summary.change_request_ids === undefined ? 'Not captured — refresh required' : summary.change_request_ids || 'Not recorded'}</strong></span><span><small>Change description</small><strong>{summary.change_description === undefined ? 'Not captured — refresh required' : summary.change_description || 'Not recorded'}</strong></span></div>
-  const defectStatuses = ['Fix Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect']
+  const defectStatuses = ['Fix Pending', 'Not a Defect Review Pending', 'Retest Pending', 'Reopened / Retest Failed', 'Business Acceptance Pending', 'Release Pending', 'Production Verification Pending', 'Blocked', 'Deferred', 'Closed', 'Rejected', 'Duplicate', 'Not a Defect', 'Change Request Raised']
   const activeDefectStatuses = defectStatuses.filter(status => (summary.defects.counts[status] || 0) > 0)
   const openSeverity = summary.severity.reduce((total, row) => total + row.open, 0)
   const passPercent = summary.execution.pass_pct == null ? 'No result' : `${summary.execution.pass_pct}%`

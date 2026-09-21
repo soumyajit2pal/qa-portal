@@ -738,7 +738,7 @@ def quality_scorecard(date_from: str | None = None, date_to: str | None = None, 
         models.PerformanceRequest.qa_request_id.in_(request_ids)).all()
     open_defect_rows = db.query(models.Defect.qa_request_id).filter(
         models.Defect.qa_request_id.in_(request_ids),
-        models.Defect.status.notin_(("Closed", "Rejected", "Duplicate", "Not a Defect")),
+        models.Defect.status.notin_(("Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised")),
     ).all()
 
     functional_counts = Counter(app_by_request.get(row.qa_request_id) for row in functional_rows)

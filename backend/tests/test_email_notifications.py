@@ -119,7 +119,7 @@ class EmailNotificationTests(unittest.TestCase):
     def test_every_defect_stage_is_recognized_as_a_workflow_transition(self):
         stages = (
             "New", "Triaged", "Assigned", "In Progress", "Resolved", "Retest",
-            "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect", "Closed",
+            "Reopened", "Deferred", "Rejected", "Duplicate", "Not a Defect Review", "Not a Defect", "Change Request Raised", "Closed",
         )
         for stage in stages:
             action = models.ApprovalAction(
@@ -191,7 +191,7 @@ class EmailNotificationTests(unittest.TestCase):
                 self.assertEqual(route.recipient_label, "Assigned Defect Owner")
                 self.assertTrue(route.action_required)
 
-        for stage in ("Resolved", "Retest"):
+        for stage in ("Resolved", "Retest", "Not a Defect Review"):
             route = _defect_notification_route(
                 None,
                 SimpleNamespace(
@@ -214,7 +214,7 @@ class EmailNotificationTests(unittest.TestCase):
         self.assertEqual(deferred.recipient_label, "Defect Stakeholder")
         self.assertFalse(deferred.action_required)
 
-        for stage in ("Rejected", "Duplicate", "Not a Defect", "Closed"):
+        for stage in ("Rejected", "Duplicate", "Not a Defect", "Change Request Raised", "Closed"):
             route = _defect_notification_route(
                 None,
                 SimpleNamespace(status=stage, reporter_id=40, qa_request=parent),

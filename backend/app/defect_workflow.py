@@ -34,6 +34,9 @@ def production_required(obj):
 
 def stages(obj):
     p = policy(obj.workflow_json)
+    if obj.status in ('Not a Defect Review', 'Not a Defect', 'Change Request Raised'):
+        outcome = 'Change Request Raised' if obj.status == 'Change Request Raised' else 'Not a Defect'
+        return ['New', 'Triaged', 'In Progress', 'Not a Defect Review', outcome]
     result = ['New', 'Triaged', 'In Progress', 'Ready for QA', 'QA Testing']
     if p['business_acceptance']:
         result += ['Business Acceptance']
@@ -50,10 +53,12 @@ def transitions(obj):
     if status == 'New':
         return ['Triaged']
     if status in ('Triaged', 'In Progress'):
-        return [path[path.index(status) + 1], 'Deferred', 'Duplicate', 'Not a Defect', 'Rejected', 'Accept Risk']
+        return [path[path.index(status) + 1], 'Deferred', 'Duplicate', 'Not a Defect Review', 'Rejected', 'Accept Risk']
+    if status == 'Not a Defect Review':
+        return ['Not a Defect', 'Change Request Raised', 'Reopened']
     if status in ('Deferred', 'Reopened'):
         return ['In Progress']
-    if status in ('Closed', 'Rejected', 'Not a Defect'):
+    if status in ('Closed', 'Rejected', 'Not a Defect', 'Change Request Raised'):
         return ['Reopened']
     if status == 'Duplicate':
         return []

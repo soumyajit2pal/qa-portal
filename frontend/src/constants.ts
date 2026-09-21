@@ -1013,7 +1013,7 @@ export const TEST_EXECUTION_DEFECT_ELIGIBLE_STATUSES: string[] = ['Fail', 'Block
 // against" -- mirrors the backend's own _DEFECT_RETEST_CLEAR_STATUSES
 // (test_execution.py) exactly. Rejected/Duplicate deliberately excluded --
 // reported directly as "Deferred or Closed" only.
-const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed']
+const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed', 'Not a Defect', 'Change Request Raised']
 
 // Mirrors the backend's own _execution_status_gate (test_execution.py)
 // exactly -- see that function's docstring for the full reasoning. Purely
@@ -1041,7 +1041,7 @@ export function executionStatusGate(
   executionId?: number,
 ): string | null {
   if (!['Pass', 'Fail', 'Blocked', 'NA', 'Retest Passed'].includes(status)) return null
-  const activeDefects = (linkedDefects || []).filter((d) => (d.modern_workflow || !DEFECT_RETEST_CLEAR_STATUSES.includes(d.status)) && !(executionId && d.verified_execution_ids?.includes(executionId)))
+  const activeDefects = (linkedDefects || []).filter((d) => !['Deferred', 'Not a Defect', 'Change Request Raised'].includes(d.status) && (d.modern_workflow || !DEFECT_RETEST_CLEAR_STATUSES.includes(d.status)) && !(executionId && d.verified_execution_ids?.includes(executionId)))
   if (activeDefects.length) {
     const names = activeDefects.map((d) => `${d.defect_key} (${d.status})`).join(', ')
     return `Linked defect verification does not cover this execution (${names}). Check the environment and build in Edit Cycle and verify the fix against that same environment/build. Closed status alone does not establish matching verification for a workflow defect.`

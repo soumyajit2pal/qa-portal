@@ -532,14 +532,14 @@ export default function Help() {
                 <table className="help-role-table">
                   <thead><tr><th>Outcome</th><th>Who can mark it</th><th>Required condition</th></tr></thead>
                   <tbody>
-                    <tr><td><strong>Not a Defect</strong></td><td>QA Lead group or Defect Reporter before requester ownership; the assigned Requester or their Department Head afterward</td><td>Record the discussion with the Developer/Dev Lead and confirmation against requirements.</td></tr>
+                    <tr><td><strong>Not a Defect review</strong></td><td>The assigned developer/resolver proposes NAD with justification, evidence, and a named QA reviewer. QA reviews comments, logs, screenshots, requirements, configuration, environment and test data.</td><td>QA can accept and classify the NAD, disagree and reopen it, or identify a requirement gap and close it as Change Request Raised with a mandatory CR/Enhancement reference. Documentation gaps require the updated requirement or user-guide reference before closure.</td></tr>
                     <tr><td><strong>Duplicate</strong></td><td>QA Lead group or Defect Reporter before requester ownership; the assigned Requester or their Department Head afterward</td><td>Select and link the canonical defect ID.</td></tr>
                     <tr><td><strong>Rejected</strong></td><td>QA Lead group or Defect Reporter before requester ownership; the assigned Requester or their Department Head afterward</td><td>Enter a valid rejection reason and include supporting evidence, either already attached or newly pasted/uploaded.</td></tr>
                   </tbody>
                 </table>
               </div>
               <Callout tone="warning" title="Alternative outcomes and reopening">
-                Rejected and Not a Defect can be reopened by an authorized QA actor or the responsible requester side when new evidence requires another investigation. Reopening requires a reason and supporting evidence, records the change in history, and returns the defect through Reopened before work resumes. Duplicate remains terminal. Use Deferred when valid work is intentionally postponed; it can later return to In Progress.
+                A developer's Not a Defect proposal is never terminal by itself. It routes to the named QA reviewer. QA records the triage classification and rationale: agreement closes it as Not a Defect, disagreement returns it through Reopened, a requirement gap closes it as Change Request Raised with its CR/Enhancement ID, and a documentation gap requires an updated document reference before Not a Defect closure. Historical Rejected, Not a Defect, and Change Request Raised outcomes remain reopenable with supporting evidence. Duplicate remains terminal. Use Deferred when valid work is intentionally postponed; it can later return to In Progress.
               </Callout>
               <h3 className="help-subheading">Project sharing across workspaces</h3>
               <SopSteps items={[

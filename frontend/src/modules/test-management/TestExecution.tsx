@@ -496,7 +496,7 @@ function CycleStatusControl({ cycle, executionTotal, executedCount, failedCount,
         : cycle.status === 'Blocked'
           ? [{ label: 'Resume Execution', status: 'In Progress' }]
           : []
-  const unresolvedStatuses = new Set(['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification'])
+  const unresolvedStatuses = new Set(['New', 'Triaged', 'Assigned', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Not a Defect Review', 'Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification'])
   const severeBlockers = completionDefects.filter((defect) => ['Critical', 'High'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !defect.verified_builds?.some(v => v.environment === cycle.environment && v.build === cycle.build))
   const residualDefects = completionDefects.filter((defect) => ['Medium', 'Low'].includes(defect.severity) && (unresolvedStatuses.has(defect.status) || (defect.modern_workflow && defect.status === 'Closed' && defect.resolution_type === 'Fixed')) && !defect.verified_builds?.some(v => v.environment === cycle.environment && v.build === cycle.build))
   const deferredDefects = completionDefects.filter((defect) => defect.status === 'Deferred')
@@ -1585,7 +1585,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   // not just a disabled option buried in the Result dropdown below. See
   // constants.ts's executionStatusGate / backend's matching
   // _execution_status_gate for where this is actually enforced.
-  const activeLinkedDefects = (execution.linked_defects || []).filter((d) => (d.modern_workflow || !['Deferred', 'Closed'].includes(d.status)) && !d.verified_execution_ids?.includes(execution.id))
+  const activeLinkedDefects = (execution.linked_defects || []).filter((d) => !['Deferred', 'Not a Defect', 'Change Request Raised'].includes(d.status) && (d.modern_workflow || d.status !== 'Closed') && !d.verified_execution_ids?.includes(execution.id))
   const hasPriorFailedOrBlocked = hasRetestEligibleHistory(execution.runs, execution.status)
   return (
     <Modal title={`Record Result -- ${tc?.test_case_key || `Test Case #${execution.test_case_id}`}`} onClose={onClose} wide>

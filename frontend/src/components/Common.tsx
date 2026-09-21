@@ -72,6 +72,8 @@ export function Badge({ status, label: labelOverride }: { status?: string | null
     Cancelled: "badge-gray",
     Approved: "badge-green",
     Rejected: "badge-red",
+    "Not a Defect Review": "badge-yellow",
+    "Change Request Raised": "badge-blue",
     "Not a Defect": "badge-red",
     Passed: "badge-green",
     Failed: "badge-red",

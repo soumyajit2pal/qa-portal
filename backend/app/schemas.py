@@ -1785,12 +1785,13 @@ class DefectTransition(BaseModel):
     expected_resolution_date: Optional[datetime.date] = None
     rejection_reason: Optional[str] = None
     duplicate_defect_id: Optional[int] = None
-    # 2026-08 "Not a Defect" cycle addition -- required (see
-    # routers/defects.py::transition_defect's own "Not a Defect" branch)
-    # when transitioning to that status, same pattern as rejection_reason
-    # above for Rejected.
+    # Developer rationale captured when proposing "Not a Defect Review".
+    # QA independently records the final agreement in closure_remarks or a
+    # disagreement in reopen_reason.
     not_a_defect_reason: Optional[str] = None
     closure_remarks: Optional[str] = None
+    reference: Optional[str] = Field(default=None, max_length=500)
+    related_cr_number: Optional[str] = Field(default=None, max_length=64)
 
     _limit_rich_text = field_validator(
         "remarks", "resolution_summary", "root_cause", "fix_details", "actual_result",
@@ -3772,6 +3773,8 @@ class DefectWorkflowAction(BaseModel):
     root_cause: Optional[str] = None
     fix_details: Optional[str] = None
     reference: Optional[str] = None
+    resolution_type: Optional[str] = Field(default=None, max_length=60)
+    related_cr_number: Optional[str] = Field(default=None, max_length=64)
     target_release: Optional[str] = Field(default=None, max_length=100)
     review_date: Optional[datetime.date] = None
     duplicate_defect_id: Optional[int] = None

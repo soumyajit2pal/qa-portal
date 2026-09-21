@@ -1710,7 +1710,7 @@ def dashboard_summary(date_from: str | None = Query(None), date_to: str | None =
     )
     defect_q = _scope_defect_records(defect_q, db, current_user)
     defects_total = defect_q.count()
-    defects_open = defect_q.filter(models.Defect.status.notin_(["Closed", "Rejected", "Duplicate", "Not a Defect"])).count()
+    defects_open = defect_q.filter(models.Defect.status.notin_(["Closed", "Rejected", "Duplicate", "Not a Defect", "Change Request Raised"])).count()
     defects_resolved = defect_q.filter(models.Defect.resolved_at.isnot(None)).count()
     defect_reopen_events = defect_q.with_entities(func.coalesce(func.sum(models.Defect.reopen_count), 0)).scalar() or 0
 
