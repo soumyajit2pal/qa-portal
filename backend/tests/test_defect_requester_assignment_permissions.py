@@ -5,6 +5,7 @@ import pytest
 from app.constants import Role
 from app import schemas
 from app.routers.defects import CREATE_ROLES, NAD_QA_OUTCOMES, RESOLUTION_TYPES, STATUSES, TRANSITIONS, _qa_disposition_blocked_for_requester_assignment
+from app.routers import test_execution
 from app.routers.test_execution import _DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES, _DEFECT_RETEST_CLEAR_STATUSES
 
 
@@ -102,6 +103,39 @@ def test_qa_triage_classifications_do_not_leak_into_normal_fix_resolution_types(
     assert qa_only.issubset(NAD_QA_OUTCOMES)
     assert qa_only.isdisjoint(RESOLUTION_TYPES)
     assert "Enhancement / Change Request" not in RESOLUTION_TYPES
+
+
+def test_na_is_allowed_after_failure_for_referenced_change_request(monkeypatch):
+    defects = [SimpleNamespace(
+        defect_key="TQA-DEF-14", status="Change Request Raised", related_cr_number="CR-2041",
+    )]
+    monkeypatch.setattr(test_execution, "_execution_lock_state", lambda *_: ([], True, defects))
+
+    assert test_execution._execution_status_gate(None, 88, "NA") is None
+    assert "no longer available" in test_execution._execution_status_gate(None, 88, "Pass")
+
+
+@pytest.mark.parametrize("has_prior_failure", [False, True])
+def test_na_is_blocked_when_change_request_reference_is_missing(monkeypatch, has_prior_failure):
+    defects = [SimpleNamespace(
+        defect_key="TQA-DEF-14", status="Change Request Raised", related_cr_number=" ",
+    )]
+    monkeypatch.setattr(test_execution, "_execution_lock_state", lambda *_: ([], has_prior_failure, defects))
+
+    violation = test_execution._execution_status_gate(None, 88, "NA")
+    assert "do not have a CR/enhancement reference" in violation
+    assert "TQA-DEF-14" in violation
+
+
+def test_na_change_request_exception_never_bypasses_an_active_defect(monkeypatch):
+    active = SimpleNamespace(defect_key="TQA-DEF-15", status="In Progress")
+    defects = [
+        active,
+        SimpleNamespace(defect_key="TQA-DEF-14", status="Change Request Raised", related_cr_number="CR-2041"),
+    ]
+    monkeypatch.setattr(test_execution, "_execution_lock_state", lambda *_: ([active], True, defects))
+
+    assert "TQA-DEF-15 (In Progress)" in test_execution._execution_status_gate(None, 88, "NA")
 
 
 def test_agm_qa_has_full_defect_creation_authority():

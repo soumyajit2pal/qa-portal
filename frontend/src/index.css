@@ -8529,13 +8529,28 @@ td { padding: 12px; }
 .defect-workflow-context p { margin: 0 0 12px; color: #5c6879; line-height: 1.6; font-size: 13px; }
 .defect-impact-card > small { display: block; margin-bottom: 12px; color: #64748b; }
 .defect-verification-card ul { margin: 12px 0 0; padding-left: 19px; color: #52647a; font-size: 13px; line-height: 1.9; }
-.defect-workflow-next { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 18px 0; border-top: 1px solid #e3eaf2; }
-.defect-workflow-next > div:first-child { display: flex; flex-direction: column; gap: 4px; }
-.defect-workflow-next strong { color: #243b53; font-size: 16px; }
-.defect-workflow-next small { color: #64748b; }
-.defect-workflow-next .workflow-actions { margin: 0; align-items: center; }
-.defect-workflow-other summary { cursor: pointer; padding: 10px; font-size: 13px; font-weight: 600; color: #52647a; }
-.defect-workflow-other > div { display: flex; flex-wrap: wrap; gap: 8px; max-width: 430px; padding: 10px 0; }
+.defect-action-picker { margin-top: 18px; padding: 18px; border: 1px solid #c9dfe5; border-radius: 12px; background: linear-gradient(135deg, #f7fcfd 0%, #f3f8fb 100%); }
+.defect-action-picker-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+.defect-action-picker-heading h4 { margin: 2px 0 4px; color: #183858; font-size: 17px; }
+.defect-action-picker-heading p { margin: 0; color: #64748b; font-size: 12px; line-height: 1.5; }
+.defect-action-count { flex-shrink: 0; padding: 5px 10px; border: 1px solid #c9dfe5; border-radius: 999px; background: #fff; color: #41626d; font-size: 11px; font-weight: 700; }
+.defect-action-waiting { display: flex; flex-direction: column; gap: 4px; margin-top: 14px; padding: 11px 13px; border-left: 3px solid #d49a37; border-radius: 0 8px 8px 0; background: #fff9e9; color: #785c26; }
+.defect-action-waiting strong { font-size: 13px; }
+.defect-action-waiting span { font-size: 11px; line-height: 1.5; }
+.defect-action-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 14px; }
+.defect-action-choice { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-height: 126px; padding: 15px 16px; border: 1px solid #d7e3e8; border-radius: 10px; background: #fff; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease, background .16s ease; }
+.defect-action-choice:hover:not(:disabled) { transform: translateY(-1px); border-color: #4b9bac; box-shadow: 0 5px 14px rgba(25,77,130,.10); }
+.defect-action-choice:focus-visible { outline: 3px solid rgba(8,121,140,.28); outline-offset: 2px; }
+.defect-action-choice:disabled { cursor: not-allowed; opacity: .65; }
+.defect-action-choice.recommended { border-color: #78b9c5; background: #f1fbfc; }
+.defect-action-choice.selected { border-color: #08798c; background: #eaf8fa; box-shadow: 0 0 0 2px rgba(8,121,140,.16); }
+.defect-action-choice.caution:not(.selected) { border-color: #ead5ca; }
+.defect-action-choice-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.defect-action-choice strong { color: #213f4a; font-size: 14px; line-height: 1.35; }
+.defect-action-choice em { flex-shrink: 0; padding: 3px 7px; border-radius: 999px; background: #dceff2; color: #156174; font-size: 9px; font-style: normal; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; }
+.defect-action-choice small { color: #64748b; font-size: 11px; line-height: 1.5; }
+.defect-action-choice-cta { margin-top: auto; color: #087386; font-size: 11px; font-weight: 750; }
+.defect-action-empty { margin: 14px 0 0; padding: 12px; border-radius: 8px; background: #fff; color: #64748b; font-size: 12px; }
 .defect-environment-details { border-top: 1px solid #e3eaf2; padding-top: 16px; }
 .defect-environment-details > summary { cursor: pointer; font-size: 14px; font-weight: 600; color: #334e68; }
 .defect-environment-details > summary span { display: inline-block; margin-left: 12px; color: #718096; font-size: 12px; font-weight: 400; }
@@ -8547,7 +8562,9 @@ td { padding: 12px; }
 .defect-workflow-blocker { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; border-left: 3px solid #dc7d29; padding: 12px 16px; background: #fffbeb; color: #855326; }
 @media (max-width: 760px) {
   .workflow-panel:has(.defect-workflow-heading) { padding: 16px; }
-  .defect-workflow-heading, .defect-workflow-next { flex-direction: column; align-items: stretch; }
+  .defect-workflow-heading, .defect-action-picker-heading { flex-direction: column; align-items: stretch; }
+  .defect-action-count { align-self: flex-start; }
+  .defect-action-grid { grid-template-columns: 1fr; }
   .defect-workflow-context { grid-template-columns: 1fr; }
   .defect-workflow-path li { flex-basis: 130px; }
 }
@@ -8610,7 +8627,6 @@ td { padding: 12px; }
 .workflow-stages.defect-workflow-path li { min-width:116px; flex:1 1 116px; padding:10px 9px; }
 .workflow-stages.defect-workflow-path li.completed { border-color:#c9e5dc; background:#f0faf5; color:#326a51; }
 .workflow-stages.defect-workflow-path li.completed .defect-stage-number { background:#dcefe4; color:#27734d; }
-.defect-workflow-next { padding:12px; border:1px solid #c9dfe5; border-radius:11px; background:#f3fafb; }
 @media (max-width:1100px) { .defect-overview-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:760px) { .defect-health-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }.defect-health-strip > :is(div,button) { border-bottom:1px solid #e4edef; }.defect-trace-grid,.defect-result-compare { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:520px) { .defect-overview-grid,.defect-trace-grid,.defect-result-compare { grid-template-columns:1fr; }.defect-health-strip { grid-template-columns:1fr; }.defect-linked-work-head { align-items:flex-start; flex-direction:column; }.defect-detail-hero { align-items:flex-start; flex-direction:column; } }

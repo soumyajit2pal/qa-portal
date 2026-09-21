@@ -545,7 +545,7 @@ _DEFECT_CYCLE_COMPLETION_BLOCKING_STATUSES = (
 
 
 def _execution_lock_state(db: Session, execution_id: int):
-    """Returns (active_defects, has_prior_failed_or_blocked) for the status gate.
+    """Returns (active_defects, has_prior_failed_or_blocked, defects) for the status gate.
     active_defects -- every governed Defect (defects.py) linked to this slot
     through its primary execution or an additional execution trace, whose
     own status is not yet Deferred/QA-confirmed Not a Defect, or a properly
@@ -582,7 +582,7 @@ def _execution_lock_state(db: Session, execution_id: int):
             models.TestExecution.id == execution_id,
         ).scalar()
         has_prior_failed_or_blocked = legacy_status in ("Fail", "Blocked")
-    return active_defects, has_prior_failed_or_blocked
+    return active_defects, has_prior_failed_or_blocked, defects
 
 
 def _execution_status_gate(db: Session, execution_id: int, status_value: str,
@@ -604,10 +604,12 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
        at least one earlier 'Fail' or 'Blocked' attempt on the same slot.
 
     3. Once every linked defect clears (or none was ever linked), but this
-       slot has EVER recorded a 'Fail' or 'Blocked': 'Pass'/'NA' are permanently blocked
+       slot has EVER recorded a 'Fail' or 'Blocked': 'Pass' remains permanently blocked
        for the rest of this slot's history (a defect-corrected pass is
        always 'Retest Passed', never 'Pass' -- keeps "clean first try" and
-       "passed after a fix" distinguishable in reporting). 'Retest Passed'
+       "passed after a fix" distinguishable in reporting). 'NA' is allowed
+       only when a linked defect is Change Request Raised with a populated
+       CR/enhancement reference. 'Retest Passed'
        and 'Blocked' are available. A fresh 'Fail' (failed again on retest)
        requires a defect_key that resolves to an existing, currently-active
        governed Defect -- reopen the existing one, link a different active
@@ -621,7 +623,7 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
     Returns a human-readable reason, or None if nothing blocks status_value."""
     if status_value not in ("Pass", "Fail", "Blocked", "NA", "Retest Passed"):
         return None
-    active_defects, has_prior_failed_or_blocked = _execution_lock_state(db, execution_id)
+    active_defects, has_prior_failed_or_blocked, linked_defects = _execution_lock_state(db, execution_id)
     if active_defects:
         names = ", ".join(f"{d.defect_key} ({d.status})" for d in active_defects)
         return (
@@ -634,13 +636,23 @@ def _execution_status_gate(db: Session, execution_id: int, status_value: str,
             "'Retest Passed' is available only after this testcase has a previous Failed or "
             "Blocked execution attempt."
         )
+    change_request_defects = [d for d in linked_defects if d.status == "Change Request Raised"]
+    if status_value == "NA" and change_request_defects:
+        missing_reference = [d for d in change_request_defects if not (d.related_cr_number or "").strip()]
+        if missing_reference:
+            names = ", ".join(d.defect_key for d in missing_reference)
+            return (
+                "NA cannot be recorded because the linked Change Request Raised defect(s) "
+                f"do not have a CR/enhancement reference: {names}. Update the defect decision first."
+            )
+        return None
     if not has_prior_failed_or_blocked:
         return None
     if status_value in ("Pass", "NA"):
         return (
             f"this test case failed or was blocked earlier in its history -- '{status_value}' is no longer available. "
-            "The linked defect has been Closed or Deferred: select 'Retest Passed' if it passes now, or "
-            "'Fail' if it fails again."
+            "Select 'Retest Passed' after a delivered fix, or 'NA' only when the finding was converted to a "
+            "Change Request Raised defect with a valid CR reference."
         )
     if status_value == "Fail":
         if not defect_key:

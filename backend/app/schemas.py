@@ -3407,6 +3407,7 @@ class LinkedGovernedDefectRef(ORMModel):
     id: int
     defect_key: str
     status: str
+    related_cr_number: Optional[str] = None
 
 
 class TestExecutionRunOut(ORMModel):

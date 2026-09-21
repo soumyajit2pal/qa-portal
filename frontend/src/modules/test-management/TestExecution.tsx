@@ -1587,6 +1587,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
   // _execution_status_gate for where this is actually enforced.
   const activeLinkedDefects = (execution.linked_defects || []).filter((d) => !['Deferred', 'Not a Defect', 'Change Request Raised'].includes(d.status) && (d.modern_workflow || d.status !== 'Closed') && !d.verified_execution_ids?.includes(execution.id))
   const hasPriorFailedOrBlocked = hasRetestEligibleHistory(execution.runs, execution.status)
+  const validChangeRequestDisposition = (execution.linked_defects || []).some((defect) => defect.status === 'Change Request Raised' && !!defect.related_cr_number?.trim())
   return (
     <Modal title={`Record Result -- ${tc?.test_case_key || `Test Case #${execution.test_case_id}`}`} onClose={onClose} wide>
       {execution.pinned_version_id && (
@@ -1687,8 +1688,7 @@ function RecordResultModal({ execution, readOnly, canAssign, canReassign, canRem
       )}
       {activeLinkedDefects.length === 0 && hasPriorFailedOrBlocked && (
         <div className="info-banner">
-          The linked defect verification requirements are satisfied. Please retest the test case and select
-          {' '}<strong>Retest Passed</strong> if it passes, or <strong>Fail</strong> if it fails again.
+          {validChangeRequestDisposition ? <>The finding was converted to a referenced Change Request. Preserve the original failed attempt and select <strong>NA</strong> for the current scope.</> : <>The linked defect verification requirements are satisfied. Please retest the test case and select <strong>Retest Passed</strong> if it passes, or <strong>Fail</strong> if it fails again.</>}
         </div>
       )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 16px' }}>

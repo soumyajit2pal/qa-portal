@@ -1806,6 +1806,7 @@ export interface LinkedGovernedDefectRef {
   id: number
   defect_key: string
   status: string
+  related_cr_number?: string | null
 }
 
 // ---------------- Test Management Reporting (SRS section 11) ----------------

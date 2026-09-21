@@ -164,6 +164,36 @@ test('not-a-defect is proposed to an independent QA reviewer before becoming ter
   assert.match(modern, /target === 'Reopened'.*Not a Defect Review.*manager \|\| qa/)
 })
 
+test('NA after failure is limited to a referenced Change Request Raised outcome', async () => {
+  const constants = await readFile(new URL('../src/constants.ts', import.meta.url), 'utf8')
+  const types = await readFile(new URL('../src/types.ts', import.meta.url), 'utf8')
+
+  assert.match(constants, /status === 'NA' && changeRequestDefects\.length/)
+  assert.match(constants, /related_cr_number/)
+  assert.match(constants, /do not have a CR\/enhancement reference/)
+  assert.match(types, /related_cr_number\?: string \| null/)
+})
+
+test('modern duplicate workflow selects a canonical defect by business identity, not numeric input', async () => {
+  const panel = await readFile(new URL('../src/components/DefectWorkflowPanel.tsx', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(panel, /Canonical defect numeric ID/)
+  assert.match(panel, /label="Canonical defect \*"/)
+  assert.match(panel, /Search by defect key, title, status, or application/)
+  assert.match(panel, /candidate\.id !== defect\.id && candidate\.status !== 'Duplicate'/)
+  assert.match(panel, /duplicate_defect_id: value \? Number\(value\) : null/)
+})
+
+test('defect workflow exposes all permitted actions in a descriptive accessible selector', async () => {
+  const panel = await readFile(new URL('../src/components/DefectWorkflowPanel.tsx', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(panel, /defect-workflow-other/)
+  assert.match(panel, /className="defect-action-grid"/)
+  assert.match(panel, /aria-pressed=\{isSelected\}/)
+  assert.match(panel, /<em>Recommended<\/em>/)
+  assert.match(panel, /actionDescriptions\[target\]/)
+})
+
 test('privileged configuration routes are wrapped in the AdminOnly guard', async () => {
   const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8')
   for (const path of ['/admin', '/checklist-config', '/request-type-config']) {

@@ -69,8 +69,8 @@
 .defect-review .defect-linked-work-head h4 { font-size:14px; }
 .defect-review .defect-workflow-heading h3 { font-size:17px; }
 .defect-review .defect-workflow-heading h4 { font-size:14px; }
-.defect-review .defect-workflow-next { margin-top:12px; padding:12px; gap:10px; }
-.defect-review .defect-workflow-next strong { font-size:14px; }
+.defect-review .defect-action-picker { margin-top:12px; padding:14px; }
+.defect-review .defect-action-choice strong { font-size:13px; }
 .defect-review .defect-evidence h4 { font-size:14px; }
 .defect-review .defect-files button { overflow-wrap:anywhere; text-align:left; }
 @media(max-width:1000px) {

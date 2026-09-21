@@ -1026,14 +1026,15 @@ const DEFECT_RETEST_CLEAR_STATUSES = ['Deferred', 'Closed', 'Not a Defect', 'Cha
 //    Deferred/Closed), every status is blocked -- the execution is fully
 //    locked until the defect(s) clear.
 // 2. Once clear (or nothing was ever linked), but this slot has EVER
-//    recorded a 'Fail' or 'Blocked': 'Pass'/'NA' are permanently blocked for the rest of
-//    its history -- a defect-corrected pass is always 'Retest Passed'.
+//    recorded a 'Fail' or 'Blocked': 'Pass' remains blocked for the rest of
+//    its history -- a defect-corrected pass is always 'Retest Passed'. 'NA'
+//    is permitted only for a Change Request Raised outcome carrying a CR reference.
 //    'Fail' (failed again on retest) requires a Defect Key to be entered
 //    (defectKeyInput) -- the backend additionally verifies that key
 //    resolves to an existing, currently-active governed Defect, which this
 //    client-side check can't do without a round trip.
 export function executionStatusGate(
-  linkedDefects: { defect_key: string; status: string; modern_workflow?: boolean; verified_execution_ids?: number[] }[] | undefined,
+  linkedDefects: { defect_key: string; status: string; related_cr_number?: string | null; modern_workflow?: boolean; verified_execution_ids?: number[] }[] | undefined,
   runs: { status: string }[] | undefined,
   status: string,
   defectKeyInput?: string,
@@ -1054,9 +1055,17 @@ export function executionStatusGate(
   if (status === 'Retest Passed' && !hasPriorFailedOrBlocked) {
     return "'Retest Passed' is available only after this testcase has a previous Failed or Blocked execution attempt."
   }
+  const changeRequestDefects = (linkedDefects || []).filter((defect) => defect.status === 'Change Request Raised')
+  if (status === 'NA' && changeRequestDefects.length) {
+    const missingReference = changeRequestDefects.filter((defect) => !(defect.related_cr_number || '').trim())
+    if (missingReference.length) {
+      return `NA cannot be recorded because the linked Change Request Raised defect(s) do not have a CR/enhancement reference: ${missingReference.map((defect) => defect.defect_key).join(', ')}. Update the defect decision first.`
+    }
+    return null
+  }
   if (!hasPriorFailedOrBlocked) return null
   if (status === 'Pass' || status === 'NA') {
-    return `this test case failed or was blocked earlier in its history -- '${status}' is no longer available. The linked defect has been Closed or Deferred: select 'Retest Passed' if it passes now, or 'Fail' if it fails again.`
+    return `this test case failed or was blocked earlier in its history -- '${status}' is no longer available. Select 'Retest Passed' after a delivered fix, or 'NA' only when the finding was converted to a Change Request Raised defect with a valid CR reference.`
   }
   if (status === 'Fail' && !(defectKeyInput || '').trim()) {
     return 'this test case is failing again after a resolved defect -- reopen the existing defect, link another active defect, or create a new defect in Defect Management, then reference its Defect Key here before recording this Fail.'
