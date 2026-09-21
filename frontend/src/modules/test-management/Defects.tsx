@@ -24,6 +24,7 @@ import { ENVIRONMENTS, DEFECT_REASSIGNABLE_STATUSES, QA_REQUEST_CREATOR_ROLES, h
 import { usePaginatedList } from '../../hooks/usePaginatedList'
 import { internalNavigationPath } from '../../requestNavigation'
 import { createLatestRequestGate } from '../../latestRequest'
+import { defectStageOwnership } from '../../defectOwnership'
 
 const STATUSES = ['Ready for QA', 'QA Testing', 'Business Acceptance', 'Ready for Release', 'Production Verification', 'New', 'Triaged', 'In Progress', 'Resolved', 'Retest', 'Reopened', 'Deferred', 'Rejected', 'Duplicate', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised', 'Closed']
 const SEVERITIES = ['Critical', 'High', 'Medium', 'Low']
@@ -964,11 +965,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
   const traceRows = defectTraceRows(defect)
   const traceCycleCount = new Set(traceRows.map((row) => row.cycle_id || row.cycle_key).filter(Boolean)).size
   const productionImpact = defect.workflow_state?.production_impact || (defect.environment === 'Production' ? 'Reported in Production' : 'Not assessed')
-  const stageOwnerId = defect.status === 'Business Acceptance' ? defect.workflow_state?.business_owner_id
-    : ['Ready for Release', 'Production Verification'].includes(defect.status) ? defect.workflow_state?.release_owner_id
-    : ['Ready for QA', 'QA Testing', 'Retest', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised'].includes(defect.status) ? defect.retest_tester_id : defect.assignee_id
-  const stageOwner = users.find((candidate) => candidate.id === stageOwnerId)?.full_name
-    || (stageOwnerId === defect.assignee_id ? defect.assignee_name : null)
+  const stageOwnership = defectStageOwnership(defect, users)
   function runAction(action: () => void) {
     setActionsOpen(false)
     action()
@@ -1009,7 +1006,7 @@ function DefectDetail({ defect, users, departments, requestDepartment, defects, 
       <section className="defect-overview-grid" aria-label="Defect at a glance">
         <div className="defect-overview-fact"><span>Current stage</span><strong>{defect.status}</strong><small>{defect.workflow ? `Workflow version ${defect.workflow.version}` : 'Legacy defect workflow'}</small></div>
         <div className={`defect-overview-fact impact-${productionImpact.toLowerCase().replace(/\s+/g, '-')}`}><span>Production impact</span><strong>{productionImpact === 'Affected' ? 'Production affected' : productionImpact === 'Unaffected' ? 'Production unaffected' : productionImpact}</strong><small>{productionImpact === 'Affected' ? 'Production verification required' : productionImpact === 'Unaffected' ? 'Issue limited to test environments' : 'Review the observation and assessment'}</small></div>
-        <div className="defect-overview-fact"><span>Responsible now</span><strong>{stageOwner || 'Not assigned yet'}</strong><small>{defect.assigned_team || 'Department not assigned'}</small></div>
+        <div className="defect-overview-fact"><span>{stageOwnership.heading}</span><strong>{stageOwnership.ownerName || 'Not assigned yet'}</strong><small>{stageOwnership.departmentLabel}</small></div>
         <div className={`defect-overview-fact ${traceRows.length ? 'trace-linked' : 'trace-missing'}`}><span>Execution trace</span><strong>{traceRows.length ? `${traceRows.length} linked testcase${traceRows.length === 1 ? '' : 's'}` : 'No execution linked'}</strong><small>{traceRows.length ? `Across ${traceCycleCount || 1} test cycle${traceCycleCount === 1 ? '' : 's'}` : 'Link a failed or blocked execution to complete traceability'}</small></div>
       </section>
       <ErrorText error={error} />

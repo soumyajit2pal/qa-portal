@@ -20,6 +20,7 @@ const { isKeyboardActivationKey } = await loadTypeScriptModule('../src/keyboard.
 const { shouldActivateTableRow } = await loadTypeScriptModule('../src/tableInteraction.ts')
 const { boundedRetryDelay } = await loadTypeScriptModule('../src/retryPolicy.ts')
 const { isActivityReadOnly } = await loadTypeScriptModule('../src/activityAccess.ts')
+const { defectStageOwnership } = await loadTypeScriptModule('../src/defectOwnership.ts')
 
 test('testcase approver badges use the record-specific eligibility endpoint', () => {
   const stageOne = approvalDirectoryRequest({
@@ -192,6 +193,30 @@ test('defect workflow exposes all permitted actions in a descriptive accessible 
   assert.match(panel, /aria-pressed=\{isSelected\}/)
   assert.match(panel, /<em>Recommended<\/em>/)
   assert.match(panel, /actionDescriptions\[target\]/)
+})
+
+test('defect stage ownership follows QA handoff and never displays the developer team for QA', () => {
+  const users = [
+    { id: 10, full_name: 'Developer One', department: 'Engineering', departments: ['Engineering'] },
+    { id: 20, full_name: 'QA One', department: 'Quality Assurance', departments: ['Quality Assurance'] },
+  ]
+  const base = {
+    status: 'Ready for QA', assignee_id: 10, assignee_name: 'Developer One', assigned_team: 'Engineering',
+    retest_tester_id: 20, workflow_state: { history: [] },
+  }
+
+  assert.deepEqual(defectStageOwnership(base, users), {
+    ownerId: 20, ownerName: 'QA One', departmentLabel: 'Quality Assurance',
+    heading: 'Responsible now', kind: 'qa',
+  })
+  assert.deepEqual(defectStageOwnership({
+    ...base,
+    status: 'Closed',
+    workflow_state: { history: [{ kind: 'transition', from: 'QA Testing', to: 'Closed', user_id: 20, user_name: 'QA One' }] },
+  }, users), {
+    ownerId: 20, ownerName: 'QA One', departmentLabel: 'Quality Assurance',
+    heading: 'Last responsible owner', kind: 'last-actor',
+  })
 })
 
 test('privileged configuration routes are wrapped in the AdminOnly guard', async () => {

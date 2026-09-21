@@ -9,6 +9,7 @@ import UserAssignSelect from './UserAssignSelect'
 import SearchableSelect from './SearchableSelect'
 import JiraRichTextField from './JiraRichTextField'
 import { MarkdownComment } from './JiraActivity'
+import { defectStageOwnership } from '../defectOwnership'
 
 export default function DefectWorkflowPanel({ defect, defects, users, departments, onChanged }: {
   defect: DefectOut; defects: DefectListOut[]; users: UserOption[]; departments: DepartmentOut[]; onChanged: (d: DefectOut) => void
@@ -165,10 +166,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
     'Change Request Raised': 'QA found a requirement gap and recorded the related Change Request or enhancement reference.',
     Duplicate: 'This issue is tracked by another defect. Review the linked canonical defect below.',
   }
-  const ownerId = defect.status === 'Business Acceptance' ? state.business_owner_id
-    : ['Ready for Release', 'Production Verification'].includes(defect.status) ? state.release_owner_id
-    : ['Ready for QA', 'QA Testing', 'Not a Defect Review', 'Not a Defect', 'Change Request Raised'].includes(defect.status) ? defect.retest_tester_id : defect.assignee_id
-  const ownerName = users.find(person => person.id === ownerId)?.full_name || (ownerId === defect.assignee_id ? defect.assignee_name : null)
+  const stageOwnership = defectStageOwnership(defect, users)
   const stageHelp: Record<string, string> = { New: 'Report', Triaged: 'Assess & assign', 'In Progress': 'Investigate & fix', 'Not a Defect Review': 'Independent QA triage', 'Not a Defect': 'QA-confirmed outcome', 'Change Request Raised': 'Enhancement recorded', 'Ready for QA': 'QA handoff', 'QA Testing': 'Test & verify', 'Business Acceptance': 'Business sign-off', 'Ready for Release': 'Release approval', 'Production Verification': 'Verify live fix', Closed: 'Complete' }
   const canManageBlocker = !closed && (manager || resolver || qa || business || release)
   const availableActions = Array.from(new Set(state.blocked
@@ -208,7 +206,7 @@ export default function DefectWorkflowPanel({ defect, defects, users, department
   }
   return <section className="workflow-panel">
     {confirmationModal}
-    <header className="defect-workflow-heading"><div><span className="workflow-action-eyebrow">RESOLUTION WORKFLOW</span><h3>{state.blocked ? 'Work is blocked' : defect.status}</h3><p>{guidance[defect.status] || 'Review the current decision and choose an available action.'}</p></div><div className="defect-workflow-owner"><span>{closed ? 'Last responsible owner' : 'Responsible now'}</span><strong>{ownerName || 'Not assigned yet'}</strong><small>{defect.status === 'New' ? 'QA team to triage' : 'Current stage owner'}</small></div></header>
+    <header className="defect-workflow-heading"><div><span className="workflow-action-eyebrow">RESOLUTION WORKFLOW</span><h3>{state.blocked ? 'Work is blocked' : defect.status}</h3><p>{guidance[defect.status] || 'Review the current decision and choose an available action.'}</p></div><div className="defect-workflow-owner"><span>{stageOwnership.heading}</span><strong>{stageOwnership.ownerName || 'Not assigned yet'}</strong><small>{stageOwnership.departmentLabel}</small></div></header>
     <ol className="workflow-stages defect-workflow-path" aria-label="Defect resolution stages">{defect.workflow_stages?.map((stage, index) => <li key={stage} className={stageIndex >= 0 && index < stageIndex ? 'completed' : ''} aria-current={stage === defect.status ? 'step' : undefined}><span className="defect-stage-number">{stageIndex >= 0 && index < stageIndex ? '✓' : index + 1}</span><div><strong>{stage}</strong><small>{stageHelp[stage] || stage}</small></div></li>)}</ol>
     <div className="defect-workflow-context">
       <section className={`defect-impact-card impact-${impact.toLowerCase()}`}><span className="workflow-action-eyebrow">PRODUCTION IMPACT</span><h4>{impact === 'Affected' ? 'Production is affected' : impact === 'Unaffected' ? 'Production is not affected' : 'Impact needs assessment'}</h4><p>{impact === 'Unknown' ? 'QA must assess whether the issue affects production before verification can be completed.' : productionRequired ? 'Release and production verification are required before closure.' : 'Close after the required QA' + (workflow.business_acceptance ? ' and business' : '') + ' verification passes.'}</p>{workflow.production_for_all && <small>Workspace policy requires production verification for every fix.</small>}{!viewOnly && canTriage && !closed && <button type="button" className="btn btn-sm" disabled={busy} onClick={() => select('assess')}>{impact === 'Unknown' ? 'Assess production impact' : 'Review production impact'}</button>}</section>
